@@ -153,11 +153,8 @@ class SQLiteStorage(StorageDB):
         def _read() -> list[dict[str, Any]]:
             conn = _get_conn(self._db_path)
             rows = conn.execute(
-                """SELECT g.*, COUNT(s.id) as snapshot_count,
-                           MAX(s.timestamp) as last_snapshot_ts
+                """SELECT g.*
                     FROM games g
-                    LEFT JOIN snapshots s ON s.game_id = g.game_id
-                    GROUP BY g.id
                     ORDER BY g.updated_at DESC
                     LIMIT ?""",
                 (limit,),
