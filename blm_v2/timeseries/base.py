@@ -67,6 +67,24 @@ class TimeSeriesDB(ABC):
     async def delete_game(self, game_id: str) -> None:
         """Remove **all** snapshots for a given game.  Idempotent."""
 
+    # ── Line Analysis (OLV/CLV tracking) ──────────────────────────
+
+    @abstractmethod
+    async def write_line_analysis(self, analysis: SnapshotData) -> None:
+        """Persist a line analysis record from the OLV/CLV tracker."""
+
+    @abstractmethod
+    async def query_line_analysis(
+        self,
+        game_id: str,
+        limit: int = 500,
+    ) -> list[SnapshotData]:
+        """Return line analysis records for a game, oldest-first."""
+
+    @abstractmethod
+    async def get_live_line_analysis(self) -> Optional[SnapshotData]:
+        """Return the most recent line analysis for any live game."""
+
 
 # ── Protocol (structural typing) ──────────────────────────────────
 
@@ -90,3 +108,11 @@ class TimeSeriesDBProtocol(Protocol):
     async def query_latest(self, game_id: str) -> Optional[SnapshotData]: ...
     async def list_games(self) -> list[str]: ...
     async def delete_game(self, game_id: str) -> None: ...
+
+    async def write_line_analysis(self, analysis: SnapshotData) -> None: ...
+    async def query_line_analysis(
+        self,
+        game_id: str,
+        limit: int = 500,
+    ) -> list[SnapshotData]: ...
+    async def get_live_line_analysis(self) -> Optional[SnapshotData]: ...

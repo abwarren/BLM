@@ -117,12 +117,16 @@ class SnapshotScheduler:
         event_bus: EventEmitter,
         *,
         tick_s: float = DEFAULT_TICK_S,
+        line_tracker: Any = None,
+        under_timing_engine: Any = None,
     ) -> None:
         self._collector = collector
         self._ts_db = ts_db
         self._engine = engine
         self._event_bus = event_bus
         self._tick_s = tick_s
+        self._line_tracker = line_tracker
+        self._under_timing_engine = under_timing_engine
 
         self._running = False
         self._task: Optional[asyncio.Task[None]] = None
@@ -299,6 +303,42 @@ class SnapshotScheduler:
             logger.exception("Tick %d: time-series write failed", tick_number)
             self._stats.failed_ticks += 1
             return
+
+        # ── 3b. OLV/CLV Line Analysis ────────────────────────────
+        if self._line_tracker is not None:
+            try:
+                analysis = self._line_tracker.analyze(raw.game_id, enriched, tick_s=self._tick_s)
+                analysis_dict = analysis.to_dict()
+
+                # ── 3c. UNDER Timing Score ────────────────────────
+                if self._under_timing_engine is not None:
+                    league = enriched.get("league") or enriched.get("metadata", {}).get("league", "Cyber 2K26")
+                    under_result = self._under_timing_engine.evaluate(analysis, league=league)
+
+                    # Merge under timing into the analysis dict
+                    analysis_dict.update({
+                        "under_timing_score": under_result.score,
+                        "under_timing_confidence": under_result.confidence,
+                        "under_timing_status": under_result.status.value,
+                        "under_components": under_result.to_dict().get("components", {}),
+                        "signals_met": under_result.signals_met,
+                        "signals_missed": under_result.signals_missed,
+                        "league": league,
+                    })
+                    analysis_dict["under_timing_result"] = under_result.to_dict()
+
+                    if under_result.status.value == "UNDER READY":
+                        logger.info(
+                            "Tick %d: UNDER READY — %s (score=%.1f, conf=%.2f, excursion=%.1f)",
+                            tick_number, raw.game_id, under_result.score,
+                            under_result.confidence, analysis.excursion or 0,
+                        )
+
+                # Write to line_analysis table
+                await self._ts_db.write_line_analysis(analysis_dict)
+
+            except Exception:
+                logger.exception("Tick %d: OLV/CLV line analysis failed (non-fatal)", tick_number)
 
         # ── 4. Fire event ────────────────────────────────────────
         try:

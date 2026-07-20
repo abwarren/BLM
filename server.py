@@ -41,6 +41,9 @@ def main() -> None:
     from blm_v2.collector.v1_adapter import V1CollectorAdapter
     from blm_v2.collector.scheduler import SnapshotScheduler
     from blm_v2.alerts.manager import AlertManager, Alert
+    from blm_v2.analytics.line_tracker import LineTracker
+    from blm_v2.analytics.historical import HistoricalEngine
+    from blm_v2.analytics.under_timing import UnderTimingEngine
 
     ts = SQLiteTimeSeries(db_path=root / "blm_ts.db")
     storage = SQLiteStorage(db_path=root / "blm_v2.db")
@@ -50,6 +53,11 @@ def main() -> None:
     core_engine = CoreEngine()
     engine_adapter = BlmEngineAdapter(core_engine)
     collector = V1CollectorAdapter(headless=True)
+
+    # ── OLV/CLV + Historical + UNDER timing ──────────────────────
+    line_tracker = LineTracker()
+    historical_engine = HistoricalEngine(db_path=root / "blm_ts.db")
+    under_timing_engine = UnderTimingEngine(historical_engine)
 
     # Adapter: scheduler calls emit(type_str, dict), EventBus expects BlmEvent
     class _SchedulerEventBus:
@@ -62,6 +70,8 @@ def main() -> None:
         engine=engine_adapter,
         event_bus=_SchedulerEventBus(),
         tick_s=20.0,
+        line_tracker=line_tracker,
+        under_timing_engine=under_timing_engine,
     )
 
     # ── Register event handlers ──────────────────────────────

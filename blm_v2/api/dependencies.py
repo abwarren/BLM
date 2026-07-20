@@ -202,6 +202,21 @@ class TSInterface(Protocol):
     async def get_game_detail(self, game_id: str) -> Optional[Dict[str, Any]]:
         ...
 
+    # ── Line Analysis (OLV/CLV) ───────────────────────────────────
+
+    async def write_line_analysis(self, analysis: Dict[str, Any]) -> None:
+        ...
+
+    async def query_line_analysis(
+        self,
+        game_id: str,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        ...
+
+    async def get_live_line_analysis(self) -> Optional[Dict[str, Any]]:
+        ...
+
 
 @runtime_checkable
 class StorageInterface(Protocol):

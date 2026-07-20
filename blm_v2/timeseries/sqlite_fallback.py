@@ -51,6 +51,31 @@ CREATE INDEX IF NOT EXISTS idx_sv2_game_ts
 
 CREATE INDEX IF NOT EXISTS idx_sv2_game_id
     ON snapshots_v2(game_id);
+
+CREATE TABLE IF NOT EXISTS line_analysis (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id         TEXT    NOT NULL,
+    timestamp       TEXT    NOT NULL,
+    olv             REAL,
+    current_line    REAL,
+    excursion       REAL,
+    excursion_percent REAL,
+    score_delta     INTEGER NOT NULL DEFAULT 0,
+    line_delta      REAL    NOT NULL DEFAULT 0.0,
+    divergence      TEXT    NOT NULL DEFAULT 'neither',
+    freeze_ticks    INTEGER NOT NULL DEFAULT 0,
+    is_burst        INTEGER NOT NULL DEFAULT 0,
+    rolling_mean_score REAL NOT NULL DEFAULT 0.0,
+    under_confidence REAL NOT NULL DEFAULT 0.0,
+    data_json       TEXT,
+    ingested_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_la_game_ts
+    ON line_analysis(game_id, timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_la_game_id
+    ON line_analysis(game_id);
 """
 
 
@@ -279,6 +304,112 @@ class SQLiteTimeSeries(TimeSeriesDB):
         d.pop("id", None)
         d.pop("ingested_at", None)
         return d
+
+    # ── Line Analysis Methods ─────────────────────────────────────
+
+    async def write_line_analysis(self, analysis: SnapshotData) -> None:
+        """Persist a line analysis record to the ``line_analysis`` table."""
+        self._ensure_initialized()
+
+        game_id = analysis.get("game_id", "unknown")
+        ts = analysis.get("timestamp", "")
+        olv = analysis.get("olv")
+        current_line = analysis.get("current_line")
+        excursion = analysis.get("excursion")
+        excursion_pct = analysis.get("excursion_percent")
+        score_delta = analysis.get("score_delta", 0)
+        line_delta = analysis.get("line_delta", 0.0)
+        divergence = analysis.get("divergence", "neither")
+        freeze_ticks = analysis.get("freeze_ticks", 0)
+        is_burst = 1 if analysis.get("is_burst", False) else 0
+        rolling_mean = analysis.get("rolling_mean_score_delta", 0.0)
+        under_conf = analysis.get("under_confidence", 0.0)
+        data_json_str = json.dumps(analysis, default=str)
+
+        def _write() -> None:
+            conn = _get_conn(self._db_path)
+            conn.execute(
+                """INSERT INTO line_analysis
+                    (game_id, timestamp, olv, current_line, excursion,
+                     excursion_percent, score_delta, line_delta, divergence,
+                     freeze_ticks, is_burst, rolling_mean_score,
+                     under_confidence, data_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    game_id, ts, olv, current_line, excursion,
+                    excursion_pct, score_delta, line_delta, divergence,
+                    freeze_ticks, is_burst, rolling_mean,
+                    under_conf, data_json_str,
+                ),
+            )
+            conn.commit()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _write)
+
+    async def query_line_analysis(
+        self,
+        game_id: str,
+        limit: int = 500,
+    ) -> list[SnapshotData]:
+        """Return line analysis records for a game, oldest-first."""
+        self._ensure_initialized()
+
+        def _query() -> list[SnapshotData]:
+            conn = _get_conn(self._db_path)
+            rows = conn.execute(
+                """SELECT * FROM line_analysis
+                    WHERE game_id = ?
+                    ORDER BY timestamp ASC
+                    LIMIT ?""",
+                (game_id, limit),
+            ).fetchall()
+            results = []
+            for r in rows:
+                d = dict(r)
+                data_json_str = d.pop("data_json", None)
+                if data_json_str:
+                    try:
+                        parsed = json.loads(data_json_str)
+                        d.update(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                d.pop("id", None)
+                d.pop("ingested_at", None)
+                results.append(d)
+            return results
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _query)
+
+    async def get_live_line_analysis(self) -> Optional[SnapshotData]:
+        """Return the most recent line analysis for any live game."""
+        self._ensure_initialized()
+
+        def _query() -> Optional[SnapshotData]:
+            conn = _get_conn(self._db_path)
+            # Find the most recent line analysis across all games
+            row = conn.execute(
+                """SELECT * FROM line_analysis
+                    ORDER BY timestamp DESC
+                    LIMIT 1"""
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            data_json_str = d.pop("data_json", None)
+            if data_json_str:
+                try:
+                    parsed = json.loads(data_json_str)
+                    d.update(parsed)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            d.pop("id", None)
+            d.pop("ingested_at", None)
+            return d
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _query)
 
 
 # ── Module-level initialisation guard ─────────────────────────────

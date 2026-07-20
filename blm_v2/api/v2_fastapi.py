@@ -166,6 +166,40 @@ class GamesListResponse(BaseModel):
     games: list
 
 
+# ── Line Analysis / OLV/CLV models ─────────────────────────────────────
+
+class LineAnalysisResponse(BaseModel):
+    game_id: str
+    total_entries: int = 0
+    olv: Optional[float] = None
+    entries: list = []
+    under_signals: Optional[Dict[str, Any]] = None
+
+
+class UnderSignalsResponse(BaseModel):
+    game_id: str = ""
+    league: str = "Cyber 2K26"
+    under_timing_score: float = 0.0
+    confidence: float = 0.0
+    status: str = "PASS"
+    components: Dict[str, float] = {}
+    signals_met: list = []
+    signals_missed: list = []
+    last_updated: str = ""
+
+
+class LearnedRangesResponse(BaseModel):
+    league: str = "Cyber 2K26"
+    total_games: int = 0
+    total_snapshots: int = 0
+    confidence: float = 0.0
+    olv_distribution: Dict[str, float] = {}
+    excursion_distribution: Dict[str, float] = {}
+    burst: Dict[str, float] = {}
+    freeze: Dict[str, float] = {}
+    regression: Dict[str, float] = {}
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Route handlers
 # ═══════════════════════════════════════════════════════════════════════
@@ -431,6 +465,98 @@ async def list_games(
         return GamesListResponse(total=len(items), games=[m.model_dump() for m in items])
 
 
+# ── GET /api/v2/line-analysis/{game_id} ────────────────────────────────
+
+async def get_line_analysis(
+    game_id: str,
+    ts: TSInterface = Depends(get_ts_interface),
+    metrics: MetricsCollector = Depends(get_metrics_collector_dep),
+):
+    """Return OLV/CLV line analysis history for a game."""
+    with metrics.timer("api_response_time"):
+        entries = await ts.query_line_analysis(game_id=game_id, limit=1000)
+        if not entries:
+            # Try live analysis as fallback
+            live = await ts.get_live_line_analysis()
+            if live and live.get("game_id") == game_id:
+                entries = [live]
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No line analysis data for game {game_id!r}",
+                )
+        olv = next((e.get("olv") for e in entries if e.get("olv") is not None), None)
+        return LineAnalysisResponse(
+            game_id=game_id,
+            total_entries=len(entries),
+            olv=olv,
+            entries=entries[-200:],  # last 200 data points
+        )
+
+
+# ── GET /api/v2/under-signals ──────────────────────────────────────────
+
+async def get_under_signals(
+    ts: TSInterface = Depends(get_ts_interface),
+    metrics: MetricsCollector = Depends(get_metrics_collector_dep),
+):
+    """Return current UNDER timing signal for the live game."""
+    with metrics.timer("api_response_time"):
+        import json
+        live_analysis = await ts.get_live_line_analysis()
+        if not live_analysis:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No live line analysis available",
+            )
+        # UnderTimingEngine is wired globally; read its last result from
+        # the analysis data_json which stores the full under_timing result
+        data_str = live_analysis.get("data_json")
+        under_result = None
+        if data_str and isinstance(data_str, str):
+            try:
+                parsed = json.loads(data_str)
+                under_result = parsed.get("under_timing_result")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return UnderSignalsResponse(
+            game_id=live_analysis.get("game_id", ""),
+            league="Cyber 2K26",
+            under_timing_score=live_analysis.get("under_timing_score", 0.0),
+            confidence=live_analysis.get("under_timing_confidence", 0.0),
+            status=live_analysis.get("under_timing_status", "PASS"),
+            components=live_analysis.get("under_components", {}),
+            signals_met=live_analysis.get("signals_met", []),
+            signals_missed=live_analysis.get("signals_missed", []),
+            last_updated=live_analysis.get("timestamp", ""),
+        )
+
+
+# ── GET /api/v2/learned-ranges ─────────────────────────────────────────
+
+async def get_learned_ranges(
+    league: str = "Cyber 2K26",
+    metrics: MetricsCollector = Depends(get_metrics_collector_dep),
+):
+    """Return the historical learned distributions for a league."""
+    with metrics.timer("api_response_time"):
+        from blm_v2.analytics.historical import HistoricalEngine
+        engine = HistoricalEngine()
+        profile = engine.get_profile(league)
+        return LearnedRangesResponse(
+            league=league,
+            total_games=profile.total_games,
+            total_snapshots=profile.total_snapshots,
+            confidence=profile.confidence,
+            olv_distribution=profile.to_dict().get("olv_distribution", {}),
+            excursion_distribution=profile.to_dict().get("excursion_distribution", {}),
+            burst=profile.to_dict().get("burst", {}),
+            freeze=profile.to_dict().get("freeze", {}),
+            regression=profile.to_dict().get("regression", {}),
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # App factory
 # ═══════════════════════════════════════════════════════════════════════
@@ -448,6 +574,9 @@ _ROUTES: list[tuple[str, str, Any]] = [
     ("GET", "/traps/{game_id}", get_traps),
     ("GET", "/model", get_model_state),
     ("GET", "/games", list_games),
+    ("GET", "/line-analysis/{game_id}", get_line_analysis),
+    ("GET", "/under-signals", get_under_signals),
+    ("GET", "/learned-ranges", get_learned_ranges),
 ]
 
 _RESPONSE_MODELS: dict[str, type[BaseModel]] = {
@@ -462,6 +591,9 @@ _RESPONSE_MODELS: dict[str, type[BaseModel]] = {
     "/traps/{game_id}": TrapsResponse,
     "/model": ModelResponse,
     "/games": GamesListResponse,
+    "/line-analysis/{game_id}": LineAnalysisResponse,
+    "/under-signals": UnderSignalsResponse,
+    "/learned-ranges": LearnedRangesResponse,
 }
 
 
