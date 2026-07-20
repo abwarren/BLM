@@ -531,6 +531,10 @@ def create_v2_app() -> FastAPI:
         metrics_instance = get_metrics_collector()
         await handle_websocket(websocket, ts, storage, engine, metrics_instance)
 
+    # ── Mount dashboard sub-app ────────────────────────────────
+    from blm_v2.dashboard.server import create_dashboard_app
+    app.mount("/dashboard", create_dashboard_app())
+
     # ── Startup / shutdown events ───────────────────────────────
     @app.on_event("startup")
     async def on_startup():

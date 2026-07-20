@@ -34,7 +34,7 @@ if _project_root not in sys.path:
 # ── Environment defaults ──────────────────────────────────────────────
 
 HOST = os.environ.get("HOST", "0.0.0.0")
-PORT = int(os.environ.get("PORT", "8000"))
+PORT = int(os.environ.get("PORT", "262"))
 RELOAD = os.environ.get("RELOAD", "false").lower() in ("true", "1", "yes")
 ENVIRONMENT = os.environ.get("BLM_ENV", "development")
 
@@ -185,13 +185,19 @@ def main() -> None:
 
     logger.info("blm_v2_initializing", environment=ENVIRONMENT, host=HOST, port=PORT)
 
-    # ── 2. Wire dependencies ───────────────────────────────────
+    # ── 2. Wire dependencies (real implementations) ─────────────
     from blm_v2.api.dependencies import wire_dependencies
+    from blm_v2.timeseries.sqlite_fallback import SQLiteTimeSeries
+    from blm_v2.storage.sqlite import SQLiteStorage
+    from blm_v2.events.bus import EventBus
+    from blm_v2.engine.blm_engine import BLMEngine
+    from pathlib import Path
 
-    ts = _StubTSInterface()
-    storage = _StubStorageInterface()
-    event_bus = _StubEventBus()
-    engine = _StubBLMEngine()
+    root = Path(_project_root)
+    ts = SQLiteTimeSeries(db_path=root / "blm_ts.db")
+    storage = SQLiteStorage(db_path=root / "blm_v2.db")
+    event_bus = EventBus()
+    engine = BLMEngine()
 
     wire_dependencies(
         ts_interface=ts,
