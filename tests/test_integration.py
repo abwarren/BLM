@@ -1,6 +1,6 @@
 """
 Integration tests for BLM V2 platform.
-Tests the full pipeline: snapshot → engine → event bus → TS write → query → verify.
+Tests the full pipeline: snapshot → event bus → TS write → query → verify.
 """
 
 import asyncio
@@ -8,14 +8,15 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
-from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from blm_v2.events.bus import EventBus
 from blm_v2.timeseries.sqlite_fallback import SQLiteTimeSeries
+from blm_v2.models.events import BlmEvent, EventType, MarketMove, TrapTriggered
 
 
 class TestFullPipeline:
@@ -67,20 +68,12 @@ class TestFullPipeline:
         }
 
     @pytest.mark.asyncio
-    async def test_snapshot_through_pipeline(self, ts, event_bus):
-        """Test: raw snapshot → event → TS write → query back."""
+    async def test_snapshot_through_pipeline(self, ts):
+        """Test: snapshot → TS write → query back."""
         snap = self.create_snapshot(quarter=1, clock="10:00", home=12, away=8, total_line=180.0)
 
-        # Fire event
-        event_bus.publish("SnapshotCaptured", {
-            "game_id": "integration-test-001",
-            "snapshot": snap,
-        })
-
-        # Write to time series
         await ts.write_snapshot(snap)
 
-        # Query back
         results = await ts.query_snapshots(game_id="integration-test-001", limit=10)
         assert len(results) == 1
         assert results[0]["game_id"] == "integration-test-001"
@@ -98,39 +91,47 @@ class TestFullPipeline:
         results = await ts.query_snapshots(game_id=game_id, limit=100)
         assert len(results) == 5
 
-        # Verify chronological order
         scores = [r["home_score"] for r in results]
         assert scores == sorted(scores)
 
     @pytest.mark.asyncio
-    async def test_event_bus_integration(self, event_bus):
-        """Test event bus publishes and receives events during pipeline."""
+    async def test_event_bus_emit_and_receive(self, event_bus):
+        """Test EventBus emits BlmEvent instances to registered handlers."""
         received = []
 
-        async def handler(event):
+        async def handler(event: MarketMove):
             received.append(event)
 
-        event_bus.register("SnapshotCaptured", handler)
-        event_bus.publish("SnapshotCaptured", {"game_id": "test", "data": "value"})
-        event_bus.publish("SnapshotCaptured", {"game_id": "test", "data": "value2"})
+        event_bus.register(MarketMove, handler)
+
+        evt = MarketMove(game_id="test-001", market="total", previous_value=180.5, new_value=182.0)
+        await event_bus.emit(evt)
+        await event_bus.emit(MarketMove(game_id="test-001", market="total", previous_value=182.0, new_value=181.0))
 
         assert len(received) == 2
-        assert received[0]["data"] == "value"
+        assert received[0].previous_value == 180.5
+        assert received[1].new_value == 181.0
 
     @pytest.mark.asyncio
-    async def test_event_bus_filtering(self, event_bus):
-        """Test event bus correctly filters by event type."""
-        captured = []
+    async def test_event_bus_type_filtering(self, event_bus):
+        """Test EventBus only dispatches to handlers for matching event types."""
+        market_events = []
         trap_events = []
 
-        event_bus.register("SnapshotCaptured", lambda e: captured.append(e))
-        event_bus.register("TrapTriggered", lambda e: trap_events.append(e))
+        async def market_handler(e: MarketMove):
+            market_events.append(e)
 
-        event_bus.publish("SnapshotCaptured", {"n": 1})
-        event_bus.publish("SnapshotCaptured", {"n": 2})
-        event_bus.publish("TrapTriggered", {"trap": "bull"})
+        async def trap_handler(e: TrapTriggered):
+            trap_events.append(e)
 
-        assert len(captured) == 2
+        event_bus.register(MarketMove, market_handler)
+        event_bus.register(TrapTriggered, trap_handler)
+
+        await event_bus.emit(MarketMove(game_id="test-001", market="total", previous_value=180.0, new_value=182.0))
+        await event_bus.emit(MarketMove(game_id="test-001", market="total", previous_value=182.0, new_value=181.0))
+        await event_bus.emit(TrapTriggered(game_id="test-001", trap_type="bull_trap", trap_score=0.85))
+
+        assert len(market_events) == 2
         assert len(trap_events) == 1
 
     @pytest.mark.asyncio
@@ -151,10 +152,8 @@ class TestFullPipeline:
         """Test snapshot write performance meets <50ms target."""
         snap = self.create_snapshot()
 
-        # Warm up
         await ts.write_snapshot(snap)
 
-        # Timed write
         start = time.perf_counter()
         for _ in range(10):
             await ts.write_snapshot(snap)
