@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 
 import pytest
 
+from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from blm_v2.events.bus import EventBus
-from blm_v2.timeseries.sqlite_fallback import SQLiteFallbackTS
+from blm_v2.timeseries.sqlite_fallback import SQLiteTimeSeries
 
 
 class TestFullPipeline:
@@ -23,7 +24,7 @@ class TestFullPipeline:
     @pytest.fixture
     def ts(self, tmp_path):
         db_path = str(tmp_path / "blm_ts_test.db")
-        return SQLiteFallbackTS(db_path=db_path)
+        return SQLiteTimeSeries(db_path=Path(db_path))
 
     @pytest.fixture
     def event_bus(self):
