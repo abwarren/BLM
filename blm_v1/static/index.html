@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BLM — Research Console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>BLM <span class="subtitle">Betting Logic Model — Research Console</span></h1>
+  <div class="status-bar">
+    <span id="status">Connecting...</span>
+    <span id="snapshot-count">0 snapshots</span>
+    <span id="last-update">--</span>
+  </div>
+</header>
+
+<main class="dashboard">
+  <!-- Score Panel -->
+  <section class="panel score-panel">
+    <div class="game-info">
+      <span id="league">Cyber 2K26</span>
+      <span id="quarter">Q1</span>
+      <span id="clock">00:00</span>
+    </div>
+    <div class="scoreboard">
+      <div class="team home">
+        <span class="team-name" id="home-team">HOME</span>
+        <span class="team-score" id="home-score">0</span>
+      </div>
+      <div class="vs">VS</div>
+      <div class="team away">
+        <span class="team-name" id="away-team">AWAY</span>
+        <span class="team-score" id="away-score">0</span>
+      </div>
+    </div>
+    <div class="market-lines">
+      <div class="line"><span>Total:</span> <span id="total-line">--</span></div>
+      <div class="line"><span>Spread:</span> <span id="spread">--</span></div>
+      <div class="line"><span>Margin:</span> <span id="margin">0</span></div>
+    </div>
+  </section>
+
+  <!-- Chart Panel -->
+  <section class="panel chart-panel">
+    <h2>Total Movement</h2>
+    <div class="chart-container">
+      <svg id="line-chart" viewBox="0 0 800 300" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="chart-legend">
+      <span class="legend-item"><span class="dot current"></span>Current Total</span>
+      <span class="legend-item"><span class="dot line"></span>Bookmaker Line</span>
+    </div>
+  </section>
+
+  <!-- Stats Panel -->
+  <section class="panel stats-panel">
+    <h2>Derived Metrics</h2>
+    <div class="metrics-grid">
+      <div class="metric">
+        <label>Current Pace</label>
+        <span id="pace">--</span>
+      </div>
+      <div class="metric">
+        <label>Expected Total</label>
+        <span id="expected-total">--</span>
+      </div>
+      <div class="metric">
+        <label>Possessions</label>
+        <span id="possessions">--</span>
+      </div>
+      <div class="metric">
+        <label>Home Projection</label>
+        <span id="home-projection">--</span>
+      </div>
+      <div class="metric">
+        <label>Away Projection</label>
+        <span id="away-projection">--</span>
+      </div>
+      <div class="metric">
+        <label>Inflation</label>
+        <span id="inflation">--</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="script.js"></script>
+</body>
+</html>

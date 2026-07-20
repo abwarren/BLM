@@ -1,0 +1,992 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BLM V2 — Replay</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+  <style>
+    /* ── Replay-specific styles ──────────────────────────────── */
+
+    .replay-layout {
+      display: grid;
+      grid-template-areas:
+        "timeline   timeline"
+        "controls   controls"
+        "score      chart";
+      grid-template-columns: 280px 1fr;
+      grid-template-rows: auto auto 1fr;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+      background: var(--bg-deepest);
+    }
+
+    /* Timeline */
+    .timeline-bar {
+      grid-area: timeline;
+      padding: 12px 20px;
+      background: var(--bg-default);
+      border-bottom: 1px solid var(--border-default);
+    }
+
+    .timeline-container {
+      position: relative;
+      width: 100%;
+      height: 36px;
+      cursor: pointer;
+    }
+
+    .timeline-track {
+      position: absolute;
+      top: 50%;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: var(--bg-input);
+      border-radius: 2px;
+      transform: translateY(-50%);
+    }
+
+    .timeline-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--brand-primary), var(--brand-secondary));
+      border-radius: 2px;
+      transition: width 0.1s linear;
+    }
+
+    .timeline-thumb {
+      position: absolute;
+      top: 50%;
+      width: 16px;
+      height: 16px;
+      background: var(--brand-primary);
+      border: 2px solid var(--bg-deepest);
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 0 8px rgba(0, 212, 255, 0.4);
+      transition: left 0.1s linear;
+      z-index: 2;
+      cursor: grab;
+    }
+
+    .timeline-thumb:active {
+      cursor: grabbing;
+    }
+
+    .quarter-markers {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      pointer-events: none;
+    }
+
+    .quarter-marker {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: rgba(85, 96, 122, 0.5);
+    }
+
+    .quarter-marker-label {
+      position: absolute;
+      bottom: -18px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .timeline-info {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 22px;
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+    }
+
+    /* Controls */
+    .controls-bar {
+      grid-area: controls;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 20px;
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--border-default);
+    }
+
+    .control-btn {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 14px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid var(--border-default);
+      border-radius: 6px;
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: var(--transition-fast);
+    }
+
+    .control-btn:hover {
+      border-color: var(--border-accent);
+      color: var(--text-primary);
+      background: var(--bg-card-hover);
+    }
+
+    .control-btn.primary {
+      background: rgba(0, 212, 255, 0.1);
+      border-color: var(--brand-primary);
+      color: var(--brand-primary);
+    }
+
+    .control-btn.primary:hover {
+      background: rgba(0, 212, 255, 0.2);
+    }
+
+    .control-btn:active {
+      transform: scale(0.96);
+    }
+
+    .control-divider {
+      width: 1px;
+      height: 24px;
+      background: var(--border-default);
+      margin: 0 4px;
+    }
+
+    .speed-indicator {
+      padding: 4px 12px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--brand-primary);
+      background: rgba(0, 212, 255, 0.08);
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      border-radius: 4px;
+      margin-left: auto;
+    }
+
+    .frame-counter {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-left: 12px;
+    }
+
+    /* Score panel (replay variant) */
+    .replay-score-panel {
+      grid-area: score;
+      padding: 12px;
+      background: var(--bg-default);
+      border-right: 1px solid var(--border-default);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .replay-score-panel .panel-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+
+    .replay-score-panel .panel-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+
+    .replay-score-panel .panel-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+    }
+
+    /* Chart panel (replay) */
+    .replay-chart-panel {
+      grid-area: chart;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .replay-chart-container {
+      flex: 1;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-default);
+      border-radius: 8px;
+      padding: 12px;
+      position: relative;
+    }
+
+    .replay-chart-container canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    .position-marker {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: var(--brand-primary);
+      box-shadow: 0 0 8px rgba(0, 212, 255, 0.6);
+      pointer-events: none;
+      z-index: 10;
+      transition: left 0.1s linear;
+    }
+
+    /* Progress bar */
+    .progress-bar {
+      width: 100%;
+      height: 3px;
+      background: var(--bg-input);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: var(--brand-primary);
+      border-radius: 2px;
+      transition: width 0.1s linear;
+    }
+
+    /* Speed button active state */
+    .control-btn.speed-active {
+      background: rgba(0, 212, 255, 0.15);
+      border-color: var(--brand-primary);
+      color: var(--brand-primary);
+    }
+
+    /* Quarter jump active */
+    .control-btn.q-active {
+      background: rgba(124, 58, 237, 0.15);
+      border-color: var(--brand-secondary);
+      color: var(--brand-secondary);
+    }
+  </style>
+</head>
+<body>
+  <div class="replay-layout">
+    <!-- ═══ TIMELINE BAR ═══ -->
+    <div class="timeline-bar">
+      <div class="timeline-container" id="timelineContainer">
+        <div class="timeline-track"></div>
+        <div class="timeline-fill" id="timelineFill" style="width: 0%"></div>
+        <div class="quarter-markers" id="quarterMarkers"></div>
+        <div class="timeline-thumb" id="timelineThumb" style="left: 0%"></div>
+      </div>
+      <div class="timeline-info">
+        <span id="timelineClock">Q1 12:00</span>
+        <span id="frameCounter">Frame 0 of 0</span>
+      </div>
+    </div>
+
+    <!-- ═══ CONTROLS ═══ -->
+    <div class="controls-bar">
+      <button class="control-btn" id="btnRewind2" title="Rewind 2x">⏪ 2x</button>
+      <button class="control-btn" id="btnRewind4" title="Rewind 4x">⏪ 4x</button>
+      <button class="control-btn" id="btnRewind8" title="Rewind 8x">⏪ 8x</button>
+      <div class="control-divider"></div>
+      <button class="control-btn" id="btnStepBack" title="Step Back">◀</button>
+      <button class="control-btn primary" id="btnPlayPause">▶ Play</button>
+      <button class="control-btn" id="btnStepFwd" title="Step Forward">▶</button>
+      <div class="control-divider"></div>
+      <button class="control-btn" id="btnFwd2" title="Fast Forward 2x">2x ▶▶</button>
+      <button class="control-btn" id="btnFwd4" title="Fast Forward 4x">4x ▶▶</button>
+      <button class="control-btn" id="btnFwd8" title="Fast Forward 8x">8x ▶▶</button>
+      <div class="control-divider"></div>
+      <button class="control-btn" id="btnQ1">Q1</button>
+      <button class="control-btn" id="btnQ2">Q2</button>
+      <button class="control-btn" id="btnQ3">Q3</button>
+      <button class="control-btn" id="btnQ4">Q4</button>
+      <button class="control-btn" id="btnOT">OT</button>
+      <div class="speed-indicator" id="speedIndicator">1.0x</div>
+      <span class="frame-counter" id="frameCounterLabel">Frame 0 / 0</span>
+    </div>
+
+    <!-- ═══ SCORE PANEL ═══ -->
+    <aside class="replay-score-panel" id="scorePanel">
+      <div class="panel-card">
+        <div class="panel-label">Current Score</div>
+        <div class="panel-value" id="replayScore" style="font-size:1.1rem;">-- vs --</div>
+        <div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;">
+          <span id="replayScoreDetail">0 - 0</span>
+        </div>
+      </div>
+      <div class="panel-card">
+        <div class="panel-label">BLM Score</div>
+        <div class="panel-value" id="replayBlmScore">--</div>
+      </div>
+      <div class="panel-card">
+        <div class="panel-label">Trap Meter</div>
+        <div class="gauge-value">
+          <span class="gauge-number" id="replayTrapMeter">0%</span>
+        </div>
+        <div class="gauge gauge-low" id="replayTrapGauge">
+          <div class="gauge-fill" id="replayTrapFill" style="width:0%"></div>
+        </div>
+      </div>
+      <div class="panel-card">
+        <div class="panel-label">Confidence</div>
+        <div class="panel-value" id="replayConfidence">--%</div>
+      </div>
+      <div class="panel-card">
+        <div class="panel-label">Win Probability</div>
+        <div class="panel-value" id="replayWinProb">--%</div>
+      </div>
+      <div class="panel-card">
+        <div class="panel-label">Expected Total</div>
+        <div class="panel-value" id="replayExpectedTotal">--</div>
+      </div>
+      <div class="panel-card">
+        <div class="panel-label">Expected Margin</div>
+        <div class="panel-value" id="replayExpectedMargin">--</div>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="replayProgress" style="width:0%"></div>
+      </div>
+    </aside>
+
+    <!-- ═══ CHART PANEL ═══ -->
+    <main class="replay-chart-panel">
+      <div class="replay-chart-container">
+        <canvas id="replayChart"></canvas>
+        <div class="position-marker" id="positionMarker" style="left:0%"></div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    // ── Replay Application ──────────────────────────────────────────
+
+    (function () {
+      'use strict';
+
+      // ── State ──────────────────────────────────────────────────
+
+      const API_BASE = '/api/v2';
+
+      let gameId = null;
+      let allFrames = [];
+      let currentFrameIndex = 0;
+      let isPlaying = false;
+      let currentSpeed = 1;
+      let playTimer = null;
+      let replayChart = null;
+      let chartAnnotations = {};
+
+      // Quarter boundary frame indices
+      let quarterBoundaries = [];
+
+      // DOM refs
+      const $ = function (id) { return document.getElementById(id); };
+
+      const dom = {
+        timelineContainer: $('timelineContainer'),
+        timelineFill: $('timelineFill'),
+        timelineThumb: $('timelineThumb'),
+        quarterMarkers: $('quarterMarkers'),
+        timelineClock: $('timelineClock'),
+        frameCounter: $('frameCounter'),
+        frameCounterLabel: $('frameCounterLabel'),
+        speedIndicator: $('speedIndicator'),
+        replayProgress: $('replayProgress'),
+
+        // Score panel
+        replayScore: $('replayScore'),
+        replayScoreDetail: $('replayScoreDetail'),
+        replayBlmScore: $('replayBlmScore'),
+        replayTrapMeter: $('replayTrapMeter'),
+        replayTrapGauge: $('replayTrapGauge'),
+        replayTrapFill: $('replayTrapFill'),
+        replayConfidence: $('replayConfidence'),
+        replayWinProb: $('replayWinProb'),
+        replayExpectedTotal: $('replayExpectedTotal'),
+        replayExpectedMargin: $('replayExpectedMargin'),
+
+        // Controls
+        btnPlayPause: $('btnPlayPause'),
+        btnStepBack: $('btnStepBack'),
+        btnStepFwd: $('btnStepFwd'),
+        btnFwd2: $('btnFwd2'),
+        btnFwd4: $('btnFwd4'),
+        btnFwd8: $('btnFwd8'),
+        btnRewind2: $('btnRewind2'),
+        btnRewind4: $('btnRewind4'),
+        btnRewind8: $('btnRewind8'),
+        btnQ1: $('btnQ1'),
+        btnQ2: $('btnQ2'),
+        btnQ3: $('btnQ3'),
+        btnQ4: $('btnQ4'),
+        btnOT: $('btnOT'),
+
+        positionMarker: $('positionMarker'),
+        replayChartCanvas: $('replayChart'),
+      };
+
+      // ── Helper Functions ──────────────────────────────────────
+
+      function safeGet(obj, path, fallback) {
+        return path.split('.').reduce(function (acc, key) {
+          return (acc && typeof acc === 'object' && key in acc) ? acc[key] : fallback;
+        }, obj);
+      }
+
+      function toPct(val) {
+        if (val === null || val === undefined) return '--';
+        return (val * 100).toFixed(1) + '%';
+      }
+
+      function toFixed(val, digits) {
+        if (digits === undefined) digits = 1;
+        if (val === null || val === undefined) return '--';
+        return Number(val).toFixed(digits);
+      }
+
+      // ── API Calls ─────────────────────────────────────────────
+
+      function loadGameReplay(gameIdParam) {
+        return fetch(API_BASE + '/replay/' + gameIdParam)
+          .then(function (res) {
+            if (!res.ok) throw new Error('Failed to load replay: ' + res.status);
+            return res.json();
+          });
+      }
+
+      function loadGameDetail(gameIdParam) {
+        return fetch(API_BASE + '/game/' + gameIdParam)
+          .then(function (res) {
+            if (!res.ok) throw new Error('Failed to load game: ' + res.status);
+            return res.json();
+          });
+      }
+
+      function loadGamesList() {
+        return fetch(API_BASE + '/games')
+          .then(function (res) {
+            if (!res.ok) throw new Error('Failed to load games list');
+            return res.json();
+          });
+      }
+
+      // ── Frame Display ─────────────────────────────────────────
+
+      function displayFrame(index) {
+        if (!allFrames.length || index < 0 || index >= allFrames.length) return;
+
+        currentFrameIndex = index;
+        const data = allFrames[index];
+
+        // Update timeline
+        var pct = (index / (allFrames.length - 1)) * 100;
+        dom.timelineFill.style.width = pct + '%';
+        dom.timelineThumb.style.left = pct + '%';
+        dom.replayProgress.style.width = pct + '%';
+
+        // Frame counter
+        dom.frameCounter.textContent = 'Frame ' + (index + 1) + ' of ' + allFrames.length;
+        dom.frameCounterLabel.textContent = 'Frame ' + (index + 1) + ' / ' + allFrames.length;
+
+        // Extract data
+        var homeTeam = safeGet(data, 'game_state.home_team', 'Home');
+        var awayTeam = safeGet(data, 'game_state.away_team', 'Away');
+        var homeScore = safeGet(data, 'game_state.home_score', 0);
+        var awayScore = safeGet(data, 'game_state.away_score', 0);
+        var quarter = safeGet(data, 'metadata.quarter', 1);
+        var clock = safeGet(data, 'metadata.clock', '12:00');
+        var margin = safeGet(data, 'game_state.margin', 0);
+
+        // Score panel
+        dom.replayScore.textContent = homeTeam + ' vs ' + awayTeam;
+        dom.replayScoreDetail.textContent = homeScore + ' - ' + awayScore + ' (Margin: ' + (margin > 0 ? '+' : '') + margin + ')';
+        dom.timelineClock.textContent = 'Q' + quarter + ' ' + clock;
+
+        // BLM Score
+        var blmScore = safeGet(data, 'blm.blm_score') || safeGet(data, 'blm.expected_margin');
+        dom.replayBlmScore.textContent = toFixed(blmScore);
+
+        // Trap Meter
+        var trapMeter = safeGet(data, 'trap_detection.trap_meter', 0);
+        var trapPct = Math.round(trapMeter * 100);
+        dom.replayTrapMeter.textContent = trapPct + '%';
+        dom.replayTrapFill.style.width = trapPct + '%';
+        dom.replayTrapGauge.className = 'gauge';
+        if (trapPct >= 80) dom.replayTrapGauge.classList.add('gauge-high');
+        else if (trapPct >= 50) dom.replayTrapGauge.classList.add('gauge-mid');
+        else dom.replayTrapGauge.classList.add('gauge-low');
+
+        // Confidence
+        var confidence = safeGet(data, 'blm.confidence', 0);
+        dom.replayConfidence.textContent = toPct(confidence);
+
+        // Win Probability
+        var winProb = safeGet(data, 'blm.win_probability', null);
+        dom.replayWinProb.textContent = toPct(winProb);
+
+        // Expected Total
+        var expTotal = safeGet(data, 'blm.expected_total', null);
+        dom.replayExpectedTotal.textContent = toFixed(expTotal);
+
+        // Expected Margin
+        var expMargin = safeGet(data, 'blm.expected_margin', null);
+        dom.replayExpectedMargin.textContent = toFixed(expMargin);
+
+        // Update position marker on chart
+        updatePositionMarker();
+      }
+
+      // ── Chart ──────────────────────────────────────────────────
+
+      function initReplayChart() {
+        var ctx = dom.replayChartCanvas.getContext('2d');
+
+        Chart.register(chartjsAnnotation);
+
+        replayChart = new Chart(ctx, {
+          type: 'scatter',
+          data: {
+            datasets: [{
+              label: 'BLM Score',
+              data: [],
+              borderColor: '#00d4ff',
+              backgroundColor: 'rgba(0, 212, 255, 0.1)',
+              showLine: true,
+              tension: 0.2,
+              pointRadius: 1.5,
+              pointHoverRadius: 4,
+              borderWidth: 2,
+              fill: true,
+            }, {
+              label: 'Trap Meter',
+              data: [],
+              borderColor: '#ef4444',
+              backgroundColor: 'rgba(239, 68, 68, 0.05)',
+              showLine: true,
+              tension: 0.2,
+              pointRadius: 1,
+              pointHoverRadius: 3,
+              borderWidth: 1,
+              borderDash: [4, 3],
+              yAxisID: 'y1',
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+              mode: 'index',
+              intersect: false,
+            },
+            plugins: {
+              legend: {
+                labels: {
+                  color: '#8892b0',
+                  font: { size: 11 },
+                },
+              },
+              tooltip: {
+                backgroundColor: 'rgba(13, 17, 28, 0.95)',
+                titleColor: '#e8edf5',
+                bodyColor: '#8892b0',
+                borderColor: '#1e2745',
+                borderWidth: 1,
+                padding: 8,
+              },
+              annotation: {
+                annotations: {},
+              },
+            },
+            scales: {
+              x: {
+                type: 'linear',
+                title: {
+                  display: true,
+                  text: 'Game Time (minutes)',
+                  color: '#55607a',
+                },
+                ticks: { color: '#55607a' },
+                grid: { color: 'rgba(30, 39, 69, 0.5)' },
+              },
+              y: {
+                position: 'left',
+                title: {
+                  display: true,
+                  text: 'Score',
+                  color: '#55607a',
+                },
+                ticks: { color: '#55607a' },
+                grid: { color: 'rgba(30, 39, 69, 0.3)' },
+              },
+              y1: {
+                position: 'right',
+                min: 0,
+                max: 1,
+                title: {
+                  display: true,
+                  text: 'Trap',
+                  color: '#55607a',
+                },
+                ticks: {
+                  color: '#55607a',
+                  callback: function (v) { return (v * 100).toFixed(0) + '%'; },
+                },
+                grid: { drawOnChartArea: false },
+              },
+            },
+          },
+        });
+
+        return replayChart;
+      }
+
+      function buildChartData() {
+        if (!replayChart || !allFrames.length) return;
+
+        var blmData = [];
+        var trapData = [];
+
+        allFrames.forEach(function (frame, i) {
+          var quarter = safeGet(frame, 'metadata.quarter', 1);
+          var clock = safeGet(frame, 'metadata.clock', '12:00');
+          var gameMinutes = (quarter - 1) * 12;
+          if (clock && clock !== '--') {
+            var parts = clock.split(':');
+            var mins = parseInt(parts[0], 10);
+            var secs = parseInt(parts[1], 10);
+            gameMinutes += (12 - mins - 1) + (60 - secs) / 60;
+          }
+
+          var blmScore = safeGet(frame, 'blm.blm_score') || safeGet(frame, 'blm.expected_margin') || 0;
+          var trapMeter = safeGet(frame, 'trap_detection.trap_meter', 0);
+
+          blmData.push({ x: gameMinutes, y: blmScore });
+          trapData.push({ x: gameMinutes, y: trapMeter });
+        });
+
+        replayChart.data.datasets[0].data = blmData;
+        replayChart.data.datasets[1].data = trapData;
+
+        // Add quarter separator annotations
+        var annotations = replayChart.options.plugins.annotation.annotations;
+        var qTimes = [0, 12, 24, 36, 48];
+        qTimes.forEach(function (qm, i) {
+          annotations['q' + (i + 1)] = {
+            type: 'line',
+            xMin: qm,
+            xMax: qm,
+            borderColor: 'rgba(85, 96, 122, 0.4)',
+            borderWidth: 1,
+            borderDash: [6, 4],
+            label: {
+              display: true,
+              content: 'Q' + (i + 1),
+              position: 'start',
+              backgroundColor: 'rgba(13, 17, 28, 0.8)',
+              color: '#55607a',
+              font: { size: 9 },
+            },
+          };
+        });
+
+        replayChart.update();
+      }
+
+      function updatePositionMarker() {
+        if (!allFrames.length || !replayChart) return;
+        var frame = allFrames[currentFrameIndex];
+        var quarter = safeGet(frame, 'metadata.quarter', 1);
+        var clock = safeGet(frame, 'metadata.clock', '12:00');
+        var gameMinutes = (quarter - 1) * 12;
+        if (clock && clock !== '--') {
+          var parts = clock.split(':');
+          var mins = parseInt(parts[0], 10);
+          var secs = parseInt(parts[1], 10);
+          gameMinutes += (12 - mins - 1) + (60 - secs) / 60;
+        }
+
+        var xScale = replayChart.scales.x;
+        var xPx = xScale.getPixelForValue(gameMinutes);
+        var chartArea = replayChart.chartArea;
+        var relPct = ((xPx - chartArea.left) / (chartArea.right - chartArea.left)) * 100;
+        dom.positionMarker.style.left = Math.max(0, Math.min(100, relPct)) + '%';
+      }
+
+      // ── Quarter Markers ────────────────────────────────────────
+
+      function buildQuarterMarkers() {
+        var container = dom.quarterMarkers;
+        container.innerHTML = '';
+        var quarters = ['Q1', 'Q2', 'Q3', 'Q4'];
+        quarters.forEach(function (q, i) {
+          var pct = ((i + 1) / 4) * 100;
+          var marker = document.createElement('div');
+          marker.className = 'quarter-marker';
+          marker.style.left = pct + '%';
+          marker.innerHTML = '<span class="quarter-marker-label">' + q + ' End</span>';
+          container.appendChild(marker);
+        });
+      }
+
+      // ── Playback Controls ──────────────────────────────────────
+
+      function togglePlay() {
+        if (!allFrames.length) return;
+
+        if (isPlaying) {
+          pausePlayback();
+        } else {
+          startPlayback();
+        }
+      }
+
+      function startPlayback() {
+        if (currentFrameIndex >= allFrames.length - 1) {
+          currentFrameIndex = 0;
+          displayFrame(0);
+        }
+        isPlaying = true;
+        dom.btnPlayPause.textContent = '⏸ Pause';
+        dom.btnPlayPause.classList.add('primary');
+        runPlayLoop();
+      }
+
+      function pausePlayback() {
+        isPlaying = false;
+        dom.btnPlayPause.textContent = '▶ Play';
+        dom.btnPlayPause.classList.add('primary');
+        if (playTimer) {
+          clearTimeout(playTimer);
+          playTimer = null;
+        }
+      }
+
+      function runPlayLoop() {
+        if (!isPlaying || currentFrameIndex >= allFrames.length - 1) {
+          if (currentFrameIndex >= allFrames.length - 1) {
+            isPlaying = false;
+            dom.btnPlayPause.textContent = '▶ Play';
+            dom.btnPlayPause.classList.add('primary');
+          }
+          return;
+        }
+
+        displayFrame(currentFrameIndex + 1);
+
+        // Frame interval depends on speed
+        // At 1x, advance every ~330ms (roughly 3 fps since snapshots are every 20s)
+        var interval = Math.max(30, 330 / currentSpeed);
+        playTimer = setTimeout(runPlayLoop, interval);
+      }
+
+      function stepForward() {
+        if (currentFrameIndex < allFrames.length - 1) {
+          if (isPlaying) pausePlayback();
+          displayFrame(currentFrameIndex + 1);
+        }
+      }
+
+      function stepBackward() {
+        if (currentFrameIndex > 0) {
+          if (isPlaying) pausePlayback();
+          displayFrame(currentFrameIndex - 1);
+        }
+      }
+
+      function setSpeed(speed, direction) {
+        if (direction === 'fwd') {
+          currentSpeed = speed;
+        } else if (direction === 'rewind') {
+          currentSpeed = speed;
+          // For simplicity, rewind goes backward at speed
+        }
+        dom.speedIndicator.textContent = currentSpeed.toFixed(1) + 'x';
+
+        // If playing, restart loop
+        if (isPlaying) {
+          pausePlayback();
+          startPlayback();
+        }
+
+        // Highlight active speed buttons
+        document.querySelectorAll('.control-btn.speed-active').forEach(function (b) {
+          b.classList.remove('speed-active');
+        });
+      }
+
+      function jumpToQuarter(q) {
+        if (isPlaying) pausePlayback();
+
+        // Find first frame at or after this quarter
+        for (var i = 0; i < allFrames.length; i++) {
+          var frameQ = safeGet(allFrames[i], 'metadata.quarter', 0);
+          if (frameQ >= q) {
+            displayFrame(i);
+            break;
+          }
+        }
+
+        // Highlight quarter button
+        document.querySelectorAll('.control-btn.q-active').forEach(function (b) {
+          b.classList.remove('q-active');
+        });
+      }
+
+      // ── Timeline Scrubbing ─────────────────────────────────────
+
+      function initTimelineScrub() {
+        var isDragging = false;
+
+        dom.timelineContainer.addEventListener('mousedown', function (e) {
+          isDragging = true;
+          scrubToEvent(e);
+        });
+
+        document.addEventListener('mousemove', function (e) {
+          if (isDragging) scrubToEvent(e);
+        });
+
+        document.addEventListener('mouseup', function () {
+          isDragging = false;
+        });
+
+        function scrubToEvent(e) {
+          if (!allFrames.length) return;
+          if (isPlaying) pausePlayback();
+
+          var rect = dom.timelineContainer.getBoundingClientRect();
+          var pct = (e.clientX - rect.left) / rect.width;
+          pct = Math.max(0, Math.min(1, pct));
+          var idx = Math.round(pct * (allFrames.length - 1));
+          displayFrame(idx);
+        }
+      }
+
+      // ── Initialization ─────────────────────────────────────────
+
+      function init() {
+        buildQuarterMarkers();
+        initReplayChart();
+        initTimelineScrub();
+
+        // Load game from URL parameter or pick most recent ended game
+        var params = new URLSearchParams(window.location.search);
+        var gameIdParam = params.get('game_id');
+
+        function loadGame(gid) {
+          gameId = gid;
+          var loadEl = document.createElement('div');
+          loadEl.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:1.2rem;';
+          loadEl.textContent = 'Loading replay data...';
+          document.body.appendChild(loadEl);
+
+          loadGameReplay(gid)
+            .then(function (data) {
+              allFrames = data.frames || data.snapshots || [];
+              if (!allFrames.length) throw new Error('No frames');
+
+              document.title = 'Replay: ' + gid;
+              displayFrame(0);
+              buildChartData();
+
+              loadEl.remove();
+            })
+            .catch(function (err) {
+              loadEl.textContent = 'Error: ' + err.message;
+              console.error(err);
+            });
+        }
+
+        if (gameIdParam) {
+          loadGame(gameIdParam);
+        } else {
+          // Find most recent ended game with replay data
+          loadGamesList()
+            .then(function (data) {
+              var games = data.games || [];
+              var ended = games.filter(function (g) { return g.status === 'ended'; });
+              if (ended.length) {
+                loadGame(ended[0].game_id);
+              } else if (games.length) {
+                // Load any game with snapshots
+                loadGame(games[0].game_id);
+              } else {
+                dom.replayScore.textContent = 'No games available';
+              }
+            })
+            .catch(function (err) {
+              console.error('Failed to load games list:', err);
+              dom.replayScore.textContent = 'Failed to load game data';
+            });
+        }
+
+        // ── Bind Controls ──────────────────────────────────────
+
+        dom.btnPlayPause.addEventListener('click', togglePlay);
+        dom.btnStepFwd.addEventListener('click', stepForward);
+        dom.btnStepBack.addEventListener('click', stepBackward);
+
+        dom.btnFwd2.addEventListener('click', function () { setSpeed(2, 'fwd'); });
+        dom.btnFwd4.addEventListener('click', function () { setSpeed(4, 'fwd'); });
+        dom.btnFwd8.addEventListener('click', function () { setSpeed(8, 'fwd'); });
+
+        dom.btnRewind2.addEventListener('click', function () { setSpeed(2, 'rewind'); });
+        dom.btnRewind4.addEventListener('click', function () { setSpeed(4, 'rewind'); });
+        dom.btnRewind8.addEventListener('click', function () { setSpeed(8, 'rewind'); });
+
+        dom.btnQ1.addEventListener('click', function () { jumpToQuarter(1); });
+        dom.btnQ2.addEventListener('click', function () { jumpToQuarter(2); });
+        dom.btnQ3.addEventListener('click', function () { jumpToQuarter(3); });
+        dom.btnQ4.addEventListener('click', function () { jumpToQuarter(4); });
+        dom.btnOT.addEventListener('click', function () { jumpToQuarter(5); });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function (e) {
+          if (e.key === ' ' || e.key === 'Space') {
+            e.preventDefault();
+            togglePlay();
+          } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            stepForward();
+          } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            stepBackward();
+          } else if (e.key === 'Home') {
+            e.preventDefault();
+            if (isPlaying) pausePlayback();
+            displayFrame(0);
+          } else if (e.key === 'End') {
+            e.preventDefault();
+            if (isPlaying) pausePlayback();
+            displayFrame(allFrames.length - 1);
+          }
+        });
+      }
+
+      // ── Start ──────────────────────────────────────────────────
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+
+    })();
+  </script>
+</body>
+</html>

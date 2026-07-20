@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BLM V2 — Live Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+</head>
+<body>
+  <div class="dashboard">
+    <!-- ═══ HEADER ═══ -->
+    <header class="header">
+      <div class="header-left">
+        <div class="header-brand">BLM V2</div>
+        <div class="header-game-info">
+          <div class="header-teams" id="headerTeams">-- vs --</div>
+          <div class="live-indicator" id="liveIndicator">
+            <span class="live-dot" id="liveDot"></span>
+            <span id="liveLabel">LIVE</span>
+          </div>
+          <div class="header-score" id="headerScore">0 - 0</div>
+          <div class="header-clock" id="headerClock">Q1 12:00</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="last-update" id="lastUpdate">Last update: --</div>
+        <div class="status-indicator status-connected" id="statusIndicator">
+          <span class="status-dot"></span>
+          <span id="statusLabel">Connected</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ═══ LEFT SIDEBAR ═══ -->
+    <aside class="sidebar" id="sidebar">
+      <!-- Current Score -->
+      <div class="panel-card">
+        <div class="panel-label">Current Score</div>
+        <div class="panel-value" id="scoreValue">0 - 0</div>
+        <div class="panel-sub" id="scoreSub">Margin: 0</div>
+      </div>
+
+      <!-- BLM Score -->
+      <div class="panel-card">
+        <div class="panel-label">BLM Score</div>
+        <div class="panel-value" id="blmScoreValue">--</div>
+        <div class="panel-sub" id="blmScoreSub">Expected Winner: --</div>
+      </div>
+
+      <!-- Trap Meter -->
+      <div class="panel-card">
+        <div class="panel-label">Trap Meter</div>
+        <div class="gauge-value">
+          <span class="gauge-number" id="trapMeterValue">0%</span>
+          <span class="gauge-label">Risk Level</span>
+        </div>
+        <div class="gauge gauge-low" id="trapMeterGauge">
+          <div class="gauge-fill" id="trapMeterFill" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <!-- Confidence (Circular Gauge) -->
+      <div class="panel-card" style="text-align:center;">
+        <div class="panel-label">Confidence</div>
+        <div class="circular-gauge" id="confidenceGauge">
+          <svg viewBox="0 0 80 80">
+            <circle class="circular-gauge-bg" cx="40" cy="40" r="34"/>
+            <circle class="circular-gauge-fill" id="confidenceArc" cx="40" cy="40" r="34"
+                    stroke="#3b82f6" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
+          </svg>
+          <div class="circular-gauge-text">
+            <div class="circular-gauge-value" id="confidenceValue">0%</div>
+            <div class="circular-gauge-sublabel">Conf</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Win Probability -->
+      <div class="panel-card">
+        <div class="panel-label">Win Probability</div>
+        <div class="panel-value" id="winProbValue">--%</div>
+        <div class="panel-sub" id="winProbSub">--</div>
+      </div>
+
+      <!-- Momentum -->
+      <div class="panel-card">
+        <div class="panel-label">Momentum</div>
+        <div class="momentum-display">
+          <div class="momentum-arrow neutral" id="momentumArrow">→</div>
+          <div class="momentum-details">
+            <div class="momentum-detail-row">
+              <span class="momentum-detail-label">Score</span>
+              <span class="momentum-detail-value" id="momentumScore">--</span>
+            </div>
+            <div class="momentum-detail-row">
+              <span class="momentum-detail-label">Velocity</span>
+              <span class="momentum-detail-value" id="momentumVelocity">--</span>
+            </div>
+            <div class="momentum-detail-row">
+              <span class="momentum-detail-label">Acceleration</span>
+              <span class="momentum-detail-value" id="momentumAccel">--</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Current Pace -->
+      <div class="panel-card">
+        <div class="panel-label">Current Pace</div>
+        <div class="panel-value" id="paceValue">--</div>
+        <div class="panel-sub" id="paceSub">Possessions: -- / -- remaining</div>
+      </div>
+
+      <!-- Expected Total -->
+      <div class="panel-card">
+        <div class="panel-label">Expected Total</div>
+        <div class="panel-value" id="expectedTotal">--</div>
+        <div class="panel-sub" id="expectedTotalSub">Current: --</div>
+      </div>
+
+      <!-- Expected Margin -->
+      <div class="panel-card">
+        <div class="panel-label">Expected Margin</div>
+        <div class="panel-value" id="expectedMargin">--</div>
+        <div class="panel-sub" id="expectedMarginSub">Home - Away</div>
+      </div>
+    </aside>
+
+    <!-- ═══ MAIN CHART AREA ═══ -->
+    <main class="main-content">
+      <div class="chart-container">
+        <div class="chart-header">
+          <div class="chart-title">BLM Score Evolution</div>
+          <div class="chart-toggles" id="chartToggles">
+            <button class="chart-toggle active" data-key="blmScore">BLM</button>
+            <button class="chart-toggle" data-key="trapMeter">Trap</button>
+            <button class="chart-toggle" data-key="winProb">Win%</button>
+            <button class="chart-toggle" data-key="pace">Pace</button>
+            <button class="chart-toggle" data-key="projectedTotal">Proj Total</button>
+            <button class="chart-toggle" data-key="momentum">Momentum</button>
+            <button class="chart-toggle" data-key="vegasLine">Vegas</button>
+            <button class="chart-toggle" data-key="confidence">Confidence</button>
+            <button class="chart-toggle" data-key="marketMovement">Market</button>
+          </div>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="mainChart"></canvas>
+        </div>
+      </div>
+    </main>
+
+    <!-- ═══ RIGHT PANEL (Alerts) ═══ -->
+    <aside class="right-panel" id="rightPanel">
+      <div class="right-panel-header">
+        <span>Live Alerts</span>
+        <span class="alert-count-badge" id="alertCount">0</span>
+      </div>
+      <div class="alerts-feed" id="alertsFeed">
+        <div class="empty-state">
+          <div class="empty-state-icon">📡</div>
+          <div class="empty-state-text">No alerts yet</div>
+          <div class="empty-state-sub">Alerts will appear here as they trigger</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ═══ BOTTOM PANEL (Game Details) ═══ -->
+    <footer class="bottom-panel">
+      <div class="bottom-panel-header">Game Details</div>
+      <div class="game-details-grid" id="gameDetailsGrid">
+        <div class="detail-item">
+          <span class="detail-label">Game ID</span>
+          <span class="detail-value" id="detailGameId">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">League</span>
+          <span class="detail-value" id="detailLeague">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Season</span>
+          <span class="detail-value" id="detailSeason">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Home Team</span>
+          <span class="detail-value" id="detailHomeTeam">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Away Team</span>
+          <span class="detail-value" id="detailAwayTeam">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Possession</span>
+          <span class="detail-value" id="detailPossession">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Quarter</span>
+          <span class="detail-value" id="detailQuarter">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Clock</span>
+          <span class="detail-value" id="detailClock">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Spread</span>
+          <span class="detail-value" id="detailSpread">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Total Line</span>
+          <span class="detail-value" id="detailTotalLine">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Live Spread</span>
+          <span class="detail-value" id="detailLiveSpread">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Live Total</span>
+          <span class="detail-value" id="detailLiveTotal">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Moneyline</span>
+          <span class="detail-value" id="detailMoneyline">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Steam Movement</span>
+          <span class="detail-value" id="detailSteamMovement">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Reverse Line</span>
+          <span class="detail-value" id="detailReverseLine">--</span>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">Snapshot Version</span>
+          <span class="detail-value" id="detailSnapshotVersion">--</span>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
