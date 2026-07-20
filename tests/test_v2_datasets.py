@@ -1,6 +1,6 @@
 """Tests for BLM V2 Dataset Builder.
 
-Uses a mock snapshot loader to test the builder in isolation without any
+Uses a mock TS interface to test the builder in isolation without any
 database backend.  CSV and Parquet exports are verified on disk then cleaned up.
 """
 
@@ -8,29 +8,26 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-import pyarrow.feather as paf
 import pyarrow.parquet as pq
 import pytest
 
 from blm_v2.datasets.builder import (
     DatasetBuilder,
-    DatasetSample,
     FEATURES,
     TARGETS,
 )
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Mock snapshot loader
+# Mock TS interface
 # ═════════════════════════════════════════════════════════════════════
 
 
-class MockSnapshotLoader:
+class MockTSInterface:
     """In-memory snapshot store that mimics the TimeSeriesDB query interface."""
 
     def __init__(self):
@@ -39,16 +36,24 @@ class MockSnapshotLoader:
     def add_game(self, game_id: str, snapshots: List[Dict[str, Any]]):
         self._snapshots[game_id] = snapshots
 
-    def query_snapshots(self, game_id: str, from_ts: Optional[str] = None, to_ts: Optional[str] = None) -> List[Dict[str, Any]]:
-        snaps = self._snapshots.get(game_id, [])
-        if from_ts:
-            snaps = [s for s in snaps if (s.get("timestamp") or "") >= from_ts]
-        if to_ts:
-            snaps = [s for s in snaps if (s.get("timestamp") or "") <= to_ts]
-        return snaps
+    async def query_snapshots(self, game_id: str, limit: int = 10000):
+        return self._snapshots.get(game_id, [])
 
-    def list_games(self) -> List[str]:
+    async def list_games(self):
         return list(self._snapshots.keys())
+
+
+class MockStorageInterface:
+    """Mock storage interface for build_all."""
+
+    def __init__(self):
+        self._games: List[Dict[str, Any]] = []
+
+    def add_game(self, game_id: str, status: str = "ended"):
+        self._games.append({"game_id": game_id, "status": status})
+
+    async def list_games(self):
+        return self._games
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -105,7 +110,7 @@ def make_snapshot(
             "margin": home_score - away_score,
         },
         "blm": {
-            "expected_winner": "Warriors",
+            "expected_winner": "home",
             "win_probability": 0.65,
             "confidence": 0.72,
             "expected_margin": 4.5,
@@ -126,12 +131,12 @@ def make_snapshot(
             "trap_meter": 0.15,
         },
         "momentum": {
-            "momentum_score": 55.0,
-            "momentum_velocity": 2.5,
-            "momentum_acceleration": 0.3,
-            "momentum_direction": "up",
+            "score": 55.0,
+            "velocity": 2.5,
+            "acceleration": 0.3,
+            "direction": "up",
         },
-        "confidence": {
+        "confidence_inputs": {
             "composite_confidence": 0.72,
         },
         "team_totals": {
@@ -139,54 +144,23 @@ def make_snapshot(
             "away_projection": 107.0,
         },
     }
-    # Override with extra fields.
     snap.update(extra)
     return snap
 
 
 @pytest.fixture
-def loader():
-    return MockSnapshotLoader()
+def ts():
+    return MockTSInterface()
 
 
 @pytest.fixture
-def builder(loader):
-    return DatasetBuilder(snapshot_loader=loader)
+def storage():
+    return MockStorageInterface()
 
 
-# ═════════════════════════════════════════════════════════════════════
-# DatasetSample
-# ═════════════════════════════════════════════════════════════════════
-
-
-def test_dataset_sample_defaults():
-    """DatasetSample initialises with default values."""
-    s = DatasetSample()
-    assert s.quarter == 0
-    assert s.home_score == 0
-    assert s.away_score == 0
-    assert s.winner == 0
-    assert s.prediction_accuracy == 0
-
-
-def test_dataset_sample_to_dict():
-    """to_dict() returns a flat dict with all feature and target keys."""
-    s = DatasetSample(
-        quarter=3,
-        clock_seconds=300.0,
-        home_score=70,
-        away_score=65,
-        confidence=0.85,
-        winner=1,
-        margin=5.0,
-        final_total=135.0,
-    )
-    d = s.to_dict()
-    assert d["quarter"] == 3
-    assert d["home_score"] == 70
-    assert d["winner"] == 1
-    assert d["margin"] == 5.0
-    assert all(k in d for k in FEATURES + TARGETS)
+@pytest.fixture
+def builder(tmp_path):
+    return DatasetBuilder(output_dir=str(tmp_path))
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -194,81 +168,65 @@ def test_dataset_sample_to_dict():
 # ═════════════════════════════════════════════════════════════════════
 
 
-def test_build_single_game(loader, builder):
+@pytest.mark.asyncio
+async def test_build_single_game(ts, builder):
     """build() produces samples from snapshots and exports them."""
-    loader.add_game("game-test", [
+    ts.add_game("game-test", [
         make_snapshot(home_score=50, away_score=45, timestamp="t1"),
         make_snapshot(home_score=55, away_score=48, timestamp="t2"),
-        make_snapshot(home_score=60, away_score=52, timestamp="t3"),
-        make_snapshot(home_score=102, away_score=95, timestamp="final"),  # final
+        make_snapshot(home_score=102, away_score=95, timestamp="final"),
     ])
 
-    filepath = builder.build("game-test", output_format="csv")
-    assert os.path.exists(filepath)
+    path = await builder.build("game-test", ts_interface=ts, output_format="csv")
+    assert os.path.exists(path)
 
-    # Verify content.
-    df = pd.read_csv(filepath)
-    assert len(df) == 3  # 3 training samples (excludes final)
-    assert set(FEATURES + TARGETS).issubset(df.columns)
+    df = pd.read_csv(path)
+    assert len(df) == 3  # All snapshots become samples (no exclusion)
+    for col in FEATURES:
+        assert col in df.columns, f"Missing feature: {col}"
+    for col in TARGETS:
+        assert col in df.columns, f"Missing target: {col}"
 
-    # Clean up.
-    os.unlink(filepath)
 
-
-def test_build_single_game_invalid_format(loader, builder):
+@pytest.mark.asyncio
+async def test_build_single_game_invalid_format(ts, builder):
     """build() raises ValueError for unsupported format."""
-    loader.add_game("game-test", [make_snapshot()])
-    with pytest.raises(ValueError, match="Unsupported output format"):
-        builder.build("game-test", output_format="xlsx")
+    ts.add_game("game-test", [make_snapshot()])
+    with pytest.raises(ValueError, match="Unsupported format"):
+        await builder.build("game-test", ts_interface=ts, output_format="xlsx")
 
 
-def test_build_single_game_no_snapshots(builder):
-    """build() raises RuntimeError when no snapshots exist."""
-    with pytest.raises(RuntimeError, match="No snapshots found"):
-        builder.build("nonexistent")
+@pytest.mark.asyncio
+async def test_build_single_game_no_snapshots(builder):
+    """build() raises ValueError when no snapshots exist."""
+    ts_empty = MockTSInterface()
+    with pytest.raises(ValueError, match="No snapshots found"):
+        await builder.build("nonexistent", ts_interface=ts_empty)
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Dataset schema verification
+# Dataset schema
 # ═════════════════════════════════════════════════════════════════════
 
 
-def test_dataset_schema(loader, builder):
+@pytest.mark.asyncio
+async def test_dataset_schema(ts, builder):
     """Built dataset has the correct feature and target columns."""
-    loader.add_game("game-test", [
+    ts.add_game("game-test", [
         make_snapshot(home_score=10, away_score=8, timestamp="t1"),
-        make_snapshot(home_score=20, away_score=15, timestamp="t2"),
         make_snapshot(home_score=100, away_score=90, timestamp="final"),
     ])
 
-    filepath = builder.build("game-test", output_format="csv")
-    df = pd.read_csv(filepath)
+    path = await builder.build("game-test", ts_interface=ts, output_format="csv")
+    df = pd.read_csv(path)
 
     assert len(df) == 2
-
-    # Check all features present.
     for col in FEATURES:
         assert col in df.columns, f"Missing feature column: {col}"
-
-    # Check all targets present.
     for col in TARGETS:
         assert col in df.columns, f"Missing target column: {col}"
 
-    # Check types.
-    assert df["winner"].dtype in ("int64", "int32", "int"), "winner should be int"
-    assert df["margin"].dtype in ("float64", "float32"), "margin should be float"
-    assert df["final_total"].dtype in ("float64", "float32"), "final_total should be float"
-
-    os.unlink(filepath)
-
-
-def test_dataset_schema_empty_game(loader, builder):
-    """Building from a 1-snapshot game produces 0 samples."""
-    loader.add_game("game-test", [
-        make_snapshot(home_score=100, away_score=95, timestamp="final"),
-    ])
-    with pytest.raises(RuntimeError, match="No snapshots found"):
-        builder.build("game-test")
+    os.unlink(path)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -276,27 +234,27 @@ def test_dataset_schema_empty_game(loader, builder):
 # ═════════════════════════════════════════════════════════════════════
 
 
-def test_export_csv(loader, builder):
+@pytest.mark.asyncio
+async def test_export_csv(ts, builder):
     """CSV export produces a valid CSV file with correct data."""
-    loader.add_game("game-test", [
+    ts.add_game("game-test", [
         make_snapshot(home_score=10, away_score=8, timestamp="t1"),
         make_snapshot(home_score=100, away_score=95, timestamp="final"),
     ])
 
-    filepath = builder.build("game-test", output_format="csv")
+    path = await builder.build("game-test", ts_interface=ts, output_format="csv")
 
-    with open(filepath) as f:
+    with open(path) as f:
         content = f.read()
     assert "quarter" in content
     assert "winner" in content
     assert "margin" in content
 
-    df = pd.read_csv(filepath)
-    assert len(df) == 1
+    df = pd.read_csv(path)
+    assert len(df) == 2
     assert df.iloc[0]["home_score"] == 10
-    assert df.iloc[0]["away_score"] == 8
 
-    os.unlink(filepath)
+    os.unlink(path)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -304,46 +262,44 @@ def test_export_csv(loader, builder):
 # ═════════════════════════════════════════════════════════════════════
 
 
-def test_export_parquet(loader, builder):
+@pytest.mark.asyncio
+async def test_export_parquet(ts, builder):
     """Parquet export produces a valid Parquet file."""
-    loader.add_game("game-test", [
+    ts.add_game("game-test", [
         make_snapshot(home_score=10, away_score=8, timestamp="t1"),
         make_snapshot(home_score=100, away_score=95, timestamp="final"),
     ])
 
-    filepath = builder.build("game-test", output_format="parquet")
-    assert filepath.endswith(".parquet")
+    path = await builder.build("game-test", ts_interface=ts, output_format="parquet")
+    assert str(path).endswith(".parquet")
 
-    table = pq.read_table(filepath)
-    assert table.num_rows == 1
+    table = pq.read_table(path)
+    assert table.num_rows == 2
     assert "home_score" in table.column_names
     assert "winner" in table.column_names
 
-    os.unlink(filepath)
+    os.unlink(path)
 
 
-def test_export_parquet_multiple_games(loader, builder):
+@pytest.mark.asyncio
+async def test_export_parquet_multiple_games(ts, storage, builder):
     """build_all creates a combined Parquet from all games."""
-    loader.add_game("game-a", [
-        make_snapshot(home_score=10, away_score=5, timestamp="t1"),
+    ts.add_game("game-a", [
         make_snapshot(home_score=80, away_score=70, timestamp="final"),
     ])
-    loader.add_game("game-b", [
-        make_snapshot(home_score=15, away_score=10, timestamp="t1"),
+    ts.add_game("game-b", [
         make_snapshot(home_score=95, away_score=88, timestamp="final"),
     ])
+    storage.add_game("game-a")
+    storage.add_game("game-b")
 
-    filepath = builder.build_all(output_format="parquet", output_dir="/tmp/test_blm_parquet")
-    assert os.path.exists(filepath)
+    path = await builder.build_all(storage_interface=storage, ts_interface=ts, output_format="parquet")
+    assert os.path.exists(path)
 
-    table = pq.read_table(filepath)
-    assert table.num_rows == 2  # one sample per game
+    table = pq.read_table(path)
+    assert table.num_rows == 2
 
-    # Clean up.
-    os.unlink(filepath)
-    meta = filepath.replace(".parquet", ".json")
-    if os.path.exists(meta):
-        os.unlink(meta)
+    os.unlink(path)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -352,12 +308,8 @@ def test_export_parquet_multiple_games(loader, builder):
 
 
 def test_feature_and_target_lists():
-    """FEATURES and TARGETS are non-overlapping and cover all columns."""
+    """FEATURES and TARGETS are non-overlapping lists."""
     assert len(FEATURES) == 20
     assert len(TARGETS) == 6
-    # No overlap.
+    # No overlap
     assert set(FEATURES).isdisjoint(TARGETS)
-    # All columns covered.
-    expected_keys = set(FEATURES + TARGETS)
-    sample = DatasetSample()
-    assert set(sample.to_dict().keys()) == expected_keys

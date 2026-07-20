@@ -267,7 +267,7 @@ def test_store_snapshot(mock_insert, mock_upsert, collector):
 @patch("blm_v1.collector.insert_snapshot")
 def test_store_snapshot_increments_count(mock_insert, mock_upsert, collector):
     """_store_snapshot increments snapshot_count on each call."""
-    state = {"home_team": "A", "away_team": "B", "home_score": 0, "away_score": 0}
+    state = {"home_team": "A", "away_team": "B", "home_score": 0, "away_score": 0, "quarter": 1}
 
     collector._store_snapshot(state)
     assert collector.snapshot_count == 1
@@ -286,6 +286,7 @@ def test_store_snapshot_generates_game_id(mock_insert, mock_upsert, collector):
         "away_team": "Celtics",
         "home_score": 10,
         "away_score": 8,
+        "quarter": 1,
     }
 
     collector._store_snapshot(state)

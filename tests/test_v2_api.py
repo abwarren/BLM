@@ -1,16 +1,16 @@
 """Tests for BLM V2 FastAPI API.
 
-Uses httpx AsyncClient with FastAPI's TestClient for async endpoint testing.
+Uses httpx AsyncClient with FastAPI's ASGI transport for async endpoint testing.
 All external dependencies (db, engine, metrics) are mocked.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient as SyncTestClient
+from fastapi import FastAPI
 
 from blm_v2.api.v2_fastapi import create_v2_app
 
@@ -25,16 +25,13 @@ def app():
     """Return a clean V2 app with mocked dependencies."""
     application = create_v2_app()
 
-    # Wire mock dependencies.
     from blm_v2.api.dependencies import _deps
 
     mock_ts = AsyncMock()
     mock_storage = AsyncMock()
     mock_engine = AsyncMock()
-    mock_metrics = MagicMock()
 
-    # Default mock returns.
-    mock_ts.get_live_game.return_value = None  # no live game by default
+    mock_ts.get_live_game.return_value = None
     mock_ts.get_game_detail.return_value = {
         "game_id": "g-1",
         "home_team": "Warriors",
@@ -50,7 +47,6 @@ def app():
     mock_ts.list_games.return_value = []
     mock_ts.get_replay_snapshots.return_value = []
     mock_ts.get_chart_data.return_value = []
-    mock_ts.get_live_game.return_value = None
 
     mock_storage.list_games.return_value = []
     mock_storage.get_events.return_value = []
@@ -68,7 +64,6 @@ def app():
 
     yield application
 
-    # Clean up
     _deps.ts_interface = None
     _deps.storage_interface = None
     _deps.blm_engine = None
@@ -76,18 +71,22 @@ def app():
 
 @pytest.fixture
 def client(app):
-    """Synchronous test client."""
-    return SyncTestClient(app)
+    """Synchronous test client for non-async tests."""
+    from fastapi.testclient import TestClient
+    return TestClient(app)
 
 
-@pytest.fixture
-async def async_client(app):
-    """Async test client."""
-    async with httpx.AsyncClient(
+# ═════════════════════════════════════════════════════════════════════
+# Helper: create an async client for a given app
+# ═════════════════════════════════════════════════════════════════════
+
+
+def _async_client(app: FastAPI):
+    """Return an httpx AsyncClient wired to the app via ASGI transport."""
+    return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
-    ) as ac:
-        yield ac
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -111,9 +110,10 @@ def test_health_endpoint(client):
 
 
 @pytest.mark.asyncio
-async def test_live_endpoint_no_game(async_client):
+async def test_live_endpoint_no_game(app):
     """GET /api/v2/live returns 404 when no live game."""
-    resp = await async_client.get("/api/v2/live")
+    async with _async_client(app) as ac:
+        resp = await ac.get("/api/v2/live")
     assert resp.status_code == 404
     assert "detail" in resp.json()
 
@@ -123,7 +123,6 @@ async def test_live_endpoint_with_game(app):
     """GET /api/v2/live returns live game when available."""
     from blm_v2.api.dependencies import _deps
 
-    # Wire a live game.
     _deps.ts_interface.get_live_game.return_value = {
         "game_id": "g-live",
         "home_team": "Warriors",
@@ -147,15 +146,12 @@ async def test_live_endpoint_with_game(app):
         "confidence": 0.72,
     }
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://test",
-    ) as ac:
+    async with _async_client(app) as ac:
         resp = await ac.get("/api/v2/live")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["game_id"] == "g-live"
-        assert data["home_team"] == "Warriors"
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["game_id"] == "g-live"
+    assert data["home_team"] == "Warriors"
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -164,9 +160,10 @@ async def test_live_endpoint_with_game(app):
 
 
 @pytest.mark.asyncio
-async def test_game_endpoint(async_client):
+async def test_game_endpoint(app):
     """GET /api/v2/game/{game_id} returns game detail."""
-    resp = await async_client.get("/api/v2/game/g-1")
+    async with _async_client(app) as ac:
+        resp = await ac.get("/api/v2/game/g-1")
     assert resp.status_code == 200
     data = resp.json()
     assert data["game_id"] == "g-1"
@@ -181,12 +178,9 @@ async def test_game_endpoint_not_found(app):
 
     _deps.ts_interface.get_game_detail.return_value = None
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://test",
-    ) as ac:
+    async with _async_client(app) as ac:
         resp = await ac.get("/api/v2/game/non-existent")
-        assert resp.status_code == 404
+    assert resp.status_code == 404
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -195,9 +189,10 @@ async def test_game_endpoint_not_found(app):
 
 
 @pytest.mark.asyncio
-async def test_history_endpoint(async_client):
+async def test_history_endpoint(app):
     """GET /api/v2/history/{game_id} returns snapshot history."""
-    resp = await async_client.get("/api/v2/history/g-1")
+    async with _async_client(app) as ac:
+        resp = await ac.get("/api/v2/history/g-1")
     assert resp.status_code == 200
     data = resp.json()
     assert data["game_id"] == "g-1"
@@ -209,17 +204,13 @@ async def test_history_with_params(app):
     """GET /api/v2/history respects query parameters."""
     from blm_v2.api.dependencies import _deps
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://test",
-    ) as ac:
+    async with _async_client(app) as ac:
         resp = await ac.get(
             "/api/v2/history/g-1",
             params={"from": "2026-01-01", "to": "2026-02-01", "limit": 50},
         )
-        assert resp.status_code == 200
+    assert resp.status_code == 200
 
-    # Verify the mock was called with the right args.
     _deps.ts_interface.get_snapshots.assert_called_with(
         game_id="g-1",
         from_ts="2026-01-01",
@@ -235,9 +226,10 @@ async def test_history_with_params(app):
 
 
 @pytest.mark.asyncio
-async def test_games_endpoint(async_client):
+async def test_games_endpoint(app):
     """GET /api/v2/games returns game list."""
-    resp = await async_client.get("/api/v2/games")
+    async with _async_client(app) as ac:
+        resp = await ac.get("/api/v2/games")
     assert resp.status_code == 200
     data = resp.json()
     assert "games" in data
@@ -245,9 +237,10 @@ async def test_games_endpoint(async_client):
 
 
 @pytest.mark.asyncio
-async def test_model_endpoint(async_client):
+async def test_model_endpoint(app):
     """GET /api/v2/model returns model state."""
-    resp = await async_client.get("/api/v2/model")
+    async with _async_client(app) as ac:
+        resp = await ac.get("/api/v2/model")
     assert resp.status_code == 200
     data = resp.json()
     assert "version" in data
@@ -255,7 +248,8 @@ async def test_model_endpoint(async_client):
 
 
 @pytest.mark.asyncio
-async def test_openapi_docs(async_client):
+async def test_openapi_docs(app):
     """GET /api/v2/docs returns Swagger UI."""
-    resp = await async_client.get("/api/v2/docs")
+    async with _async_client(app) as ac:
+        resp = await ac.get("/api/v2/docs")
     assert resp.status_code == 200
