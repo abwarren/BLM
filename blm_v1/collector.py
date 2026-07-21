@@ -1,191 +1,197 @@
 """
-BLM V1 — Playwright Snapshot Collector
+BLM V1 — Bandwidth-Optimized Playwright Snapshot Collector
 
-Scrapes live Cyber Basketball 2K26 from PokerBet and writes snapshots to SQLite.
-Runs in a background thread.
+Scrapes live Cyber Basketball 2K26 from PokerBet with aggressive request
+blocking to minimise residential proxy bandwidth.
+
+Follows the lean-scraper skill template.
 """
+
+from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import traceback
+from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
-import re
-
-from playwright.sync_api import sync_playwright, Page, Browser
+from playwright.sync_api import sync_playwright, Browser, Page, Route, Request
 
 from blm_v1.database import upsert_game, insert_snapshot, get_live_game
 
 logger = logging.getLogger(__name__)
 
-# ── Configuration ────────────────────────────────────────────────
+# ── Configuration ───────────────────────────────────────────────────
 
-SCRAPE_INTERVAL = 1.0  # seconds between scrape attempts
-POKERBET_URL = "https://www.pokerbet.co.za/en/sports/live/event-view/Basketball/World/18295203/cyber-basketball-2k26-matches/30346555/denver-nuggets-cyber-houston-rockets-cyber"
+SCRAPE_INTERVAL = 1.0
+POKERBET_URL = (
+    "https://www.pokerbet.co.za/en/sports/live/event-view/Basketball/World/18295203/"
+    "cyber-basketball-2k26-matches/30346555/denver-nuggets-cyber-houston-rockets-cyber"
+)
 NAV_TIMEOUT = 30000
-SELECTOR_TIMEOUT = 5000
 
-# ── DOM Selectors (centralised for maintainability) ─────────────
+# ── Resource types to always abort ─────────────────────────────────
 
-# BetConstruct event view — text-based extraction patterns
-# The page renders a React SPA; we extract from visible text.
+ALWAYS_BLOCK = {"image", "font", "media", "manifest", "ping"}
 
-SEL = {
-    "game_cards": '[class*="game-card"], [class*="match-card"], [data-testid*="game"], article',
-    "home_team": '[class*="home"] [class*="name"], [class*="participant"]:first-child [class*="name"]',
-    "away_team": '[class*="away"] [class*="name"], [class*="participant"]:last-child [class*="name"]',
-    "home_score": '[class*="home"] [class*="score"], [class*="score"]:nth-child(1)',
-    "away_score": '[class*="away"] [class*="score"], [class*="score"]:nth-child(2)',
-    "clock": '[class*="clock"], [class*="timer"], [class*="period"]',
-    "quarter": '[class*="quarter"], [class*="period"]',
-    "total_line": '[class*="total"], [class*="over-under"]',
-    "spread": '[class*="spread"], [class*="handicap"]',
-}
+# URLs containing any of these patterns get aborted (analytics, ads, tracking)
+BLOCK_URL_PATTERNS = re.compile(
+    r"(google-analytics|googletagmanager|hotjar|mixpanel|"
+    r"facebook\.com|facebook\.net|connect\.facebook|fbcdn|"
+    r"doubleclick|adsystem|adservice|scorecardresearch|"
+    r"amazon-adsystem|moatads|criteo|taboola|outbrain|"
+    r"analytics\.|tracking\.|pixel\.|beacon\.|bat\.bing\.com)", re.I
+)
 
 
-def extract_text(page: Page, selector: str, timeout: int = 3000) -> Optional[str]:
-    """Safely extract text from a DOM element."""
-    try:
-        el = page.query_selector(selector)
-        if el:
-            return el.inner_text(timeout=timeout).strip()
-    except Exception:
-        pass
-    return None
+# ── Bandwidth tracking ──────────────────────────────────────────────
+
+class BandwidthTracker:
+    """Track downloaded bytes by resource type for one scrape tick."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._counts: dict[str, int] = defaultdict(int)
+        self._bytes: dict[str, int] = defaultdict(int)
+        self._blocked_count = 0
+        self._blocked_bytes = 0
+
+    def record(self, resource_type: str, size: int):
+        self._counts[resource_type] += 1
+        self._bytes[resource_type] += size
+
+    def record_blocked(self, size: int):
+        self._blocked_count += 1
+        self._blocked_bytes += size
+
+    @property
+    def total_kb(self) -> float:
+        return sum(self._bytes.values()) / 1024
+
+    @property
+    def saved_kb(self) -> float:
+        return self._blocked_bytes / 1024
+
+    def summary(self) -> str:
+        return (
+            f"DL={self.total_kb:.0f}KB saved={self.saved_kb:.0f}KB "
+            f"reqs={sum(self._counts.values())} blocked={self._blocked_count}"
+        )
 
 
-def extract_int(page: Page, selector: str) -> Optional[int]:
-    val = extract_text(page, selector)
-    if val:
-        try:
-            return int(''.join(c for c in val if c.isdigit() or c == '-'))
-        except ValueError:
-            pass
-    return None
+_tracker = BandwidthTracker()
 
 
-def extract_float(page: Page, selector: str) -> Optional[float]:
-    val = extract_text(page, selector)
-    if val:
-        try:
-            return float(val.replace(',', ''))
-        except ValueError:
-            pass
-    return None
+# ── Request interception handler ────────────────────────────────────
+
+def _handle_route(route: Route, request: Request) -> None:
+    """Intercept every request — block images, fonts, media, tracking."""
+    url = request.url
+    rtype = request.resource_type
+
+    # Block images, fonts, media, manifests, pings unconditionally
+    if rtype in ALWAYS_BLOCK:
+        _tracker.record_blocked(len(request.headers.get("content-length", "0")))
+        route.abort("blockedbyclient")
+        return
+
+    # Block analytics / ad / tracking URLs regardless of resource type
+    if BLOCK_URL_PATTERNS.search(url):
+        _tracker.record_blocked(len(request.headers.get("content-length", "0")))
+        route.abort("blockedbyclient")
+        return
+
+    # Block third-party stylesheets (allow first-party)
+    if rtype == "stylesheet" and "pokerbet" not in url and "betconstruct" not in url:
+        _tracker.record_blocked(len(request.headers.get("content-length", "0")))
+        route.abort("blockedbyclient")
+        return
+
+    # Allow everything else — JS, XHR, document, fetch, websocket, first-party CSS
+    route.continue_()
 
 
-def scrape_betconstruct_event(page: Page) -> Optional[dict]:
-    """Scrape a BetConstruct event view page using visible text extraction.
+# ── Text-based extraction ───────────────────────────────────────────
 
-    BetConstruct renders its event view as a React SPA with obfuscated class
-    names, making traditional DOM selectors unreliable.  Instead we extract the
-    page's visible text and parse it with patterns derived from known layouts.
-    """
-    try:
-        body_text = page.inner_text("body", timeout=5000)
-    except Exception:
-        logger.debug("Could not extract body text")
-        return None
-
+def extract_game_state(body_text: str) -> Optional[dict[str, Any]]:
+    """Parse visible page text for Cyber Basketball scores, total line, spread."""
     if not body_text:
         return None
 
-    # ── Extract team names ──────────────────────────────────────────
-    # Pattern: "HOME_TEAM\nSCORE\nAWAY_TEAM\nSCORE" near a half/quarter marker
     lines = [l.strip() for l in body_text.split("\n") if l.strip()]
 
-    home_team = None
-    away_team = None
-    home_score = 0
-    away_score = 0
+    home_team = away_team = None
+    home_score = away_score = 0
     clock = None
     quarter = 1
-    total_line = None
-    spread = None
+    total_line = spread = None
 
-    # Look for Cyber Basketball team names - they end with "Cyber" but aren't headers
-    # Filter out section headers like "Cyber Basketball. 2K26 Matches" or "Cyber Basketball"
-    cyber_teams = [l for l in lines if "Cyber" in l and len(l) < 60
-                   and "Basketball" not in l and "2K26" not in l]
-    # Typical pattern: HOME_TEAM, SCORE, AWAY_TEAM, SCORE in sequence
+    # Find two Cyber team names 3 lines apart (team / score / team / score)
+    cyber = [
+        l for l in lines
+        if "Cyber" in l and len(l) < 60 and "Basketball" not in l and "2K26" not in l
+    ]
     for i, line in enumerate(lines):
-        if line in cyber_teams and (i + 2 < len(lines)) and lines[i + 2] in cyber_teams:
-            # Found two cyber teams 3 lines apart — likely home/away/score pattern
+        if line in cyber and i + 3 < len(lines) and lines[i + 2] in cyber:
             home_team = lines[i]
             try:
                 home_score = int(lines[i + 1])
             except (ValueError, IndexError):
-                home_score = 0
+                pass
             away_team = lines[i + 2]
             try:
                 away_score = int(lines[i + 3])
             except (ValueError, IndexError):
-                away_score = 0
+                pass
             break
 
     if not home_team:
-        logger.debug("Could not find Cyber team names in page text")
         return None
 
-    # ── Extract quarter / period ───────────────────────────────────
-    quarter_keywords = {
-        "1st Quarter": 1, "2nd Quarter": 2, "3rd Quarter": 3, "4th Quarter": 4,
-        "Quarter 1": 1, "Quarter 2": 2, "Quarter 3": 3, "Quarter 4": 4,
-        "Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4,
-        "Half End": 2, "Half Time": 2, "Halftime": 2,
-    }
-    for kw, q in quarter_keywords.items():
+    # Quarter
+    qmap = {"1st Quarter": 1, "2nd Quarter": 2, "3rd Quarter": 3, "4th Quarter": 4,
+            "Half End": 2, "Half Time": 2, "Halftime": 2}
+    for kw, q in qmap.items():
         if kw.lower() in body_text.lower():
             quarter = q
             break
 
-    # ── Extract clock ──────────────────────────────────────────────
-    # Look for MM:SS or M:SS pattern
-    clock_match = re.search(r'\b(\d{1,2}:\d{2})\b', body_text)
-    if clock_match:
-        clock = clock_match.group(1)
+    # Clock
+    cm = re.search(r'\b(\d{1,2}:\d{2})\b', body_text)
+    if cm:
+        clock = cm.group(1)
 
-    # ── Extract total line ─────────────────────────────────────────
-    # Look for "Total Points" section then find nearby numbers
-    # Pattern: number.5 Over Odds Under Odds
+    # Total line — look for "Total Points" section with valid over/under
+    # Must match X.X or XXX format, not the match-winner-and-total combo markets
     total_section = re.search(
-        r'Total Points.*?(?:Over\s*Under)?\s*(\d{3}\.?\d*)\s+(\d+\.\d+)\s+(\d+\.\d+)',
-        body_text, re.DOTALL
+        r'Total Points\s*\n\s*(?:Over\s+Under\s+)?(\d{2,3}\.\d)\s+\d+\.\d+\s+\d+\.\d+',
+        body_text
     )
     if total_section:
         total_line = float(total_section.group(1))
 
-    # ── Extract spread ─────────────────────────────────────────────
-    # Look for "Points Handicap" section then find +XX.X or -XX.X
-    spread_match = re.search(
-        r'Points Handicap.*?([+-]\d+\.\d+)',
-        body_text, re.DOTALL
-    )
-    if spread_match:
-        spread = float(spread_match.group(1))
-
-    logger.info(
-        "Scraped: %s %d - %d %s | Q%d %s | Total=%.1f Spread=%s",
-        home_team, home_score, away_score, away_team,
-        quarter, clock or "?", total_line or 0, spread or "?",
-    )
+    # Spread
+    sm = re.search(r'Points Handicap.*?([+-]\d+\.\d+)', body_text, re.DOTALL)
+    if sm:
+        spread = float(sm.group(1))
 
     return {
-        "home_team": home_team,
-        "away_team": away_team,
-        "home_score": home_score,
-        "away_score": away_score,
-        "quarter": quarter,
-        "clock": clock,
-        "total_line": total_line,
-        "spread": spread,
+        "home_team": home_team, "away_team": away_team,
+        "home_score": home_score, "away_score": away_score,
+        "quarter": quarter, "clock": clock,
+        "total_line": total_line, "spread": spread,
     }
 
 
+# ── Collector ───────────────────────────────────────────────────────
+
 class SnapshotCollector:
-    """Continuously scrapes PokerBet and stores snapshots."""
+    """Bandwidth-optimised Playwright collector for PokerBet Cyber games."""
 
     def __init__(self, headless: bool = True):
         self.headless = headless
@@ -207,13 +213,13 @@ class SnapshotCollector:
     def game_id(self) -> Optional[str]:
         return self._game_id
 
-    def start(self):
+    def start(self) -> None:
         self._running = True
         try:
-            with sync_playwright() as p:
-                self._browser = p.chromium.launch(
+            with sync_playwright() as pw:
+                self._browser = pw.chromium.launch(
                     headless=self.headless,
-                    args=["--no-sandbox", "--disable-gpu"]
+                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
                 )
                 context = self._browser.new_context(
                     viewport={"width": 1920, "height": 1080},
@@ -221,66 +227,75 @@ class SnapshotCollector:
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/125.0.0.0 Safari/537.36"
-                    )
+                    ),
+                    extra_http_headers={
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-ZA,en;q=0.9",
+                        "Accept-Encoding": "gzip, deflate, br",
+                    },
                 )
                 page = context.new_page()
+                page.route("**/*", _handle_route)
+
+                # Navigate once — reuse page for all ticks
+                _tracker.reset()
+                t0 = time.monotonic()
                 page.goto(POKERBET_URL, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
-                logger.info(f"Navigated to {POKERBET_URL}")
+                logger.info(
+                    "Navigated (%.1fs) | %s",
+                    time.monotonic() - t0, _tracker.summary(),
+                )
+                page.wait_for_timeout(2000)  # React hydration
 
                 while self._running:
                     try:
-                        state = scrape_betconstruct_event(page)
+                        text = page.inner_text("body", timeout=5000)
+                        state = extract_game_state(text)
                         if state:
                             self._store_snapshot(state)
+                            logger.info(
+                                "%s %d-%d %s | Q%d %s | Total=%s Spread=%s | %s",
+                                state["home_team"], state["home_score"], state["away_score"],
+                                state["away_team"], state["quarter"], state.get("clock", "?"),
+                                state.get("total_line", "?"), state.get("spread", "?"),
+                                _tracker.summary(),
+                            )
                         else:
-                            logger.debug("No game state scraped — waiting")
+                            logger.debug("No game state — waiting")
                     except Exception:
-                        logger.error(f"Scrape error: {traceback.format_exc()}")
-
+                        logger.error("Tick error: %s", traceback.format_exc())
                     time.sleep(SCRAPE_INTERVAL)
 
         except Exception:
-            logger.error(f"Collector crashed: {traceback.format_exc()}")
+            logger.error("Collector crashed: %s", traceback.format_exc())
         finally:
             if self._browser:
                 self._browser.close()
 
-    def _store_snapshot(self, state: dict):
+    def _store_snapshot(self, state: dict) -> None:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-        # Derive a game ID from team names
-        game_id = self._game_id or f"{state['home_team']}-vs-{state['away_team']}-{ts[:10]}"
+        gid = self._game_id or f"{state['home_team']}-vs-{state['away_team']}-{ts[:10]}"
         if not self._game_id:
-            self._game_id = game_id
+            self._game_id = gid
 
-        upsert_game(
-            game_id=game_id,
-            home=state["home_team"],
-            away=state["away_team"],
-        )
+        upsert_game(game_id=gid, home=state["home_team"], away=state["away_team"])
         insert_snapshot(
-            game_id=game_id,
-            ts=ts,
-            quarter=state["quarter"],
+            game_id=gid, ts=ts, quarter=state["quarter"],
             clock=state.get("clock"),
-            home_score=state["home_score"],
-            away_score=state["away_score"],
-            total_line=state.get("total_line"),
-            spread=state.get("spread"),
+            home_score=state["home_score"], away_score=state["away_score"],
+            total_line=state.get("total_line"), spread=state.get("spread"),
         )
-
-        self._latest_state = {**state, "timestamp": ts, "game_id": game_id}
+        self._latest_state = {**state, "timestamp": ts, "game_id": gid}
         self._snapshot_count += 1
 
-    def stop(self):
+    def stop(self) -> None:
         self._running = False
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    collector = SnapshotCollector()
+    c = SnapshotCollector()
     try:
-        collector.start()
+        c.start()
     except KeyboardInterrupt:
-        collector.stop()
-        logger.info("Collector stopped")
+        c.stop()
