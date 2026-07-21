@@ -141,7 +141,7 @@ class Settings(BaseSettings):
         description="Run Playwright browser in headless mode.",
     )
     collector_url: str = Field(
-        default="https://www.pokerbet.co.za/sports/basketball/cyber-basketball",
+        default="https://www.pokerbet.co.za/en/sports/live/event-view/Basketball/World/18295203/cyber-basketball-2k26-matches/30346555/denver-nuggets-cyber-houston-rockets-cyber",
         description="Target URL for the Playwright scraper.",
     )
     collector_nav_timeout: int = Field(

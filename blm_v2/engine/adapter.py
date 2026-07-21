@@ -138,4 +138,18 @@ class BlmEngineAdapter:
         }
 
         enriched.update(result.enriched_fields)
+
+        # ── Flatten nested fields for SQLite storage ─────────────
+        # The snapshot_v2 schema expects scalar columns for pace,
+        # possessions, home/away projections, total_line, spread.
+        enriched["pace"] = enriched.get("pace", {}).get("real_pace")
+        enriched["possessions"] = enriched.get("pace", {}).get("possessions")
+        tt = enriched.get("team_totals", {})
+        enriched["home_projection"] = tt.get("home_projection")
+        enriched["away_projection"] = tt.get("away_projection")
+        bm = enriched.get("betting_market", {})
+        if enriched.get("total_line") is None:
+            enriched["total_line"] = bm.get("total") or bm.get("live_total")
+        if enriched.get("spread") is None:
+            enriched["spread"] = bm.get("spread") or bm.get("live_spread")
         return enriched
