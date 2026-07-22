@@ -654,6 +654,24 @@ def create_v2_app() -> FastAPI:
             summary=handler.__doc__.strip().split("\n")[0] if handler.__doc__ else None,
         )
 
+    # ── Prometheus /metrics endpoint ────────────────────────────
+    @app.get("/metrics")
+    async def prometheus_metrics():
+        """Prometheus metrics endpoint — refreshed on each scrape."""
+        from blm_v2.api.prometheus_metrics import refresh_metrics, render_metrics
+        from blm_v2.api.dependencies import get_ts_interface, get_storage_interface
+        from fastapi.responses import Response
+
+        ts = await get_ts_interface()
+        storage = await get_storage_interface()
+        await refresh_metrics(ts, storage)
+
+        return Response(
+            content=render_metrics(),
+            media_type="text/plain; charset=utf-8",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
+
     # ── WebSocket endpoint ──────────────────────────────────────
     @app.websocket("/ws")
     async def websocket_endpoint(websocket):

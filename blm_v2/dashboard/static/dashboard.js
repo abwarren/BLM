@@ -1,304 +1,356 @@
 /* ═══════════════════════════════════════════════════════════════════════
-   BLM V2 Dashboard — Main Application Script
+   BLM V2 — UNDER Timing Dashboard  (Main Script)
    ═══════════════════════════════════════════════════════════════════════ */
 
 (function () {
   'use strict';
 
-  // ── Constants ──────────────────────────────────────────────────────
+  const API = '/api/v2';
+  const POLL_MS = 5000;
+  const ANALYSIS_POLL_MS = 10000;
+  const MAX_CHART_POINTS = 400;
 
-  const WS_URL = 'ws://localhost:8000/ws';
-  const RECONNECT_BASE_DELAY = 1000;  // 1s
-  const RECONNECT_MAX_DELAY = 30000;  // 30s
-  const ALERT_DISMISS_AFTER_MS = 30000;
-  const CHART_COLORS = {
-    blmScore: '#00d4ff',
-    trapMeter: '#ef4444',
-    winProb: '#22c55e',
-    pace: '#f59e0b',
-    projectedTotal: '#ff6b6b',
-    momentum: '#7c3aed',
-    vegasLine: '#ff6b6b',
-    confidence: '#3b82f6',
-    marketMovement: '#06b6d4',
-  };
-  const CHART_LABELS = {
-    blmScore: 'BLM Score',
-    trapMeter: 'Trap Meter',
-    winProb: 'Win Probability',
-    pace: 'Pace',
-    projectedTotal: 'Projected Total',
-    momentum: 'Momentum',
-    vegasLine: 'Vegas Line',
-    confidence: 'Confidence',
-    marketMovement: 'Market Movement',
-  };
-
-  // ── State ──────────────────────────────────────────────────────────
-
-  let ws = null;
-  let reconnectAttempts = 0;
-  let reconnectTimer = null;
-  let currentGameId = null;
-  let lastSnapshotData = null;
-  let chartHistory = [];        // {time, blmScore, trapMeter, winProb, pace, projectedTotal, momentum, vegasLine, confidence, marketMovement}
-  let alertTimers = new Map();  // alertId -> setTimeout handle
+  // ── State ───────────────────────────────────────────────────
+  let gameId = null;
+  let lastUnderData = null;
+  let lastLineAnalysis = null;
   let mainChart = null;
+  let subChart = null;
+  let alertTimers = new Map();
 
-  // ── DOM References ─────────────────────────────────────────────────
+  // ── DOM Refs ───────────────────────────────────────────────
 
-  const $ = (id) => document.getElementById(id);
+  const $ = id => document.getElementById(id);
 
   const dom = {
     // Header
-    headerTeams: $('headerTeams'),
-    headerScore: $('headerScore'),
-    headerClock: $('headerClock'),
+    gameTeams: $('gameTeams'),
+    gameScore: $('gameScore'),
+    gameClock: $('gameClock'),
+    gameLeague: $('gameLeague'),
     liveDot: $('liveDot'),
-    liveLabel: $('liveLabel'),
     lastUpdate: $('lastUpdate'),
-    statusIndicator: $('statusIndicator'),
-    statusLabel: $('statusLabel'),
-
-    // Sidebar panels
-    scoreValue: $('scoreValue'),
-    scoreSub: $('scoreSub'),
-    blmScoreValue: $('blmScoreValue'),
-    blmScoreSub: $('blmScoreSub'),
-    trapMeterValue: $('trapMeterValue'),
-    trapMeterGauge: $('trapMeterGauge'),
-    trapMeterFill: $('trapMeterFill'),
-    confidenceGauge: $('confidenceGauge'),
-    confidenceArc: $('confidenceArc'),
-    confidenceValue: $('confidenceValue'),
-    winProbValue: $('winProbValue'),
-    winProbSub: $('winProbSub'),
-    momentumArrow: $('momentumArrow'),
-    momentumScore: $('momentumScore'),
-    momentumVelocity: $('momentumVelocity'),
-    momentumAccel: $('momentumAccel'),
-    paceValue: $('paceValue'),
-    paceSub: $('paceSub'),
-    expectedTotal: $('expectedTotal'),
-    expectedTotalSub: $('expectedTotalSub'),
-    expectedMargin: $('expectedMargin'),
-    expectedMarginSub: $('expectedMarginSub'),
-
+    snapCount: $('snapCount'),
+    statusBadge: $('statusBadge'),
+    // Scoreboard
+    homeTeam: $('homeTeam'),
+    awayTeam: $('awayTeam'),
+    homeScore: $('homeScore'),
+    awayScore: $('awayScore'),
+    totalScore: $('totalScore'),
+    margin: $('margin'),
+    // Market
+    totalLine: $('totalLine'),
+    spread: $('spread'),
+    olv: $('olv'),
+    excursion: $('excursion'),
+    // State
+    paceVal: $('paceVal'),
+    possessions: $('possessions'),
+    scoreDelta: $('scoreDelta'),
+    lineDelta: $('lineDelta'),
+    // UNDER
+    underGauge: $('underGauge'),
+    underStatus: $('underStatus'),
+    underScore: $('underScore'),
+    confidenceBar: $('confidenceBar'),
+    confidenceVal: $('confidenceVal'),
+    // Components
+    comp_historical_inflation: $('comp_historical_inflation'),
+    comp_freeze: $('comp_freeze'),
+    comp_burst: $('comp_burst'),
+    comp_excursion: $('comp_excursion'),
+    comp_divergence: $('comp_divergence'),
+    comp_regression: $('comp_regression'),
+    comp_under_rate: $('comp_under_rate'),
+    // Signals
+    signalsMet: $('signalsMet'),
+    signalsMissed: $('signalsMissed'),
     // Alerts
-    alertCount: $('alertCount'),
-    alertsFeed: $('alertsFeed'),
-
-    // Game details
-    detailGameId: $('detailGameId'),
-    detailLeague: $('detailLeague'),
-    detailSeason: $('detailSeason'),
-    detailHomeTeam: $('detailHomeTeam'),
-    detailAwayTeam: $('detailAwayTeam'),
-    detailPossession: $('detailPossession'),
-    detailQuarter: $('detailQuarter'),
-    detailClock: $('detailClock'),
-    detailSpread: $('detailSpread'),
-    detailTotalLine: $('detailTotalLine'),
-    detailLiveSpread: $('detailLiveSpread'),
-    detailLiveTotal: $('detailLiveTotal'),
-    detailMoneyline: $('detailMoneyline'),
-    detailSteamMovement: $('detailSteamMovement'),
-    detailReverseLine: $('detailReverseLine'),
-    detailSnapshotVersion: $('detailSnapshotVersion'),
+    alertBadge: $('alertBadge'),
+    alertFeed: $('alertFeed'),
+    // Historical
+    histGames: $('histGames'),
+    histSnapshots: $('histSnapshots'),
+    histRegress: $('histRegress'),
+    histUnderRate: $('histUnderRate'),
+    histOlvMean: $('histOlvMean'),
+    histExcP95: $('histExcP95'),
+    // Chart controls
+    chartRangeLabel: $('chartRangeLabel'),
+    resetZoomBtn: $('resetZoomBtn'),
   };
 
-  // ── Utility Functions ──────────────────────────────────────────────
+  // ── Utilities ──────────────────────────────────────────────
 
-  function safeGet(obj, path, fallback = null) {
-    return path.split('.').reduce((acc, key) =>
-      (acc && typeof acc === 'object' && key in acc) ? acc[key] : fallback, obj);
+  function fmt(n, d) {
+    const digits = d !== undefined ? d : 1;
+    return (n === null || n === undefined) ? '--' : Number(n).toFixed(digits);
   }
 
-  function toPct(val) {
-    if (val === null || val === undefined) return '--';
-    return (val * 100).toFixed(1) + '%';
+  function pct(n) {
+    if (n === null || n === undefined) return '--';
+    return (n * 100).toFixed(1) + '%';
   }
 
-  function toFixed(val, digits = 1) {
-    if (val === null || val === undefined) return '--';
-    return Number(val).toFixed(digits);
+  function timeStr(iso) {
+    if (!iso) return '--';
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? '--' : d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
-  function formatTime(isoString) {
-    if (!isoString) return '--';
-    const d = new Date(isoString);
-    return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  function clockStr(quarter, clock) {
+    if (!clock && !quarter) return '--';
+    return `Q${quarter || 1} ${clock || '--'}`;
   }
 
-  function now() {
-    return new Date().toISOString();
+  // ── Status ────────────────────────────────────────────────
+
+  function setConnected(ok) {
+    dom.statusBadge.textContent = ok ? '● Connected' : '✕ Disconnected';
+    dom.statusBadge.className = 'status-badge ' + (ok ? 'connected' : 'disconnected');
   }
 
-  // ── Status Indicator ───────────────────────────────────────────────
+  // ── Gauge Drawing ──────────────────────────────────────────
 
-  function setStatus(state) {
-    const indicator = dom.statusIndicator;
-    indicator.classList.remove('status-connected', 'status-disconnected', 'status-reconnecting');
-    if (state === 'connected') {
-      indicator.classList.add('status-connected');
-      dom.statusLabel.textContent = 'Connected';
-    } else if (state === 'disconnected') {
-      indicator.classList.add('status-disconnected');
-      dom.statusLabel.textContent = 'Disconnected';
-    } else if (state === 'reconnecting') {
-      indicator.classList.add('status-reconnecting');
-      dom.statusLabel.textContent = `Reconnecting (${reconnectAttempts})`;
+  function drawGauge(score) {
+    const canvas = dom.underGauge;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    const cx = w / 2;
+    const cy = h - 12;
+    const r = 90;
+
+    ctx.clearRect(0, 0, w, h);
+
+    const startAngle = Math.PI * 0.75;
+    const endAngle = Math.PI * 2.25;
+
+    // Background arc
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, startAngle, endAngle);
+    ctx.strokeStyle = '#1a2235';
+    ctx.lineWidth = 14;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    // Score arc
+    const clamped = Math.min(100, Math.max(0, score));
+    const pctArc = clamped / 100;
+    const scoreAngle = startAngle + pctArc * (endAngle - startAngle);
+
+    let color;
+    if (clamped < 15) color = '#4a5570';
+    else if (clamped < 35) color = '#f59e0b';
+    else if (clamped < 60) color = '#f97316';
+    else color = '#22c55e';
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, startAngle, scoreAngle);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 14;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    // Glow on READY
+    if (clamped >= 60) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, startAngle, scoreAngle);
+      ctx.strokeStyle = 'rgba(34, 197, 94, 0.2)';
+      ctx.lineWidth = 20;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    // Center number
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = 'bold 28px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(Math.round(clamped).toString(), cx, cy - 4);
+
+    ctx.fillStyle = '#4a5570';
+    ctx.font = '11px -apple-system, sans-serif';
+    ctx.fillText('/ 100', cx, cy + 20);
+
+    // Tick marks at thresholds
+    const thresholds = [0, 15, 35, 60, 100];
+    const tcolors = ['#4a5570', '#f59e0b', '#f97316', '#22c55e'];
+    for (let i = 0; i < thresholds.length; i++) {
+      const t = thresholds[i];
+      const a = startAngle + (t / 100) * (endAngle - startAngle);
+      const tx = cx + (r + 18) * Math.cos(a);
+      const ty = cy + (r + 18) * Math.sin(a);
+      ctx.fillStyle = i < thresholds.length - 1 ? tcolors[Math.min(i, tcolors.length - 1)] : tcolors[tcolors.length - 1];
+      ctx.font = '8px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(t, tx, ty);
     }
   }
 
-  function updateLastUpdate() {
-    dom.lastUpdate.textContent = 'Last update: ' + formatTime(now());
-  }
+  // ── Dashboard Updates ──────────────────────────────────────
 
-  // ── Dashboard Panel Updates ────────────────────────────────────────
+  function updateUnderSignals(under) {
+    if (!under) return;
+    lastUnderData = under;
 
-  function animateValue(el, newValue) {
-    if (!el) return;
-    if (el.textContent !== String(newValue)) {
-      el.textContent = newValue;
-      el.classList.remove('updating');
-      // Force reflow then add
-      void el.offsetWidth;
-      el.classList.add('updating');
+    const status = under.status || 'PASS';
+    dom.underStatus.textContent = status;
+    dom.underStatus.className = 'under-status ' + status;
+
+    dom.underScore.textContent = fmt(under.under_timing_score, 1);
+    drawGauge(under.under_timing_score || 0);
+
+    const conf = under.confidence || 0;
+    dom.confidenceBar.style.width = (conf * 100) + '%';
+    dom.confidenceVal.textContent = pct(conf);
+    if (conf >= 0.6) dom.confidenceBar.style.background = '#22c55e';
+    else if (conf >= 0.3) dom.confidenceBar.style.background = '#f59e0b';
+    else dom.confidenceBar.style.background = '#3b82f6';
+
+    // Components
+    const comps = under.components || {};
+    const compKeys = ['historical_inflation', 'freeze', 'burst', 'excursion', 'divergence', 'regression', 'under_rate'];
+    const compMax = { historical_inflation: 25, freeze: 20, burst: 15, excursion: 15, divergence: 10, regression: 10, under_rate: 5 };
+
+    compKeys.forEach(key => {
+      const val = comps[key] || 0;
+      const max = compMax[key];
+      const ele = dom['comp_' + key];
+      if (ele) {
+        ele.textContent = fmt(val, 1);
+        const bar = ele.closest('.comp-item').querySelector('.comp-bar');
+        if (bar) bar.style.width = Math.min(100, (val / max) * 100) + '%';
+      }
+    });
+
+    // Signals met/missed
+    const met = under.signals_met || [];
+    dom.signalsMet.innerHTML = met.length
+      ? met.map(s => `<li>${s}</li>`).join('')
+      : '<li class="signal-empty">None</li>';
+
+    const missed = under.signals_missed || [];
+    dom.signalsMissed.innerHTML = missed.length
+      ? missed.map(s => `<li>${s}</li>`).join('')
+      : '<li class="signal-empty">None</li>';
+
+    // Card border color flash
+    const underCard = document.getElementById('underCard');
+    if (underCard) {
+      if (status === 'UNDER READY') underCard.style.borderColor = '#22c55e';
+      else if (status === 'WATCH') underCard.style.borderColor = '#f97316';
+      else if (status === 'WAIT') underCard.style.borderColor = '#f59e0b';
+      else underCard.style.borderColor = '';
     }
   }
 
-  function updateAllPanels(data) {
-    if (!data) return;
-
-    lastSnapshotData = data;
-
-    // ── Header ──────────────────────────────────────────────────
-    const homeTeam = safeGet(data, 'game_state.home_team', '--');
-    const awayTeam = safeGet(data, 'game_state.away_team', '--');
-    const homeScore = safeGet(data, 'game_state.home_score', 0);
-    const awayScore = safeGet(data, 'game_state.away_score', 0);
-    const quarter = safeGet(data, 'metadata.quarter', 1);
-    const clock = safeGet(data, 'metadata.clock', '--');
-
-    dom.headerTeams.textContent = `${homeTeam} vs ${awayTeam}`;
-    dom.headerScore.textContent = `${homeScore} - ${awayScore}`;
-    dom.headerClock.textContent = `Q${quarter} ${clock}`;
-
-    // Live indicator
-    const status = safeGet(data, 'metadata.status', 'live');
-    if (status === 'ended') {
-      dom.liveDot.classList.add('ended');
-      dom.liveLabel.textContent = 'ENDED';
-    } else if (status === 'halftime') {
-      dom.liveDot.style.animation = 'none';
-      dom.liveDot.style.background = '#f59e0b';
-      dom.liveLabel.textContent = 'HALFTIME';
-    } else {
-      dom.liveDot.classList.remove('ended');
-      dom.liveDot.style.animation = '';
-      dom.liveDot.style.background = '';
-      dom.liveLabel.textContent = 'LIVE';
+  function parseGameId(gid) {
+    // "East Cyber-vs-West Cyber-2026-07-21" => "East Cyber" vs "West Cyber"
+    if (!gid) return ['--', '--'];
+    const trimmed = gid.replace(/\s*\d{4}-\d{2}-\d{2}(T.*)?$/, '').trim();
+    const parts = trimmed.split(/-vs-/i);
+    if (parts.length >= 2) {
+      return [parts[0].trim() || 'HOME', parts.slice(1).join(' vs ').trim() || 'AWAY'];
     }
-
-    // ── Score Panel ─────────────────────────────────────────────
-    animateValue(dom.scoreValue, `${homeScore} - ${awayScore}`);
-    const margin = safeGet(data, 'game_state.margin', 0);
-    dom.scoreSub.textContent = `Margin: ${margin > 0 ? '+' : ''}${margin}`;
-
-    // ── BLM Score ───────────────────────────────────────────────
-    const blmScore = safeGet(data, 'blm.blm_score') || safeGet(data, 'blm.expected_margin');
-    animateValue(dom.blmScoreValue, toFixed(blmScore));
-    const expectedWinner = safeGet(data, 'blm.expected_winner', '--');
-    dom.blmScoreSub.textContent = `Expected Winner: ${expectedWinner}`;
-
-    // ── Trap Meter ──────────────────────────────────────────────
-    const trapMeter = safeGet(data, 'trap_detection.trap_meter', 0);
-    const trapPct = Math.round(trapMeter * 100);
-    animateValue(dom.trapMeterValue, trapPct + '%');
-    dom.trapMeterFill.style.width = trapPct + '%';
-    // Color the gauge
-    dom.trapMeterGauge.className = 'gauge';
-    if (trapPct >= 80) dom.trapMeterGauge.classList.add('gauge-high');
-    else if (trapPct >= 50) dom.trapMeterGauge.classList.add('gauge-mid');
-    else dom.trapMeterGauge.classList.add('gauge-low');
-
-    // ── Confidence (Circular Gauge) ─────────────────────────────
-    const confidence = safeGet(data, 'blm.confidence', 0);
-    const confPct = Math.round(confidence * 100);
-    animateValue(dom.confidenceValue, confPct + '%');
-    const circumference = 2 * Math.PI * 34; // r=34
-    const offset = circumference - (confidence * circumference);
-    dom.confidenceArc.style.strokeDasharray = circumference;
-    dom.confidenceArc.style.strokeDashoffset = offset;
-    // Color
-    if (confPct >= 70) dom.confidenceArc.style.stroke = '#22c55e';
-    else if (confPct >= 40) dom.confidenceArc.style.stroke = '#f59e0b';
-    else dom.confidenceArc.style.stroke = '#ef4444';
-
-    // ── Win Probability ─────────────────────────────────────────
-    const winProb = safeGet(data, 'blm.win_probability', null);
-    animateValue(dom.winProbValue, toPct(winProb));
-    dom.winProbSub.textContent = expectedWinner !== '--' ? `${expectedWinner} to win` : '--';
-
-    // ── Momentum ────────────────────────────────────────────────
-    const momentumDir = safeGet(data, 'momentum.momentum_direction', 'neutral');
-    dom.momentumArrow.className = 'momentum-arrow ' + momentumDir;
-    const arrowMap = { up: '↑', down: '↓', sideways: '→', neutral: '→' };
-    dom.momentumArrow.textContent = arrowMap[momentumDir] || '→';
-    animateValue(dom.momentumScore, toFixed(safeGet(data, 'momentum.momentum_score', null)));
-    animateValue(dom.momentumVelocity, toFixed(safeGet(data, 'momentum.momentum_velocity', null)));
-    animateValue(dom.momentumAccel, toFixed(safeGet(data, 'momentum.momentum_acceleration', null)));
-
-    // ── Pace ────────────────────────────────────────────────────
-    const pace = safeGet(data, 'pace.real_pace', null);
-    animateValue(dom.paceValue, toFixed(pace));
-    const possessions = safeGet(data, 'pace.possessions', '--');
-    const remaining = safeGet(data, 'pace.remaining_possessions', '--');
-    dom.paceSub.textContent = `Possessions: ${possessions} / ${remaining} remaining`;
-
-    // ── Expected Total ──────────────────────────────────────────
-    const expTotal = safeGet(data, 'blm.expected_total', null);
-    animateValue(dom.expectedTotal, toFixed(expTotal));
-    const currentTotal = safeGet(data, 'game_state.total', 0);
-    dom.expectedTotalSub.textContent = `Current: ${currentTotal}`;
-
-    // ── Expected Margin ─────────────────────────────────────────
-    const expMargin = safeGet(data, 'blm.expected_margin', null);
-    animateValue(dom.expectedMargin, toFixed(expMargin));
-    dom.expectedMarginSub.textContent = `${homeTeam} - ${awayTeam}`;
-
-    // ── Game Details (bottom panel) ─────────────────────────────
-    dom.detailGameId.textContent = safeGet(data, 'metadata.game_id', '--');
-    dom.detailLeague.textContent = safeGet(data, 'metadata.league', '--');
-    dom.detailSeason.textContent = safeGet(data, 'metadata.season', '--');
-    dom.detailHomeTeam.textContent = homeTeam;
-    dom.detailAwayTeam.textContent = awayTeam;
-    dom.detailPossession.textContent = safeGet(data, 'game_state.possession', '--');
-    dom.detailQuarter.textContent = `Q${safeGet(data, 'metadata.quarter', '--')}`;
-    dom.detailClock.textContent = clock;
-    dom.detailSpread.textContent = toFixed(safeGet(data, 'betting_market.spread', null));
-    dom.detailTotalLine.textContent = toFixed(safeGet(data, 'betting_market.total', null));
-    dom.detailLiveSpread.textContent = toFixed(safeGet(data, 'betting_market.live_spread', null));
-    dom.detailLiveTotal.textContent = toFixed(safeGet(data, 'betting_market.live_total', null));
-    dom.detailMoneyline.textContent = safeGet(data, 'betting_market.moneyline', '--');
-    dom.detailSteamMovement.textContent = toFixed(safeGet(data, 'betting_market.steam_movement', null), 2);
-    dom.detailReverseLine.textContent = safeGet(data, 'betting_market.reverse_line_movement', '--');
-    dom.detailSnapshotVersion.textContent = safeGet(data, 'metadata.snapshot_version', '--');
-
-    // ── Update Chart ────────────────────────────────────────────
-    pushChartDataPoint(data);
-    updateLastUpdate();
+    return [gid, ''];
   }
 
-  // ── Chart Functions ────────────────────────────────────────────────
+  function updateScoreboardFromAnalysis(entries) {
+    if (!entries || !entries.length) return;
 
-  function getOrCreateChart() {
+    // Parse teams from game_id
+    if (lastUnderData && lastUnderData.game_id) {
+      const [h, a] = parseGameId(lastUnderData.game_id);
+      dom.homeTeam.textContent = h;
+      dom.awayTeam.textContent = a;
+      dom.gameTeams.textContent = `${h} vs ${a}`;
+      dom.gameLeague.textContent = lastUnderData.league || 'Cyber 2K26';
+    }
+
+    const latest = entries[entries.length - 1];
+    if (!latest) return;
+
+    // Total score
+    const total = latest.current_total ?? latest.current_score ?? 0;
+    dom.homeScore.textContent = '0';  // line analysis doesn't have per-team scores
+    dom.awayScore.textContent = '0';
+    dom.totalScore.textContent = total;
+
+    // Game score header
+    dom.gameScore.textContent = `${total} - ?`;
+
+    // Market
+    dom.totalLine.textContent = latest.current_line != null ? fmt(latest.current_line, 1) : '--';
+    if (latest.olv != null) dom.olv.textContent = fmt(latest.olv, 1);
+
+    // Excursion
+    if (latest.excursion != null) {
+      dom.excursion.textContent = fmt(latest.excursion, 1);
+      dom.excursion.style.color = latest.excursion > 3 ? '#22c55e'
+        : latest.excursion > 0 ? '#f59e0b' : '#ef4444';
+    }
+
+    // Deltas
+    dom.scoreDelta.textContent = latest.score_delta ?? 0;
+    dom.lineDelta.textContent = fmt(latest.line_delta, 1);
+
+    // Clock from timestamp
+    if (latest.timestamp) {
+      dom.lastUpdate.textContent = timeStr(latest.timestamp);
+    }
+
+    dom.snapCount.textContent = (lastLineAnalysis ? lastLineAnalysis.total_entries : entries.length) + ' entries';
+  }
+
+  function updateAlerts(alerts) {
+    if (!alerts || !alerts.alerts || !alerts.alerts.length) {
+      dom.alertBadge.textContent = '0';
+      dom.alertBadge.className = 'alert-badge zero';
+      dom.alertFeed.innerHTML = '<div class="alert-empty">No alerts</div>';
+      return;
+    }
+
+    const items = alerts.alerts.slice(-20);
+    dom.alertBadge.textContent = items.length;
+    dom.alertBadge.className = 'alert-badge';
+
+    dom.alertFeed.innerHTML = items.map(a => {
+      const lvl = (a.level || 'info').toLowerCase();
+      const cls = lvl === 'warning' ? 'warning' : (lvl === 'info' ? 'info' : '');
+      const msg = a.message || a.type || a.text || 'Alert';
+      return `<div class="alert-item ${cls}">
+        <span>${msg}</span>
+        <span class="alert-time">${timeStr(a.timestamp || a.time)}</span>
+      </div>`;
+    }).join('');
+  }
+
+  function updateHistorical(profile) {
+    if (!profile) return;
+    dom.histGames.textContent = profile.total_games ?? 0;
+    dom.histSnapshots.textContent = profile.total_snapshots ?? 0;
+
+    if (profile.regression) {
+      dom.histRegress.textContent = pct(profile.regression.total_regression_rate);
+      dom.histUnderRate.textContent = pct(profile.regression.under_rate);
+    }
+    if (profile.olv_distribution) {
+      dom.histOlvMean.textContent = fmt(profile.olv_distribution.mean, 1);
+    }
+    if (profile.excursion_distribution) {
+      dom.histExcP95.textContent = fmt(profile.excursion_distribution.p95, 1);
+    }
+  }
+
+  // ── Chart Management ───────────────────────────────────────
+
+  function getOrCreateMainChart() {
+    if (mainChart) return mainChart;
     const ctx = document.getElementById('mainChart').getContext('2d');
 
-    if (mainChart) return mainChart;
-
-    // Register plugins
     Chart.register(chartjsZoom);
     Chart.register(chartjsAnnotation);
 
@@ -307,550 +359,266 @@
       data: {
         datasets: [
           {
-            label: 'BLM Score',
-            data: [],
-            borderColor: CHART_COLORS.blmScore,
-            backgroundColor: CHART_COLORS.blmScore + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 2,
-            pointHoverRadius: 5,
-            borderWidth: 2,
-            yAxisID: 'y',
+            label: 'Total Score', data: [],
+            borderColor: '#00d4ff', backgroundColor: 'rgba(0,212,255,0.08)',
+            showLine: true, tension: 0.15, pointRadius: 1, pointHoverRadius: 4,
+            borderWidth: 2, fill: true, yAxisID: 'y'
           },
           {
-            label: 'Trap Meter',
-            data: [],
-            borderColor: CHART_COLORS.trapMeter,
-            backgroundColor: CHART_COLORS.trapMeter + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 1,
-            pointHoverRadius: 4,
-            borderWidth: 1,
-            borderDash: [4, 3],
-            hidden: true,
-            yAxisID: 'y1',
+            label: 'Bookmaker Line', data: [],
+            borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.06)',
+            showLine: true, tension: 0.15, pointRadius: 0.5, pointHoverRadius: 3,
+            borderWidth: 1.5, borderDash: [4, 3], fill: false, yAxisID: 'y'
           },
           {
-            label: 'Win Probability',
-            data: [],
-            borderColor: CHART_COLORS.winProb,
-            backgroundColor: CHART_COLORS.winProb + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 1,
-            pointHoverRadius: 4,
-            borderWidth: 1,
-            borderDash: [4, 3],
-            hidden: true,
-            yAxisID: 'y1',
+            label: 'OLV', data: [],
+            borderColor: '#7c3aed', backgroundColor: 'rgba(124,58,237,0.5)',
+            showLine: true, tension: 0, pointRadius: 0,
+            borderWidth: 1.5, borderDash: [8, 4], fill: false, yAxisID: 'y'
           },
-          {
-            label: 'Pace',
-            data: [],
-            borderColor: CHART_COLORS.pace,
-            backgroundColor: CHART_COLORS.pace + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 1,
-            pointHoverRadius: 4,
-            borderWidth: 1,
-            borderDash: [4, 3],
-            hidden: true,
-            yAxisID: 'y',
-          },
-          {
-            label: 'Projected Total',
-            data: [],
-            borderColor: CHART_COLORS.projectedTotal,
-            backgroundColor: CHART_COLORS.projectedTotal + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 1,
-            pointHoverRadius: 4,
-            borderWidth: 1,
-            borderDash: [4, 3],
-            hidden: true,
-            yAxisID: 'y',
-          },
-          {
-            label: 'Momentum',
-            data: [],
-            borderColor: CHART_COLORS.momentum,
-            backgroundColor: CHART_COLORS.momentum + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 1,
-            pointHoverRadius: 4,
-            borderWidth: 1,
-            borderDash: [4, 3],
-            hidden: true,
-            yAxisID: 'y',
-          },
-          {
-            label: 'Vegas Line',
-            data: [],
-            borderColor: CHART_COLORS.vegasLine,
-            backgroundColor: CHART_COLORS.vegasLine + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 1,
-            pointHoverRadius: 4,
-            borderWidth: 1,
-            borderDash: [4, 3],
-            hidden: true,
-            yAxisID: 'y',
-          },
-          {
-            label: 'Confidence',
-            data: [],
-            borderColor: CHART_COLORS.confidence,
-            backgroundColor: CHART_COLORS.confidence + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 1,
-            pointHoverRadius: 4,
-            borderWidth: 1,
-            borderDash: [4, 3],
-            hidden: true,
-            yAxisID: 'y1',
-          },
-          {
-            label: 'Market Movement',
-            data: [],
-            borderColor: CHART_COLORS.marketMovement,
-            backgroundColor: CHART_COLORS.marketMovement + '33',
-            showLine: true,
-            tension: 0.2,
-            pointRadius: 1,
-            pointHoverRadius: 4,
-            borderWidth: 1,
-            borderDash: [4, 3],
-            hidden: true,
-            yAxisID: 'y',
-          },
-        ],
+        ]
       },
       options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: {
-          mode: 'index',
-          intersect: false,
-        },
+        responsive: true, maintainAspectRatio: false,
+        animation: { duration: 200 },
+        interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: {
-            display: false,
+            labels: { color: '#7a84a0', font: { size: 10 }, usePointStyle: true, padding: 8, boxWidth: 12 }
           },
           tooltip: {
-            backgroundColor: 'rgba(13, 17, 28, 0.95)',
-            titleColor: '#e8edf5',
-            bodyColor: '#8892b0',
-            borderColor: '#1e2745',
-            borderWidth: 1,
-            padding: 10,
-            callbacks: {
-              title: function (items) {
-                if (items.length > 0) {
-                  return 'Game Time: ' + items[0].label;
-                }
-                return '';
-              },
-            },
+            backgroundColor: 'rgba(13,17,28,0.95)', titleColor: '#e2e8f0', bodyColor: '#7a84a0',
+            borderColor: '#1e2745', borderWidth: 1, padding: 8,
+            callbacks: { title: items => items.length ? 'Tick ' + items[0].label : '' }
           },
           zoom: {
-            pan: {
-              enabled: true,
-              mode: 'x',
-              modifierKey: 'shift',
-            },
+            pan: { enabled: true, mode: 'x', modifierKey: 'shift' },
             zoom: {
-              wheel: {
-                enabled: true,
-                speed: 0.05,
-              },
-              pinch: {
-                enabled: true,
-              },
-              drag: {
-                enabled: true,
-                backgroundColor: 'rgba(0, 212, 255, 0.1)',
-                borderColor: '#00d4ff',
-                borderWidth: 1,
-              },
-              mode: 'x',
-            },
+              wheel: { enabled: true, speed: 0.05 },
+              pinch: { enabled: true },
+              drag: { enabled: true, backgroundColor: 'rgba(0,212,255,0.08)', borderColor: '#00d4ff', borderWidth: 1 },
+              mode: 'x'
+            }
           },
           annotation: {
-            annotations: {},
-          },
+            annotations: {
+              under_ready: {
+                type: 'line', yMin: 60, yMax: 60,
+                borderColor: 'rgba(34,197,94,0.3)', borderWidth: 1, borderDash: [4, 3],
+                label: {
+                  display: true, content: 'UNDER READY', position: 'end',
+                  backgroundColor: 'rgba(13,17,28,0.8)', color: '#22c55e', font: { size: 9 }
+                }
+              }
+            }
+          }
         },
         scales: {
           x: {
             type: 'linear',
-            title: {
-              display: true,
-              text: 'Game Time (minutes)',
-              color: '#55607a',
-            },
-            ticks: {
-              color: '#55607a',
-              maxTicksLimit: 20,
-            },
-            grid: {
-              color: 'rgba(30, 39, 69, 0.5)',
-            },
+            title: { display: true, text: 'Tick #', color: '#4a5570' },
+            ticks: { color: '#4a5570', maxTicksLimit: 20 },
+            grid: { color: 'rgba(30,39,69,0.4)' }
           },
           y: {
-            type: 'linear',
-            position: 'left',
-            title: {
-              display: true,
-              text: 'Score / Value',
-              color: '#55607a',
-            },
-            ticks: { color: '#55607a' },
-            grid: {
-              color: 'rgba(30, 39, 69, 0.3)',
-            },
+            type: 'linear', position: 'left',
+            title: { display: true, text: 'Points', color: '#4a5570' },
+            ticks: { color: '#4a5570' },
+            grid: { color: 'rgba(30,39,69,0.2)' }
           },
-          y1: {
-            type: 'linear',
-            position: 'right',
-            min: 0,
-            max: 1,
-            title: {
-              display: true,
-              text: 'Percentage',
-              color: '#55607a',
-            },
-            ticks: {
-              color: '#55607a',
-              callback: function (value) {
-                return (value * 100).toFixed(0) + '%';
-              },
-            },
-            grid: {
-              drawOnChartArea: false,
-            },
-          },
-        },
-      },
+        }
+      }
     });
 
     return mainChart;
   }
 
-  function pushChartDataPoint(data) {
-    if (!mainChart) mainChart = getOrCreateChart();
+  function getOrCreateSubChart() {
+    if (subChart) return subChart;
+    const ctx = document.getElementById('subChart').getContext('2d');
 
-    const quarter = safeGet(data, 'metadata.quarter', 1);
-    const clock = safeGet(data, 'metadata.clock', '12:00');
-    // Compute game time in minutes
-    let gameMinutes = (quarter - 1) * 12;
-    if (clock && clock !== '--') {
-      const parts = clock.split(':');
-      const mins = parseInt(parts[0], 10);
-      const secs = parseInt(parts[1], 10);
-      gameMinutes += (12 - mins - 1) + (60 - secs) / 60;
-    }
-
-    // Push data to each dataset
-    const blmScore = safeGet(data, 'blm.blm_score') || safeGet(data, 'blm.expected_margin') || 0;
-    const trapMeter = safeGet(data, 'trap_detection.trap_meter', 0);
-    const winProb = safeGet(data, 'blm.win_probability', 0);
-    const pace = safeGet(data, 'pace.real_pace', 0);
-    const projectedTotal = safeGet(data, 'blm.expected_total', 0);
-    const momentum = safeGet(data, 'momentum.momentum_score', 0);
-    const vegas = safeGet(data, 'betting_market.live_spread') || safeGet(data, 'betting_market.spread') || 0;
-    const confidence = safeGet(data, 'blm.confidence', 0);
-    const marketMove = safeGet(data, 'betting_market.steam_movement', 0);
-
-    const datasets = mainChart.data.datasets;
-    datasets[0].data.push({ x: gameMinutes, y: blmScore });
-    datasets[1].data.push({ x: gameMinutes, y: trapMeter });
-    datasets[2].data.push({ x: gameMinutes, y: winProb });
-    datasets[3].data.push({ x: gameMinutes, y: pace });
-    datasets[4].data.push({ x: gameMinutes, y: projectedTotal });
-    datasets[5].data.push({ x: gameMinutes, y: momentum });
-    datasets[6].data.push({ x: gameMinutes, y: vegas });
-    datasets[7].data.push({ x: gameMinutes, y: confidence });
-    datasets[8].data.push({ x: gameMinutes, y: marketMove });
-
-    // Update annotations for quarter separators
-    const annotations = mainChart.options.plugins.annotation.annotations;
-    const qMinutes = [0, 12, 24, 36, 48];
-    qMinutes.forEach((qm, i) => {
-      annotations['q' + (i + 1) + '_end'] = {
-        type: 'line',
-        xMin: qm,
-        xMax: qm,
-        borderColor: 'rgba(85, 96, 122, 0.4)',
-        borderWidth: 1,
-        borderDash: [6, 4],
-        label: {
-          display: true,
-          content: 'Q' + (i + 1) + ' End',
-          position: 'start',
-          backgroundColor: 'rgba(13, 17, 28, 0.8)',
-          color: '#55607a',
-          font: { size: 9 },
-        },
-      };
-    });
-
-    // Trim data to last 500 points to avoid memory issues
-    if (datasets[0].data.length > 500) {
-      datasets.forEach(ds => {
-        ds.data = ds.data.slice(-500);
-      });
-    }
-
-    mainChart.update('none');
-  }
-
-  // ── Chart Toggle Handlers ──────────────────────────────────────────
-
-  function initChartToggles() {
-    const toggles = document.querySelectorAll('.chart-toggle');
-    toggles.forEach(btn => {
-      btn.addEventListener('click', function () {
-        const key = this.dataset.key;
-        const datasetIndex = [
-          'blmScore', 'trapMeter', 'winProb', 'pace', 'projectedTotal',
-          'momentum', 'vegasLine', 'confidence', 'marketMovement'
-        ].indexOf(key);
-
-        if (datasetIndex === -1 || !mainChart) return;
-
-        const meta = mainChart.getDatasetMeta(datasetIndex);
-        meta.hidden = !meta.hidden;
-        this.classList.toggle('active');
-        mainChart.update();
-      });
-    });
-  }
-
-  // ── Alert Management ───────────────────────────────────────────────
-
-  function addAlert(alert) {
-    const feed = dom.alertsFeed;
-
-    // Remove empty state if present
-    const emptyState = feed.querySelector('.empty-state');
-    if (emptyState) emptyState.remove();
-
-    const severity = alert.severity || 'info';
-    const typeLabel = alert.type ? alert.type.replace(/_/g, ' ') : severity;
-    const alertId = alert.id || 'alert-' + Date.now();
-
-    const el = document.createElement('div');
-    el.className = 'alert-item';
-    el.dataset.alertId = alertId;
-    el.innerHTML = `
-      <div class="alert-header">
-        <span class="alert-type-badge ${severity}">${typeLabel}</span>
-        <span class="alert-time">${formatTime(alert.timestamp)}</span>
-      </div>
-      <div class="alert-title">${alert.title || 'Alert'}</div>
-      <div class="alert-message">${alert.message || ''}</div>
-    `;
-
-    // Click to dismiss
-    el.addEventListener('click', function () {
-      dismissAlert(alertId);
-    });
-
-    feed.insertBefore(el, feed.firstChild);
-
-    // Update count
-    const visible = feed.querySelectorAll('.alert-item:not(.dismissing)');
-    dom.alertCount.textContent = visible.length;
-
-    // Auto-dismiss after 30s
-    const timer = setTimeout(function () {
-      dismissAlert(alertId);
-    }, ALERT_DISMISS_AFTER_MS);
-    alertTimers.set(alertId, timer);
-  }
-
-  function dismissAlert(alertId) {
-    const feed = dom.alertsFeed;
-    const el = feed.querySelector(`[data-alert-id="${alertId}"]`);
-    if (el) {
-      el.classList.add('dismissing');
-      setTimeout(function () {
-        el.remove();
-        // Show empty state if no alerts
-        if (!feed.querySelector('.alert-item')) {
-          feed.innerHTML = `
-            <div class="empty-state">
-              <div class="empty-state-icon">📡</div>
-              <div class="empty-state-text">No alerts yet</div>
-              <div class="empty-state-sub">Alerts will appear here as they trigger</div>
-            </div>
-          `;
-        }
-        dom.alertCount.textContent = feed.querySelectorAll('.alert-item:not(.dismissing)').length;
-      }, 400);
-    }
-    // Clear timer
-    const timer = alertTimers.get(alertId);
-    if (timer) {
-      clearTimeout(timer);
-      alertTimers.delete(alertId);
-    }
-  }
-
-  // ── WebSocket Connection ───────────────────────────────────────────
-
-  function connectWebSocket() {
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-      return;
-    }
-
-    setStatus('reconnecting');
-
-    try {
-      ws = new WebSocket(WS_URL);
-    } catch (err) {
-      console.error('WebSocket construction failed:', err);
-      scheduleReconnect();
-      return;
-    }
-
-    ws.onopen = function () {
-      console.log('[BLM Dashboard] WebSocket connected');
-      reconnectAttempts = 0;
-      setStatus('connected');
-      // Subscribe to current game or wildcard
-      if (currentGameId) {
-        ws.send(JSON.stringify({ subscribe: currentGameId }));
-      } else {
-        ws.send(JSON.stringify({ subscribe: '*' }));
-      }
-    };
-
-    ws.onmessage = function (event) {
-      try {
-        const msg = JSON.parse(event.data);
-
-        if (msg.type === 'snapshot') {
-          const data = msg.data || {};
-          const gid = msg.game_id || data.game_id || '';
-          if (!currentGameId && gid) {
-            currentGameId = gid;
+    subChart = new Chart(ctx, {
+      type: 'scatter',
+      data: {
+        datasets: [
+          {
+            label: 'Excursion from OLV', data: [],
+            borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.08)',
+            showLine: true, tension: 0.15, pointRadius: 1, pointHoverRadius: 4,
+            borderWidth: 1.5, fill: true, yAxisID: 'y'
+          },
+          {
+            label: 'Freeze Ticks', data: [],
+            borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.08)',
+            showLine: true, tension: 0, pointRadius: 2, pointHoverRadius: 5,
+            borderWidth: 1.5, fill: false, yAxisID: 'y1'
+          },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: { duration: 200 },
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            labels: { color: '#7a84a0', font: { size: 10 }, usePointStyle: true, padding: 8, boxWidth: 12 }
+          },
+          tooltip: {
+            backgroundColor: 'rgba(13,17,28,0.95)', titleColor: '#e2e8f0', bodyColor: '#7a84a0',
+            borderColor: '#1e2745', borderWidth: 1, padding: 8,
+            callbacks: { title: items => items.length ? 'Tick ' + items[0].label : '' }
+          },
+          zoom: {
+            pan: { enabled: true, mode: 'x', modifierKey: 'shift' },
+            zoom: { wheel: { enabled: true, speed: 0.05 }, mode: 'x' }
+          },
+          annotation: {
+            annotations: {
+              zero_line: {
+                type: 'line', yMin: 0, yMax: 0,
+                borderColor: 'rgba(74,85,112,0.3)', borderWidth: 1, borderDash: [2, 2]
+              }
+            }
           }
-          updateAllPanels(data);
-        } else if (msg.type === 'subscribed') {
-          console.log('[BLM Dashboard] Subscribed to game:', msg.game_id);
-          currentGameId = msg.game_id;
-        } else if (msg.type === 'pong') {
-          // Keepalive response received
-        } else if (msg.type === 'error') {
-          console.warn('[BLM Dashboard] Server error:', msg.message);
-        } else if (msg.type === 'alert') {
-          // Direct alert push from server
-          addAlert(msg.alert || msg);
+        },
+        scales: {
+          x: {
+            type: 'linear',
+            title: { display: true, text: 'Tick #', color: '#4a5570' },
+            ticks: { color: '#4a5570', maxTicksLimit: 15 },
+            grid: { color: 'rgba(30,39,69,0.4)' }
+          },
+          y: {
+            type: 'linear', position: 'left',
+            title: { display: true, text: 'Excursion', color: '#4a5570' },
+            ticks: { color: '#4a5570' },
+            grid: { color: 'rgba(30,39,69,0.2)' }
+          },
+          y1: {
+            type: 'linear', position: 'right', min: 0,
+            title: { display: true, text: 'Freeze Ticks', color: '#4a5570' },
+            ticks: { color: '#4a5570', stepSize: 1 },
+            grid: { drawOnChartArea: false }
+          }
         }
-      } catch (err) {
-        console.error('[BLM Dashboard] Failed to parse message:', err);
       }
-    };
+    });
 
-    ws.onclose = function () {
-      console.log('[BLM Dashboard] WebSocket disconnected');
-      setStatus('disconnected');
-      scheduleReconnect();
-    };
-
-    ws.onerror = function (err) {
-      console.error('[BLM Dashboard] WebSocket error:', err);
-      // onclose will fire after onerror, triggering reconnect
-    };
+    return subChart;
   }
 
-  function scheduleReconnect() {
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
+  function updateCharts(entries) {
+    if (!entries || !entries.length) return;
+
+    const chart = getOrCreateMainChart();
+    const sub = getOrCreateSubChart();
+
+    chart.data.datasets.forEach(ds => ds.data = []);
+    sub.data.datasets.forEach(ds => ds.data = []);
+
+    const points = entries.slice(-MAX_CHART_POINTS);
+
+    points.forEach((e, i) => {
+      chart.data.datasets[0].data.push({
+        x: i,
+        y: e.current_total ?? e.current_score ?? 0
+      });
+      if (e.current_line != null) {
+        chart.data.datasets[1].data.push({ x: i, y: e.current_line });
+      }
+      if (e.olv != null) {
+        chart.data.datasets[2].data.push({ x: i, y: e.olv });
+      }
+    });
+
+    points.forEach((e, i) => {
+      if (e.excursion != null) {
+        sub.data.datasets[0].data.push({ x: i, y: e.excursion });
+      }
+      sub.data.datasets[1].data.push({ x: i, y: e.freeze_ticks || 0 });
+    });
+
+    chart.update('none');
+    sub.update('none');
+
+    dom.chartRangeLabel.textContent = `Last ${points.length} ticks`;
+  }
+
+  function resetZoom() {
+    if (mainChart) mainChart.resetZoom();
+    if (subChart) subChart.resetZoom();
+  }
+
+  // ── Polling ─────────────────────────────────────────────────
+
+  let pollTimer = null;
+  let analysisTimer = null;
+
+  async function fetchJson(url) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        if (res.status === 404) return null;
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return await res.json();
+    } catch (err) {
+      console.warn('Fetch error:', url, err.message);
+      return null;
     }
-    reconnectAttempts++;
-    const delay = Math.min(
-      RECONNECT_BASE_DELAY * Math.pow(1.5, reconnectAttempts - 1),
-      RECONNECT_MAX_DELAY
-    );
-    console.log(`[BLM Dashboard] Reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
-    reconnectTimer = setTimeout(function () {
-      connectWebSocket();
-    }, delay);
   }
 
-  function sendMessage(msg) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
+  async function pollMain() {
+    const under = await fetchJson(`${API}/under-signals`);
+    if (under && under.game_id) {
+      gameId = under.game_id;
+      updateUnderSignals(under);
+    }
+
+    const alerts = await fetchJson(`${API}/alerts`);
+    if (alerts) updateAlerts(alerts);
+
+    const profile = await fetchJson(`${API}/learned-ranges`);
+    if (profile) updateHistorical(profile);
+
+    dom.lastUpdate.textContent = timeStr(new Date().toISOString());
+    setConnected(true);
+  }
+
+  async function pollAnalysis() {
+    if (!gameId) return;
+
+    const analysis = await fetchJson(`${API}/line-analysis/${encodeURIComponent(gameId)}`);
+    if (analysis && analysis.entries && analysis.entries.length) {
+      lastLineAnalysis = analysis;
+      updateScoreboardFromAnalysis(analysis.entries);
+      updateCharts(analysis.entries);
     }
   }
 
-  // ── Initialization ─────────────────────────────────────────────────
+  async function pollAll() {
+    await pollMain();
+    await pollAnalysis();
+  }
+
+  // ── Init ───────────────────────────────────────────────────
 
   function init() {
-    console.log('[BLM Dashboard] Initializing...');
+    dom.resetZoomBtn.addEventListener('click', resetZoom);
 
-    // Initialize chart
-    getOrCreateChart();
+    // Initial fetch
+    pollAll();
 
-    // Initialize chart toggles
-    initChartToggles();
+    // Start polling
+    pollTimer = setInterval(pollMain, POLL_MS);
+    analysisTimer = setInterval(pollAnalysis, ANALYSIS_POLL_MS);
 
-    // Load game list from REST API to find current game
-    fetch('/api/v2/live')
-      .then(function (res) {
-        if (!res.ok) throw new Error('No live game');
-        return res.json();
-      })
-      .then(function (data) {
-        if (data && data.game_id) {
-          currentGameId = data.game_id;
-          // Load initial chart history
-          return fetch('/api/v2/chart/' + data.game_id);
-        }
-      })
-      .then(function (res) {
-        if (res && res.ok) return res.json();
-        return null;
-      })
-      .then(function (chartData) {
-        if (chartData && chartData.data_points) {
-          // Pre-populate chart with historical data
-          chartData.data_points.forEach(function (pt) {
-            // Push as a pseudo-snapshot structure
-            pushChartDataPoint(pt);
-          });
-        }
-      })
-      .catch(function (err) {
-        console.log('[BLM Dashboard] No live game found, waiting for WebSocket data');
-      })
-      .finally(function () {
-        // Connect WebSocket
-        connectWebSocket();
-      });
-
-    // Handle visibility change — reconnect if needed
-    document.addEventListener('visibilitychange', function () {
-      if (!document.hidden && (!ws || ws.readyState !== WebSocket.OPEN)) {
-        connectWebSocket();
-      }
-    });
+    window.addEventListener('online', () => { pollAll(); });
   }
-
-  // ── Start ──────────────────────────────────────────────────────────
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
     init();
   }
-
 })();

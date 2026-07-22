@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""BLM v2 — UNDER Timing CLI. Live assessment on demand, no Grafana needed."""
+
+import sqlite3
+import json
+import os
+import sys
+import shutil
+from datetime import datetime, timezone, timedelta
+from collections import deque
+
+DB_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_V2 = os.path.join(DB_DIR, "blm_ts.db")
+DB_V1 = os.path.join(DB_DIR, "blm.db")
+
+# ─── Terminal helpers ────────────────────────────────────────────────────
+
+def tty_width():
+    try:
+        return shutil.get_terminal_size().columns
+    except:
+        return 80
+
+def fmt_time(ts_str, ago=False):
+    """Parse ISO timestamp, return formatted string + optional time ago."""
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except:
+        return ts_str, ""
+    t = dt.strftime("%H:%M:%S")
+    a = ""
+    if ago:
+        secs = (datetime.now(timezone.utc) - dt).total_seconds()
+        if secs < 60:
+            a = f" ({int(secs)}s ago)"
+        elif secs < 3600:
+            a = f" ({int(secs/60)}m ago)"
+        elif secs < 86400:
+            a = f" ({int(secs/3600)}h ago)"
+        else:
+            a = f" ({int(secs/86400)}d ago)"
+    return t, a
+
+def ratio_bar(val, max_val=100, width=20):
+    """Draw a colored horizontal bar."""
+    filled = int((val / max_val) * width) if max_val > 0 else 0
+    filled = min(filled, width)
+    empty = width - filled
+    bar = "█" * filled + "░" * empty
+    return bar
+
+def sparkline(values, width=20):
+    """Simple ASCII sparkline from list of values."""
+    if not values:
+        return "─" * width
+    mn, mx = min(values), max(values)
+    rng = mx - mn if mx != mn else 1
+    chars = "▁▂▃▄▅▆▇█"
+    scaled = [int((v - mn) / rng * (len(chars) - 1)) for v in values]
+    step = max(1, len(scaled) // width) if len(scaled) > width else 1
+    sampled = scaled[::step][:width]
+    while len(sampled) < width:
+        sampled.append(sampled[-1] if sampled else 0)
+    return "".join(chars[i] for i in sampled)
+
+def color(val, threshold_green=60, threshold_yellow=30):
+    """Return terminal color codes based on value thresholds."""
+    if val >= threshold_green:
+        return "\033[32m"  # green
+    elif val >= threshold_yellow:
+        return "\033[33m"  # yellow
+    return "\033[31m"  # red
+
+def color_status(status):
+    mapping = {
+        "PASS": "\033[32m",
+        "UNDER_READY": "\033[32m",
+        "WATCH": "\033[33m",
+        "WAIT": "\033[34m",
+    }
+    return mapping.get(status, "\033[37m")
+
+def reset():
+    return "\033[0m"
+
+# ─── Data queries ────────────────────────────────────────────────────────
+
+def get_recent_snapshots(limit=30):
+    conn = sqlite3.connect(f"file:{DB_V2}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT * FROM snapshots_v2
+        ORDER BY timestamp DESC LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows][::-1]  # oldest first
+
+def get_recent_analysis(limit=30):
+    conn = sqlite3.connect(f"file:{DB_V2}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT * FROM line_analysis
+        ORDER BY timestamp DESC LIMIT ?
+    """, (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows][::-1]
+
+def get_games():
+    conn = sqlite3.connect(f"file:{DB_V1}?mode=ro", uri=True)
+    rows = conn.execute("SELECT * FROM games ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return rows
+
+def get_game_snapshots(game_id=None, limit=200):
+    conn = sqlite3.connect(f"file:{DB_V2}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    if game_id:
+        rows = conn.execute("""
+            SELECT * FROM snapshots_v2
+            WHERE game_id = ? ORDER BY timestamp ASC
+        """, (game_id,)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT * FROM snapshots_v2
+            ORDER BY timestamp DESC LIMIT ?
+        """, (limit,)).fetchall()
+        rows = rows[::-1]
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_v1_snapshots(game_id=None, limit=200):
+    conn = sqlite3.connect(f"file:{DB_V1}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    if game_id:
+        # V1 game_id format is different - partial match
+        rows = conn.execute("""
+            SELECT * FROM snapshots
+            WHERE game_id LIKE ? ORDER BY timestamp ASC
+        """, (f"%{game_id}%",)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT * FROM snapshots
+            ORDER BY timestamp DESC LIMIT ?
+        """, (limit,)).fetchall()
+        rows = rows[::-1]
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_all_game_ids():
+    """Get distinct game IDs from both DBs."""
+    conn = sqlite3.connect(f"file:{DB_V2}?mode=ro", uri=True)
+    gids = [r[0] for r in conn.execute("SELECT DISTINCT game_id FROM snapshots_v2 ORDER BY game_id").fetchall()]
+    conn.close()
+    return gids
+
+# ─── Live assessment ────────────────────────────────────────────────────
+
+def live_assessment():
+    analysis = get_recent_analysis(1)
+    if not analysis:
+        print(f"{color(100,100,100)} No assessment data yet. Is the pipeline running?{reset()}")
+        return
+
+    latest = analysis[0]
+
+    # Get matching snapshot for score data
+    snap = get_recent_snapshots(1)
+    if not snap:
+        snap_data = {}
+    else:
+        snap_data = snap[0]
+
+    # Parse data_json for component scores if present
+    components = {}
+    try:
+        dj = json.loads(latest.get("data_json", "{}"))
+        if isinstance(dj, dict):
+            components = dj.get("components", dj.get("under_components", dj.get("blm_components", {})))
+            if not components and "freeze_ticks" in dj:
+                components = {k: v for k, v in dj.items() if isinstance(v, (int, float)) and k not in ["olv", "current_line", "excursion", "excursion_percent", "score_delta", "line_delta", "rolling_mean_score"]}
+    except:
+        pass
+
+    # Calculate UNDER timing score from components
+    score = 0
+    freeze = int(latest.get("freeze_ticks") or 0)
+    is_burst = int(latest.get("is_burst") or 0)
+    divergence = latest.get("divergence") or ""
+    excursion = float(latest.get("excursion") or 0)
+    excursion_pct = float(latest.get("excursion_percent") or 0)
+
+    # Score heuristic: freeze_ticks*3 + burst*25 + abs(excursion)*2 + divergence_score
+    div_score = 10 if divergence and divergence != "none" and divergence != "sync" else 0
+    score = min(100, int(freeze * 3 + (is_burst * 25) + abs(excursion) * 2 + div_score))
+    confidence = float(latest.get("under_confidence") or 0)
+
+    # Status
+    if score >= 70 and confidence > 0.5:
+        status = "UNDER_READY"
+    elif score >= 50:
+        status = "WATCH"
+    elif score >= 20:
+        status = "WAIT"
+    else:
+        status = "PASS"
+
+    # Timestamps
+    ts, ago = fmt_time(latest["timestamp"], ago=True)
+
+    # ─── RENDER ────────────────────────────────────────────────────
+    W = min(tty_width(), 72)
+
+    print()
+    print(f"  ╔{'═' * (W-4)}╗")
+    print(f"  ║  \033[1mBLM v2 — UNDER Timing Assessment{reset()}" + " " * (W - 40) + f"║")
+    print(f"  ╚{'═' * (W-4)}╝")
+
+    # Game info
+    gid = snap_data.get("game_id", latest.get("game_id", "—"))
+    q = snap_data.get("quarter", "—")
+    c = snap_data.get("clock", "—")
+    hs = snap_data.get("home_score", "—")
+    as_ = snap_data.get("away_score", "—")
+    total = (hs + as_) if isinstance(hs, (int, float)) and isinstance(as_, (int, float)) else None
+    line = snap_data.get("total_line") or latest.get("current_line") or "—"
+    olv = latest.get("olv") or "—"
+
+    print()
+    print(f"  {color_status(status)}◉ {status}{reset()}    Score: \033[1m{score}/100{reset()}   Confidence: {color(confidence*100)}{confidence*100:.0f}%{reset()}")
+    print(f"  ═══{'═' * (W-10)}")
+    print(f"  {ts}{ago}")
+    print()
+
+    # Game details
+    print(f"  \033[1mGame:\033[0m          {gid}")
+    print(f"  \033[1mQuarter / Clock:\033[0m  {q}Q / {c}")
+    print(f"  \033[1mScore:\033[0m           {hs} – {as_}  {f'(Total: {total})' if total else ''}")
+    print(f"  \033[1mLine / OLV:\033[0m      {line} / {olv}")
+    print(f"  \033[1mExcursion:\033[0m       {excursion:+.1f} ({excursion_pct:+.1f}%)")
+    print()
+
+    # Score bar
+    bar = ratio_bar(score, 100, W - 12)
+    label = f"UNDER Timing "
+    print(f"  {label}{color(score)}{bar}{reset()}  {score}")
+
+    # Components
+    comp_data = {
+        "freeze_ticks": freeze,
+        "burst": is_burst,
+        "divergence": div_score,
+        "excursion": abs(excursion) * 2,
+    }
+    print()
+    comp_names = {"freeze_ticks": "Freeze Ticks", "burst": "Burst", "divergence": "Divergence", "excursion": "Excursion"}
+    for key, name in comp_names.items():
+        v = comp_data.get(key, 0)
+        cb = ratio_bar(min(v, 30), 30, 10)
+        print(f"  {cb} {name}: {v}")
+
+    # Recent tick sparkline
+    all_analysis = get_recent_analysis(120)
+    if len(all_analysis) > 1:
+        all_scores = []
+        for r in all_analysis[-60:]:
+            f = int(r.get("freeze_ticks") or 0)
+            b = int(r.get("is_burst") or 0)
+            e = float(r.get("excursion") or 0)
+            d = r.get("divergence") or ""
+            s = f * 3 + b * 25 + abs(e) * 2
+            s += 10 if d and d not in ("none", "sync") else 0
+            all_scores.append(min(s, 100))
+        if all_scores:
+            sp = sparkline(all_scores, W - 14)
+            print()
+            print(f"  \033[1m60-tick trend:\033[0m")
+            print(f"  {color(score)}{sp}{reset()}")
+            print(f"  {'─' * (W-14)}")
+            print(f"  \033[2m{min(all_scores):.0f}              {sum(all_scores)/len(all_scores):.0f} avg              {max(all_scores):.0f}\033[0m")
+
+    # Historical stats from V1 DB
+    print()
+    print(f"  \033[1mHistorical Stats:\033[0m")
+    try:
+        conn = sqlite3.connect(f"file:{DB_V1}?mode=ro", uri=True)
+        tot = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        games_cnt = conn.execute("SELECT COUNT(DISTINCT game_id) FROM snapshots").fetchone()[0]
+        gam = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+        conn.close()
+        print(f"  V1 snapshots: {tot:,}  |  Games: {games_cnt}  |  DB games: {gam}")
+    except:
+        pass
+
+    try:
+        conn = sqlite3.connect(f"file:{DB_V2}?mode=ro", uri=True)
+        v2tot = conn.execute("SELECT COUNT(*) FROM snapshots_v2").fetchone()[0]
+        v2games = conn.execute("SELECT COUNT(DISTINCT game_id) FROM snapshots_v2").fetchone()[0]
+        conn.close()
+        print(f"  V2 snapshots: {v2tot:,}  |  Games: {v2games}")
+    except:
+        pass
+
+    # Recent games list
+    all_gids = get_all_game_ids()
+    print()
+    print(f"  \033[1mRecent games tracked:\033[0m")
+    for g in all_gids[-5:]:
+        print(f"   • {g}")
+    print()
+
+def games_list():
+    """List all games with summary stats."""
+    gids = get_all_game_ids()
+    if not gids:
+        print("No games in database.")
+        return
+
+    conn = sqlite3.connect(f"file:{DB_V2}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+
+    print(f"\n  \033[1mGames tracked ({len(gids)} total):\033[0m\n")
+    for gid in gids:
+        rows = conn.execute(
+            "SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM snapshots_v2 WHERE game_id = ?",
+            (gid,)
+        ).fetchone()
+        ts_min, ts_max, cnt = rows
+        tmin, _ = fmt_time(ts_min)
+        tmax, a = fmt_time(ts_max, ago=True)
+        print(f"  {gid}")
+        print(f"     {cnt} snapshots  |  {tmin} → {tmax}{a}")
+    conn.close()
+    print()
+
+def game_detail(game_id):
+    """Show detailed UNDER timing history for a specific game."""
+    conn = sqlite3.connect(f"file:{DB_V2}?mode=ro", uri=True)
+    # Try exact match first, then partial match
+    exact = conn.execute(
+        "SELECT DISTINCT game_id FROM line_analysis WHERE game_id = ?", (game_id,)
+    ).fetchall()
+    if exact:
+        actual_gid = exact[0][0]
+    else:
+        partial = conn.execute(
+            "SELECT DISTINCT game_id FROM line_analysis WHERE game_id LIKE ? LIMIT 1",
+            (f"%{game_id}%",)
+        ).fetchall()
+        if not partial:
+            print(f"  No analysis data for game: {game_id}")
+            conn.close()
+            return
+        actual_gid = partial[0][0]
+
+    rows = conn.execute(
+        "SELECT * FROM line_analysis WHERE game_id = ? ORDER BY timestamp ASC",
+        (actual_gid,)
+    ).fetchall()
+    cols = [c[1] for c in conn.execute('PRAGMA table_info(line_analysis)').fetchall()]
+    conn.close()
+
+    game_analysis = [dict(zip(cols, r)) for r in rows]
+
+    scores = []
+    for a in game_analysis:
+        f = int(a.get("freeze_ticks") or 0)
+        b = int(a.get("is_burst") or 0)
+        e = float(a.get("excursion") or 0)
+        d = a.get("divergence") or ""
+        s = f * 3 + b * 25 + abs(e) * 2
+        s += 10 if d and d not in ("none", "sync") else 0
+        scores.append(min(s, 100))
+
+    # Sparkline over whole game
+    W = min(tty_width(), 72)
+    sp = sparkline(scores, W - 10)
+    print(f"  \033[1mGame: {actual_gid}\033[0m")
+    print(f"  Snapshots: {len(game_analysis)}")
+    print(f"  Score range: {min(scores)} – {max(scores)}  (avg: {sum(scores)/len(scores):.0f})")
+    print(f"  {sp}")
+
+    # Key moments
+    print(f"\n  \033[1mKey moments:\033[0m")
+    thresholds = [(70, "UNDER_READY"), (50, "WATCH"), (20, "WAIT")]
+    for thr, label in thresholds:
+        crossings = [i for i, s in enumerate(scores) if s >= thr]
+        if crossings:
+            first = game_analysis[crossings[0]]
+            t, _ = fmt_time(first["timestamp"])
+            a_count = len(crossings)
+            print(f"   {label} ≥{thr}: first at {t}, triggered {a_count} times")
+
+    # Final assessment
+    if len(scores) > 5:
+        last_5 = scores[-5:]
+        print(f"\n  Final 5 ticks: {last_5}  →  avg {sum(last_5)/len(last_5):.0f}")
+    print()
+
+# ─── Main ────────────────────────────────────────────────────────────────
+
+def help_text():
+    print("""
+  \033[1mBLM v2 — UNDER Timing CLI\033[0m
+
+  Usage:
+    blm-cli              Show live UNDER timing assessment
+    blm-cli games        List all tracked games
+    blm-cli game <id>    Show detailed timing history for a game
+    blm-cli help         Show this help
+
+  Reads directly from blm_ts.db and blm.db. No server required.
+""")
+
+if __name__ == "__main__":
+    os.chdir(DB_DIR)
+
+    if len(sys.argv) == 1:
+        live_assessment()
+    elif sys.argv[1] == "games":
+        games_list()
+    elif sys.argv[1] == "game" and len(sys.argv) > 2:
+        game_detail(" ".join(sys.argv[2:]))
+    elif sys.argv[1] in ("help", "--help", "-h"):
+        help_text()
+    else:
+        print(f"Unknown command: {sys.argv[1]}")
+        help_text()

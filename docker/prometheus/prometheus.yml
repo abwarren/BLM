@@ -1,0 +1,18 @@
+# BLM V2 — Prometheus scrape config
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'blm-v2'
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:2262']
+        labels:
+          application: 'blm-v2'
+          league: 'Cyber 2K26'
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

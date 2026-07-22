@@ -3,240 +3,254 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BLM V2 — Live Dashboard</title>
+  <title>BLM V2 — UNDER Timing Dashboard</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
 </head>
 <body>
-  <div class="dashboard">
+  <div id="app">
     <!-- ═══ HEADER ═══ -->
     <header class="header">
       <div class="header-left">
-        <div class="header-brand">BLM V2</div>
-        <div class="header-game-info">
-          <div class="header-teams" id="headerTeams">-- vs --</div>
-          <div class="live-indicator" id="liveIndicator">
-            <span class="live-dot" id="liveDot"></span>
-            <span id="liveLabel">LIVE</span>
-          </div>
-          <div class="header-score" id="headerScore">0 - 0</div>
-          <div class="header-clock" id="headerClock">Q1 12:00</div>
-        </div>
+        <span class="brand">BLM V2</span>
+        <span class="brand-sub">UNDER Timing</span>
+      </div>
+      <div class="header-center" id="headerCenter">
+        <span class="game-teams" id="gameTeams">-- vs --</span>
+        <span class="game-score" id="gameScore">0 - 0</span>
+        <span class="game-clock" id="gameClock">--</span>
+        <span class="game-league" id="gameLeague">Cyber 2K26</span>
+        <span class="live-dot" id="liveDot"></span>
       </div>
       <div class="header-right">
-        <div class="last-update" id="lastUpdate">Last update: --</div>
-        <div class="status-indicator status-connected" id="statusIndicator">
-          <span class="status-dot"></span>
-          <span id="statusLabel">Connected</span>
-        </div>
+        <span class="last-update" id="lastUpdate">--</span>
+        <span class="snap-count" id="snapCount">0 entries</span>
+        <span class="status-badge" id="statusBadge">● Connected</span>
       </div>
     </header>
 
-    <!-- ═══ LEFT SIDEBAR ═══ -->
-    <aside class="sidebar" id="sidebar">
-      <!-- Current Score -->
-      <div class="panel-card">
-        <div class="panel-label">Current Score</div>
-        <div class="panel-value" id="scoreValue">0 - 0</div>
-        <div class="panel-sub" id="scoreSub">Margin: 0</div>
-      </div>
+    <!-- ═══ MAIN GRID ═══ -->
+    <div class="main-grid">
 
-      <!-- BLM Score -->
-      <div class="panel-card">
-        <div class="panel-label">BLM Score</div>
-        <div class="panel-value" id="blmScoreValue">--</div>
-        <div class="panel-sub" id="blmScoreSub">Expected Winner: --</div>
-      </div>
+      <!-- ─── LEFT COLUMN: Scoreboard + Market + OLV ─── -->
+      <div class="col-left">
 
-      <!-- Trap Meter -->
-      <div class="panel-card">
-        <div class="panel-label">Trap Meter</div>
-        <div class="gauge-value">
-          <span class="gauge-number" id="trapMeterValue">0%</span>
-          <span class="gauge-label">Risk Level</span>
+        <div class="card score-card">
+          <div class="card-title">Scoreboard</div>
+          <div class="score-row">
+            <div class="team-box">
+              <div class="team-name" id="homeTeam">HOME</div>
+              <div class="team-score" id="homeScore">0</div>
+            </div>
+            <div class="score-vs">@</div>
+            <div class="team-box">
+              <div class="team-name" id="awayTeam">AWAY</div>
+              <div class="team-score" id="awayScore">0</div>
+            </div>
+          </div>
+          <div class="score-meta">
+            <span>Total: <strong id="totalScore">0</strong></span>
+            <span>Margin: <strong id="margin">0</strong></span>
+          </div>
         </div>
-        <div class="gauge gauge-low" id="trapMeterGauge">
-          <div class="gauge-fill" id="trapMeterFill" style="width: 0%"></div>
+
+        <div class="card market-card">
+          <div class="card-title">Market Lines</div>
+          <div class="market-row">
+            <div class="market-item">
+              <span class="market-label">Total Line</span>
+              <span class="market-value" id="totalLine">--</span>
+            </div>
+            <div class="market-item">
+              <span class="market-label">Spread</span>
+              <span class="market-value" id="spread">--</span>
+            </div>
+            <div class="market-item">
+              <span class="market-label">OLV</span>
+              <span class="market-value" id="olv">--</span>
+            </div>
+            <div class="market-item">
+              <span class="market-label">Excursion</span>
+              <span class="market-value" id="excursion">--</span>
+            </div>
+          </div>
         </div>
+
+        <div class="card pace-card">
+          <div class="card-title">Game State</div>
+          <div class="state-row">
+            <div class="state-item">
+              <span class="state-label">Pace</span>
+              <span class="state-value" id="paceVal">--</span>
+            </div>
+            <div class="state-item">
+              <span class="state-label">Possessions</span>
+              <span class="state-value" id="possessions">--</span>
+            </div>
+            <div class="state-item">
+              <span class="state-label">Score Delta</span>
+              <span class="state-value" id="scoreDelta">0</span>
+            </div>
+            <div class="state-item">
+              <span class="state-label">Line Delta</span>
+              <span class="state-value" id="lineDelta">0.0</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card alert-card" id="alertCard">
+          <div class="card-title">Active Alerts <span class="alert-badge" id="alertBadge">0</span></div>
+          <div id="alertFeed" class="alert-feed">
+            <div class="alert-empty">No alerts</div>
+          </div>
+        </div>
+
       </div>
 
-      <!-- Confidence (Circular Gauge) -->
-      <div class="panel-card" style="text-align:center;">
-        <div class="panel-label">Confidence</div>
-        <div class="circular-gauge" id="confidenceGauge">
-          <svg viewBox="0 0 80 80">
-            <circle class="circular-gauge-bg" cx="40" cy="40" r="34"/>
-            <circle class="circular-gauge-fill" id="confidenceArc" cx="40" cy="40" r="34"
-                    stroke="#3b82f6" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
-          </svg>
-          <div class="circular-gauge-text">
-            <div class="circular-gauge-value" id="confidenceValue">0%</div>
-            <div class="circular-gauge-sublabel">Conf</div>
+      <!-- ─── CENTER COLUMN: Charts ─── -->
+      <div class="col-center">
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div class="chart-title">Total Score vs Bookmaker Line</div>
+            <div class="chart-controls">
+              <span class="chart-range-label" id="chartRangeLabel">Last 200 ticks</span>
+              <button class="chart-btn" id="resetZoomBtn" title="Reset zoom">⟲</button>
+            </div>
+          </div>
+          <div class="chart-wrapper">
+            <canvas id="mainChart"></canvas>
+          </div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div class="chart-title">Excursion from OLV & Freeze Ticks</div>
+          </div>
+          <div class="chart-wrapper">
+            <canvas id="subChart"></canvas>
           </div>
         </div>
       </div>
 
-      <!-- Win Probability -->
-      <div class="panel-card">
-        <div class="panel-label">Win Probability</div>
-        <div class="panel-value" id="winProbValue">--%</div>
-        <div class="panel-sub" id="winProbSub">--</div>
-      </div>
+      <!-- ─── RIGHT COLUMN: UNDER Timing Signal ─── -->
+      <div class="col-right">
 
-      <!-- Momentum -->
-      <div class="panel-card">
-        <div class="panel-label">Momentum</div>
-        <div class="momentum-display">
-          <div class="momentum-arrow neutral" id="momentumArrow">→</div>
-          <div class="momentum-details">
-            <div class="momentum-detail-row">
-              <span class="momentum-detail-label">Score</span>
-              <span class="momentum-detail-value" id="momentumScore">--</span>
+        <!-- UNDER Timing Score Gauge -->
+        <div class="card under-card" id="underCard">
+          <div class="card-title">UNDER Timing Score</div>
+          <div class="under-gauge-container">
+            <canvas id="underGauge" width="220" height="160"></canvas>
+          </div>
+          <div class="under-status-row">
+            <span class="under-status-label">Status</span>
+            <span class="under-status" id="underStatus">PASS</span>
+          </div>
+          <div class="under-score-row">
+            <span class="under-score-value" id="underScore">0.0</span>
+            <span class="under-score-max">/ 100</span>
+          </div>
+          <div class="under-confidence-row">
+            <span class="under-confidence-label">Confidence</span>
+            <span class="under-confidence-bar-bg">
+              <span class="under-confidence-bar" id="confidenceBar" style="width:0%"></span>
+            </span>
+            <span class="under-confidence-val" id="confidenceVal">0%</span>
+          </div>
+        </div>
+
+        <!-- Component Breakdown -->
+        <div class="card component-card">
+          <div class="card-title">Component Breakdown <span class="component-max">/100</span></div>
+          <div class="component-list" id="componentList">
+            <div class="comp-item" data-key="historical_inflation">
+              <span class="comp-label">Hist. Inflation <span class="comp-max">(25)</span></span>
+              <span class="comp-bar-bg"><span class="comp-bar" style="width:0%"></span></span>
+              <span class="comp-val" id="comp_historical_inflation">0.0</span>
             </div>
-            <div class="momentum-detail-row">
-              <span class="momentum-detail-label">Velocity</span>
-              <span class="momentum-detail-value" id="momentumVelocity">--</span>
+            <div class="comp-item" data-key="freeze">
+              <span class="comp-label">Freeze <span class="comp-max">(20)</span></span>
+              <span class="comp-bar-bg"><span class="comp-bar" style="width:0%"></span></span>
+              <span class="comp-val" id="comp_freeze">0.0</span>
             </div>
-            <div class="momentum-detail-row">
-              <span class="momentum-detail-label">Acceleration</span>
-              <span class="momentum-detail-value" id="momentumAccel">--</span>
+            <div class="comp-item" data-key="burst">
+              <span class="comp-label">Burst <span class="comp-max">(15)</span></span>
+              <span class="comp-bar-bg"><span class="comp-bar" style="width:0%"></span></span>
+              <span class="comp-val" id="comp_burst">0.0</span>
+            </div>
+            <div class="comp-item" data-key="excursion">
+              <span class="comp-label">Excursion <span class="comp-max">(15)</span></span>
+              <span class="comp-bar-bg"><span class="comp-bar" style="width:0%"></span></span>
+              <span class="comp-val" id="comp_excursion">0.0</span>
+            </div>
+            <div class="comp-item" data-key="divergence">
+              <span class="comp-label">Divergence <span class="comp-max">(10)</span></span>
+              <span class="comp-bar-bg"><span class="comp-bar" style="width:0%"></span></span>
+              <span class="comp-val" id="comp_divergence">0.0</span>
+            </div>
+            <div class="comp-item" data-key="regression">
+              <span class="comp-label">Regression <span class="comp-max">(10)</span></span>
+              <span class="comp-bar-bg"><span class="comp-bar" style="width:0%"></span></span>
+              <span class="comp-val" id="comp_regression">0.0</span>
+            </div>
+            <div class="comp-item" data-key="under_rate">
+              <span class="comp-label">Under Rate <span class="comp-max">(5)</span></span>
+              <span class="comp-bar-bg"><span class="comp-bar" style="width:0%"></span></span>
+              <span class="comp-val" id="comp_under_rate">0.0</span>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- Current Pace -->
-      <div class="panel-card">
-        <div class="panel-label">Current Pace</div>
-        <div class="panel-value" id="paceValue">--</div>
-        <div class="panel-sub" id="paceSub">Possessions: -- / -- remaining</div>
-      </div>
+        <!-- Signals Met -->
+        <div class="card signals-card">
+          <div class="card-title">Signals Met</div>
+          <ul class="signal-list signal-met" id="signalsMet">
+            <li class="signal-empty">None</li>
+          </ul>
+        </div>
 
-      <!-- Expected Total -->
-      <div class="panel-card">
-        <div class="panel-label">Expected Total</div>
-        <div class="panel-value" id="expectedTotal">--</div>
-        <div class="panel-sub" id="expectedTotalSub">Current: --</div>
-      </div>
+        <!-- Signals Missed -->
+        <div class="card signals-card missed">
+          <div class="card-title">Signals Missed</div>
+          <ul class="signal-list signal-missed" id="signalsMissed">
+            <li class="signal-empty">None</li>
+          </ul>
+        </div>
 
-      <!-- Expected Margin -->
-      <div class="panel-card">
-        <div class="panel-label">Expected Margin</div>
-        <div class="panel-value" id="expectedMargin">--</div>
-        <div class="panel-sub" id="expectedMarginSub">Home - Away</div>
-      </div>
-    </aside>
-
-    <!-- ═══ MAIN CHART AREA ═══ -->
-    <main class="main-content">
-      <div class="chart-container">
-        <div class="chart-header">
-          <div class="chart-title">BLM Score Evolution</div>
-          <div class="chart-toggles" id="chartToggles">
-            <button class="chart-toggle active" data-key="blmScore">BLM</button>
-            <button class="chart-toggle" data-key="trapMeter">Trap</button>
-            <button class="chart-toggle" data-key="winProb">Win%</button>
-            <button class="chart-toggle" data-key="pace">Pace</button>
-            <button class="chart-toggle" data-key="projectedTotal">Proj Total</button>
-            <button class="chart-toggle" data-key="momentum">Momentum</button>
-            <button class="chart-toggle" data-key="vegasLine">Vegas</button>
-            <button class="chart-toggle" data-key="confidence">Confidence</button>
-            <button class="chart-toggle" data-key="marketMovement">Market</button>
+        <!-- Historical Profile -->
+        <div class="card hist-card">
+          <div class="card-title">Historical Profile <span class="league-name" id="leagueName">Cyber 2K26</span></div>
+          <div class="hist-grid">
+            <div class="hist-item">
+              <span class="hist-label">Games</span>
+              <span class="hist-value" id="histGames">0</span>
+            </div>
+            <div class="hist-item">
+              <span class="hist-label">Snapshots</span>
+              <span class="hist-value" id="histSnapshots">0</span>
+            </div>
+            <div class="hist-item">
+              <span class="hist-label">Regress Rate</span>
+              <span class="hist-value" id="histRegress">0%</span>
+            </div>
+            <div class="hist-item">
+              <span class="hist-label">Under Rate</span>
+              <span class="hist-value" id="histUnderRate">0%</span>
+            </div>
+            <div class="hist-item">
+              <span class="hist-label">OLV Mean</span>
+              <span class="hist-value" id="histOlvMean">0</span>
+            </div>
+            <div class="hist-item">
+              <span class="hist-label">Exc P95</span>
+              <span class="hist-value" id="histExcP95">0</span>
+            </div>
           </div>
         </div>
-        <div class="chart-wrapper">
-          <canvas id="mainChart"></canvas>
-        </div>
-      </div>
-    </main>
 
-    <!-- ═══ RIGHT PANEL (Alerts) ═══ -->
-    <aside class="right-panel" id="rightPanel">
-      <div class="right-panel-header">
-        <span>Live Alerts</span>
-        <span class="alert-count-badge" id="alertCount">0</span>
       </div>
-      <div class="alerts-feed" id="alertsFeed">
-        <div class="empty-state">
-          <div class="empty-state-icon">📡</div>
-          <div class="empty-state-text">No alerts yet</div>
-          <div class="empty-state-sub">Alerts will appear here as they trigger</div>
-        </div>
-      </div>
-    </aside>
-
-    <!-- ═══ BOTTOM PANEL (Game Details) ═══ -->
-    <footer class="bottom-panel">
-      <div class="bottom-panel-header">Game Details</div>
-      <div class="game-details-grid" id="gameDetailsGrid">
-        <div class="detail-item">
-          <span class="detail-label">Game ID</span>
-          <span class="detail-value" id="detailGameId">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">League</span>
-          <span class="detail-value" id="detailLeague">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Season</span>
-          <span class="detail-value" id="detailSeason">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Home Team</span>
-          <span class="detail-value" id="detailHomeTeam">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Away Team</span>
-          <span class="detail-value" id="detailAwayTeam">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Possession</span>
-          <span class="detail-value" id="detailPossession">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Quarter</span>
-          <span class="detail-value" id="detailQuarter">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Clock</span>
-          <span class="detail-value" id="detailClock">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Spread</span>
-          <span class="detail-value" id="detailSpread">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Total Line</span>
-          <span class="detail-value" id="detailTotalLine">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Live Spread</span>
-          <span class="detail-value" id="detailLiveSpread">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Live Total</span>
-          <span class="detail-value" id="detailLiveTotal">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Moneyline</span>
-          <span class="detail-value" id="detailMoneyline">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Steam Movement</span>
-          <span class="detail-value" id="detailSteamMovement">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Reverse Line</span>
-          <span class="detail-value" id="detailReverseLine">--</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Snapshot Version</span>
-          <span class="detail-value" id="detailSnapshotVersion">--</span>
-        </div>
-      </div>
-    </footer>
+    </div>
   </div>
 
   <script src="/static/dashboard.js"></script>
