@@ -3,1367 +3,954 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BLM V2 — Replay</title>
-  <link rel="stylesheet" href="/static/styles.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+  <title>BLM V3 — Historical Dashboard</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
   <style>
-    /* ── Replay-specific styles ──────────────────────────────── */
+    /* ── Design system ───────────────────────────────────────── */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg-deepest: #050812;  --bg-default: #0b1020;  --bg-elevated: #111827;
+      --bg-card: #0f1628;     --bg-card-hover: #1a2235;
+      --border: #1e2745;      --border-subtle: #161f35;
+      --text-primary: #e2e8f0;--text-secondary: #8892b0;--text-muted: #4a5570;
+      --accent: #00d4ff;      --accent2: #7c3aed;       --accent3: #f59e0b;
+      --green: #10b981;       --red: #ef4444;           --orange: #f97316;
+      --purple: #a855f7;      --pink: #ec4899;
+      --font: -apple-system, BlinkMacSystemFont, 'SF Mono', Consolas, monospace;
+      --radius: 8px;
+    }
+    html, body { height: 100%; background: var(--bg-deepest); color: var(--text-primary); font-family: var(--font); overflow: hidden; }
+    button { font-family: var(--font); cursor: pointer; border: none; border-radius: 4px; padding: 6px 12px; font-size: 11px; transition: all 0.15s; }
+    select { font-family: var(--font); background: var(--bg-elevated); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 11px; }
+    input[type="text"], input[type="number"], input[type="datetime-local"] {
+      font-family: var(--font); background: var(--bg-elevated); color: var(--text-primary);
+      border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 11px;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-deepest); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
-    .replay-layout {
-      display: grid;
-      grid-template-areas:
-        "timeline   timeline"
-        "controls   controls"
-        "signals    chart";
-      grid-template-columns: 300px 1fr;
-      grid-template-rows: auto auto 1fr;
-      height: 100vh;
-      width: 100vw;
-      overflow: hidden;
-      background: var(--bg-deepest);
+    /* ── Layout ──────────────────────────────────────────────── */
+    .app { display: flex; flex-direction: column; height: 100vh; }
+    .topbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--bg-default); border-bottom: 1px solid var(--border); min-height: 48px; flex-shrink: 0; }
+    .topbar .brand { font-size: 14px; font-weight: 600; color: var(--accent); }
+    .topbar .brand small { font-size: 10px; color: var(--text-muted); font-weight: 400; }
+    .topbar .sep { width: 1px; height: 24px; background: var(--border); }
+    .topbar select { min-width: 140px; }
+    .topbar .stats { font-size: 10px; color: var(--text-muted); margin-left: auto; }
+
+    .controls { display: flex; align-items: center; gap: 8px; padding: 6px 16px; background: var(--bg-elevated); border-bottom: 1px solid var(--border); flex-wrap: wrap; flex-shrink: 0; }
+    .controls button { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); }
+    .controls button:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+    .controls button.active { background: var(--accent); color: #000; }
+    .controls button.danger { border-color: var(--red); color: var(--red); }
+    .controls button.danger:hover { background: var(--red); color: #fff; }
+    .controls label { font-size: 10px; color: var(--text-muted); }
+    .controls .group { display: flex; align-items: center; gap: 4px; }
+    .controls .sep { width: 1px; height: 20px; background: var(--border); }
+    .controls .speed { width: 40px; text-align: center; font-size: 11px; color: var(--accent); font-weight: 600; }
+
+    /* ── Chart area ──────────────────────────────────────────── */
+    .chart-area { flex: 1; overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+    .chart-area.compact .chart-panel { min-height: 100px; }
+    .chart-area.compact .chart-panel .chart-header { padding: 4px 8px; }
+
+    .chart-panel { background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius); min-height: 180px; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+    .chart-panel:hover { border-color: var(--border); }
+    .chart-panel.dimmed { opacity: 0.5; }
+    .chart-panel.collapsed { min-height: 32px !important; }
+    .chart-panel.collapsed .chart-container { display: none; }
+
+    .chart-header { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--bg-elevated); border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; cursor: grab; }
+    .chart-header:active { cursor: grabbing; }
+    .chart-header .name { font-size: 11px; font-weight: 500; }
+    .chart-header .name .unit { font-size: 9px; color: var(--text-muted); font-weight: 400; }
+    .chart-header .value { margin-left: auto; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .chart-header .actions { display: flex; gap: 2px; }
+    .chart-header .actions button { padding: 2px 6px; font-size: 9px; background: transparent; color: var(--text-muted); }
+    .chart-header .actions button:hover { color: var(--text-primary); background: var(--bg-card); }
+    .chart-header .legend { font-size: 9px; display: flex; gap: 8px; margin-left: 8px; color: var(--text-muted); }
+    .chart-header .legend span { display: flex; align-items: center; gap: 3px; }
+    .chart-header .legend .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+
+    .chart-container { flex: 1; min-height: 0; }
+
+    /* ── Tooltip (custom crosshair) ───────────────────────────── */
+    .crosshair-tooltip { position: fixed; background: var(--bg-elevated); border: 1px solid var(--accent); border-radius: 4px; padding: 6px 10px; font-size: 10px; pointer-events: none; z-index: 1000; display: none; min-width: 120px; }
+    .crosshair-tooltip .row { display: flex; justify-content: space-between; gap: 12px; }
+    .crosshair-tooltip .label { color: var(--text-muted); }
+    .crosshair-tooltip .time { color: var(--accent); font-weight: 500; margin-bottom: 3px; font-size: 11px; }
+
+    /* ── Signal badges on timeline ────────────────────────────── */
+    .signal-legend { display: flex; gap: 12px; padding: 4px 16px; flex-shrink: 0; background: var(--bg-default); border-bottom: 1px solid var(--border-subtle); flex-wrap: wrap; }
+    .signal-legend .sig { display: flex; align-items: center; gap: 4px; font-size: 9px; color: var(--text-muted); }
+    .signal-legend .sig .badge { width: 8px; height: 8px; border-radius: 50%; }
+
+    /* ── Filters panel (slide-in) ─────────────────────────────── */
+    .filter-panel { position: fixed; right: -320px; top: 0; bottom: 0; width: 300px; background: var(--bg-elevated); border-left: 1px solid var(--border); z-index: 500; transition: right 0.2s; padding: 16px; overflow-y: auto; }
+    .filter-panel.open { right: 0; }
+    .filter-panel h3 { font-size: 12px; font-weight: 500; color: var(--accent); margin-bottom: 12px; }
+    .filter-panel .field { margin-bottom: 10px; }
+    .filter-panel .field label { display: block; font-size: 10px; color: var(--text-muted); margin-bottom: 3px; }
+    .filter-panel .field input, .filter-panel .field select { width: 100%; }
+    .filter-panel .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: -1; display: none; }
+    .filter-panel.open .overlay { display: block; }
+    .filter-panel .apply-btn { width: 100%; margin-top: 12px; padding: 8px; background: var(--accent); color: #000; font-weight: 600; }
+    .filter-panel .compare-toggle { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .filter-panel .compare-toggle input { width: auto; }
+
+    /* ── Event timeline (bottom strip) ────────────────────────── */
+    .event-strip { height: 28px; background: var(--bg-default); border-top: 1px solid var(--border-subtle); display: flex; align-items: center; padding: 0 16px; gap: 6px; overflow-x: auto; flex-shrink: 0; }
+    .event-strip .event-marker { display: flex; align-items: center; gap: 3px; font-size: 9px; padding: 2px 6px; border-radius: 3px; cursor: pointer; white-space: nowrap; }
+    .event-strip .event-marker:hover { filter: brightness(1.3); }
+    .event-strip .event-marker .emoji { font-size: 10px; }
+
+    /* ── Loading / Error ──────────────────────────────────────── */
+    .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 13px; }
+    .loading .spinner { width: 24px; height: 24px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 12px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error { color: var(--red); padding: 20px; text-align: center; }
+
+    /* ── Responsive ───────────────────────────────────────────── */
+    @media (max-width: 768px) {
+      .topbar { flex-wrap: wrap; padding: 6px 10px; }
+      .topbar .sep { display: none; }
+      .chart-area { padding: 4px 6px; }
+      .chart-panel { min-height: 120px; }
+      .controls { padding: 4px 10px; }
     }
 
-    .replay-layout {
-      --bg-deepest: #050812;
-      --bg-default: #0b1020;
-      --bg-elevated: #111827;
-      --bg-card: #0f1628;
-      --bg-card-hover: #1a2235;
-      --bg-input: #1a2235;
-      --border-default: #1e2745;
-      --border-subtle: #161f35;
-      --border-accent: #2a3560;
-      --text-primary: #e2e8f0;
-      --text-secondary: #8892b0;
-      --text-muted: #4a5570;
-      --brand-primary: #00d4ff;
-      --brand-secondary: #7c3aed;
-      --transition-fast: all 0.15s ease;
-    }
-
-    /* Timeline */
-    .timeline-bar {
-      grid-area: timeline;
-      padding: 12px 20px;
-      background: var(--bg-default);
-      border-bottom: 1px solid var(--border-default);
-    }
-
-    .timeline-container {
-      position: relative;
-      width: 100%;
-      height: 36px;
-      cursor: pointer;
-    }
-
-    .timeline-track {
-      position: absolute;
-      top: 50%;
-      left: 0;
-      right: 0;
-      height: 4px;
-      background: var(--bg-input);
-      border-radius: 2px;
-      transform: translateY(-50%);
-    }
-
-    .timeline-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--brand-primary), var(--brand-secondary));
-      border-radius: 2px;
-      transition: width 0.1s linear;
-    }
-
-    .timeline-thumb {
-      position: absolute;
-      top: 50%;
-      width: 16px;
-      height: 16px;
-      background: var(--brand-primary);
-      border: 2px solid var(--bg-deepest);
-      border-radius: 50%;
-      transform: translate(-50%, -50%);
-      box-shadow: 0 0 8px rgba(0, 212, 255, 0.4);
-      transition: left 0.1s linear;
-      z-index: 2;
-      cursor: grab;
-    }
-
-    .timeline-thumb:active { cursor: grabbing; }
-
-    .quarter-markers {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      pointer-events: none;
-    }
-
-    .quarter-marker {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      width: 2px;
-      background: rgba(85, 96, 122, 0.5);
-    }
-
-    .quarter-marker-label {
-      position: absolute;
-      bottom: -18px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-
-    .timeline-info {
-      display: flex;
-      justify-content: space-between;
-      margin-top: 22px;
-      font-size: 0.78rem;
-      color: var(--text-secondary);
-    }
-
-    /* Controls */
-    .controls-bar {
-      grid-area: controls;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 20px;
-      background: var(--bg-elevated);
-      border-bottom: 1px solid var(--border-default);
-    }
-
-    .control-btn {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 6px 14px;
-      font-size: 0.8rem;
-      font-weight: 600;
-      border: 1px solid var(--border-default);
-      border-radius: 6px;
-      background: var(--bg-card);
-      color: var(--text-secondary);
-      cursor: pointer;
-      transition: var(--transition-fast);
-    }
-
-    .control-btn:hover {
-      border-color: var(--border-accent);
-      color: var(--text-primary);
-      background: var(--bg-card-hover);
-    }
-
-    .control-btn.primary {
-      background: rgba(0, 212, 255, 0.1);
-      border-color: var(--brand-primary);
-      color: var(--brand-primary);
-    }
-
-    .control-btn.primary:hover { background: rgba(0, 212, 255, 0.2); }
-    .control-btn:active { transform: scale(0.96); }
-
-    .control-divider {
-      width: 1px;
-      height: 24px;
-      background: var(--border-default);
-      margin: 0 4px;
-    }
-
-    .speed-indicator {
-      padding: 4px 12px;
-      font-size: 0.78rem;
-      font-weight: 600;
-      color: var(--brand-primary);
-      background: rgba(0, 212, 255, 0.08);
-      border: 1px solid rgba(0, 212, 255, 0.2);
-      border-radius: 4px;
-      margin-left: auto;
-    }
-
-    .frame-counter {
-      font-size: 0.78rem;
-      color: var(--text-muted);
-      margin-left: 12px;
-    }
-
-    /* ═══ Signals Panel (replaces old score panel) ═══ */
-    .signals-panel {
-      grid-area: signals;
-      padding: 8px;
-      background: var(--bg-default);
-      border-right: 1px solid var(--border-default);
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    /* Score card at top of signals panel */
-    .panel-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 10px 12px;
-    }
-
-    .panel-label {
-      font-size: 0.68rem;
-      text-transform: uppercase;
-      letter-spacing: 0.7px;
-      color: var(--text-muted);
-      margin-bottom: 3px;
-      font-weight: 600;
-    }
-
-    .panel-value {
-      font-size: 1.3rem;
-      font-weight: 700;
-    }
-
-    .score-display {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .score-display .home { color: var(--brand-primary); }
-    .score-display .away { color: #f97316; }
-    .score-display .vs { color: var(--text-muted); font-size: 0.9rem; }
-    .score-margin {
-      font-size: 0.82rem;
-      color: var(--text-secondary);
-      margin-top: 2px;
-    }
-
-    /* Gauge for trap meter */
-    .gauge {
-      height: 6px;
-      background: var(--bg-input);
-      border-radius: 3px;
-      overflow: hidden;
-      margin-top: 4px;
-    }
-    .gauge-fill {
-      height: 100%;
-      border-radius: 3px;
-      transition: width 0.2s ease;
-    }
-    .gauge.gauge-low .gauge-fill { background: var(--brand-primary); }
-    .gauge.gauge-mid .gauge-fill { background: #f59e0b; }
-    .gauge.gauge-high .gauge-fill { background: #ef4444; }
-    .gauge-number { font-size: 0.95rem; font-weight: 700; }
-
-    /* Signal legend */
-    .signal-legend { }
-    .signal-legend-title {
-      font-size: 0.68rem;
-      text-transform: uppercase;
-      letter-spacing: 0.7px;
-      color: var(--text-muted);
-      font-weight: 600;
-      margin-bottom: 6px;
-    }
-
-    .signal-list {
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-      max-height: 240px;
-      overflow-y: auto;
-    }
-
-    .signal-item {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 0.75rem;
-      background: var(--bg-elevated);
-      border-left: 3px solid transparent;
-      transition: background 0.15s ease, opacity 0.3s ease;
-    }
-
-    .signal-item.active {
-      background: var(--bg-card-hover);
-    }
-
-    .signal-item.inactive {
-      opacity: 0.35;
-    }
-
-    .signal-icon {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-
-    .signal-icon.signal-trap { background: #ef4444; }
-    .signal-icon.signal-bull { background: #f97316; }
-    .signal-icon.signal-bear { background: #ec4899; }
-    .signal-icon.signal-dead-market { background: #6b7280; }
-    .signal-icon.signal-momentum { background: #22c55e; }
-    .signal-icon.signal-confidence { background: #3b82f6; }
-    .signal-icon.signal-correction { background: #7c3aed; }
-    .signal-icon.signal-sharp { background: #f59e0b; }
-    .signal-icon.signal-three { background: #06b6d4; }
-
-    .signal-name {
-      flex: 1;
-      color: var(--text-secondary);
-    }
-
-    .signal-value {
-      font-weight: 600;
-      font-size: 0.7rem;
-      min-width: 32px;
-      text-align: right;
-    }
-
-    .signal-value.val-trap { color: #ef4444; }
-    .signal-value.val-bull { color: #f97316; }
-    .signal-value.val-bear { color: #ec4899; }
-    .signal-value.val-dead { color: #6b7280; }
-    .signal-value.val-momentum { color: #22c55e; }
-    .signal-value.val-confidence { color: #3b82f6; }
-    .signal-value.val-correction { color: #7c3aed; }
-    .signal-value.val-sharp { color: #f59e0b; }
-
-    /* Active signals count badge */
-    .signal-count-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 0.72rem;
-      color: var(--text-muted);
-    }
-    .signal-count-badge .count {
-      background: rgba(239, 68, 68, 0.15);
-      color: #ef4444;
-      padding: 0 6px;
-      border-radius: 8px;
-      font-weight: 700;
-      font-size: 0.7rem;
-    }
-
-    /* Progress bar */
-    .progress-bar {
-      width: 100%;
-      height: 3px;
-      background: var(--bg-input);
-      border-radius: 2px;
-      overflow: hidden;
-      margin-top: 6px;
-    }
-    .progress-fill {
-      height: 100%;
-      background: var(--brand-primary);
-      border-radius: 2px;
-      transition: width 0.1s linear;
-    }
-
-    /* Speed button active state */
-    .control-btn.speed-active {
-      background: rgba(0, 212, 255, 0.15);
-      border-color: var(--brand-primary);
-      color: var(--brand-primary);
-    }
-    .control-btn.q-active {
-      background: rgba(124, 58, 237, 0.15);
-      border-color: var(--brand-secondary);
-      color: var(--brand-secondary);
-    }
-
-    /* Chart panel */
-    .replay-chart-panel {
-      grid-area: chart;
-      padding: 8px;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .replay-chart-container {
-      flex: 1;
-      background: var(--bg-elevated);
-      border: 1px solid var(--border-default);
-      border-radius: 8px;
-      padding: 8px;
-      position: relative;
-    }
-
-    .replay-chart-container canvas {
-      width: 100% !important;
-      height: 100% !important;
-    }
-
-    .position-marker {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      width: 2px;
-      background: var(--brand-primary);
-      box-shadow: 0 0 8px rgba(0, 212, 255, 0.6);
-      pointer-events: none;
-      z-index: 10;
-      transition: left 0.1s linear;
-    }
-
-    /* Signal tooltip overlay */
-    .signal-tooltip {
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(13, 17, 28, 0.95);
-      border: 1px solid var(--border-default);
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-size: 0.7rem;
-      color: var(--text-secondary);
-      white-space: nowrap;
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity 0.15s ease;
-      z-index: 20;
-    }
-
-    .signal-dot:hover .signal-tooltip {
-      opacity: 1;
-    }
+    /* ── Drag ghost ───────────────────────────────────────────── */
+    .drag-ghost { position: fixed; pointer-events: none; opacity: 0.8; z-index: 9999; background: var(--bg-card); border: 1px solid var(--accent); border-radius: var(--radius); padding: 4px 12px; font-size: 11px; }
   </style>
 </head>
 <body>
-  <div class="replay-layout">
-    <!-- ═══ TIMELINE BAR ═══ -->
-    <div class="timeline-bar">
-      <div class="timeline-container" id="timelineContainer">
-        <div class="timeline-track"></div>
-        <div class="timeline-fill" id="timelineFill" style="width: 0%"></div>
-        <div class="quarter-markers" id="quarterMarkers"></div>
-        <div class="timeline-thumb" id="timelineThumb" style="left: 0%"></div>
-      </div>
-      <div class="timeline-info">
-        <span id="timelineClock">Q1 12:00</span>
-        <span id="frameCounter">Frame 0 of 0</span>
-      </div>
-    </div>
-
-    <!-- ═══ CONTROLS ═══ -->
-    <div class="controls-bar">
-      <button class="control-btn" id="btnRewind2" title="Rewind 2x">⏪ 2x</button>
-      <button class="control-btn" id="btnRewind4" title="Rewind 4x">⏪ 4x</button>
-      <button class="control-btn" id="btnRewind8" title="Rewind 8x">⏪ 8x</button>
-      <div class="control-divider"></div>
-      <button class="control-btn" id="btnStepBack" title="Step Back">◀</button>
-      <button class="control-btn primary" id="btnPlayPause">▶ Play</button>
-      <button class="control-btn" id="btnStepFwd" title="Step Forward">▶</button>
-      <div class="control-divider"></div>
-      <button class="control-btn" id="btnFwd2" title="Fast Forward 2x">2x ▶▶</button>
-      <button class="control-btn" id="btnFwd4" title="Fast Forward 4x">4x ▶▶</button>
-      <button class="control-btn" id="btnFwd8" title="Fast Forward 8x">8x ▶▶</button>
-      <div class="control-divider"></div>
-      <button class="control-btn" id="btnQ1">Q1</button>
-      <button class="control-btn" id="btnQ2">Q2</button>
-      <button class="control-btn" id="btnQ3">Q3</button>
-      <button class="control-btn" id="btnQ4">Q4</button>
-      <button class="control-btn" id="btnOT">OT</button>
-      <div class="speed-indicator" id="speedIndicator">1.0x</div>
-      <span class="frame-counter" id="frameCounterLabel">Frame 0 / 0</span>
-    </div>
-
-    <!-- ═══ SIGNALS PANEL (left sidebar) ═══ -->
-    <aside class="signals-panel" id="signalsPanel">
-      <!-- Score card -->
-      <div class="panel-card">
-        <div class="panel-label">Current Score</div>
-        <div class="score-display">
-          <span class="home" id="replayHomeScore">0</span>
-          <span class="vs">vs</span>
-          <span class="away" id="replayAwayScore">0</span>
-        </div>
-        <div class="score-margin" id="replayScoreDetail">Margin: 0</div>
-      </div>
-
-      <!-- BLM card -->
-      <div class="panel-card">
-        <div class="panel-label">BLM Assessment</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <span class="panel-value" id="replayBlmScore" style="font-size:1.1rem;">--</span>
-          <span style="font-size:0.72rem;color:var(--text-muted);" id="replayConfidence">--% conf</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-secondary);margin-top:4px;">
-          <span>Win: <strong id="replayWinProb">--</strong></span>
-          <span>Total: <strong id="replayExpectedTotal">--</strong></span>
-          <span>Margin: <strong id="replayExpectedMargin">--</strong></span>
-        </div>
-      </div>
-
-      <!-- Trap meter card -->
-      <div class="panel-card">
-        <div class="panel-label">Trap Meter</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <span class="gauge-number" id="replayTrapMeter">0%</span>
-          <span style="font-size:0.68rem;color:var(--text-muted);">
-            <span id="signalCountBadge" class="signal-count-badge">
-              Signals: <span class="count" id="activeSignalCount">0</span>
-            </span>
-          </span>
-        </div>
-        <div class="gauge gauge-low" id="replayTrapGauge">
-          <div class="gauge-fill" id="replayTrapFill" style="width:0%"></div>
-        </div>
-      </div>
-
-      <!-- Visual Signal Legend -->
-      <div class="panel-card signal-legend">
-        <div class="signal-legend-title">Visual Signals <span style="font-weight:400;color:var(--text-muted);font-size:0.65rem;">(in-play indicators)</span></div>
-        <div class="signal-list" id="signalList"></div>
-      </div>
-
-      <div class="progress-bar">
-        <div class="progress-fill" id="replayProgress" style="width:0%"></div>
-      </div>
-    </aside>
-
-    <!-- ═══ CHART PANEL ═══ -->
-    <main class="replay-chart-panel">
-      <div class="replay-chart-container">
-        <canvas id="replayChart"></canvas>
-        <div class="position-marker" id="positionMarker" style="left:0%"></div>
-      </div>
-    </main>
+<div id="app">
+  <!-- Top bar -->
+  <div class="topbar">
+    <span class="brand">BLM <small>v3 Historical</small></span>
+    <div class="sep"></div>
+    <select id="gameSelect"><option value="">— Select Game —</option></select>
+    <div class="sep"></div>
+    <button id="btnRefresh" title="Refresh game list">⟳</button>
+    <button id="btnFilters" title="Research filters & comparison">⚙ Filters</button>
+    <button id="btnExportPNG" title="Export dashboard as PNG">⬇ PNG</button>
+    <span class="stats" id="statsBar">—</span>
   </div>
 
-  <script>
-    // ── Replay Application ──────────────────────────────────────────
+  <!-- Controls -->
+  <div class="controls" id="controlsBar">
+    <button id="btnPlay" title="Play/Pause">▶</button>
+    <button id="btnStepBack" title="Step back one frame">◀</button>
+    <button id="btnStepFwd" title="Step forward one frame">▶▶</button>
+    <div class="sep"></div>
+    <button id="btnSlowMo" title="Slow motion (0.5x)">½×</button>
+    <span class="speed" id="speedDisplay">1×</span>
+    <button id="btnFastFwd" title="Fast forward (4x)">4×</button>
+    <div class="sep"></div>
+    <label>Q:</label>
+    <select id="quarterJump" style="width:50px">
+      <option value="0">All</option><option>1</option><option>2</option><option>3</option><option>4</option>
+    </select>
+    <button id="btnJumpSignal" title="Jump to next signal">⛐ Signal</button>
+    <button id="btnJumpEvent" title="Jump to next event">▸ Event</button>
+    <div class="sep"></div>
+    <label>Game:</label>
+    <select id="compareGameSelect"><option value="">+ Compare</option></select>
+    <button id="btnClearCompare" class="danger" title="Clear comparison games">✕ Clear</button>
+  </div>
 
-    (function () {
-      'use strict';
+  <!-- Signal legend -->
+  <div class="signal-legend" id="signalLegend"></div>
 
-      // ═══════════════════════════════════════════════════════════════
-      // SIGNAL CONFIGURATION
-      // ═══════════════════════════════════════════════════════════════
+  <!-- Charts -->
+  <div class="chart-area" id="chartArea">
+    <div class="loading" id="loadingScreen"><div class="spinner"></div> Loading game data…</div>
+  </div>
 
-      const SIGNAL_DEFS = [
-        { id: 'trap_meter',      label: 'Trap Meter ≥70%',      icon: 'signal-trap',      valueClass: 'val-trap',      threshold: 0.70, fieldPath: 'trap_detection.trap_meter' },
-        { id: 'bull_trap',       label: 'Bull Trap',            icon: 'signal-bull',      valueClass: 'val-bull',      threshold: 0.50, fieldPath: 'trap_detection.bull_trap' },
-        { id: 'bear_trap',       label: 'Bear Trap',            icon: 'signal-bear',      valueClass: 'val-bear',      threshold: 0.50, fieldPath: 'trap_detection.bear_trap' },
-        { id: 'dead_market',     label: 'Dead Market',          icon: 'signal-dead-market', valueClass: 'val-dead',    threshold: 0.50, fieldPath: 'trap_detection.dead_market' },
-        { id: 'sharp_trap',      label: 'Sharp Money',          icon: 'signal-sharp',     valueClass: 'val-sharp',     threshold: 0.50, fieldPath: 'trap_detection.sharp_trap' },
-        { id: 'momentum_swing',  label: 'Momentum Shift',       icon: 'signal-momentum',  valueClass: 'val-momentum',  threshold: null,  deriveFn: 'momentumSwing' },
-        { id: 'confidence_drop', label: 'Confidence Drop',      icon: 'signal-confidence', valueClass: 'val-confidence', threshold: null, deriveFn: 'confidenceDrop' },
-        { id: 'model_correction',label: 'Model Correction',     icon: 'signal-correction',valueClass: 'val-correction', threshold: null, deriveFn: 'modelCorrection' },
-      ];
+  <!-- Event strip -->
+  <div class="event-strip" id="eventStrip"></div>
 
-      // ── State ──────────────────────────────────────────────────
+  <!-- Crosshair tooltip -->
+  <div class="crosshair-tooltip" id="crosshairTooltip"><div class="time"></div></div>
 
-      const API_BASE = '/api/v2';
+  <!-- Filter panel -->
+  <div class="filter-panel" id="filterPanel">
+    <div class="overlay" id="filterOverlay"></div>
+    <h3>Research Filters</h3>
+    <div class="compare-toggle"><input type="checkbox" id="compareMode"> <label>Comparison Mode</label></div>
+    <div class="field">
+      <label>League</label>
+      <select id="filterLeague"><option value="">All</option><option>Cyber 2K26</option></select>
+    </div>
+    <div class="field">
+      <label>Quarter Range</label>
+      <div style="display:flex;gap:4px">
+        <input type="number" id="filterQMin" placeholder="Min" min="1" max="10" style="width:50%">
+        <input type="number" id="filterQMax" placeholder="Max" min="1" max="10" style="width:50%">
+      </div>
+    </div>
+    <div class="field">
+      <label>Trap Meter Range</label>
+      <div style="display:flex;gap:4px">
+        <input type="number" id="filterTrapMin" placeholder="Min" min="0" max="100" style="width:50%">
+        <input type="number" id="filterTrapMax" placeholder="Max" min="0" max="100" style="width:50%">
+      </div>
+    </div>
+    <div class="field">
+      <label>Confidence Range</label>
+      <div style="display:flex;gap:4px">
+        <input type="number" id="filterConfMin" placeholder="Min" min="0" max="1" step="0.1" style="width:50%">
+        <input type="number" id="filterConfMax" placeholder="Max" min="0" max="1" step="0.1" style="width:50%">
+      </div>
+    </div>
+    <div class="field">
+      <label>Signal Type</label>
+      <select id="filterSignalType">
+        <option value="">All</option>
+        <option>line_jump</option><option>line_freeze</option><option>odds_compression</option>
+        <option>odds_expansion</option><option>sharp_movement</option><option>fake_movement</option>
+        <option>trap_formation</option><option>bull_trap</option><option>bear_trap</option>
+        <option>market_correction</option><option>overreaction</option><option>regression</option>
+        <option>momentum_swing</option><option>pace_collapse</option><option>inflation_spike</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Outcome</label>
+      <select id="filterOutcome"><option value="">All</option><option>over</option><option>under</option></select>
+    </div>
+    <div class="field">
+      <label>Date Range</label>
+      <div style="display:flex;gap:4px">
+        <input type="datetime-local" id="filterDateFrom" style="width:50%">
+        <input type="datetime-local" id="filterDateTo" style="width:50%">
+      </div>
+    </div>
+    <div class="field">
+      <label>Game ID</label>
+      <input type="text" id="filterGameId" placeholder="e.g. test-game-001">
+    </div>
+    <button class="apply-btn" id="btnApplyFilters">Apply Filters</button>
+  </div>
+</div>
+<script>
+// ═════════════════════════════════════════════════════════════════════
+// BLM V3 — Historical Research Dashboard
+// ═════════════════════════════════════════════════════════════════════
 
-      let gameId = null;
-      let allFrames = [];
-      let currentFrameIndex = 0;
-      let isPlaying = false;
-      let currentSpeed = 1;
-      let playTimer = null;
-      let replayChart = null;
+// ── Chart configuration ─────────────────────────────────────────────
+const CHART_PANELS = [
+  { id: 'totalLine', name: 'Total Line', unit: 'pts', color: '#00d4ff',
+    series: [
+      { key: 'total_line', label: 'Market Line', color: '#00d4ff', width: 2 },
+      { key: 'projected_total', label: 'Projected Total', color: '#7c3aed', width: 1.5, style: 2 },
+      { key: 'fair_total', label: 'Fair Total', color: '#f59e0b', width: 1.5, style: 3 },
+      { key: 'total_score', label: 'Actual Score', color: '#10b981', width: 1 },
+    ] },
+  { id: 'trapMeter', name: 'Trap Meter', unit: '', color: '#ef4444',
+    series: [
+      { key: 'trap_meter', label: 'Trap Meter', color: '#ef4444', width: 2 },
+      { key: 'tt_modifier', label: 'TT Modifier', color: '#f97316', width: 1, style: 2 },
+    ] },
+  { id: 'pace', name: 'Pace', unit: 'pts/min', color: '#10b981',
+    series: [
+      { key: 'possessions_per_min', label: 'Pace', color: '#10b981', width: 2 },
+      { key: 'projected_possessions', label: 'Proj Possessions', color: '#a3e635', width: 1, style: 2 },
+    ] },
+  { id: 'inflation', name: 'Inflation Index', unit: '', color: '#f59e0b',
+    series: [
+      { key: 'inflation_index', label: 'Inflation', color: '#f59e0b', width: 2 },
+    ] },
+  { id: 'confidence', name: 'Confidence', unit: '', color: '#a855f7',
+    series: [
+      { key: 'confidence', label: 'Confidence', color: '#a855f7', width: 2 },
+    ] },
+  { id: 'momentum', name: 'Momentum', unit: '', color: '#ec4899',
+    series: [
+      { key: 'momentum', label: 'Momentum', color: '#ec4899', width: 2 },
+    ] },
+  { id: 'regression', name: 'Regression Prob.', unit: '%', color: '#22d3ee',
+    series: [
+      { key: 'regression_prob', label: 'Regression', color: '#22d3ee', width: 2 },
+    ] },
+  { id: 'compression', name: 'Compression Index', unit: '', color: '#d946ef',
+    series: [
+      { key: 'compression_index', label: 'Compression', color: '#d946ef', width: 2 },
+    ] },
+  { id: 'teamTotals', name: 'Team Totals', unit: 'pts', color: '#22c55e',
+    series: [
+      { key: 'home_team_total', label: 'Home', color: '#22c55e', width: 2 },
+      { key: 'away_team_total', label: 'Away', color: '#ef4444', width: 2 },
+    ] },
+];
 
-      // Pre-computed signals across all frames
-      let signalMap = {};
-      let frameSignalCache = [];
-      let activeSignalsAtFrame = [];
+const API_BASE = '/api/v2/historical';
+const SIGNAL_COLORS = {
+  line_freeze: '#6b7280', line_jump: '#ef4444', odds_compression: '#10b981',
+  odds_expansion: '#f97316', sharp_movement: '#a855f7', fake_movement: '#6b7280',
+  trap_formation: '#f59e0b', bull_trap: '#ef4444', bear_trap: '#7c3aed',
+  market_correction: '#22d3ee', overreaction: '#ec4899', regression: '#10b981',
+  momentum_swing: '#ec4899', pace_collapse: '#f97316', inflation_spike: '#f59e0b',
+};
+const SIGNAL_EMOJIS = {
+  line_freeze: '⚫', line_jump: '🔴', odds_compression: '🟢', odds_expansion: '🟠',
+  sharp_movement: '🟣', fake_movement: '⚫', trap_formation: '🟡', bull_trap: '🔴',
+  bear_trap: '🟣', market_correction: '🟢', overreaction: '🔴', regression: '🟢',
+  momentum_swing: '🟡', pace_collapse: '🟠', inflation_spike: '🟠',
+};
 
-      // DOM refs
-      const $ = function (id) { return document.getElementById(id); };
+// ── State ────────────────────────────────────────────────────────────
+let state = {
+  games: [],
+  currentGameId: null,
+  compareGameIds: [],
+  snapshots: {},        // game_id → snapshot array
+  signals: {},          // game_id → signal array
+  events: {},           // game_id → event array
+  charts: {},           // panel_id → { chart, series: {key: series} }
+  visiblePanels: Object.fromEntries(CHART_PANELS.map(p => [p.id, true])),
+  panelOrder: CHART_PANELS.map(p => p.id),
+  playing: false,
+  playbackSpeed: 1,
+  currentFrame: 0,
+  totalFrames: 0,
+  filters: {},
+  compareMode: false,
+};
 
-      const dom = {
-        timelineContainer: $('timelineContainer'),
-        timelineFill: $('timelineFill'),
-        timelineThumb: $('timelineThumb'),
-        quarterMarkers: $('quarterMarkers'),
-        timelineClock: $('timelineClock'),
-        frameCounter: $('frameCounter'),
-        frameCounterLabel: $('frameCounterLabel'),
-        speedIndicator: $('speedIndicator'),
-        replayProgress: $('replayProgress'),
+// ── API helpers ──────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const r = await fetch(`${API_BASE}${path}`, opts);
+  if (!r.ok) throw new Error(`${r.status}: ${r.statusText}`);
+  return r.json();
+}
 
-        replayHomeScore: $('replayHomeScore'),
-        replayAwayScore: $('replayAwayScore'),
-        replayScoreDetail: $('replayScoreDetail'),
-        replayBlmScore: $('replayBlmScore'),
-        replayTrapMeter: $('replayTrapMeter'),
-        replayTrapGauge: $('replayTrapGauge'),
-        replayTrapFill: $('replayTrapFill'),
-        replayConfidence: $('replayConfidence'),
-        replayWinProb: $('replayWinProb'),
-        replayExpectedTotal: $('replayExpectedTotal'),
-        replayExpectedMargin: $('replayExpectedMargin'),
-        signalList: $('signalList'),
-        activeSignalCount: $('activeSignalCount'),
+async function loadGames() {
+  const data = await api('/games?limit=200');
+  state.games = data.games || [];
+  const sel = document.getElementById('gameSelect');
+  sel.innerHTML = '<option value="">— Select Game —</option>' +
+    state.games.map(g =>
+      `<option value="${g.game_id}">${g.home_team} vs ${g.away_team} (${g.total_snapshots} snaps)</option>`
+    ).join('');
+  updateStats();
+}
 
-        btnPlayPause: $('btnPlayPause'),
-        btnStepBack: $('btnStepBack'),
-        btnStepFwd: $('btnStepFwd'),
-        btnFwd2: $('btnFwd2'),
-        btnFwd4: $('btnFwd4'),
-        btnFwd8: $('btnFwd8'),
-        btnRewind2: $('btnRewind2'),
-        btnRewind4: $('btnRewind4'),
-        btnRewind8: $('btnRewind8'),
-        btnQ1: $('btnQ1'),
-        btnQ2: $('btnQ2'),
-        btnQ3: $('btnQ3'),
-        btnQ4: $('btnQ4'),
-        btnOT: $('btnOT'),
+async function loadGameData(gameId) {
+  const [snapshots, sigData, evtData, game] = await Promise.all([
+    api(`/snapshots/${gameId}?limit=100000`),
+    api(`/signals?game_id=${gameId}&limit=1000`),
+    api(`/events/${gameId}?limit=500`),
+    api(`/games/${gameId}`).catch(() => ({ game: {} })),
+  ]);
+  state.snapshots[gameId] = snapshots.snapshots || [];
+  state.signals[gameId] = (sigData.signals || []).map(s => ({ ...s, gameId }));
+  state.events[gameId] = (evtData.events || []).map(e => ({ ...e, gameId }));
+  return game.game || {};
+}
 
-        positionMarker: $('positionMarker'),
-        replayChartCanvas: $('replayChart'),
-      };
+async function loadCompareGame(gameId) {
+  if (state.snapshots[gameId]) return; // already loaded
+  const [snapshots, sigData, evtData] = await Promise.all([
+    api(`/snapshots/${gameId}?limit=100000`),
+    api(`/signals?game_id=${gameId}&limit=1000`),
+    api(`/events/${gameId}?limit=500`),
+  ]);
+  state.snapshots[gameId] = snapshots.snapshots || [];
+  state.signals[gameId] = (sigData.signals || []).map(s => ({ ...s, gameId }));
+  state.events[gameId] = (evtData.events || []).map(e => ({ ...e, gameId }));
+}
 
-      // ── Helper Functions ──────────────────────────────────────
+// ── Chart rendering ──────────────────────────────────────────────────
 
-      function safeGet(obj, path, fallback) {
-        return path.split('.').reduce(function (acc, key) {
-          return (acc && typeof acc === 'object' && key in acc) ? acc[key] : fallback;
-        }, obj);
+function formatTime(ts) {
+  if (!ts) return '';
+  try { const d = new Date(ts); return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+  catch { return ts; }
+}
+
+function timestampToUTC(ts) {
+  if (!ts) return 0;
+  return new Date(ts).getTime() / 1000;
+}
+
+function buildChartData(gameId, panel) {
+  const snaps = state.snapshots[gameId];
+  if (!snaps || snaps.length === 0) return {};
+
+  const data = {};
+  for (const s of panel.series) {
+    const points = [];
+    for (const snap of snaps) {
+      const t = timestampToUTC(snap.timestamp);
+      const v = snap[s.key];
+      if (t > 0 && v !== null && v !== undefined && v !== '') {
+        points.push({ time: t, value: parseFloat(v) });
       }
+    }
+    data[s.key] = points;
+  }
+  return data;
+}
 
-      function toPct(val) {
-        if (val === null || val === undefined) return '--';
-        return (val * 100).toFixed(1) + '%';
+let chartTooltipTimer = null;
+
+function createPanel(panelDef, index) {
+  const container = document.getElementById('chartArea');
+  const panel = document.createElement('div');
+  panel.className = 'chart-panel';
+  panel.dataset.panelId = panelDef.id;
+  panel.draggable = false;
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'chart-header';
+  header.innerHTML = `
+    <span class="name">${panelDef.name} <span class="unit">${panelDef.unit}</span></span>
+    <span class="legend">${panelDef.series.map(s =>
+      `<span><span class="dot" style="background:${s.color}"></span>${s.label}</span>`
+    ).join('')}</span>
+    <span class="value" id="val-${panelDef.id}">—</span>
+    <span class="actions">
+      <button class="btn-toggle" title="Toggle visibility">👁</button>
+      <button class="btn-remove" title="Remove panel">✕</button>
+    </span>
+  `;
+  panel.appendChild(header);
+
+  // Chart container
+  const chartDiv = document.createElement('div');
+  chartDiv.className = 'chart-container';
+  panel.appendChild(chartDiv);
+  container.appendChild(panel);
+
+  // Create chart
+  const chart = LightweightCharts.createChart(chartDiv, {
+    layout: {
+      background: { type: 'solid', color: '#0f1628' },
+      textColor: '#8892b0',
+      fontSize: 10,
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Mono', Consolas, monospace",
+    },
+    grid: {
+      vertLines: { color: '#161f35' },
+      horzLines: { color: '#161f35' },
+    },
+    crosshair: {
+      mode: LightweightCharts.CrosshairMode.Normal,
+      vertLine: { color: '#00d4ff', width: 1, style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: '#00d4ff' },
+      horzLine: { color: '#00d4ff44', width: 1, style: LightweightCharts.LineStyle.Dashed, labelBackgroundColor: '#00d4ff' },
+    },
+    timeScale: {
+      borderColor: '#1e2745',
+      timeVisible: true,
+      secondsVisible: false,
+      fixLeftEdge: true,
+      fixRightEdge: false,
+    },
+    rightPriceScale: {
+      borderColor: '#1e2745',
+      scaleMargins: { top: 0.05, bottom: 0.1 },
+    },
+    handleScroll: { vertTouchDrag: false },
+    handleScale: { axisPressedMouseMove: true },
+  });
+
+  // Series
+  const seriesMap = {};
+  for (const s of panelDef.series) {
+    const ser = chart.addAreaSeries({
+      lineColor: s.color,
+      topColor: s.color + '33',
+      bottomColor: s.color + '08',
+      lineWidth: s.width || 2,
+      lineStyle: s.style || 0,
+      lastValueVisible: true,
+      priceFormat: { type: 'custom', formatter: v => v != null ? v.toFixed(2) : '—' },
+      autoscaleInfoProvider: () => null,
+    });
+    seriesMap[s.key] = ser;
+  }
+
+  // Store
+  state.charts[panelDef.id] = { chart, series: seriesMap, panel: panelDef, panelEl: panel, chartDiv };
+
+  // ── Crosshair sync ──────────────────────────────────────────
+  chart.subscribeCrosshairMove(param => {
+    if (!param.time) { document.getElementById('crosshairTooltip').style.display = 'none'; return; }
+    const tt = document.getElementById('crosshairTooltip');
+    const timeStr = formatTime(new Date(param.time * 1000).toISOString());
+    tt.querySelector('.time').textContent = timeStr;
+
+    // Build tooltip rows for this panel
+    let rowsHtml = '';
+    for (const s of panelDef.series) {
+      if (param.seriesData && param.seriesData.get(seriesMap[s.key])) {
+        const pt = param.seriesData.get(seriesMap[s.key]);
+        const v = typeof pt.value === 'number' ? pt.value.toFixed(2) : '—';
+        rowsHtml += `<div class="row"><span class="label" style="color:${s.color}">● ${s.label}</span><span>${v} ${panelDef.unit}</span></div>`;
       }
-
-      function toFixed(val, digits) {
-        if (digits === undefined) digits = 1;
-        if (val === null || val === undefined) return '--';
-        return Number(val).toFixed(digits);
-      }
-
-      function computeGameMinutes(frame) {
-        var q = safeGet(frame, 'metadata.quarter', 1);
-        var clock = safeGet(frame, 'metadata.clock', '12:00');
-        var gm = (q - 1) * 12;
-        if (clock && clock !== '--') {
-          var parts = clock.split(':');
-          var mins = parseInt(parts[0], 10);
-          var secs = parseInt(parts[1], 10);
-          gm += (12 - mins - 1) + (60 - secs) / 60;
+    }
+    if (rowsHtml) {
+      tt.innerHTML = `<div class="time">${timeStr}</div>${rowsHtml}`;
+      // Also update all charts' crosshair positions (sync)
+      for (const [pid, pc] of Object.entries(state.charts)) {
+        if (pid !== panelDef.id) {
+          pc.chart.setCrosshairPosition?.();
         }
-        return gm;
       }
+    }
 
-      // ── Signal Detection Engine ──────────────────────────────
-
-      function detectSignals(frames) {
-        signalMap = {};
-        frameSignalCache = [];
-
-        if (!frames || frames.length < 2) return;
-
-        for (var i = 0; i < frames.length; i++) {
-          var frame = frames[i];
-          var signals = [];
-
-          // 1. Trap-based signals (threshold check)
-          var trapMeter = safeGet(frame, 'trap_detection.trap_meter', 0);
-          if (trapMeter >= 0.70) signals.push({ id: 'trap_meter', value: trapMeter, severity: trapMeter >= 0.85 ? 'high' : 'mid' });
-
-          var bullTrap = safeGet(frame, 'trap_detection.bull_trap', 0);
-          if (bullTrap >= 0.50) signals.push({ id: 'bull_trap', value: bullTrap, severity: bullTrap >= 0.7 ? 'high' : 'mid' });
-
-          var bearTrap = safeGet(frame, 'trap_detection.bear_trap', 0);
-          if (bearTrap >= 0.50) signals.push({ id: 'bear_trap', value: bearTrap, severity: bearTrap >= 0.7 ? 'high' : 'mid' });
-
-          var deadMarket = safeGet(frame, 'trap_detection.dead_market', 0);
-          if (deadMarket >= 0.50) signals.push({ id: 'dead_market', value: deadMarket, severity: deadMarket >= 0.7 ? 'high' : 'mid' });
-
-          var sharpTrap = safeGet(frame, 'trap_detection.sharp_trap', 0);
-          if (sharpTrap >= 0.50) signals.push({ id: 'sharp_trap', value: sharpTrap, severity: sharpTrap >= 0.7 ? 'high' : 'mid' });
-
-          var lateTrap = safeGet(frame, 'trap_detection.late_trap', 0);
-          if (lateTrap >= 0.50) signals.push({ id: 'late_trap', value: lateTrap, severity: lateTrap >= 0.7 ? 'high' : 'mid' });
-
-          // 2. Momentum swing (velocity change between frames)
-          if (i > 0) {
-            var prevMom = safeGet(frames[i-1], 'momentum.momentum_velocity', 0);
-            var currMom = safeGet(frame, 'momentum.momentum_velocity', 0);
-            var swingMag = Math.abs(currMom - prevMom);
-            if (swingMag > 1.5) {
-              signals.push({ id: 'momentum_swing', value: swingMag, severity: swingMag > 3.0 ? 'high' : 'mid' });
-            }
-          }
-
-          // 3. Confidence drop
-          if (i > 0) {
-            var prevConf = safeGet(frames[i-1], 'blm.confidence', 0.5);
-            var currConf = safeGet(frame, 'blm.confidence', 0.5);
-            var confDrop = prevConf - currConf;
-            if (confDrop > 0.15) {
-              signals.push({ id: 'confidence_drop', value: confDrop, severity: confDrop > 0.3 ? 'high' : 'mid' });
-            }
-          }
-
-          // 4. Model correction (large swing in expected_margin between frames)
-          if (i > 0) {
-            var prevMargin = safeGet(frames[i-1], 'blm.expected_margin', null);
-            var currMargin = safeGet(frame, 'blm.expected_margin', null);
-            if (prevMargin !== null && currMargin !== null) {
-              var marginShift = Math.abs(currMargin - prevMargin);
-              if (marginShift > 3.0) {
-                signals.push({ id: 'model_correction', value: marginShift, severity: marginShift > 6.0 ? 'high' : 'mid' });
-              }
-            }
-          }
-
-          signalMap[i] = signals;
-          frameSignalCache.push(signals);
+    // Update value display
+    const valEl = document.getElementById(`val-${panelDef.id}`);
+    if (valEl && param.seriesData) {
+      for (const s of panelDef.series) {
+        const pt = param.seriesData.get(seriesMap[s.key]);
+        if (pt && typeof pt.value === 'number') {
+          valEl.textContent = `${s.label.split(' ')[0]}: ${pt.value.toFixed(1)}`;
+          valEl.style.color = s.color;
+          break;
         }
       }
+    }
 
-      // ── API Calls ─────────────────────────────────────────────
+    // Sync all other charts to same time
+    clearTimeout(chartTooltipTimer);
+    chartTooltipTimer = setTimeout(() => {
+      for (const [pid, pc] of Object.entries(state.charts)) {
+        if (pid !== panelDef.id && param.time) {
+          try { pc.chart.timeScale().scrollToPosition(-1, false); } catch {}
+        }
+      }
+    }, 50);
 
-      function loadGameReplay(gameIdParam) {
-        return fetch(API_BASE + '/replay/' + gameIdParam)
-          .then(function (res) {
-            if (!res.ok) throw new Error('Failed to load replay: ' + res.status);
-            return res.json();
+    // Position tooltip
+    tt.style.display = 'block';
+    tt.style.left = (param.point?.x || 0) + 15 + 'px';
+    tt.style.top = Math.max(10, (param.point?.y || 0) - 10) + 'px';
+  });
+
+  return { chart, seriesMap, panel };
+}
+
+function renderGame(gameId) {
+  const area = document.getElementById('chartArea');
+  const loading = document.getElementById('loadingScreen');
+  if (loading) loading.remove();
+
+  // Clear existing panels
+  area.innerHTML = '';
+  state.charts = {};
+
+  // Determine which panels to render
+  const panels = state.panelOrder
+    .map(id => CHART_PANELS.find(p => p.id === id))
+    .filter(p => p && state.visiblePanels[p.id]);
+
+  for (const panelDef of panels) {
+    const { chart, series: seriesMap } = createPanel(panelDef, panels.indexOf(panelDef));
+
+    // Primary game data
+    const primaryData = buildChartData(gameId, panelDef);
+    for (const s of panelDef.series) {
+      if (primaryData[s.key] && primaryData[s.key].length > 0) {
+        seriesMap[s.key].setData(primaryData[s.key]);
+      }
+    }
+
+    // Comparison game data (if any)
+    for (const cid of state.compareGameIds) {
+      if (cid === gameId) continue;
+      const compData = buildChartData(cid, panelDef);
+      for (const s of panelDef.series) {
+        if (compData[s.key] && compData[s.key].length > 0) {
+          const compSer = chart.addLineSeries({
+            color: s.color + '88',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            lastValueVisible: false,
           });
-      }
-
-      function loadGameDetail(gameIdParam) {
-        return fetch(API_BASE + '/game/' + gameIdParam)
-          .then(function (res) {
-            if (!res.ok) throw new Error('Failed to load game: ' + res.status);
-            return res.json();
-          });
-      }
-
-      function loadGamesList() {
-        return fetch(API_BASE + '/games')
-          .then(function (res) {
-            if (!res.ok) throw new Error('Failed to load games list');
-            return res.json();
-          });
-      }
-
-      // ── Signal Legend Rendering ──────────────────────────────
-
-      function buildSignalLegend() {
-        dom.signalList.innerHTML = '';
-        SIGNAL_DEFS.forEach(function (def) {
-          var item = document.createElement('div');
-          item.className = 'signal-item inactive';
-          item.id = 'sig-' + def.id;
-
-          var icon = document.createElement('span');
-          icon.className = 'signal-icon ' + def.icon;
-
-          var name = document.createElement('span');
-          name.className = 'signal-name';
-          name.textContent = def.label;
-
-          var value = document.createElement('span');
-          value.className = 'signal-value ' + def.valueClass;
-          value.id = 'sig-val-' + def.id;
-          value.textContent = '--';
-
-          item.appendChild(icon);
-          item.appendChild(name);
-          item.appendChild(value);
-          dom.signalList.appendChild(item);
-        });
-      }
-
-      function updateSignalLegend(frameIndex) {
-        var signals = frameSignalCache[frameIndex] || [];
-        var activeCount = 0;
-
-        // Reset all to inactive
-        SIGNAL_DEFS.forEach(function (def) {
-          var el = document.getElementById('sig-' + def.id);
-          if (el) {
-            el.className = 'signal-item inactive';
-          }
-          var valEl = document.getElementById('sig-val-' + def.id);
-          if (valEl) valEl.textContent = '--';
-        });
-
-        // Activate current signals
-        signals.forEach(function (sig) {
-          var el = document.getElementById('sig-' + sig.id);
-          if (el) {
-            el.className = 'signal-item active';
-            if (sig.severity === 'high') {
-              el.style.borderLeftColor = '#ef4444';
-            } else {
-              el.style.borderLeftColor = '#f59e0b';
-            }
-          }
-          var valEl = document.getElementById('sig-val-' + sig.id);
-          if (valEl) {
-            valEl.textContent = (sig.value * 100).toFixed(0) + '%';
-          }
-          activeCount++;
-        });
-
-        dom.activeSignalCount.textContent = activeCount;
-        activeSignalsAtFrame = signals;
-      }
-
-      // ── Frame Display ─────────────────────────────────────────
-
-      function displayFrame(index) {
-        if (!allFrames.length || index < 0 || index >= allFrames.length) return;
-
-        currentFrameIndex = index;
-        var data = allFrames[index];
-
-        // Update timeline
-        var pct = (index / (allFrames.length - 1)) * 100;
-        dom.timelineFill.style.width = pct + '%';
-        dom.timelineThumb.style.left = pct + '%';
-        dom.replayProgress.style.width = pct + '%';
-
-        // Frame counter
-        dom.frameCounter.textContent = 'Frame ' + (index + 1) + ' of ' + allFrames.length;
-        dom.frameCounterLabel.textContent = 'Frame ' + (index + 1) + ' / ' + allFrames.length;
-
-        // Extract data
-        var homeTeam = safeGet(data, 'game_state.home_team', 'Home');
-        var awayTeam = safeGet(data, 'game_state.away_team', 'Away');
-        var homeScore = safeGet(data, 'game_state.home_score', 0);
-        var awayScore = safeGet(data, 'game_state.away_score', 0);
-        var quarter = safeGet(data, 'metadata.quarter', 1);
-        var clock = safeGet(data, 'metadata.clock', '12:00');
-        var margin = safeGet(data, 'game_state.margin', 0);
-
-        // Score panel
-        dom.replayHomeScore.textContent = homeScore;
-        dom.replayAwayScore.textContent = awayScore;
-        dom.replayScoreDetail.textContent = 'Margin: ' + (margin > 0 ? '+' : '') + margin + '  |  Q' + quarter + ' ' + clock;
-        dom.timelineClock.textContent = 'Q' + quarter + ' ' + clock;
-
-        // BLM Score
-        var blmScore = safeGet(data, 'blm.blm_score') || safeGet(data, 'blm.expected_margin');
-        dom.replayBlmScore.textContent = toFixed(blmScore);
-
-        // Trap Meter
-        var trapMeter = safeGet(data, 'trap_detection.trap_meter', 0);
-        var trapPct = Math.round(trapMeter * 100);
-        dom.replayTrapMeter.textContent = trapPct + '%';
-        dom.replayTrapFill.style.width = trapPct + '%';
-        dom.replayTrapGauge.className = 'gauge';
-        if (trapPct >= 80) dom.replayTrapGauge.classList.add('gauge-high');
-        else if (trapPct >= 50) dom.replayTrapGauge.classList.add('gauge-mid');
-        else dom.replayTrapGauge.classList.add('gauge-low');
-
-        // Confidence
-        var confidence = safeGet(data, 'blm.confidence', 0);
-        dom.replayConfidence.textContent = toPct(confidence);
-
-        // Win Probability
-        var winProb = safeGet(data, 'blm.win_probability', null);
-        dom.replayWinProb.textContent = toPct(winProb);
-
-        // Expected Total
-        var expTotal = safeGet(data, 'blm.expected_total', null);
-        dom.replayExpectedTotal.textContent = toFixed(expTotal);
-
-        // Expected Margin
-        var expMargin = safeGet(data, 'blm.expected_margin', null);
-        dom.replayExpectedMargin.textContent = toFixed(expMargin);
-
-        // Update signal legend
-        updateSignalLegend(index);
-
-        // Update position marker on chart
-        updatePositionMarker();
-      }
-
-      // ── Chart ──────────────────────────────────────────────────
-
-      function initReplayChart() {
-        var ctx = dom.replayChartCanvas.getContext('2d');
-
-        Chart.register(chartjsAnnotation);
-
-        replayChart = new Chart(ctx, {
-          type: 'scatter',
-          data: {
-            datasets: [{
-              label: 'BLM Score',
-              data: [],
-              borderColor: '#00d4ff',
-              backgroundColor: 'rgba(0, 212, 255, 0.1)',
-              showLine: true,
-              tension: 0.2,
-              pointRadius: 1.5,
-              pointHoverRadius: 4,
-              borderWidth: 2,
-              fill: true,
-              order: 2,
-            }, {
-              label: 'Trap Meter',
-              data: [],
-              borderColor: '#ef4444',
-              backgroundColor: 'rgba(239, 68, 68, 0.05)',
-              showLine: true,
-              tension: 0.2,
-              pointRadius: 1,
-              pointHoverRadius: 3,
-              borderWidth: 1,
-              borderDash: [4, 3],
-              yAxisID: 'y1',
-              order: 2,
-            }, {
-              label: '⚡ Signals',
-              data: [],
-              backgroundColor: [],
-              pointBackgroundColor: [],
-              pointRadius: 8,
-              pointHoverRadius: 10,
-              pointStyle: 'triangle',
-              showLine: false,
-              order: 1,
-            }],
-          },
-          options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            interaction: {
-              mode: 'index',
-              intersect: false,
-            },
-            plugins: {
-              legend: {
-                labels: {
-                  color: '#8892b0',
-                  font: { size: 11 },
-                  usePointStyle: true,
-                },
-              },
-              tooltip: {
-                backgroundColor: 'rgba(13, 17, 28, 0.95)',
-                titleColor: '#e8edf5',
-                bodyColor: '#8892b0',
-                borderColor: '#1e2745',
-                borderWidth: 1,
-                padding: 8,
-                callbacks: {
-                  label: function (ctx) {
-                    if (ctx.datasetIndex === 2 && ctx.raw && ctx.raw.signalInfo) {
-                      return '⚠ ' + ctx.raw.signalInfo;
-                    }
-                    return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1);
-                  }
-                }
-              },
-              annotation: {
-                annotations: {},
-              },
-            },
-            scales: {
-              x: {
-                type: 'linear',
-                title: {
-                  display: true,
-                  text: 'Game Time (minutes)',
-                  color: '#55607a',
-                },
-                ticks: { color: '#55607a' },
-                grid: { color: 'rgba(30, 39, 69, 0.5)' },
-                min: 0,
-              },
-              y: {
-                position: 'left',
-                title: {
-                  display: true,
-                  text: 'Score / Model Value',
-                  color: '#55607a',
-                },
-                ticks: { color: '#55607a' },
-                grid: { color: 'rgba(30, 39, 69, 0.3)' },
-              },
-              y1: {
-                position: 'right',
-                min: 0,
-                max: 1,
-                title: {
-                  display: true,
-                  text: 'Trap',
-                  color: '#55607a',
-                },
-                ticks: {
-                  color: '#55607a',
-                  callback: function (v) { return (v * 100).toFixed(0) + '%'; },
-                },
-                grid: { drawOnChartArea: false },
-              },
-            },
-          },
-        });
-
-        return replayChart;
-      }
-
-      function buildChartData() {
-        if (!replayChart || !allFrames.length) return;
-
-        var blmData = [];
-        var trapData = [];
-        var signalData = [];
-
-        allFrames.forEach(function (frame, i) {
-          var gameMinutes = computeGameMinutes(frame);
-          var blmScore = safeGet(frame, 'blm.blm_score') || safeGet(frame, 'blm.expected_margin') || 0;
-          var trapMeter = safeGet(frame, 'trap_detection.trap_meter', 0);
-
-          blmData.push({ x: gameMinutes, y: blmScore });
-          trapData.push({ x: gameMinutes, y: trapMeter });
-
-          // Add signal markers for high-severity events
-          var signals = signalMap[i] || [];
-          var hasHighSignal = signals.some(function (s) { return s.severity === 'high'; });
-          var hasMidSignal = signals.some(function (s) { return s.severity === 'mid'; });
-
-          if (hasHighSignal || hasMidSignal) {
-            var severityCount = signals.filter(function (s) { return s.severity === 'high'; }).length;
-            var totalCount = signals.length;
-            var signalLabels = signals.map(function (s) { return s.id; }).join(', ');
-
-            var point = {
-              x: gameMinutes,
-              y: blmScore,
-              signalInfo: totalCount + ' signal(s): ' + signalLabels,
-            };
-
-            // Color by worst severity
-            if (severityCount > 0) {
-              point.pointBackgroundColor = '#ef4444'; // red for high
-            } else {
-              point.pointBackgroundColor = '#f59e0b'; // amber for mid
-            }
-
-            signalData.push(point);
-          }
-        });
-
-        replayChart.data.datasets[0].data = blmData;
-        replayChart.data.datasets[1].data = trapData;
-        replayChart.data.datasets[2].data = signalData;
-
-        // Build annotations
-        var annotations = replayChart.options.plugins.annotation.annotations;
-
-        // Quarter separators
-        var qTimes = [0, 12, 24, 36, 48];
-        qTimes.forEach(function (qm, i) {
-          annotations['q' + (i + 1)] = {
-            type: 'line',
-            xMin: qm,
-            xMax: qm,
-            borderColor: 'rgba(85, 96, 122, 0.4)',
-            borderWidth: 1,
-            borderDash: [6, 4],
-            label: {
-              display: true,
-              content: 'Q' + (i + 1),
-              position: 'start',
-              backgroundColor: 'rgba(13, 17, 28, 0.8)',
-              color: '#55607a',
-              font: { size: 9 },
-            },
-          };
-        });
-
-        // Trap danger zone (background band for trap_meter > 0.7)
-        annotations['trap_danger'] = {
-          type: 'box',
-          yMin: 0,
-          yMax: 1,
-          xMin: 0,
-          xMax: 48,
-          backgroundColor: 'rgba(239, 68, 68, 0.03)',
-          borderColor: 'rgba(239, 68, 68, 0.08)',
-          borderWidth: 1,
-          borderDash: [3, 3],
-          drawTime: 'beforeDatasetsDraw',
-          label: {
-            display: true,
-            content: 'DANGER ZONE',
-            position: { x: 'start', y: 'end' },
-            backgroundColor: 'rgba(239, 68, 68, 0.1)',
-            color: 'rgba(239, 68, 68, 0.5)',
-            font: { size: 8, weight: 'bold' },
-          },
-        };
-
-        replayChart.update();
-      }
-
-      function updatePositionMarker() {
-        if (!allFrames.length || !replayChart) return;
-        var frame = allFrames[currentFrameIndex];
-        var gameMinutes = computeGameMinutes(frame);
-
-        var xScale = replayChart.scales.x;
-        var xPx = xScale.getPixelForValue(gameMinutes);
-        var chartArea = replayChart.chartArea;
-        var relPct = ((xPx - chartArea.left) / (chartArea.right - chartArea.left)) * 100;
-        dom.positionMarker.style.left = Math.max(0, Math.min(100, relPct)) + '%';
-      }
-
-      // ── Quarter Markers ────────────────────────────────────────
-
-      function buildQuarterMarkers() {
-        var container = dom.quarterMarkers;
-        container.innerHTML = '';
-        var quarters = ['Q1', 'Q2', 'Q3', 'Q4'];
-        quarters.forEach(function (q, i) {
-          var pct = ((i + 1) / 4) * 100;
-          var marker = document.createElement('div');
-          marker.className = 'quarter-marker';
-          marker.style.left = pct + '%';
-          marker.innerHTML = '<span class="quarter-marker-label">' + q + ' End</span>';
-          container.appendChild(marker);
-        });
-      }
-
-      // ── Playback Controls ──────────────────────────────────────
-
-      function togglePlay() {
-        if (!allFrames.length) return;
-        if (isPlaying) { pausePlayback(); }
-        else { startPlayback(); }
-      }
-
-      function startPlayback() {
-        if (currentFrameIndex >= allFrames.length - 1) {
-          currentFrameIndex = 0;
-          displayFrame(0);
-        }
-        isPlaying = true;
-        dom.btnPlayPause.textContent = '⏸ Pause';
-        dom.btnPlayPause.classList.add('primary');
-        runPlayLoop();
-      }
-
-      function pausePlayback() {
-        isPlaying = false;
-        dom.btnPlayPause.textContent = '▶ Play';
-        dom.btnPlayPause.classList.add('primary');
-        if (playTimer) {
-          clearTimeout(playTimer);
-          playTimer = null;
-        }
-      }
-
-      function runPlayLoop() {
-        if (!isPlaying || currentFrameIndex >= allFrames.length - 1) {
-          if (currentFrameIndex >= allFrames.length - 1) {
-            isPlaying = false;
-            dom.btnPlayPause.textContent = '▶ Play';
-            dom.btnPlayPause.classList.add('primary');
-          }
-          return;
-        }
-
-        displayFrame(currentFrameIndex + 1);
-
-        var interval = Math.max(30, 330 / currentSpeed);
-        playTimer = setTimeout(runPlayLoop, interval);
-      }
-
-      function stepForward() {
-        if (currentFrameIndex < allFrames.length - 1) {
-          if (isPlaying) pausePlayback();
-          displayFrame(currentFrameIndex + 1);
-        }
-      }
-
-      function stepBackward() {
-        if (currentFrameIndex > 0) {
-          if (isPlaying) pausePlayback();
-          displayFrame(currentFrameIndex - 1);
-        }
-      }
-
-      function setSpeed(speed) {
-        currentSpeed = speed;
-        dom.speedIndicator.textContent = currentSpeed.toFixed(1) + 'x';
-        if (isPlaying) {
-          pausePlayback();
-          startPlayback();
-        }
-        document.querySelectorAll('.control-btn.speed-active').forEach(function (b) {
-          b.classList.remove('speed-active');
-        });
-      }
-
-      function jumpToQuarter(q) {
-        if (isPlaying) pausePlayback();
-        for (var i = 0; i < allFrames.length; i++) {
-          var frameQ = safeGet(allFrames[i], 'metadata.quarter', 0);
-          if (frameQ >= q) {
-            displayFrame(i);
-            break;
+          compSer.setData(compData[s.key]);
+          // Store so we can clear later
+          if (!seriesMap[`comp:${s.key}`]) seriesMap[`comp:${s.key}`] = [];
+          if (Array.isArray(seriesMap[`comp:${s.key}`])) {
+            seriesMap[`comp:${s.key}`].push(compSer);
           }
         }
-        document.querySelectorAll('.control-btn.q-active').forEach(function (b) {
-          b.classList.remove('q-active');
-        });
       }
+    }
 
-      // ── Timeline Scrubbing ─────────────────────────────────────
+    // Event markers (as simple primitive markers)
+    addSignalMarkers(gameId, panelDef, chart);
+  }
 
-      function initTimelineScrub() {
-        var isDragging = false;
+  // Restore panel events
+  setupPanelControls();
+  buildSignalLegend();
+  buildEventStrip(gameId);
 
-        dom.timelineContainer.addEventListener('mousedown', function (e) {
-          isDragging = true;
-          scrubToEvent(e);
-        });
+  // Update total frames
+  const snaps = state.snapshots[gameId] || [];
+  state.totalFrames = snaps.length;
+  state.currentFrame = snaps.length - 1;
+  updateStats();
+}
 
-        document.addEventListener('mousemove', function (e) {
-          if (isDragging) scrubToEvent(e);
-        });
+function addSignalMarkers(gameId, panelDef, chart) {
+  const sigs = state.signals[gameId] || [];
+  if (sigs.length === 0) return;
 
-        document.addEventListener('mouseup', function () {
-          isDragging = false;
-        });
+  const markers = [];
+  for (const sig of sigs) {
+    const t = timestampToUTC(sig.timestamp);
+    if (t <= 0) continue;
+    markers.push({
+      time: t,
+      position: sig.severity === 'high' || sig.severity === 'critical' ? 'aboveBar' : 'belowBar',
+      color: SIGNAL_COLORS[sig.signal_type] || '#6b7280',
+      shape: sig.severity === 'critical' ? 'arrowDown' : (sig.severity === 'high' ? 'arrowUp' : 'circle'),
+      text: sig.signal_type.replace('_', ' ').slice(0, 8) + (sig.value != null ? ` ${sig.value.toFixed(1)}` : ''),
+      size: sig.severity === 'critical' ? 2 : 1,
+    });
+  }
 
-        function scrubToEvent(e) {
-          if (!allFrames.length) return;
-          if (isPlaying) pausePlayback();
+  // Add markers to the first series
+  const firstKey = panelDef.series[0]?.key;
+  if (firstKey && state.charts[panelDef.id]?.series[firstKey]) {
+    state.charts[panelDef.id].series[firstKey].setMarkers(markers);
+  }
+}
 
-          var rect = dom.timelineContainer.getBoundingClientRect();
-          var pct = (e.clientX - rect.left) / rect.width;
-          pct = Math.max(0, Math.min(1, pct));
-          var idx = Math.round(pct * (allFrames.length - 1));
-          displayFrame(idx);
+function setupPanelControls() {
+  document.querySelectorAll('.btn-toggle').forEach(btn => {
+    btn.onclick = e => {
+      const panel = e.target.closest('.chart-panel');
+      panel.classList.toggle('collapsed');
+      const chart = state.charts[panel.dataset.panelId]?.chart;
+      if (chart) setTimeout(() => chart.timeScale().fitContent(), 100);
+    };
+  });
+  document.querySelectorAll('.btn-remove').forEach(btn => {
+    btn.onclick = e => {
+      const panel = e.target.closest('.chart-panel');
+      const id = panel.dataset.panelId;
+      state.visiblePanels[id] = false;
+      panel.remove();
+    };
+  });
+}
+
+// ── Signal legend ────────────────────────────────────────────────────
+function buildSignalLegend() {
+  const el = document.getElementById('signalLegend');
+  el.innerHTML = Object.entries(SIGNAL_EMOJIS).map(([type, emoji]) =>
+    `<span class="sig"><span class="badge" style="background:${SIGNAL_COLORS[type]||'#666'}"></span>${emoji} ${type.replace('_',' ')}</span>`
+  ).join('');
+}
+
+// ── Event strip ──────────────────────────────────────────────────────
+function buildEventStrip(gameId) {
+  const el = document.getElementById('eventStrip');
+  el.innerHTML = '';
+  const evts = state.events[gameId] || [];
+  if (evts.length === 0) {
+    el.innerHTML = '<span style="color:var(--text-muted);font-size:10px">No events</span>';
+    return;
+  }
+  for (const evt of evts.slice(0, 30)) {
+    const m = document.createElement('span');
+    m.className = 'event-marker';
+    m.style.background = SIGNAL_COLORS[evt.event_type] || '#333';
+    m.innerHTML = `<span class="emoji">${SIGNAL_EMOJIS[evt.event_type] || '▸'}</span> ${evt.event_type.replace('_',' ')}`;
+    m.title = evt.description || '';
+    m.onclick = () => jumpToTime(timestampToUTC(evt.timestamp));
+    el.appendChild(m);
+  }
+}
+
+// ── Playback ─────────────────────────────────────────────────────────
+function jumpToTime(time) {
+  for (const [pid, pc] of Object.entries(state.charts)) {
+    try { pc.chart.timeScale().scrollToRealTime(); } catch {}
+    try { pc.chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, time - 600), to: time + 60 }); } catch {}
+  }
+}
+
+function jumpToFrame(frameIdx) {
+  const gameId = state.currentGameId;
+  if (!gameId) return;
+  const snaps = state.snapshots[gameId] || [];
+  if (frameIdx < 0 || frameIdx >= snaps.length) return;
+  state.currentFrame = frameIdx;
+  const snap = snaps[frameIdx];
+  if (!snap) return;
+  const t = timestampToUTC(snap.timestamp);
+  jumpToTime(t);
+  updateStats();
+}
+
+function togglePlay() {
+  state.playing = !state.playing;
+  document.getElementById('btnPlay').textContent = state.playing ? '⏸' : '▶';
+  if (state.playing) startPlayback();
+}
+
+let playbackInterval = null;
+function startPlayback() {
+  if (playbackInterval) clearInterval(playbackInterval);
+  const interval = Math.max(100, 1000 / state.playbackSpeed);
+  playbackInterval = setInterval(() => {
+    if (!state.playing) { clearInterval(playbackInterval); playbackInterval = null; return; }
+    const gameId = state.currentGameId;
+    if (!gameId) { state.playing = false; document.getElementById('btnPlay').textContent = '▶'; return; }
+    const snaps = state.snapshots[gameId] || [];
+    let next = state.currentFrame + 1;
+    if (next >= snaps.length) { state.playing = false; document.getElementById('btnPlay').textContent = '▶'; clearInterval(playbackInterval); playbackInterval = null; return; }
+    jumpToFrame(next);
+  }, interval);
+}
+
+function setSpeed(speed) {
+  state.playbackSpeed = speed;
+  document.getElementById('speedDisplay').textContent = speed + '×';
+  if (state.playing) { startPlayback(); }
+}
+
+// ── Filters ──────────────────────────────────────────────────────────
+function openFilters() {
+  document.getElementById('filterPanel').classList.toggle('open');
+}
+
+async function applyFilters() {
+  const filters = {};
+  const league = document.getElementById('filterLeague').value;
+  if (league) filters.league = league;
+  const qMin = document.getElementById('filterQMin').value;
+  const qMax = document.getElementById('filterQMax').value;
+  if (qMin) filters.quarter_min = parseInt(qMin);
+  if (qMax) filters.quarter_max = parseInt(qMax);
+  const tMin = document.getElementById('filterTrapMin').value;
+  const tMax = document.getElementById('filterTrapMax').value;
+  if (tMin) filters.trap_min = parseFloat(tMin);
+  if (tMax) filters.trap_max = parseFloat(tMax);
+  const cMin = document.getElementById('filterConfMin').value;
+  const cMax = document.getElementById('filterConfMax').value;
+  if (cMin) filters.confidence_min = parseFloat(cMin);
+  if (cMax) filters.confidence_max = parseFloat(cMax);
+  const outcome = document.getElementById('filterOutcome').value;
+  if (outcome) filters.result = outcome;
+  const signalType = document.getElementById('filterSignalType').value;
+  if (signalType) filters.signal_type = signalType;
+  const gameId = document.getElementById('filterGameId').value;
+  if (gameId) filters.game_id = gameId;
+
+  state.filters = filters;
+
+  const compareMode = document.getElementById('compareMode').checked;
+  state.compareMode = compareMode;
+
+  document.getElementById('filterPanel').classList.remove('open');
+
+  // If compare mode, load all matching games
+  if (compareMode && Object.keys(filters).length > 0) {
+    try {
+      const result = await api('/compare/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(filters),
+      });
+      const matched = result.matched_games || [];
+      if (matched.length > 0) {
+        const ids = matched.map(g => g.id).filter(Boolean);
+        state.compareGameIds = ids.slice(0, 5); // max 5 compare games
+        for (const id of ids.slice(0, 5)) {
+          await loadCompareGame(id);
         }
+        if (state.currentGameId) renderGame(state.currentGameId);
       }
+    } catch (e) {
+      console.error('Compare query failed:', e);
+    }
+  }
+}
 
-      // ── Initialization ─────────────────────────────────────────
+// ── Export ───────────────────────────────────────────────────────────
+async function exportPNG() {
+  const area = document.getElementById('chartArea');
+  try {
+    const canvas = await html2canvas(area, {
+      backgroundColor: '#050812',
+      useCORS: true,
+      logging: false,
+      scale: 2,
+    });
+    const link = document.createElement('a');
+    link.download = `blm-dashboard-${state.currentGameId || 'export'}.png`;
+    link.href = canvas.toDataURL();
+    link.click();
+  } catch (e) {
+    console.error('PNG export failed:', e);
+  }
+}
 
-      function init() {
-        buildQuarterMarkers();
-        buildSignalLegend();
-        initReplayChart();
-        initTimelineScrub();
+// ── Stats update ─────────────────────────────────────────────────────
+function updateStats() {
+  const gameId = state.currentGameId;
+  const snaps = state.snapshots[gameId] || [];
+  const sigs = state.signals[gameId] || [];
+  const evts = state.events[gameId] || [];
+  const el = document.getElementById('statsBar');
+  el.textContent = snaps.length > 0
+    ? `${snaps.length} snaps · ${sigs.length} signals · ${evts.length} events · frame ${state.currentFrame + 1}/${state.totalFrames}`
+    : `${state.games.length} games loaded`;
+}
 
-        // Load game from URL parameter or pick most recent ended game
-        var params = new URLSearchParams(window.location.search);
-        var gameIdParam = params.get('game_id');
+// ── Event bindings ───────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  loadGames();
 
-        function loadGame(gid) {
-          gameId = gid;
-          var loadEl = document.createElement('div');
-          loadEl.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-size:1.2rem;';
-          loadEl.textContent = 'Loading replay data...';
-          document.body.appendChild(loadEl);
+  document.getElementById('gameSelect').addEventListener('change', async e => {
+    const gid = e.target.value;
+    if (!gid) return;
+    state.currentGameId = gid;
+    document.getElementById('loadingScreen')?.remove();
+    // Show loading
+    const area = document.getElementById('chartArea');
+    area.innerHTML = '<div class="loading"><div class="spinner"></div> Loading game…</div>';
+    state.charts = {};
+    state.compareGameIds = [];
+    try {
+      await loadGameData(gid);
+      renderGame(gid);
+    } catch (err) {
+      area.innerHTML = `<div class="error">Error: ${err.message}</div>`;
+    }
+  });
 
-          loadGameReplay(gid)
-            .then(function (data) {
-              allFrames = data.frames || data.snapshots || [];
-              if (!allFrames.length) throw new Error('No frames');
+  document.getElementById('btnRefresh').onclick = loadGames;
+  document.getElementById('btnFilters').onclick = openFilters;
+  document.getElementById('filterOverlay').onclick = () => document.getElementById('filterPanel').classList.remove('open');
+  document.getElementById('btnApplyFilters').onclick = applyFilters;
 
-              // Run signal detection
-              detectSignals(allFrames);
+  document.getElementById('btnExportPNG').onclick = exportPNG;
+  document.getElementById('btnPlay').onclick = togglePlay;
+  document.getElementById('btnStepBack').onclick = () => jumpToFrame(state.currentFrame - 1);
+  document.getElementById('btnStepFwd').onclick = () => jumpToFrame(state.currentFrame + 1);
+  document.getElementById('btnSlowMo').onclick = () => setSpeed(state.playbackSpeed <= 1 ? 0.5 : state.playbackSpeed / 2);
+  document.getElementById('btnFastFwd').onclick = () => setSpeed(state.playbackSpeed >= 8 ? 8 : state.playbackSpeed * 2);
 
-              document.title = 'Replay: ' + gid;
-              displayFrame(0);
-              buildChartData();
+  document.getElementById('quarterJump').addEventListener('change', e => {
+    const q = parseInt(e.target.value);
+    if (!q) return;
+    const snaps = state.snapshots[state.currentGameId] || [];
+    const idx = snaps.findIndex(s => s.quarter >= q);
+    if (idx >= 0) jumpToFrame(idx);
+  });
 
-              loadEl.remove();
-            })
-            .catch(function (err) {
-              loadEl.textContent = 'Error: ' + err.message;
-              console.error(err);
-            });
-        }
+  document.getElementById('btnJumpSignal').onclick = () => {
+    const sigs = state.signals[state.currentGameId] || [];
+    const curT = timestampToUTC(state.snapshots[state.currentGameId]?.[state.currentFrame]?.timestamp);
+    const next = sigs.find(s => timestampToUTC(s.timestamp) > curT);
+    if (next) jumpToTime(timestampToUTC(next.timestamp));
+  };
 
-        if (gameIdParam) {
-          loadGame(gameIdParam);
+  document.getElementById('btnJumpEvent').onclick = () => {
+    const evts = state.events[state.currentGameId] || [];
+    const curT = timestampToUTC(state.snapshots[state.currentGameId]?.[state.currentFrame]?.timestamp);
+    const next = evts.find(e => timestampToUTC(e.timestamp) > curT);
+    if (next) jumpToTime(timestampToUTC(next.timestamp));
+  };
+
+  // Load compare game list
+  (async () => {
+    try {
+      const data = await api('/games?limit=100');
+      const sel = document.getElementById('compareGameSelect');
+      for (const g of data.games || []) {
+        const opt = document.createElement('option');
+        opt.value = g.game_id;
+        opt.textContent = `${g.home_team} vs ${g.away_team}`;
+        sel.appendChild(opt);
+      }
+    } catch {}
+  })();
+
+  document.getElementById('compareGameSelect').addEventListener('change', async e => {
+    const gid = e.target.value;
+    if (!gid || gid === state.currentGameId) return;
+    if (!state.compareGameIds.includes(gid)) {
+      state.compareGameIds.push(gid);
+      await loadCompareGame(gid);
+    }
+    if (state.currentGameId) renderGame(state.currentGameId);
+    e.target.value = '';
+  });
+
+  document.getElementById('btnClearCompare').onclick = () => {
+    state.compareGameIds = [];
+    if (state.currentGameId) renderGame(state.currentGameId);
+  };
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+    if (e.key === 'ArrowRight') jumpToFrame(state.currentFrame + 1);
+    if (e.key === 'ArrowLeft') jumpToFrame(state.currentFrame - 1);
+  });
+
+  // Drag-to-reorder (simple click-drag panels)
+  let dragTarget = null, dragClone = null;
+  document.addEventListener('mousedown', e => {
+    const header = e.target.closest('.chart-header');
+    if (!header || e.target.closest('.actions')) return;
+    const panel = header.closest('.chart-panel');
+    if (!panel) return;
+    dragTarget = panel;
+    dragClone = panel.cloneNode(true);
+    dragClone.style.position = 'fixed';
+    dragClone.style.pointerEvents = 'none';
+    dragClone.style.opacity = '0.5';
+    dragClone.style.width = panel.offsetWidth + 'px';
+    dragClone.style.zIndex = '9999';
+    dragClone.style.transform = 'rotate(1deg)';
+    document.body.appendChild(dragClone);
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragClone) return;
+    dragClone.style.left = e.clientX - 20 + 'px';
+    dragClone.style.top = e.clientY - 20 + 'px';
+    // Highlight drop zone
+    document.querySelectorAll('.chart-panel').forEach(p => p.style.borderColor = 'var(--border-subtle)');
+    const target = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.chart-panel');
+    if (target && target !== dragTarget) target.style.borderColor = '#00d4ff';
+  });
+  document.addEventListener('mouseup', e => {
+    if (dragClone) { dragClone.remove(); dragClone = null; }
+    if (!dragTarget) return;
+    const target = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.chart-panel');
+    if (target && target !== dragTarget) {
+      const area = document.getElementById('chartArea');
+      const parent = target.parentNode;
+      const children = Array.from(area.children);
+      const fromIdx = children.indexOf(dragTarget);
+      const toIdx = children.indexOf(target);
+      if (fromIdx >= 0 && toIdx >= 0) {
+        if (fromIdx < toIdx) {
+          target.after(dragTarget);
         } else {
-          loadGamesList()
-            .then(function (data) {
-              var games = data.games || [];
-              var ended = games.filter(function (g) { return g.status === 'ended'; });
-              if (ended.length) {
-                loadGame(ended[0].game_id);
-              } else if (games.length) {
-                loadGame(games[0].game_id);
-              } else {
-                dom.replayHomeScore.textContent = 'No games';
-                dom.replayAwayScore.textContent = 'available';
-              }
-            })
-            .catch(function (err) {
-              console.error('Failed to load games list:', err);
-              dom.replayHomeScore.textContent = 'Failed to load';
-              dom.replayAwayScore.textContent = 'game data';
-            });
+          target.before(dragTarget);
         }
-
-        // ── Bind Controls ──────────────────────────────────────
-
-        dom.btnPlayPause.addEventListener('click', togglePlay);
-        dom.btnStepFwd.addEventListener('click', stepForward);
-        dom.btnStepBack.addEventListener('click', stepBackward);
-
-        dom.btnFwd2.addEventListener('click', function () { setSpeed(2); });
-        dom.btnFwd4.addEventListener('click', function () { setSpeed(4); });
-        dom.btnFwd8.addEventListener('click', function () { setSpeed(8); });
-        dom.btnRewind2.addEventListener('click', function () { setSpeed(2); });
-        dom.btnRewind4.addEventListener('click', function () { setSpeed(4); });
-        dom.btnRewind8.addEventListener('click', function () { setSpeed(8); });
-
-        dom.btnQ1.addEventListener('click', function () { jumpToQuarter(1); });
-        dom.btnQ2.addEventListener('click', function () { jumpToQuarter(2); });
-        dom.btnQ3.addEventListener('click', function () { jumpToQuarter(3); });
-        dom.btnQ4.addEventListener('click', function () { jumpToQuarter(4); });
-        dom.btnOT.addEventListener('click', function () { jumpToQuarter(5); });
-
-        // Keyboard shortcuts
-        document.addEventListener('keydown', function (e) {
-          if (e.key === ' ' || e.key === 'Space') {
-            e.preventDefault();
-            togglePlay();
-          } else if (e.key === 'ArrowRight') {
-            e.preventDefault();
-            stepForward();
-          } else if (e.key === 'ArrowLeft') {
-            e.preventDefault();
-            stepBackward();
-          } else if (e.key === 'Home') {
-            e.preventDefault();
-            if (isPlaying) pausePlayback();
-            displayFrame(0);
-          } else if (e.key === 'End') {
-            e.preventDefault();
-            if (isPlaying) pausePlayback();
-            displayFrame(allFrames.length - 1);
-          }
-        });
+        // Update panel order
+        const newOrder = Array.from(area.children).map(c => c.dataset.panelId).filter(Boolean);
+        state.panelOrder = newOrder;
       }
-
-      // ── Start ──────────────────────────────────────────────────
-
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-      } else {
-        init();
-      }
-
-    })();
-  </script>
+    }
+    document.querySelectorAll('.chart-panel').forEach(p => p.style.borderColor = 'var(--border-subtle)');
+    dragTarget = null;
+  });
+});
+</script>
 </body>
 </html>
