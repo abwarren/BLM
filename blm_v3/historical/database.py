@@ -717,19 +717,28 @@ class HistoricalDatabase:
                 params.append(filters["league"])
             if "result" in filters:
                 r = filters["result"].lower()
+                # Compare final_total against the first snapshot's total_line
+                # using a subquery to get the opening line
                 if r == "over":
-                    clauses.append("g.final_total > g.starting_total_line")
-                    # Note: starting_total_line would need a games table column
+                    clauses.append("""(g.final_home + g.final_away) > (
+                        SELECT s2.total_line FROM snapshots s2
+                        WHERE s2.game_id = g.id
+                        ORDER BY s2.timestamp ASC LIMIT 1
+                    )""")
                 elif r == "under":
-                    clauses.append("g.final_total < g.starting_total_line")
+                    clauses.append("""(g.final_home + g.final_away) < (
+                        SELECT s2.total_line FROM snapshots s2
+                        WHERE s2.game_id = g.id
+                        ORDER BY s2.timestamp ASC LIMIT 1
+                    )""")
 
             where = " AND ".join(clauses)
             sql = f"""
                 SELECT DISTINCT g.id, g.home_team, g.away_team, g.status,
                        g.final_home, g.final_away, g.final_total, g.final_margin,
                        g.total_snapshots, g.start_time,
-                       (SELECT AVG(s2.trap_meter) FROM snapshots s2
-                        WHERE s2.game_id = g.id AND s2.trap_meter IS NOT NULL) AS avg_trap_meter
+                       (SELECT AVG(s3.trap_meter) FROM snapshots s3
+                        WHERE s3.game_id = g.id AND s3.trap_meter IS NOT NULL) AS avg_trap_meter
                 FROM games g, snapshots s
                 WHERE {where}
                 ORDER BY g.start_time DESC

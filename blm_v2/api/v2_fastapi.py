@@ -685,6 +685,18 @@ def create_v2_app() -> FastAPI:
     from blm_v2.dashboard.server import create_dashboard_app
     app.mount("/dashboard", create_dashboard_app())
 
+    # ── Mount historical research API ──────────────────────────
+    try:
+        from blm_v3.api.historical_routes import create_historical_router
+        from blm_v3.api.export_routes import create_export_router
+        historical_router = create_historical_router()
+        export_router = create_export_router()
+        app.include_router(historical_router, prefix="/api/v2/historical")
+        app.include_router(export_router, prefix="/api/v2/historical/export")
+        logger.info("Historical research API mounted at /api/v2/historical")
+    except ImportError as e:
+        logger.warning("Historical research API not available: %s", e)
+
     # ── Startup / shutdown events ───────────────────────────────
     @app.on_event("startup")
     async def on_startup():
