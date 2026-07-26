@@ -147,7 +147,7 @@ def create_export_router(
         ),
         label: str = Query(
             ML_DEFAULT_LABEL,
-            description="Target label column",
+            description="Target label column: final_total, final_result, over_under, clv, or trap_success",
         ),
         limit: int = Query(100000, ge=1, le=1000000),
     ):
@@ -155,30 +155,63 @@ def create_export_router(
 
         Every historical snapshot becomes one training row.
         Features and label are configurable.
+
+        Label options:
+          - ``final_total`` (default): raw final total score
+          - ``final_result``: 1 if over the opening line, 0 if under
+          - ``over_under``: 'over' or 'under' string label
+          - ``clv``: Closing Line Value (line movement from open to close)
+          - ``trap_success``: 1 if trap conditions were profitable, 0 if not
+
+        Uses the ML pipeline to compute game-level labels from snapshot data.
         """
         ids = [g.strip() for g in game_ids.split(",") if g.strip()]
         if not ids:
             raise HTTPException(400, "At least one game_id required")
 
         feature_list = [f.strip() for f in features.split(",") if f.strip()]
-        columns = list(dict.fromkeys(feature_list + [label]))  # dedupe, label last
+        columns = list(dict.fromkeys(feature_list + [label]))
 
-        all_snapshots: list[dict[str, Any]] = []
-        for gid in ids:
-            snaps = await historical_db.query_snapshots(
-                game_id=gid, limit=limit // max(len(ids), 1),
-            )
-            all_snapshots.extend(snaps)
+        # Use MlPipeline for advanced labels
+        from blm_v3.engine.ml_pipeline import MlPipeline
+        pipeline = MlPipeline(historical_db)
 
-        if not all_snapshots:
-            raise HTTPException(404, "No snapshots found")
+        if label in ('final_result', 'over_under', 'clv', 'trap_success'):
+            rows: list[dict] = []
+            rows_per_game = max(1, limit // max(len(ids), 1))
+            for gid in ids:
+                game_labels = await pipeline.compute_labels(gid)
+                snapshots = await historical_db.query_snapshots(
+                    game_id=gid, limit=rows_per_game,
+                )
+                if not snapshots:
+                    continue
+                for snap in snapshots:
+                    row = {f: snap.get(f) for f in feature_list if snap.get(f) is not None}
+                    row[label] = game_labels.get(label)
+                    row['game_id'] = gid
+                    row['timestamp'] = snap.get('timestamp', '')
+                    if len(row) > 2:
+                        rows.append(row)
+        else:
+            rows = []
+            for gid in ids:
+                snaps = await historical_db.query_snapshots(
+                    game_id=gid, limit=limit // max(len(ids), 1),
+                )
+                rows.extend(snaps)
+            if not rows:
+                raise HTTPException(404, "No snapshots found")
+            rows = [
+                {f: s.get(f) for f in columns if s.get(f) is not None}
+                for s in rows
+            ]
 
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
-        for snap in all_snapshots:
-            writer.writerow(snap)
-
+        for row in rows:
+            writer.writerow(row)
         csv_content = output.getvalue()
         return StreamingResponse(
             iter([csv_content]),
