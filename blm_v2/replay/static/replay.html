@@ -15,13 +15,31 @@
       grid-template-areas:
         "timeline   timeline"
         "controls   controls"
-        "score      chart";
-      grid-template-columns: 280px 1fr;
+        "signals    chart";
+      grid-template-columns: 300px 1fr;
       grid-template-rows: auto auto 1fr;
       height: 100vh;
       width: 100vw;
       overflow: hidden;
       background: var(--bg-deepest);
+    }
+
+    .replay-layout {
+      --bg-deepest: #050812;
+      --bg-default: #0b1020;
+      --bg-elevated: #111827;
+      --bg-card: #0f1628;
+      --bg-card-hover: #1a2235;
+      --bg-input: #1a2235;
+      --border-default: #1e2745;
+      --border-subtle: #161f35;
+      --border-accent: #2a3560;
+      --text-primary: #e2e8f0;
+      --text-secondary: #8892b0;
+      --text-muted: #4a5570;
+      --brand-primary: #00d4ff;
+      --brand-secondary: #7c3aed;
+      --transition-fast: all 0.15s ease;
     }
 
     /* Timeline */
@@ -72,9 +90,7 @@
       cursor: grab;
     }
 
-    .timeline-thumb:active {
-      cursor: grabbing;
-    }
+    .timeline-thumb:active { cursor: grabbing; }
 
     .quarter-markers {
       position: absolute;
@@ -150,13 +166,8 @@
       color: var(--brand-primary);
     }
 
-    .control-btn.primary:hover {
-      background: rgba(0, 212, 255, 0.2);
-    }
-
-    .control-btn:active {
-      transform: scale(0.96);
-    }
+    .control-btn.primary:hover { background: rgba(0, 212, 255, 0.2); }
+    .control-btn:active { transform: scale(0.96); }
 
     .control-divider {
       width: 1px;
@@ -182,43 +193,199 @@
       margin-left: 12px;
     }
 
-    /* Score panel (replay variant) */
-    .replay-score-panel {
-      grid-area: score;
-      padding: 12px;
+    /* ═══ Signals Panel (replaces old score panel) ═══ */
+    .signals-panel {
+      grid-area: signals;
+      padding: 8px;
       background: var(--bg-default);
       border-right: 1px solid var(--border-default);
       overflow-y: auto;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 6px;
     }
 
-    .replay-score-panel .panel-card {
+    /* Score card at top of signals panel */
+    .panel-card {
       background: var(--bg-card);
       border: 1px solid var(--border-subtle);
       border-radius: 8px;
-      padding: 12px 14px;
+      padding: 10px 12px;
     }
 
-    .replay-score-panel .panel-label {
-      font-size: 0.72rem;
+    .panel-label {
+      font-size: 0.68rem;
       text-transform: uppercase;
-      letter-spacing: 0.8px;
+      letter-spacing: 0.7px;
       color: var(--text-muted);
-      margin-bottom: 4px;
+      margin-bottom: 3px;
       font-weight: 600;
     }
 
-    .replay-score-panel .panel-value {
-      font-size: 1.5rem;
+    .panel-value {
+      font-size: 1.3rem;
       font-weight: 700;
     }
 
-    /* Chart panel (replay) */
+    .score-display {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .score-display .home { color: var(--brand-primary); }
+    .score-display .away { color: #f97316; }
+    .score-display .vs { color: var(--text-muted); font-size: 0.9rem; }
+    .score-margin {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+
+    /* Gauge for trap meter */
+    .gauge {
+      height: 6px;
+      background: var(--bg-input);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .gauge-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.2s ease;
+    }
+    .gauge.gauge-low .gauge-fill { background: var(--brand-primary); }
+    .gauge.gauge-mid .gauge-fill { background: #f59e0b; }
+    .gauge.gauge-high .gauge-fill { background: #ef4444; }
+    .gauge-number { font-size: 0.95rem; font-weight: 700; }
+
+    /* Signal legend */
+    .signal-legend { }
+    .signal-legend-title {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .signal-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
+    .signal-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      background: var(--bg-elevated);
+      border-left: 3px solid transparent;
+      transition: background 0.15s ease, opacity 0.3s ease;
+    }
+
+    .signal-item.active {
+      background: var(--bg-card-hover);
+    }
+
+    .signal-item.inactive {
+      opacity: 0.35;
+    }
+
+    .signal-icon {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .signal-icon.signal-trap { background: #ef4444; }
+    .signal-icon.signal-bull { background: #f97316; }
+    .signal-icon.signal-bear { background: #ec4899; }
+    .signal-icon.signal-dead-market { background: #6b7280; }
+    .signal-icon.signal-momentum { background: #22c55e; }
+    .signal-icon.signal-confidence { background: #3b82f6; }
+    .signal-icon.signal-correction { background: #7c3aed; }
+    .signal-icon.signal-sharp { background: #f59e0b; }
+    .signal-icon.signal-three { background: #06b6d4; }
+
+    .signal-name {
+      flex: 1;
+      color: var(--text-secondary);
+    }
+
+    .signal-value {
+      font-weight: 600;
+      font-size: 0.7rem;
+      min-width: 32px;
+      text-align: right;
+    }
+
+    .signal-value.val-trap { color: #ef4444; }
+    .signal-value.val-bull { color: #f97316; }
+    .signal-value.val-bear { color: #ec4899; }
+    .signal-value.val-dead { color: #6b7280; }
+    .signal-value.val-momentum { color: #22c55e; }
+    .signal-value.val-confidence { color: #3b82f6; }
+    .signal-value.val-correction { color: #7c3aed; }
+    .signal-value.val-sharp { color: #f59e0b; }
+
+    /* Active signals count badge */
+    .signal-count-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+    }
+    .signal-count-badge .count {
+      background: rgba(239, 68, 68, 0.15);
+      color: #ef4444;
+      padding: 0 6px;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 0.7rem;
+    }
+
+    /* Progress bar */
+    .progress-bar {
+      width: 100%;
+      height: 3px;
+      background: var(--bg-input);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--brand-primary);
+      border-radius: 2px;
+      transition: width 0.1s linear;
+    }
+
+    /* Speed button active state */
+    .control-btn.speed-active {
+      background: rgba(0, 212, 255, 0.15);
+      border-color: var(--brand-primary);
+      color: var(--brand-primary);
+    }
+    .control-btn.q-active {
+      background: rgba(124, 58, 237, 0.15);
+      border-color: var(--brand-secondary);
+      color: var(--brand-secondary);
+    }
+
+    /* Chart panel */
     .replay-chart-panel {
       grid-area: chart;
-      padding: 12px;
+      padding: 8px;
       display: flex;
       flex-direction: column;
     }
@@ -228,7 +395,7 @@
       background: var(--bg-elevated);
       border: 1px solid var(--border-default);
       border-radius: 8px;
-      padding: 12px;
+      padding: 8px;
       position: relative;
     }
 
@@ -249,35 +416,27 @@
       transition: left 0.1s linear;
     }
 
-    /* Progress bar */
-    .progress-bar {
-      width: 100%;
-      height: 3px;
-      background: var(--bg-input);
-      border-radius: 2px;
-      overflow: hidden;
-      margin-top: 8px;
+    /* Signal tooltip overlay */
+    .signal-tooltip {
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(13, 17, 28, 0.95);
+      border: 1px solid var(--border-default);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+      z-index: 20;
     }
 
-    .progress-fill {
-      height: 100%;
-      background: var(--brand-primary);
-      border-radius: 2px;
-      transition: width 0.1s linear;
-    }
-
-    /* Speed button active state */
-    .control-btn.speed-active {
-      background: rgba(0, 212, 255, 0.15);
-      border-color: var(--brand-primary);
-      color: var(--brand-primary);
-    }
-
-    /* Quarter jump active */
-    .control-btn.q-active {
-      background: rgba(124, 58, 237, 0.15);
-      border-color: var(--brand-secondary);
-      color: var(--brand-secondary);
+    .signal-dot:hover .signal-tooltip {
+      opacity: 1;
     }
   </style>
 </head>
@@ -320,44 +479,55 @@
       <span class="frame-counter" id="frameCounterLabel">Frame 0 / 0</span>
     </div>
 
-    <!-- ═══ SCORE PANEL ═══ -->
-    <aside class="replay-score-panel" id="scorePanel">
+    <!-- ═══ SIGNALS PANEL (left sidebar) ═══ -->
+    <aside class="signals-panel" id="signalsPanel">
+      <!-- Score card -->
       <div class="panel-card">
         <div class="panel-label">Current Score</div>
-        <div class="panel-value" id="replayScore" style="font-size:1.1rem;">-- vs --</div>
-        <div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;">
-          <span id="replayScoreDetail">0 - 0</span>
+        <div class="score-display">
+          <span class="home" id="replayHomeScore">0</span>
+          <span class="vs">vs</span>
+          <span class="away" id="replayAwayScore">0</span>
+        </div>
+        <div class="score-margin" id="replayScoreDetail">Margin: 0</div>
+      </div>
+
+      <!-- BLM card -->
+      <div class="panel-card">
+        <div class="panel-label">BLM Assessment</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span class="panel-value" id="replayBlmScore" style="font-size:1.1rem;">--</span>
+          <span style="font-size:0.72rem;color:var(--text-muted);" id="replayConfidence">--% conf</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text-secondary);margin-top:4px;">
+          <span>Win: <strong id="replayWinProb">--</strong></span>
+          <span>Total: <strong id="replayExpectedTotal">--</strong></span>
+          <span>Margin: <strong id="replayExpectedMargin">--</strong></span>
         </div>
       </div>
-      <div class="panel-card">
-        <div class="panel-label">BLM Score</div>
-        <div class="panel-value" id="replayBlmScore">--</div>
-      </div>
+
+      <!-- Trap meter card -->
       <div class="panel-card">
         <div class="panel-label">Trap Meter</div>
-        <div class="gauge-value">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
           <span class="gauge-number" id="replayTrapMeter">0%</span>
+          <span style="font-size:0.68rem;color:var(--text-muted);">
+            <span id="signalCountBadge" class="signal-count-badge">
+              Signals: <span class="count" id="activeSignalCount">0</span>
+            </span>
+          </span>
         </div>
         <div class="gauge gauge-low" id="replayTrapGauge">
           <div class="gauge-fill" id="replayTrapFill" style="width:0%"></div>
         </div>
       </div>
-      <div class="panel-card">
-        <div class="panel-label">Confidence</div>
-        <div class="panel-value" id="replayConfidence">--%</div>
+
+      <!-- Visual Signal Legend -->
+      <div class="panel-card signal-legend">
+        <div class="signal-legend-title">Visual Signals <span style="font-weight:400;color:var(--text-muted);font-size:0.65rem;">(in-play indicators)</span></div>
+        <div class="signal-list" id="signalList"></div>
       </div>
-      <div class="panel-card">
-        <div class="panel-label">Win Probability</div>
-        <div class="panel-value" id="replayWinProb">--%</div>
-      </div>
-      <div class="panel-card">
-        <div class="panel-label">Expected Total</div>
-        <div class="panel-value" id="replayExpectedTotal">--</div>
-      </div>
-      <div class="panel-card">
-        <div class="panel-label">Expected Margin</div>
-        <div class="panel-value" id="replayExpectedMargin">--</div>
-      </div>
+
       <div class="progress-bar">
         <div class="progress-fill" id="replayProgress" style="width:0%"></div>
       </div>
@@ -378,6 +548,21 @@
     (function () {
       'use strict';
 
+      // ═══════════════════════════════════════════════════════════════
+      // SIGNAL CONFIGURATION
+      // ═══════════════════════════════════════════════════════════════
+
+      const SIGNAL_DEFS = [
+        { id: 'trap_meter',      label: 'Trap Meter ≥70%',      icon: 'signal-trap',      valueClass: 'val-trap',      threshold: 0.70, fieldPath: 'trap_detection.trap_meter' },
+        { id: 'bull_trap',       label: 'Bull Trap',            icon: 'signal-bull',      valueClass: 'val-bull',      threshold: 0.50, fieldPath: 'trap_detection.bull_trap' },
+        { id: 'bear_trap',       label: 'Bear Trap',            icon: 'signal-bear',      valueClass: 'val-bear',      threshold: 0.50, fieldPath: 'trap_detection.bear_trap' },
+        { id: 'dead_market',     label: 'Dead Market',          icon: 'signal-dead-market', valueClass: 'val-dead',    threshold: 0.50, fieldPath: 'trap_detection.dead_market' },
+        { id: 'sharp_trap',      label: 'Sharp Money',          icon: 'signal-sharp',     valueClass: 'val-sharp',     threshold: 0.50, fieldPath: 'trap_detection.sharp_trap' },
+        { id: 'momentum_swing',  label: 'Momentum Shift',       icon: 'signal-momentum',  valueClass: 'val-momentum',  threshold: null,  deriveFn: 'momentumSwing' },
+        { id: 'confidence_drop', label: 'Confidence Drop',      icon: 'signal-confidence', valueClass: 'val-confidence', threshold: null, deriveFn: 'confidenceDrop' },
+        { id: 'model_correction',label: 'Model Correction',     icon: 'signal-correction',valueClass: 'val-correction', threshold: null, deriveFn: 'modelCorrection' },
+      ];
+
       // ── State ──────────────────────────────────────────────────
 
       const API_BASE = '/api/v2';
@@ -389,10 +574,11 @@
       let currentSpeed = 1;
       let playTimer = null;
       let replayChart = null;
-      let chartAnnotations = {};
 
-      // Quarter boundary frame indices
-      let quarterBoundaries = [];
+      // Pre-computed signals across all frames
+      let signalMap = {};
+      let frameSignalCache = [];
+      let activeSignalsAtFrame = [];
 
       // DOM refs
       const $ = function (id) { return document.getElementById(id); };
@@ -408,8 +594,8 @@
         speedIndicator: $('speedIndicator'),
         replayProgress: $('replayProgress'),
 
-        // Score panel
-        replayScore: $('replayScore'),
+        replayHomeScore: $('replayHomeScore'),
+        replayAwayScore: $('replayAwayScore'),
         replayScoreDetail: $('replayScoreDetail'),
         replayBlmScore: $('replayBlmScore'),
         replayTrapMeter: $('replayTrapMeter'),
@@ -419,8 +605,9 @@
         replayWinProb: $('replayWinProb'),
         replayExpectedTotal: $('replayExpectedTotal'),
         replayExpectedMargin: $('replayExpectedMargin'),
+        signalList: $('signalList'),
+        activeSignalCount: $('activeSignalCount'),
 
-        // Controls
         btnPlayPause: $('btnPlayPause'),
         btnStepBack: $('btnStepBack'),
         btnStepFwd: $('btnStepFwd'),
@@ -459,6 +646,87 @@
         return Number(val).toFixed(digits);
       }
 
+      function computeGameMinutes(frame) {
+        var q = safeGet(frame, 'metadata.quarter', 1);
+        var clock = safeGet(frame, 'metadata.clock', '12:00');
+        var gm = (q - 1) * 12;
+        if (clock && clock !== '--') {
+          var parts = clock.split(':');
+          var mins = parseInt(parts[0], 10);
+          var secs = parseInt(parts[1], 10);
+          gm += (12 - mins - 1) + (60 - secs) / 60;
+        }
+        return gm;
+      }
+
+      // ── Signal Detection Engine ──────────────────────────────
+
+      function detectSignals(frames) {
+        signalMap = {};
+        frameSignalCache = [];
+
+        if (!frames || frames.length < 2) return;
+
+        for (var i = 0; i < frames.length; i++) {
+          var frame = frames[i];
+          var signals = [];
+
+          // 1. Trap-based signals (threshold check)
+          var trapMeter = safeGet(frame, 'trap_detection.trap_meter', 0);
+          if (trapMeter >= 0.70) signals.push({ id: 'trap_meter', value: trapMeter, severity: trapMeter >= 0.85 ? 'high' : 'mid' });
+
+          var bullTrap = safeGet(frame, 'trap_detection.bull_trap', 0);
+          if (bullTrap >= 0.50) signals.push({ id: 'bull_trap', value: bullTrap, severity: bullTrap >= 0.7 ? 'high' : 'mid' });
+
+          var bearTrap = safeGet(frame, 'trap_detection.bear_trap', 0);
+          if (bearTrap >= 0.50) signals.push({ id: 'bear_trap', value: bearTrap, severity: bearTrap >= 0.7 ? 'high' : 'mid' });
+
+          var deadMarket = safeGet(frame, 'trap_detection.dead_market', 0);
+          if (deadMarket >= 0.50) signals.push({ id: 'dead_market', value: deadMarket, severity: deadMarket >= 0.7 ? 'high' : 'mid' });
+
+          var sharpTrap = safeGet(frame, 'trap_detection.sharp_trap', 0);
+          if (sharpTrap >= 0.50) signals.push({ id: 'sharp_trap', value: sharpTrap, severity: sharpTrap >= 0.7 ? 'high' : 'mid' });
+
+          var lateTrap = safeGet(frame, 'trap_detection.late_trap', 0);
+          if (lateTrap >= 0.50) signals.push({ id: 'late_trap', value: lateTrap, severity: lateTrap >= 0.7 ? 'high' : 'mid' });
+
+          // 2. Momentum swing (velocity change between frames)
+          if (i > 0) {
+            var prevMom = safeGet(frames[i-1], 'momentum.momentum_velocity', 0);
+            var currMom = safeGet(frame, 'momentum.momentum_velocity', 0);
+            var swingMag = Math.abs(currMom - prevMom);
+            if (swingMag > 1.5) {
+              signals.push({ id: 'momentum_swing', value: swingMag, severity: swingMag > 3.0 ? 'high' : 'mid' });
+            }
+          }
+
+          // 3. Confidence drop
+          if (i > 0) {
+            var prevConf = safeGet(frames[i-1], 'blm.confidence', 0.5);
+            var currConf = safeGet(frame, 'blm.confidence', 0.5);
+            var confDrop = prevConf - currConf;
+            if (confDrop > 0.15) {
+              signals.push({ id: 'confidence_drop', value: confDrop, severity: confDrop > 0.3 ? 'high' : 'mid' });
+            }
+          }
+
+          // 4. Model correction (large swing in expected_margin between frames)
+          if (i > 0) {
+            var prevMargin = safeGet(frames[i-1], 'blm.expected_margin', null);
+            var currMargin = safeGet(frame, 'blm.expected_margin', null);
+            if (prevMargin !== null && currMargin !== null) {
+              var marginShift = Math.abs(currMargin - prevMargin);
+              if (marginShift > 3.0) {
+                signals.push({ id: 'model_correction', value: marginShift, severity: marginShift > 6.0 ? 'high' : 'mid' });
+              }
+            }
+          }
+
+          signalMap[i] = signals;
+          frameSignalCache.push(signals);
+        }
+      }
+
       // ── API Calls ─────────────────────────────────────────────
 
       function loadGameReplay(gameIdParam) {
@@ -485,13 +753,77 @@
           });
       }
 
+      // ── Signal Legend Rendering ──────────────────────────────
+
+      function buildSignalLegend() {
+        dom.signalList.innerHTML = '';
+        SIGNAL_DEFS.forEach(function (def) {
+          var item = document.createElement('div');
+          item.className = 'signal-item inactive';
+          item.id = 'sig-' + def.id;
+
+          var icon = document.createElement('span');
+          icon.className = 'signal-icon ' + def.icon;
+
+          var name = document.createElement('span');
+          name.className = 'signal-name';
+          name.textContent = def.label;
+
+          var value = document.createElement('span');
+          value.className = 'signal-value ' + def.valueClass;
+          value.id = 'sig-val-' + def.id;
+          value.textContent = '--';
+
+          item.appendChild(icon);
+          item.appendChild(name);
+          item.appendChild(value);
+          dom.signalList.appendChild(item);
+        });
+      }
+
+      function updateSignalLegend(frameIndex) {
+        var signals = frameSignalCache[frameIndex] || [];
+        var activeCount = 0;
+
+        // Reset all to inactive
+        SIGNAL_DEFS.forEach(function (def) {
+          var el = document.getElementById('sig-' + def.id);
+          if (el) {
+            el.className = 'signal-item inactive';
+          }
+          var valEl = document.getElementById('sig-val-' + def.id);
+          if (valEl) valEl.textContent = '--';
+        });
+
+        // Activate current signals
+        signals.forEach(function (sig) {
+          var el = document.getElementById('sig-' + sig.id);
+          if (el) {
+            el.className = 'signal-item active';
+            if (sig.severity === 'high') {
+              el.style.borderLeftColor = '#ef4444';
+            } else {
+              el.style.borderLeftColor = '#f59e0b';
+            }
+          }
+          var valEl = document.getElementById('sig-val-' + sig.id);
+          if (valEl) {
+            valEl.textContent = (sig.value * 100).toFixed(0) + '%';
+          }
+          activeCount++;
+        });
+
+        dom.activeSignalCount.textContent = activeCount;
+        activeSignalsAtFrame = signals;
+      }
+
       // ── Frame Display ─────────────────────────────────────────
 
       function displayFrame(index) {
         if (!allFrames.length || index < 0 || index >= allFrames.length) return;
 
         currentFrameIndex = index;
-        const data = allFrames[index];
+        var data = allFrames[index];
 
         // Update timeline
         var pct = (index / (allFrames.length - 1)) * 100;
@@ -513,8 +845,9 @@
         var margin = safeGet(data, 'game_state.margin', 0);
 
         // Score panel
-        dom.replayScore.textContent = homeTeam + ' vs ' + awayTeam;
-        dom.replayScoreDetail.textContent = homeScore + ' - ' + awayScore + ' (Margin: ' + (margin > 0 ? '+' : '') + margin + ')';
+        dom.replayHomeScore.textContent = homeScore;
+        dom.replayAwayScore.textContent = awayScore;
+        dom.replayScoreDetail.textContent = 'Margin: ' + (margin > 0 ? '+' : '') + margin + '  |  Q' + quarter + ' ' + clock;
         dom.timelineClock.textContent = 'Q' + quarter + ' ' + clock;
 
         // BLM Score
@@ -547,6 +880,9 @@
         var expMargin = safeGet(data, 'blm.expected_margin', null);
         dom.replayExpectedMargin.textContent = toFixed(expMargin);
 
+        // Update signal legend
+        updateSignalLegend(index);
+
         // Update position marker on chart
         updatePositionMarker();
       }
@@ -572,6 +908,7 @@
               pointHoverRadius: 4,
               borderWidth: 2,
               fill: true,
+              order: 2,
             }, {
               label: 'Trap Meter',
               data: [],
@@ -584,6 +921,17 @@
               borderWidth: 1,
               borderDash: [4, 3],
               yAxisID: 'y1',
+              order: 2,
+            }, {
+              label: '⚡ Signals',
+              data: [],
+              backgroundColor: [],
+              pointBackgroundColor: [],
+              pointRadius: 8,
+              pointHoverRadius: 10,
+              pointStyle: 'triangle',
+              showLine: false,
+              order: 1,
             }],
           },
           options: {
@@ -598,6 +946,7 @@
                 labels: {
                   color: '#8892b0',
                   font: { size: 11 },
+                  usePointStyle: true,
                 },
               },
               tooltip: {
@@ -607,6 +956,14 @@
                 borderColor: '#1e2745',
                 borderWidth: 1,
                 padding: 8,
+                callbacks: {
+                  label: function (ctx) {
+                    if (ctx.datasetIndex === 2 && ctx.raw && ctx.raw.signalInfo) {
+                      return '⚠ ' + ctx.raw.signalInfo;
+                    }
+                    return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1);
+                  }
+                }
               },
               annotation: {
                 annotations: {},
@@ -622,12 +979,13 @@
                 },
                 ticks: { color: '#55607a' },
                 grid: { color: 'rgba(30, 39, 69, 0.5)' },
+                min: 0,
               },
               y: {
                 position: 'left',
                 title: {
                   display: true,
-                  text: 'Score',
+                  text: 'Score / Model Value',
                   color: '#55607a',
                 },
                 ticks: { color: '#55607a' },
@@ -660,30 +1018,51 @@
 
         var blmData = [];
         var trapData = [];
+        var signalData = [];
 
         allFrames.forEach(function (frame, i) {
-          var quarter = safeGet(frame, 'metadata.quarter', 1);
-          var clock = safeGet(frame, 'metadata.clock', '12:00');
-          var gameMinutes = (quarter - 1) * 12;
-          if (clock && clock !== '--') {
-            var parts = clock.split(':');
-            var mins = parseInt(parts[0], 10);
-            var secs = parseInt(parts[1], 10);
-            gameMinutes += (12 - mins - 1) + (60 - secs) / 60;
-          }
-
+          var gameMinutes = computeGameMinutes(frame);
           var blmScore = safeGet(frame, 'blm.blm_score') || safeGet(frame, 'blm.expected_margin') || 0;
           var trapMeter = safeGet(frame, 'trap_detection.trap_meter', 0);
 
           blmData.push({ x: gameMinutes, y: blmScore });
           trapData.push({ x: gameMinutes, y: trapMeter });
+
+          // Add signal markers for high-severity events
+          var signals = signalMap[i] || [];
+          var hasHighSignal = signals.some(function (s) { return s.severity === 'high'; });
+          var hasMidSignal = signals.some(function (s) { return s.severity === 'mid'; });
+
+          if (hasHighSignal || hasMidSignal) {
+            var severityCount = signals.filter(function (s) { return s.severity === 'high'; }).length;
+            var totalCount = signals.length;
+            var signalLabels = signals.map(function (s) { return s.id; }).join(', ');
+
+            var point = {
+              x: gameMinutes,
+              y: blmScore,
+              signalInfo: totalCount + ' signal(s): ' + signalLabels,
+            };
+
+            // Color by worst severity
+            if (severityCount > 0) {
+              point.pointBackgroundColor = '#ef4444'; // red for high
+            } else {
+              point.pointBackgroundColor = '#f59e0b'; // amber for mid
+            }
+
+            signalData.push(point);
+          }
         });
 
         replayChart.data.datasets[0].data = blmData;
         replayChart.data.datasets[1].data = trapData;
+        replayChart.data.datasets[2].data = signalData;
 
-        // Add quarter separator annotations
+        // Build annotations
         var annotations = replayChart.options.plugins.annotation.annotations;
+
+        // Quarter separators
         var qTimes = [0, 12, 24, 36, 48];
         qTimes.forEach(function (qm, i) {
           annotations['q' + (i + 1)] = {
@@ -704,21 +1083,35 @@
           };
         });
 
+        // Trap danger zone (background band for trap_meter > 0.7)
+        annotations['trap_danger'] = {
+          type: 'box',
+          yMin: 0,
+          yMax: 1,
+          xMin: 0,
+          xMax: 48,
+          backgroundColor: 'rgba(239, 68, 68, 0.03)',
+          borderColor: 'rgba(239, 68, 68, 0.08)',
+          borderWidth: 1,
+          borderDash: [3, 3],
+          drawTime: 'beforeDatasetsDraw',
+          label: {
+            display: true,
+            content: 'DANGER ZONE',
+            position: { x: 'start', y: 'end' },
+            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+            color: 'rgba(239, 68, 68, 0.5)',
+            font: { size: 8, weight: 'bold' },
+          },
+        };
+
         replayChart.update();
       }
 
       function updatePositionMarker() {
         if (!allFrames.length || !replayChart) return;
         var frame = allFrames[currentFrameIndex];
-        var quarter = safeGet(frame, 'metadata.quarter', 1);
-        var clock = safeGet(frame, 'metadata.clock', '12:00');
-        var gameMinutes = (quarter - 1) * 12;
-        if (clock && clock !== '--') {
-          var parts = clock.split(':');
-          var mins = parseInt(parts[0], 10);
-          var secs = parseInt(parts[1], 10);
-          gameMinutes += (12 - mins - 1) + (60 - secs) / 60;
-        }
+        var gameMinutes = computeGameMinutes(frame);
 
         var xScale = replayChart.scales.x;
         var xPx = xScale.getPixelForValue(gameMinutes);
@@ -747,12 +1140,8 @@
 
       function togglePlay() {
         if (!allFrames.length) return;
-
-        if (isPlaying) {
-          pausePlayback();
-        } else {
-          startPlayback();
-        }
+        if (isPlaying) { pausePlayback(); }
+        else { startPlayback(); }
       }
 
       function startPlayback() {
@@ -788,8 +1177,6 @@
 
         displayFrame(currentFrameIndex + 1);
 
-        // Frame interval depends on speed
-        // At 1x, advance every ~330ms (roughly 3 fps since snapshots are every 20s)
         var interval = Math.max(30, 330 / currentSpeed);
         playTimer = setTimeout(runPlayLoop, interval);
       }
@@ -808,22 +1195,13 @@
         }
       }
 
-      function setSpeed(speed, direction) {
-        if (direction === 'fwd') {
-          currentSpeed = speed;
-        } else if (direction === 'rewind') {
-          currentSpeed = speed;
-          // For simplicity, rewind goes backward at speed
-        }
+      function setSpeed(speed) {
+        currentSpeed = speed;
         dom.speedIndicator.textContent = currentSpeed.toFixed(1) + 'x';
-
-        // If playing, restart loop
         if (isPlaying) {
           pausePlayback();
           startPlayback();
         }
-
-        // Highlight active speed buttons
         document.querySelectorAll('.control-btn.speed-active').forEach(function (b) {
           b.classList.remove('speed-active');
         });
@@ -831,8 +1209,6 @@
 
       function jumpToQuarter(q) {
         if (isPlaying) pausePlayback();
-
-        // Find first frame at or after this quarter
         for (var i = 0; i < allFrames.length; i++) {
           var frameQ = safeGet(allFrames[i], 'metadata.quarter', 0);
           if (frameQ >= q) {
@@ -840,8 +1216,6 @@
             break;
           }
         }
-
-        // Highlight quarter button
         document.querySelectorAll('.control-btn.q-active').forEach(function (b) {
           b.classList.remove('q-active');
         });
@@ -881,6 +1255,7 @@
 
       function init() {
         buildQuarterMarkers();
+        buildSignalLegend();
         initReplayChart();
         initTimelineScrub();
 
@@ -900,6 +1275,9 @@
               allFrames = data.frames || data.snapshots || [];
               if (!allFrames.length) throw new Error('No frames');
 
+              // Run signal detection
+              detectSignals(allFrames);
+
               document.title = 'Replay: ' + gid;
               displayFrame(0);
               buildChartData();
@@ -915,7 +1293,6 @@
         if (gameIdParam) {
           loadGame(gameIdParam);
         } else {
-          // Find most recent ended game with replay data
           loadGamesList()
             .then(function (data) {
               var games = data.games || [];
@@ -923,15 +1300,16 @@
               if (ended.length) {
                 loadGame(ended[0].game_id);
               } else if (games.length) {
-                // Load any game with snapshots
                 loadGame(games[0].game_id);
               } else {
-                dom.replayScore.textContent = 'No games available';
+                dom.replayHomeScore.textContent = 'No games';
+                dom.replayAwayScore.textContent = 'available';
               }
             })
             .catch(function (err) {
               console.error('Failed to load games list:', err);
-              dom.replayScore.textContent = 'Failed to load game data';
+              dom.replayHomeScore.textContent = 'Failed to load';
+              dom.replayAwayScore.textContent = 'game data';
             });
         }
 
@@ -941,13 +1319,12 @@
         dom.btnStepFwd.addEventListener('click', stepForward);
         dom.btnStepBack.addEventListener('click', stepBackward);
 
-        dom.btnFwd2.addEventListener('click', function () { setSpeed(2, 'fwd'); });
-        dom.btnFwd4.addEventListener('click', function () { setSpeed(4, 'fwd'); });
-        dom.btnFwd8.addEventListener('click', function () { setSpeed(8, 'fwd'); });
-
-        dom.btnRewind2.addEventListener('click', function () { setSpeed(2, 'rewind'); });
-        dom.btnRewind4.addEventListener('click', function () { setSpeed(4, 'rewind'); });
-        dom.btnRewind8.addEventListener('click', function () { setSpeed(8, 'rewind'); });
+        dom.btnFwd2.addEventListener('click', function () { setSpeed(2); });
+        dom.btnFwd4.addEventListener('click', function () { setSpeed(4); });
+        dom.btnFwd8.addEventListener('click', function () { setSpeed(8); });
+        dom.btnRewind2.addEventListener('click', function () { setSpeed(2); });
+        dom.btnRewind4.addEventListener('click', function () { setSpeed(4); });
+        dom.btnRewind8.addEventListener('click', function () { setSpeed(8); });
 
         dom.btnQ1.addEventListener('click', function () { jumpToQuarter(1); });
         dom.btnQ2.addEventListener('click', function () { jumpToQuarter(2); });
