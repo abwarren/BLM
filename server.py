@@ -81,6 +81,10 @@ def main() -> None:
     from blm_v2.api.v2_fastapi import create_v2_app
     app = create_v2_app()
 
+    # ── Mount dashboard sub-app ─────────────────────────────
+    from blm_v2.dashboard.server import create_dashboard_app
+    app.mount("/dashboard", create_dashboard_app())
+
     # ── Wire deps into global state for API endpoints ────────
     from blm_v2.api.dependencies import wire_dependencies
     wire_dependencies(
