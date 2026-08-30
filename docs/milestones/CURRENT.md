@@ -6,20 +6,43 @@ projections + accuracy scorecard + historical market analytics. Live on
 `blm-server:2262` / `blm-collector` (systemd).
 
 ## CURRENT MILESTONE
-M004 — Accuracy-scorecard audit (0 valid / 85 invalid / 100-point mystery).
+M006 — First-class live PokerBet market data (capture frequency + prediction freeze).
 
 ## COMPLETED
 - 79c4c0d: projection live-score floor at source + single-source api.py +
   collector honesty (no explosion-split, identity guard, audit table). 167 tests.
-- db650d7 (DEPLOYED 23:47:40Z): market_history table + trends.py +
-  /api/v4/trends + dashboard section. 173 tests.
-- af3e4c2 (DEPLOYED 23:49:00Z): scorecard REBASE — record_predictions
-  recomputes every checkpoint from immutable snapshots and UPSERTS, so the
-  scorecard always measures v4-pace-1 AS DEFINED TODAY, never a dead build.
-  Cleared legacy pre-floor rows (e.g. 143.2-vs-207). 174 tests.
-- Audit root causes (below) — INVESTIGATION COMPLETE, no gate change needed.
+- db650d7 (DEPLOYED): market_history table + trends.py + /api/v4/trends + dashboard section.
+- af3e4c2 (DEPLOYED): scorecard REBASE — recomputes checkpoints from current model. 174 tests.
+- 7eed84a (DEPLOYED): quality-gate >50pt jump rule wall-clock-gap aware. 175 tests.
+- 7d1bb8e (DEPLOYED): dashboard distinguishes RECORDED/COMPLETED/VALID/EXCLUDED.
+- c598be5 + 5062a37 + 024c571 (DEPLOYED): first-class market data —
+  * collector captures event views with per-game freshness tracking
+    (MARKET_BATCH=1, MARKET_REFRESH_S=480 → every game's line refreshed
+    ~7 min vs ~33 min before; batch>1 broke the SPA, reverted).
+  * predictions FREEZE the market total observed at/before each
+    checkpoint (quarter + fixed 10-90%) — later movement never rewrites.
+  * API exposes total_line_at + total_line_age_s (freshness).
+  * dashboard Mkt Total shows live/stale by age.
+  * event-view failure storm → browser rotation (self-healing).
+  Tests: 177 pass (2 new freeze tests).
 
-## CURRENT STATE — the audit answers
+## CURRENT STATE — market data
+- Root cause of MKT TOTAL = –: market lines captured only on the single
+  round-robin event-view pass (~1 game/tick ≈ 33 min/game with 100 live
+  games).  Games between rotations showed no market.
+- Fix deployed: per-game freshness tracking + API freshness fields +
+  prediction market freeze.  The freeze is PROVEN by tests (190.0 at Q1
+  never rewritten by the later 195.0).
+- LIVE BLOCKER: PokerBet event-view SPA is currently degraded — panel
+  rows parse fine (56 snapshots/5min) but event-view clicks parse to
+  empty teams (''/''), so no new market captures land right now.  The
+  rotation self-heals when the SPA recovers; 984 historical captures
+  prove the capture path works when the SPA is healthy.
+- API verified live: game 30727748 market.total_line=218.5,
+  total_line_at=20:43Z, total_line_age_s=6428 (~107 min stale — the
+  dashboard now honestly shows "stale").
+
+## M004 (previous milestone) — audit answers retained
 
 ### 1. Why 0 valid scored games while Recent Predictions is populated
 The dashboard "Valid scored games" = prediction_scores rows where
