@@ -1170,6 +1170,89 @@ def test_trends_model_vs_market(tmp_path, monkeypatch):
         conn.close()
 
 
+# ═══════════ Market data first-class (live PokerBet lines) ═════════
+
+def test_prediction_freezes_market_at_checkpoint(tmp_path):
+    """A prediction's market_total must be the last observed PokerBet line
+    AT that checkpoint — a later line movement must NEVER rewrite it.
+    Also: market_total is the observed line, never the model's projection."""
+    st = _make_store(tmp_path)
+    gid = "9501"
+    t0 = datetime(2026, 8, 30, 1, 0, tzinfo=timezone.utc)
+    gid_db = _add_game(st, gid, "BETUAL_NBA", "Home Virtual", "Away Virtual", status="ended")
+    # Q1 with line 190.0, Q2 with line 195.0, ... final 96-88 (184)
+    snaps = [
+        (0, 0, 1, "09:00", 190.0), (8, 6, 1, "06:00", None), (16, 12, 1, "03:00", None),
+        (24, 20, 1, "00:00", None), (30, 26, 2, "09:00", 195.0), (40, 34, 2, "06:00", None),
+        (52, 42, 2, "03:00", None), (60, 50, 2, "00:00", None), (66, 58, 3, "09:00", None),
+        (76, 66, 3, "06:00", None), (82, 72, 3, "03:00", None), (86, 78, 3, "00:00", None),
+        (88, 80, 4, "09:00", None), (92, 84, 4, "06:00", None), (96, 88, 4, "00:00", None),
+    ]
+    for i, (hs, as_, q, clock, line) in enumerate(snaps):
+        _snap(st, gid_db, gid, "BETUAL_NBA", t0 + timedelta(minutes=i * 1.2),
+              hs, as_, q, clock, line)
+    sc = Scorecard(tmp_path / "blm.db")
+    sc.run()
+    conn = sc._connect()
+    try:
+        q1 = conn.execute(
+            "SELECT market_total FROM predictions WHERE source_game_id=? AND checkpoint='q1'",
+            (gid,)).fetchone()
+        q2 = conn.execute(
+            "SELECT market_total FROM predictions WHERE source_game_id=? AND checkpoint='q2'",
+            (gid,)).fetchone()
+        assert q1["market_total"] == 190.0   # frozen at Q1 (line 190.0)
+        assert q2["market_total"] == 195.0   # frozen at Q2 (line moved to 195.0)
+        # later line (195.0) must NOT appear in the Q1 prediction
+        assert q1["market_total"] != 195.0
+        # re-run: freeze is stable (idempotent)
+    finally:
+        conn.close()
+    sc.run()
+    conn = sc._connect()
+    try:
+        q1 = conn.execute(
+            "SELECT market_total FROM predictions WHERE source_game_id=? AND checkpoint='q1'",
+            (gid,)).fetchone()
+        assert q1["market_total"] == 190.0
+    finally:
+        conn.close()
+
+
+def test_fixed_checkpoint_freezes_market(tmp_path):
+    """10-90% fixed checkpoints also freeze the market line available at
+    that moment."""
+    st = _make_store(tmp_path)
+    gid = "9502"
+    t0 = datetime(2026, 8, 30, 1, 0, tzinfo=timezone.utc)
+    gid_db = _add_game(st, gid, "BETUAL_NBA", "Home Virtual", "Away Virtual", status="ended")
+    snaps = [
+        (0, 0, 1, "09:00", 190.0), (8, 6, 1, "06:00", None), (16, 12, 1, "03:00", None),
+        (24, 20, 1, "00:00", None), (30, 26, 2, "09:00", 195.0), (40, 34, 2, "06:00", None),
+        (52, 42, 2, "03:00", None), (60, 50, 2, "00:00", None), (66, 58, 3, "09:00", None),
+        (76, 66, 3, "06:00", None), (82, 72, 3, "03:00", None), (86, 78, 3, "00:00", None),
+        (88, 80, 4, "09:00", None), (92, 84, 4, "06:00", None), (96, 88, 4, "00:00", None),
+    ]
+    for i, (hs, as_, q, clock, line) in enumerate(snaps):
+        _snap(st, gid_db, gid, "BETUAL_NBA", t0 + timedelta(minutes=i * 1.2),
+              hs, as_, q, clock, line)
+    sc = Scorecard(tmp_path / "blm.db")
+    sc.run()
+    conn = sc._connect()
+    try:
+        # pct10 should be at Q1 (line 190), pct20-40 at Q2 (line 195)
+        p10 = conn.execute(
+            "SELECT market_total FROM predictions WHERE source_game_id=? AND checkpoint='pct10'",
+            (gid,)).fetchone()
+        p40 = conn.execute(
+            "SELECT market_total FROM predictions WHERE source_game_id=? AND checkpoint='pct40'",
+            (gid,)).fetchone()
+        assert p10["market_total"] == 190.0
+        assert p40["market_total"] == 195.0
+    finally:
+        conn.close()
+
+
 # ═══════════ Fragment classification (short histories never headline) ═
 
 def test_fragments_excluded_from_headline(tmp_path, monkeypatch):

@@ -81,6 +81,14 @@ NAV_TIMEOUT = 45000
 PANEL_WAIT_S = 8.0
 ENDED_GRACE_TICKS = 3
 
+# Market data is first-class live data: capture a batch of event views
+# every tick so every tracked game's PokerBet total is observed at least
+# once per MARKET_REFRESH window (~100 live games → 5 games/tick at a
+# 20s tick ≈ full refresh every ~7 min, vs ~33 min on the old 1-per-tick
+# round-robin).
+MARKET_BATCH = 5
+MARKET_REFRESH_S = 300
+
 # Resilience: the BetConstruct SPA slowly degrades in long-lived sessions
 # (the live-panel tree stops hydrating even though a fresh browser renders
 # it fine).  When parsing keeps coming up empty, rotate the session:
@@ -99,6 +107,15 @@ _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
+
+
+def _ts_age_s(iso_ts: str) -> float:
+    """Seconds since an ISO timestamp (UTC). Returns +inf on parse error."""
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:
+        return float("inf")
 
 
 def competition_url(cls: Classification, comp_ids: dict[str, str]) -> str:
@@ -157,6 +174,7 @@ class PokerBetCollector:
             cls.value: {} for cls in (Classification.CYBER_2K26, Classification.BETUAL_NBA)
         }
         self._market_queue: list[str] = []   # round-robin of source_game_ids
+        self._last_market_at: dict[str, str] = {}  # gid -> last event-view capture ts
         self._instances: dict[str, str] = {}  # base game_id -> current instance id
         self._running = False
         self._browser: Optional[Browser] = None
@@ -981,71 +999,88 @@ class PokerBetCollector:
         #i1..#i7).  The parsed page is only accepted when its scoreboard
         TEAMS match the tracked game; lobby text and foreign events are
         skipped — never stored, never split.
+
+        Market data is FIRST-CLASS: capture a BATCH of games per tick
+        (MARKET_BATCH) so every tracked game's live PokerBet total is
+        observed at least once per MARKET_REFRESH window, not only on the
+        single round-robin pass (~1 game/tick ≈ 33 min/game with 100 live
+        games).  A game captured within the refresh window is skipped to
+        leave room for the next one in the queue.
         """
         if not self._market_queue:
             return
-        gid = self._market_queue.pop(0)
-        self._market_queue.append(gid)
-        game = self._find_tracked(gid)
-        if game is None or not game.source_url:
-            return
-        cls = Classification(game.classification)
-        logger.info("capturing event view for game %s", gid)
-        try:
-            if not self._click_tracked_row(page, game):
-                return
-            text = page.inner_text("body", timeout=10000)
-            parsed = parse_event_view(text)
-            # Identity guard: only THIS game's event view may be stored.
-            if not self._verified_event_view(game, parsed):
-                self._event_view_failures += 1
-                logger.warning(
-                    "event view unverified for %s (parsed teams %r/%r) — "
-                    "skipped (unverified=%d)",
-                    gid, parsed.get("home_team"), parsed.get("away_team"),
-                    self._event_view_failures,
-                )
-                return
-            self._event_view_failures = 0
-            eh, ea = parsed.get("home_score"), parsed.get("away_score")
-            if eh is None or ea is None:
-                return
-            # Virtual replay protection: the event URL now serves a NEW
-            # instance of the same fixture.  Detect the score reset BEFORE
-            # writing and split the instance, so this event-view snapshot
-            # lands in the fresh game's history — never the finished one's.
-            # BUT: a verified FINAL state (4th quarter + sentinel clock) of
-            # the tracked game with a forward score is the game ENDING, not
-            # a new replay — the live list feed lags the true ~7x game by
-            # minutes, so the tracked instance can still show Q1/Q2 while
-            # the event view already shows the final.  End the game there.
-            prev = self.store.get_snapshots(game.source_game_id, limit=1)
-            prev_tot = None
-            if prev:
-                ph, pa = prev[0].get("home_score"), prev[0].get("away_score")
-                if ph is not None and pa is not None:
-                    prev_tot = ph + pa
-            cur = int(eh) + int(ea)
-            if self._is_final_state(parsed) and (
-                    prev_tot is None or cur >= prev_tot):
-                self._capture_event_state(page, cls, game, text, end=True)
-                return
-            sig = self._detect_event_reset(
-                game, int(eh), int(ea),
-                parsed.get("period_label"), parsed.get("clock"))
-            if sig:
-                row = RowGame(home_score=int(eh), away_score=int(ea))
-                game = self._split_instance(
-                    game, row, cls, signal=sig, path="event")
-            # refresh identity from the URL taxonomy (URL changes handled);
-            # keep any virtual-instance suffix (base#iN) — the suffix is
-            # the instance identity, the URL base is just the fixture.
-            tax = parse_event_url(page.url)
-            if tax:
-                base = self._base_id(game.source_game_id)
-                suffix = game.source_game_id[len(base):]
-                if tax["game_id"] != base:
-                    game.source_game_id = tax["game_id"] + suffix
+        now = utcnow_iso()
+        captured = 0
+        # scan up to the whole queue for games due for a market refresh
+        for _ in range(len(self._market_queue)):
+            if captured >= MARKET_BATCH:
+                break
+            gid = self._market_queue.pop(0)
+            self._market_queue.append(gid)
+            last = self._last_market_at.get(gid)
+            if last and _ts_age_s(last) < MARKET_REFRESH_S:
+                continue  # fresh enough — leave room for others
+            game = self._find_tracked(gid)
+            if game is None or not game.source_url:
+                continue
+            cls = Classification(game.classification)
+            logger.info("capturing event view for game %s", gid)
+            try:
+                if not self._click_tracked_row(page, game):
+                    continue
+                text = page.inner_text("body", timeout=10000)
+                parsed = parse_event_view(text)
+                # Identity guard: only THIS game's event view may be stored.
+                if not self._verified_event_view(game, parsed):
+                    self._event_view_failures += 1
+                    logger.warning(
+                        "event view unverified for %s (parsed teams %r/%r) — "
+                        "skipped (unverified=%d)",
+                        gid, parsed.get("home_team"), parsed.get("away_team"),
+                        self._event_view_failures,
+                    )
+                    continue
+                self._event_view_failures = 0
+                eh, ea = parsed.get("home_score"), parsed.get("away_score")
+                if eh is None or ea is None:
+                    continue
+                # Virtual replay protection: the event URL now serves a NEW
+                # instance of the same fixture.  Detect the score reset BEFORE
+                # writing and split the instance, so this event-view snapshot
+                # lands in the fresh game's history — never the finished one's.
+                # BUT: a verified FINAL state (4th quarter + sentinel clock) of
+                # the tracked game with a forward score is the game ENDING, not
+                # a new replay — the live list feed lags the true ~7x game by
+                # minutes, so the tracked instance can still show Q1/Q2 while
+                # the event view already shows the final.  End the game there.
+                prev = self.store.get_snapshots(game.source_game_id, limit=1)
+                prev_tot = None
+                if prev:
+                    ph, pa = prev[0].get("home_score"), prev[0].get("away_score")
+                    if ph is not None and pa is not None:
+                        prev_tot = ph + pa
+                cur = int(eh) + int(ea)
+                if self._is_final_state(parsed) and (
+                        prev_tot is None or cur >= prev_tot):
+                    self._capture_event_state(page, cls, game, text, end=True)
+                    captured += 1
+                    continue
+                sig = self._detect_event_reset(
+                    game, int(eh), int(ea),
+                    parsed.get("period_label"), parsed.get("clock"))
+                if sig:
+                    row = RowGame(home_score=int(eh), away_score=int(ea))
+                    game = self._split_instance(
+                        game, row, cls, signal=sig, path="event")
+                # refresh identity from the URL taxonomy (URL changes handled);
+                # keep any virtual-instance suffix (base#iN) — the suffix is
+                # the instance identity, the URL base is just the fixture.
+                tax = parse_event_url(page.url)
+                if tax:
+                    base = self._base_id(game.source_game_id)
+                    suffix = game.source_game_id[len(base):]
+                    if tax["game_id"] != base:
+                        game.source_game_id = tax["game_id"] + suffix
                     game.competition_id = tax["competition_id"]
                     game.competition_slug = tax["competition_slug"]
                     game.game_slug = tax["game_slug"]
@@ -1055,13 +1090,15 @@ class PokerBetCollector:
                         game.classification = url_cls.value
                         game.game_family = url_cls.game_family.value
                     self.store.upsert_game(game)
-            self._capture_event_state(page, cls, game, text)
-        except Exception:
-            logger.error("market capture failed:\n%s", traceback.format_exc())
-        finally:
-            # return to the discovery page for the next tick
-            self._goto(page, competition_url(cls, self.comp_ids))
-            self._wait_panel(page)
+                self._capture_event_state(page, cls, game, text)
+                captured += 1
+                self._last_market_at[gid] = now
+            except Exception:
+                logger.error("market capture failed:\n%s", traceback.format_exc())
+            finally:
+                # return to the discovery page for the next tick
+                self._goto(page, competition_url(cls, self.comp_ids))
+                self._wait_panel(page)
 
     def _click_tracked_row(self, page: Page, game: PokerBetGame) -> bool:
         """Open ``game``'s event view by clicking its panel row.

@@ -457,6 +457,9 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
         "source_url": game.get("source_url"),
         "market": {
             "total_line": market_total,
+            "total_line_at": (mlatest["captured_at"] if mlatest else None),
+            "total_line_age_s": (
+                _age_s(mlatest["captured_at"], now) if mlatest else None),
             "over_odds": _f(latest["total_over_odds"]) if latest else None,
             "under_odds": _f(latest["total_under_odds"]) if latest else None,
             "spread": spread,

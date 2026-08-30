@@ -367,7 +367,7 @@ function divergenceHTML(g) {
     <div class="divergence">
       <div class="divergence-title">Market vs Model</div>
       <div class="div-row">
-        <div><div class="lab">Mkt Total</div><div class="val">${num(mkt, 1)}</div></div>
+        <div><div class="lab">Mkt Total</div><div class="val">${num(mkt, 1)}${m.total_line_age_s != null ? `<span class="muted" style="font-size:10px"> ${m.total_line_age_s > 300 ? "· stale" : "· live"}</span>` : ""}</div></div>
         <div><div class="lab">Model Total</div><div class="val">${num(mod, 1)}</div></div>
         <div><div class="lab">Edge</div><div class="edge ${edgeCls(tEdge)}">${edgeSym(tEdge)}</div></div>
       </div>

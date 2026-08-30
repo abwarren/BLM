@@ -401,12 +401,17 @@ class Scorecard:
         n = 0
         rb = 0
         seen: set[str] = set()
+        last_line: Optional[float] = None  # frozen market total at/before this snapshot
         for i, r in enumerate(rows):
             cp = _checkpoint_for(r.get("quarter"), r.get("clock"),
                                  r.get("period_label"))
             if cp is None or cp in seen:
                 continue
             seen.add(cp)
+            # FREEZE the market: the last PokerBet-observed total line at or
+            # before this snapshot — never a later line, never model-derived.
+            if r.get("total_line") is not None:
+                last_line = float(r["total_line"])
             proj = project(rows[: i + 1])
             if proj["home_projection"] is None or proj["away_projection"] is None:
                 continue
@@ -444,7 +449,7 @@ class Scorecard:
                     proj["elapsed_minutes"], proj["progress"],
                     proj["home_score"], proj["away_score"], combined,
                     proj["home_projection"], proj["away_projection"],
-                    proj["expected_total"], proj["market_total"],
+                    proj["expected_total"], last_line,
                 ),
             )
             if cur is None:
@@ -512,6 +517,12 @@ class Scorecard:
             if proj["home_projection"] is None or proj["away_projection"] is None:
                 stats["skipped_no_snapshot"] += 1
                 continue
+            # FREEZE the market: last PokerBet-observed line at/before this
+            # checkpoint snapshot — never a later line, never model-derived.
+            line = None
+            for rr in rows[: idx + 1]:
+                if rr.get("total_line") is not None:
+                    line = float(rr["total_line"])
             combined = ((proj["home_score"] or 0) + (proj["away_score"] or 0)
                         if proj["home_score"] is not None else None)
             cur = conn.execute(
@@ -549,7 +560,7 @@ class Scorecard:
                     proj["elapsed_minutes"], proj["progress"],
                     proj["home_score"], proj["away_score"], combined,
                     proj["home_projection"], proj["away_projection"],
-                    proj["expected_total"], proj["market_total"],
+                    proj["expected_total"], line,
                 ),
             )
             n += 1
