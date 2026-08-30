@@ -157,11 +157,13 @@ function renderScorecard(d) {
       <tr><td>Over / Under / Push</td><td class="sc-num">${mc.over ?? 0} / ${mc.under ?? 0} / ${mc.push ?? 0}</td></tr>
     </table>
   </div>`);
-  // data quality
+  // data quality — RECORDED vs COMPLETED vs VALID vs EXCLUDED (never conflated)
   html.push(`<div class="sc-block">
     <h4>DATA QUALITY</h4>
     <table class="sc-table">
-      <tr><td>Valid scored games</td><td class="sc-num">${q.valid ?? "–"}</td></tr>
+      <tr><td>Recorded predictions</td><td class="sc-num">${q.recorded_predictions ?? "–"}</td></tr>
+      <tr><td>Completed games (OK result)</td><td class="sc-num">${q.completed_games ?? "–"}</td></tr>
+      <tr><td>Valid scored games</td><td class="sc-num">${q.valid_scored_games ?? "–"}</td></tr>
       <tr><td>Invalid / excluded</td><td class="sc-num">${q.invalid ?? "–"}</td></tr>
       <tr><td>Excluded games total</td><td class="sc-num">${q.excluded_games ?? "–"}</td></tr>
       <tr><td>Reasons</td><td>${Object.entries(q.excluded_reasons || {}).map(([k, n]) => `${esc(k)}: ${n}`).join(", ") || "–"}</td></tr>
@@ -170,11 +172,11 @@ function renderScorecard(d) {
   // recent predictions
   if (recent.length) {
     html.push(`<div class="sc-block sc-wide">
-      <h4>RECENT PREDICTIONS</h4>
+      <h4>RECENT PREDICTIONS <span style="color:var(--muted);font-weight:400">· fragment rows are diagnostics, excluded from headline</span></h4>
       <table class="sc-table">
         <tr><th>Game</th><th>Check</th><th>Pred</th><th>Actual</th><th>Err</th><th>Time</th></tr>
         ${recent.map((r) => `<tr>
-          <td>${esc(r.home_team || r.source_game_id)} vs ${esc(r.away_team || "")}</td>
+          <td>${esc(r.home_team || r.source_game_id)} vs ${esc(r.away_team || "")}${r.fragment ? ` <span style="color:#e8a13d">FRAGMENT</span>` : ""}</td>
           <td>${r.checkpoint_percent != null ? (r.checkpoint_percent * 100).toFixed(0) + "%" : esc(r.checkpoint || "")}</td>
           <td class="sc-num">${r.model_total ?? "–"}</td>
           <td class="sc-num">${r.actual_total ?? "–"}</td>

@@ -1023,8 +1023,20 @@ def _summary_sql(conn) -> dict[str, Any]:
         ).fetchone()["c"]
         total[ver]["completed_games"] = ok
         total[ver]["unscored_ended_games"] = unk
-    # data-quality: valid vs excluded
+    # data-quality: four DISTINCT concepts — recorded predictions vs
+    # completed games vs valid scored games vs invalid/excluded.  These
+    # must never be conflated (an INVALID game's predictions exist and
+    # are recorded, but the game is excluded; fragment games are scored
+    # for diagnostics only).
     total["_quality"] = {
+        "recorded_predictions": conn.execute(
+            "SELECT COUNT(*) c FROM predictions").fetchone()["c"],
+        "completed_games": conn.execute(
+            "SELECT COUNT(*) c FROM game_results "
+            "WHERE final_result_status='OK'").fetchone()["c"],
+        "valid_scored_games": conn.execute(
+            "SELECT COUNT(DISTINCT source_game_id) c FROM prediction_scores "
+            "WHERE fragment = 0").fetchone()["c"],
         "valid": conn.execute("SELECT COUNT(*) c FROM game_quality WHERE status='OK'").fetchone()["c"],
         "invalid": conn.execute("SELECT COUNT(*) c FROM game_quality WHERE status='INVALID'").fetchone()["c"],
         "excluded_games": conn.execute("SELECT COUNT(*) c FROM game_results WHERE final_result_status!='OK'").fetchone()["c"],
