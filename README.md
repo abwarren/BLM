@@ -23,6 +23,53 @@ python3 server.py
 # API: http://localhost:8000/api/v2/health
 ```
 
+## V4 — PokerBet Live Basketball Pipeline (Current)
+
+BLM's production game source is **PokerBet.co.za** (BetConstruct). The V4
+collector discovers live basketball games from PokerBet's live panel,
+classifies each into an isolated statistical population, snapshots the
+full market state, and reconciles against the underlying BetConstruct
+event.
+
+```bash
+# One-shot live capture (both categories)
+python -m blm_v4.collector --once --ticks 1
+
+# Continuous collector (20s cadence) — systemd: blm-collector.service
+# API server (port 2262) — systemd: blm-server.service
+```
+
+### Classifications (isolated populations — zero statistical leakage)
+
+| Classification | Competition (PokerBet) | Region | Example |
+|---|---|---|---|
+| `CYBER_2K26` | Cyber Basketball. 2K26 Matches | World | OKC Thunder Cyber vs SAS Spurs Cyber |
+| `BETUAL_NBA` | Betual NBA | Virtual Matches | Sacramento Kings Virtual vs Miami Heat Virtual |
+
+Every game/snapshot record carries its own `classification`, `game_family`,
+`competition`, `region` — identity is `source + source_game_id` (the
+BetConstruct event ID from the event-view URL). Snapshots are append-only
+timestamped observations (score, period, clock, totals, spreads, odds,
+status, source metadata). Historical/statistical processing is scoped per
+classification; the two populations are never mixed.
+
+### Reconciliation
+
+Each recorded game is cross-verified against the BetConstruct event-view:
+game ID, teams, competition header, score/period/clock, totals/spreads
+present, and W1/W2 pricing — logged as `matched` or `mismatch` with the
+reason (blm_pokerbet.db `reconciliation` table).
+
+### Tests
+
+```bash
+python -m pytest tests/           # 112 passed (incl. blm_v4 fixtures both categories)
+```
+
+Replayable fixtures exist for both categories
+(`tests/test_blm_v4_pipeline.py`) proving discovery, classification,
+source, dedup, snapshot persistence, and statistical separation.
+
 ## Architecture
 
 ```
