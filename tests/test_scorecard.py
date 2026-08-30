@@ -620,11 +620,12 @@ def test_final_result_accepts_list_stub_late_q4():
     # mid-Q4 loss (clock 05:00 = 35 game-min) is NOT a verified finish
     early = dict(stub, clock="05:00")
     assert Scorecard._final_result(early, 58)[0] == "UNKNOWN"
-    # event-view row with quarter=4 but unparseable clock (21:00 artifact):
-    # can't verify the game was in its final seconds -> UNKNOWN
+    # event-view row with quarter=4 but the "21:00" sentinel clock (panel's
+    # finished-period placeholder, unparseable) — clean history + 4th-quarter
+    # label IS a verified finish
     ev = {"home_score": 90, "away_score": 86,
           "period_label": "4th Quarter", "clock": "21:00", "quarter": 4}
-    assert Scorecard._final_result(ev, 58)[0] == "UNKNOWN"
+    assert Scorecard._final_result(ev, 58)[0] == "OK"
     # event-view row with a parseable late clock -> OK
     ev2 = dict(ev, clock="00:15")
     assert Scorecard._final_result(ev2, 58)[0] == "OK"

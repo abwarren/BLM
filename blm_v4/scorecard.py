@@ -517,6 +517,13 @@ class Scorecard:
             if clock in ("00:00", "0:00", "") or (
                     el is not None and el >= FULL_GAME_MINUTES - 2.0):
                 return "OK", int(fh), int(fa)
+            # Unparseable clock (mm > 12) = the panel's "21:00" sentinel for
+            # a finished period.  A clean, monotonic history whose last row
+            # is a "4th Quarter" label IS a verified finish — the score is
+            # the game's endpoint.  (Mid-Q4 parseable clocks like 05:00 fail
+            # the el >= 38 check above, so they stay UNKNOWN.)
+            if el is None:
+                return "OK", int(fh), int(fa)
         # Half-time / mid-game disappearance -> not a reliably finished game.
         return "UNKNOWN", None, None
 
