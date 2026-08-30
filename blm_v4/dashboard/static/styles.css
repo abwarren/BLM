@@ -192,6 +192,10 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
   background: var(--panel2); padding: 8px 12px;
 }
 .divergence-title { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; }
+.line-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin-bottom: 8px; font-family: var(--mono); font-size: 12px; }
+.line-cell { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; border-bottom: 1px dashed var(--border); padding-bottom: 2px; }
+.line-cell .lab { color: var(--muted); font-size: 9px; letter-spacing: 1px; text-transform: uppercase; white-space: nowrap; }
+.line-cell .val { font-size: 13px; font-weight: 800; color: #eaf2ff; text-align: right; }
 .div-row { display: grid; grid-template-columns: 1fr 1fr 1fr; text-align: center; font-family: var(--mono); font-size: 12px; }
 .div-row .lab { color: var(--muted); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
 .div-row .val { font-size: 15px; font-weight: 800; color: #eaf2ff; }

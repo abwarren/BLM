@@ -363,9 +363,31 @@ function divergenceHTML(g) {
   const sEdge = hasS ? +(modSpr - mSpr).toFixed(1) : null;
   const edgeCls = (v) => (v == null ? "flat" : v > 0.05 ? "pos" : v < -0.05 ? "neg" : "flat");
   const edgeSym = (v) => (v == null ? "–" : (v > 0 ? "+" : "") + v);
+  const lineRow = (lab, v, meta) => `
+    <div class="line-cell"><div class="lab">${lab}</div>
+      <div class="val">${num(v, 1)}${meta ? `<span class="muted" style="font-size:10px"> ${meta}</span>` : ""}</div>
+    </div>`;
+  // Five distinct concepts — never conflated:
+  //   PREMATCH BLM (not stored → "–", never fabricated)
+  //   OPENING LINE  (first verified PokerBet total — immutable)
+  //   CURRENT LIVE LINE (latest verified PokerBet total)
+  //   LIVE BLM PREDICTION (model.expected_total, live)
+  const prematch = "–";
+  const opening = m.opening_line;
+  const openingMeta = m.opening_line_at ? `@ ${(m.opening_line_at || "").slice(11, 19)}Z` : "";
+  const live = mkt;
+  const liveMeta = m.total_line_age_s != null
+    ? `${m.total_line_age_s > 300 ? "· stale" : "· live"}${m.market_source ? ` · ${m.market_source}` : ""}`
+    : "";
   return `
     <div class="divergence">
       <div class="divergence-title">Market vs Model</div>
+      <div class="line-grid">
+        ${lineRow("Prematch BLM", null, prematch)}
+        ${lineRow("Opening Line", opening, openingMeta)}
+        ${lineRow("Current Live Line", live, liveMeta)}
+        ${lineRow("Live BLM Prediction", mod, m.total_line_age_s != null ? (m.total_line_age_s > 300 ? "· stale mkt" : "· live mkt") : "")}
+      </div>
       <div class="div-row">
         <div><div class="lab">Mkt Total</div><div class="val">${num(mkt, 1)}${m.total_line_age_s != null ? `<span class="muted" style="font-size:10px"> ${m.total_line_age_s > 300 ? "· stale" : "· live"}</span>` : ""}${m.market_source === "ws" ? `<span class="muted" style="font-size:10px"> · ws</span>` : ""}</div></div>
         <div><div class="lab">Model Total</div><div class="val">${num(mod, 1)}</div></div>
