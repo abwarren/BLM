@@ -24,7 +24,16 @@ concepts through the existing game-detail API.
   (stale, honest age 8545s); live 30741613 opening=null total=null (event
   view starved — honest), live prediction 165.7 computed.
 - Tests: 185 pass (new test_opening_snapshot_returns_first_line).
-NEXT: M007-M2 — connect the existing game-detail pane to these API values.
+M007-M2 (COMPLETE, deployed 6a40efc): game-detail pane shows the four
+concepts.  divergenceHTML now leads with a line-grid: Prematch BLM (–,
+honest), Opening Line (immutable first line + ts), Current Live Line
+(latest + live/stale + source), Live BLM Prediction (model.expected_total).
+Same poll loop (refresh → loadModalDetail → renderModal → divergenceHTML)
+re-renders every tick — no page refresh.  Verified live on running server:
+deployed JS/CSS carry the header; API 30740053 opening=171.5 live=181.5
+expected_total=181.5.  node --check OK; 185 tests green.
+NEXT: M007-M3 — closing-line handling (populated only when the market/game
+reaches closing state).
 
 ## COMPLETED
 - 79c4c0d: projection live-score floor at source + single-source api.py +
