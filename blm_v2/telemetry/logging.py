@@ -66,8 +66,6 @@ def _shared_processors(timestamp: bool = True) -> list:
 
 def _production_pipeline() -> dict:
     """JSON logging — ideal for containerised/cloud deployments."""
-    pre_chain = _shared_processors(timestamp=True)
-
     return {
         "wrapper_class": structlog.stdlib.BoundLogger,
         "context_class": dict,
@@ -78,7 +76,6 @@ def _production_pipeline() -> dict:
             *_shared_processors(timestamp=True),
             ProcessorFormatter.wrap_for_formatter,
         ],
-        "foreign_pre_chain": pre_chain,
     }
 
 

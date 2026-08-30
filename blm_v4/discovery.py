@@ -111,6 +111,12 @@ class _Node:
         return t.strip() if strip else t
 
 
+VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
+
+
 class _TreeBuilder(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -124,15 +130,21 @@ class _TreeBuilder(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list) -> None:
         node = _Node(tag, attrs, parent=self._stack[-1])
         self._stack[-1].children.append(node)
-        self._stack.append(node)
+        if tag not in VOID_TAGS:
+            self._stack.append(node)
 
     def handle_startendtag(self, tag: str, attrs: list) -> None:
         node = _Node(tag, attrs, parent=self._stack[-1])
         self._stack[-1].children.append(node)
 
     def handle_endtag(self, tag: str) -> None:
-        if len(self._stack) > 1:
-            self._stack.pop()
+        # Pop up to and including the matching open tag.  Real-world HTML
+        # may omit/overlap end tags; ignoring unmatched ones keeps the
+        # tree from corrupting.
+        for i in range(len(self._stack) - 1, 0, -1):
+            if self._stack[i].tag == tag:
+                del self._stack[i:]
+                return
 
     def handle_data(self, data: str) -> None:
         if self._stack:
@@ -177,12 +189,23 @@ class DiscoveredCompetition:
 
 # ── Parsing helpers ────────────────────────────────────────────────
 
-def _header_title(section: _Node) -> Optional[str]:
+def _header_titles(section: _Node) -> list[str]:
+    """All title p texts in the section header.
+
+    The real BetConstruct DOM puts the region title and the competition
+    title as consecutive ``p.sp-s-l-h-title-bc`` elements in the SAME
+    header (e.g. ['World', 'Cyber Basketball. 2K26 Matches']).
+    """
     head = section.find("div", class_="sp-s-l-head-bc")
     if not head:
-        return None
-    p = head.find("p", class_=SPORT_HEADER_CLS)
-    return p.get_text(strip=True) if p else head.get_text(strip=True)
+        return []
+    return [p.get_text(strip=True) for p in head.find_all("p", class_=SPORT_HEADER_CLS)]
+
+
+def _header_title(section: _Node) -> Optional[str]:
+    """Competition title = the LAST title p in the header."""
+    titles = _header_titles(section)
+    return titles[-1] if titles else None
 
 
 def _header_count(section: _Node) -> str:
@@ -195,18 +218,19 @@ def _header_count(section: _Node) -> str:
 
 
 def _section_sport_region(section: _Node) -> tuple[str, str]:
-    """Walk up to find the enclosing sport and region titles."""
-    sport, region = "", ""
+    """Sport + region from the header titles and the tree.
+
+    The competition header carries [region, competition] titles; the sport
+    is the first title of the enclosing sport section.
+    """
+    titles = _header_titles(section)
+    region = titles[0] if titles else ""
+    sport = ""
     parent_wrp = section.find_parent("div", class_="sp-s-l-b-content-wrp")
     if parent_wrp:
-        region_section = parent_wrp.find_parent("div", class_=SECTION_CLS)
-        if region_section:
-            region = _header_title(region_section) or ""
-            sport_wrp = region_section.find_parent("div", class_="sp-s-l-b-content-wrp")
-            if sport_wrp:
-                sport_section = sport_wrp.find_parent("div", class_=SECTION_CLS)
-                if sport_section:
-                    sport = _header_title(sport_section) or ""
+        sport_section = parent_wrp.find_parent("div", class_=SECTION_CLS)
+        if sport_section:
+            sport = _header_title(sport_section) or ""
     return sport, region
 
 

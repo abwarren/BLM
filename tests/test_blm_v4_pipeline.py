@@ -105,7 +105,7 @@ def _row_span(comp_name: str, region: str, count: str, row_html: str) -> str:
     return f"""
     <div class="sp-sub-list-bc  active selected">
       <div class="sp-s-l-head-bc" role="button" aria-expanded="true">
-        <div class="sp-s-l-h-title-content ellipsis"><p class="sp-s-l-h-title-bc ellipsis">{comp_name}</p></div>
+        <div class="sp-s-l-h-title-content ellipsis"><p class="sp-s-l-h-title-bc ellipsis">{region}</p><p class="sp-s-l-h-title-bc ellipsis">{comp_name}</p></div>
         <span class="sp-s-l-h-count-bc">{count}</span>
       </div>
       <div class="sp-s-l-b-content-bc">{row_html}</div>
@@ -150,18 +150,8 @@ def live_panel_html() -> str:
       <div class="sp-sub-list-bc  active selected">
         <div class="sp-s-l-head-bc"><div class="sp-s-l-h-title-content ellipsis"><p class="sp-s-l-h-title-bc ellipsis">Basketball</p></div></div>
         <div class="sp-s-l-b-content-wrp verticalNavigationContent">
-          <div class="sp-sub-list-bc  active selected">
-            <div class="sp-s-l-head-bc"><div class="sp-s-l-h-title-content ellipsis"><p class="sp-s-l-h-title-bc ellipsis">World</p></div></div>
-            <div class="sp-s-l-b-content-wrp verticalNavigationContent">
-              {_row_span("Cyber Basketball. 2K26 Matches", "World", "2", cyber_rows)}
-            </div>
-          </div>
-          <div class="sp-sub-list-bc  active selected">
-            <div class="sp-s-l-head-bc"><div class="sp-s-l-h-title-content ellipsis"><p class="sp-s-l-h-title-bc ellipsis">Virtual Matches</p></div></div>
-            <div class="sp-s-l-b-content-wrp verticalNavigationContent">
-              {_row_span("Betual NBA", "Virtual Matches", "2", betual_rows)}
-            </div>
-          </div>
+          {_row_span("Cyber Basketball. 2K26 Matches", "World", "2", cyber_rows)}
+          {_row_span("Betual NBA", "Virtual Matches", "2", betual_rows)}
         </div>
       </div>
     </div></div>"""

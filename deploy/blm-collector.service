@@ -1,0 +1,16 @@
+[Unit]
+Description=BLM V4 PokerBet collector (Cyber 2K26 + Betual NBA live pipeline)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gdi
+WorkingDirectory=/home/gdi/BLM
+Environment=BLM_POKERBET_DB=/home/gdi/BLM/blm_pokerbet.db
+ExecStart=/home/gdi/BLM/venv/bin/python -m blm_v4.collector --tick 20
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

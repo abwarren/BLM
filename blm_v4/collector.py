@@ -203,7 +203,7 @@ class PokerBetCollector:
     def _goto(self, page: Page, url: str) -> bool:
         try:
             page.goto(url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
-            page.wait_for_timeout(2500)  # React hydration
+            page.wait_for_timeout(4000)  # React hydration (panel ~4s)
             return True
         except Exception:
             logger.error("goto failed %s:\n%s", url, traceback.format_exc())
@@ -219,6 +219,32 @@ class PokerBetCollector:
         except Exception:
             return False
 
+    def _expand_target_sections(self, page: Page) -> None:
+        """Expand the left-panel tree (Basketball → World/Cyber, Virtual/Betual).
+
+        The BetConstruct SPA renders the live sport tree collapsed; the
+        competition sections only appear after expanding the relevant
+        headers.  Click every header whose title matches a target.
+        """
+        try:
+            page.evaluate(
+                """() => {
+                    const targets = ['Basketball', 'E-Basketball', 'World',
+                                     'Cyber Basketball', 'Virtual Matches', 'Betual NBA'];
+                    const heads = document.querySelectorAll('.sp-s-l-head-bc');
+                    for (const h of heads) {
+                        const t = (h.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (targets.some(x => t.includes(x))) {
+                            const expanded = h.getAttribute('aria-expanded');
+                            if (expanded !== 'true') h.click();
+                        }
+                    }
+                }"""
+            )
+            page.wait_for_timeout(2000)
+        except Exception:
+            logger.error("expand sections failed:\n%s", traceback.format_exc())
+
     def _ensure_discovery_page(self, page: Page) -> None:
         """Land on a live page whose left panel renders all live games."""
         url = competition_url(Classification.CYBER_2K26, self.comp_ids)
@@ -226,6 +252,7 @@ class PokerBetCollector:
             url = BASKETBALL_LIVE_URL
             self._goto(page, url)
         self._wait_panel(page)
+        self._expand_target_sections(page)
 
     def _recover(self, page: Page) -> None:
         """After a tick error, re-establish the discovery page."""
@@ -302,35 +329,35 @@ class PokerBetCollector:
         try:
             # find the row element by team names
             el = page.evaluate(
-                """(home, away) => {
+                """(names) => {
                     const rows = document.querySelectorAll('.market-game-section');
                     for (const r of rows) {
-                        const names = [...r.querySelectorAll('.market-game-team-name')]
+                        const rnames = [...r.querySelectorAll('.market-game-team-name')]
                             .map(n => n.textContent.trim());
-                        if (names.length >= 2 && names[0] === home && names[1] === away) {
+                        if (rnames.length >= 2 && rnames[0] === names.home && rnames[1] === names.away) {
                             return true;
                         }
                     }
                     return false;
                 }""",
-                row.home_team, row.away_team,
+                {"home": row.home_team, "away": row.away_team},
             )
             if not el:
                 logger.warning("row not found for %s vs %s", row.home_team, row.away_team)
                 return None
             page.evaluate(
-                """(home, away) => {
+                """(names) => {
                     const rows = document.querySelectorAll('.market-game-section');
                     for (const r of rows) {
-                        const names = [...r.querySelectorAll('.market-game-team-name')]
+                        const rnames = [...r.querySelectorAll('.market-game-team-name')]
                             .map(n => n.textContent.trim());
-                        if (names.length >= 2 && names[0] === home && names[1] === away) {
+                        if (rnames.length >= 2 && rnames[0] === names.home && rnames[1] === names.away) {
                             r.click();
                             return;
                         }
                     }
                 }""",
-                row.home_team, row.away_team,
+                {"home": row.home_team, "away": row.away_team},
             )
             page.wait_for_timeout(2500)
             url = page.url

@@ -1,0 +1,18 @@
+[Unit]
+Description=BLM V2 FastAPI server (PokerBet analytics platform)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gdi
+WorkingDirectory=/home/gdi/BLM
+Environment=HOST=0.0.0.0
+Environment=PORT=2262
+Environment=BLM_ENV=production
+ExecStart=/home/gdi/BLM/venv/bin/python /home/gdi/BLM/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

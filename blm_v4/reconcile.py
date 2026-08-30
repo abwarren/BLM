@@ -119,13 +119,18 @@ def reconcile_event(
     if not (checks["total_points_present"] or checks["match_winner_present"]):
         failures.append("no pricing markets present on event page")
 
-    # 6. displayed competition header
+    # 6. displayed competition header (normalized — the page may render
+    #    "Cyber Basketball. 2K26 Matches" vs canonical "Cyber Basketball 2K26")
     comp_header = recorded.get("competition", "")
-    if comp_header and comp_header.lower() in page_text.lower():
-        checks["competition_header_matches"] = True
+    if comp_header:
+        norm = re.sub(r"[^a-z0-9]+", "", comp_header.lower())
+        page_norm = re.sub(r"[^a-z0-9]+", "", page_text.lower())
+        checks["competition_header_matches"] = norm in page_norm
+        if not checks["competition_header_matches"]:
+            failures.append(f"competition header '{comp_header}' not on page")
     else:
         checks["competition_header_matches"] = False
-        failures.append(f"competition header '{comp_header}' not on page")
+        failures.append("no competition recorded to verify")
 
     result = "matched" if not failures else "mismatch"
     return {
