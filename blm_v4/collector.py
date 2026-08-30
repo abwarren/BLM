@@ -365,28 +365,86 @@ class PokerBetCollector:
             if not tax:
                 logger.warning("no event taxonomy after click: %s", url)
                 return None
-            game = self._build_game(comp, row, tax, url)
+            text = page.inner_text("body", timeout=10000)
+
+            # Authoritative teams: event-view scoreboard > URL slug > panel row.
+            # The panel row can be STALE during fast game rotation (the row
+            # text lags the actual event), so never trust it alone.
+            home, away = self._authoritative_teams(row, tax, text)
+
+            # Dedup by durable identity (source_game_id): the same event may be
+            # re-discovered from a refreshed row — update, don't duplicate.
+            existing = self._find_tracked(tax["game_id"])
+            if existing is not None:
+                cls_val = existing.classification
+                old_key = f"{existing.home_team}|{existing.away_team}"
+                if (existing.home_team, existing.away_team) != (home, away):
+                    existing.home_team, existing.away_team = home, away
+                    self.store.upsert_game(existing)
+                    logger.info(
+                        "updated teams for %s -> %s vs %s",
+                        tax["game_id"], home, away,
+                    )
+                self._tracked[cls_val].pop(old_key, None)
+                self._unseen_ticks[cls_val].pop(old_key, None)
+                new_key = f"{home}|{away}"
+                self._tracked[cls_val][new_key] = existing
+                self._unseen_ticks[cls_val][new_key] = 0
+                if existing.source_game_id not in self._market_queue:
+                    self._market_queue.append(existing.source_game_id)
+                return existing, text
+
+            game = self._build_game(comp, row, tax, url, home, away)
             gid = self.store.upsert_game(game)
-            self._tracked[comp.classification.value][
-                f"{row.home_team}|{row.away_team}"
-            ] = game
-            self._unseen_ticks[comp.classification.value][
-                f"{row.home_team}|{row.away_team}"
-            ] = 0
+            key = f"{home}|{away}"
+            self._tracked[comp.classification.value][key] = game
+            self._unseen_ticks[comp.classification.value][key] = 0
             self._market_queue.append(game.source_game_id)
             self.stats["games_resolved"] += 1
             logger.info(
                 "resolved new %s game %s (%s vs %s) game_id=%s",
-                comp.classification.value, gid, row.home_team, row.away_team,
+                comp.classification.value, gid, home, away,
                 tax["game_id"],
             )
-            text = page.inner_text("body", timeout=10000)
             return game, text
         except Exception:
             logger.error("resolve failed:\n%s", traceback.format_exc())
             return None
 
-    def _build_game(self, comp, row: RowGame, tax: dict, url: str) -> PokerBetGame:
+    def _authoritative_teams(self, row: RowGame, tax: dict, text: str) -> tuple[str, str]:
+        """Pick the true team names for the event.
+
+        Priority: event-view scoreboard (displayed truth) > URL slug
+        (BetConstruct event identity) > panel row (may be stale).
+        """
+        home, away = row.home_team, row.away_team
+        try:
+            ev = parse_event_view(text)
+            eh, ea = ev.get("home_team"), ev.get("away_team")
+            if eh and ea:
+                home, away = eh, ea
+        except Exception:
+            pass
+        slug = tax.get("game_slug") or ""
+        home_slug, away_slug = slugify_team(home), slugify_team(away)
+        if slug and (not slug.startswith(home_slug) or not slug.endswith(away_slug)):
+            logger.warning(
+                "teams inconsistent with slug %s (%s vs %s) — deriving from slug",
+                slug, home, away,
+            )
+            if slug.startswith(home_slug):
+                rest = slug[len(home_slug):].lstrip("-")
+                if rest:
+                    away = rest.replace("-", " ").title()
+            elif slug.endswith(away_slug):
+                head = slug[: len(slug) - len(away_slug)].rstrip("-")
+                if head:
+                    home = head.replace("-", " ").title()
+        return home, away
+
+    def _build_game(
+        self, comp, row: RowGame, tax: dict, url: str, home: str, away: str,
+    ) -> PokerBetGame:
         cls = comp.classification
         return PokerBetGame(
             source=SOURCE_POKERBET,
@@ -398,8 +456,8 @@ class PokerBetCollector:
             game_family=cls.game_family.value,
             classification=cls.value,
             sport=tax["sport"].lower(),
-            home_team=row.home_team,
-            away_team=row.away_team,
+            home_team=home,
+            away_team=away,
             game_slug=tax["game_slug"],
             source_url=url,
             status="live",

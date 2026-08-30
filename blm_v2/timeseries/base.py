@@ -85,6 +85,16 @@ class TimeSeriesDB(ABC):
     async def get_live_line_analysis(self) -> Optional[SnapshotData]:
         """Return the most recent line analysis for any live game."""
 
+    async def get_live_game(self) -> Optional[SnapshotData]:
+        """Return the most recent snapshot across all games.
+
+        Default: not implemented. Backends that support the live endpoint
+        (SQLite) override this. The V2 API's ``GET /api/v2/live`` depends on
+        it, so a backend without this method returns None → 404 rather than
+        crashing the server.
+        """
+        return None
+
 
 # ── Protocol (structural typing) ──────────────────────────────────
 

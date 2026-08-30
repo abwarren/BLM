@@ -467,6 +467,34 @@ class SQLiteTimeSeries(TimeSeriesDB):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _query)
 
+    async def get_live_game(self) -> Optional[SnapshotData]:
+        """Return the most recent snapshot across all games (live game)."""
+        self._ensure_initialized()
+
+        def _query() -> Optional[SnapshotData]:
+            conn = _get_conn(self._db_path)
+            row = conn.execute(
+                """SELECT * FROM snapshots_v2
+                    ORDER BY timestamp DESC
+                    LIMIT 1"""
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            data_json_str = d.pop("data_json", None)
+            if data_json_str:
+                try:
+                    parsed = json.loads(data_json_str)
+                    d.update(parsed)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            d.pop("id", None)
+            d.pop("ingested_at", None)
+            return d
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _query)
+
 
 # ── Module-level initialisation guard ─────────────────────────────
 
