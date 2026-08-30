@@ -162,6 +162,7 @@ class PokerBetCollector:
         self._browser: Optional[Browser] = None
         self._pw: Any = None                  # active sync_playwright scope
         self._empty_ticks = 0                 # consecutive empty-parses
+        self._event_view_failures = 0         # consecutive unverified event views
         self._browser_started_at = 0.0
         self._started_at_iso = utcnow_iso()
         self._last_success_iso = ""
@@ -859,7 +860,17 @@ class PokerBetCollector:
         return None
 
     def _capture_next_market(self, page: Page) -> None:
-        """Visit the next tracked game's event view (round-robin)."""
+        """Visit the next tracked game's event view (round-robin).
+
+        Navigation is by CLICKING the game's panel row — the SPA's own
+        route change.  A direct ``page.goto`` of the event-view URL falls
+        back to the LOBBY page (observed: 60/60 captures were lobby text,
+        parsed as the first-listed game's state, e.g. a WNBA '62 : 71'
+        written under ~15 unrelated fixtures and fragmenting each into
+        #i1..#i7).  The parsed page is only accepted when its scoreboard
+        TEAMS match the tracked game; lobby text and foreign events are
+        skipped — never stored, never split.
+        """
         if not self._market_queue:
             return
         gid = self._market_queue.pop(0)
@@ -867,15 +878,24 @@ class PokerBetCollector:
         game = self._find_tracked(gid)
         if game is None or not game.source_url:
             return
+        cls = Classification(game.classification)
         logger.info("capturing event view for game %s", gid)
-        if not self._goto(page, game.source_url):
-            return
-        if not self._wait_panel(page):
-            logger.warning("event page for %s didn't render", gid)
-            return
         try:
+            if not self._click_tracked_row(page, game):
+                return
             text = page.inner_text("body", timeout=10000)
             parsed = parse_event_view(text)
+            # Identity guard: only THIS game's event view may be stored.
+            if not self._verified_event_view(game, parsed):
+                self._event_view_failures += 1
+                logger.warning(
+                    "event view unverified for %s (parsed teams %r/%r) — "
+                    "skipped (unverified=%d)",
+                    gid, parsed.get("home_team"), parsed.get("away_team"),
+                    self._event_view_failures,
+                )
+                return
+            self._event_view_failures = 0
             # Virtual replay protection: the event URL now serves a NEW
             # instance of the same fixture.  Detect the score reset BEFORE
             # writing and split the instance, so this event-view snapshot
@@ -886,8 +906,7 @@ class PokerBetCollector:
                         game, int(eh), int(ea),
                         parsed.get("period_label"), parsed.get("clock")):
                 row = RowGame(home_score=int(eh), away_score=int(ea))
-                game = self._split_instance(game, row,
-                                            Classification(game.classification))
+                game = self._split_instance(game, row, cls)
             # refresh identity from the URL taxonomy (URL changes handled);
             # keep any virtual-instance suffix (base#iN) — the suffix is
             # the instance identity, the URL base is just the fixture.
@@ -901,19 +920,70 @@ class PokerBetCollector:
                     game.competition_slug = tax["competition_slug"]
                     game.game_slug = tax["game_slug"]
                     game.source_url = page.url
-                    cls = classify_event_url(page.url)
-                    if cls != Classification.UNKNOWN:
-                        game.classification = cls.value
-                        game.game_family = cls.game_family.value
+                    url_cls = classify_event_url(page.url)
+                    if url_cls != Classification.UNKNOWN:
+                        game.classification = url_cls.value
+                        game.game_family = url_cls.game_family.value
                     self.store.upsert_game(game)
-            self._capture_event_state(page, Classification(game.classification), game, text)
+            self._capture_event_state(page, cls, game, text)
         except Exception:
             logger.error("market capture failed:\n%s", traceback.format_exc())
-        # return to the discovery page for the next tick
-        self._goto(page, competition_url(
-            Classification(game.classification), self.comp_ids,
-        ))
-        self._wait_panel(page)
+        finally:
+            # return to the discovery page for the next tick
+            self._goto(page, competition_url(cls, self.comp_ids))
+            self._wait_panel(page)
+
+    def _click_tracked_row(self, page: Page, game: PokerBetGame) -> bool:
+        """Open ``game``'s event view by clicking its panel row.
+
+        The SPA's event-view route only hydrates via an in-app row click;
+        a direct goto of the event-view URL falls back to the lobby.
+        """
+        try:
+            clicked = page.evaluate(
+                """(names) => {
+                    const rows = document.querySelectorAll('.market-game-section');
+                    for (const r of rows) {
+                        const rnames = [...r.querySelectorAll('.market-game-team-name')]
+                            .map(n => n.textContent.trim());
+                        if (rnames.length >= 2 && rnames[0] === names.home
+                                && rnames[1] === names.away) {
+                            r.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                {"home": game.home_team, "away": game.away_team},
+            )
+            if not clicked:
+                logger.warning(
+                    "row not found for %s (%s vs %s) — skipping event view",
+                    game.source_game_id, game.home_team, game.away_team)
+                return False
+            page.wait_for_timeout(2500)  # event view hydration
+            return True
+        except Exception:
+            logger.error("row click failed:\n%s", traceback.format_exc())
+            return False
+
+    @staticmethod
+    def _same_team(a: Optional[str], b: Optional[str]) -> bool:
+        return (a or "").strip().casefold() == (b or "").strip().casefold()
+
+    def _verified_event_view(self, game: PokerBetGame, parsed: dict) -> bool:
+        """True when the parsed page is THIS game's event view.
+
+        The event-view scoreboard always carries the teams; the lobby page
+        (goto fallback) has no scoreboard teams within the parse window and
+        a different event carries different teams.  Only verified pages may
+        be stored — unverified content previously attributed another game's
+        score to every fixture and fragmented every instance.
+        """
+        ph, pa = parsed.get("home_team") or "", parsed.get("away_team") or ""
+        return bool(ph and pa) \
+            and self._same_team(ph, game.home_team) \
+            and self._same_team(pa, game.away_team)
 
     def _reconcile(self, game: PokerBetGame, url: str, page_text: str, parsed: dict) -> None:
         try:

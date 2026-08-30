@@ -680,6 +680,72 @@ def test_market_total_survives_list_stubs(tmp_path, monkeypatch):
         conn.close()
 
 
+# ═══════════ Fragment classification (short histories never headline) ═
+
+def test_fragments_excluded_from_headline(tmp_path, monkeypatch):
+    """Short-history games (FRAGMENT) are scored for diagnostics but never
+    included in headline model-accuracy metrics."""
+    st = _make_store(tmp_path)
+    monkeypatch.setenv("BLM_POKERBET_DB", str(tmp_path / "blm.db"))
+    _ended_game_snapshots(st, gid="9601")          # FULL: 16 snaps from Q1
+    # FRAGMENT: 6 snaps, all 4th Quarter (the live 96-second-fragment shape)
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=3)
+    gf = _add_game(st, "9602", "BETUAL_NBA", "G1", "G2", status="ended")
+    for i, ck in enumerate(["02:00", "01:45", "01:15", "01:00", "00:45", "00:15"]):
+        _snap(st, gf, "9602", "BETUAL_NBA", t0 + timedelta(seconds=10 + i * 15),
+              90 + i, 88 + i, 4, ck)
+
+    sc = Scorecard(tmp_path / "blm.db")
+    out = sc.run()
+    assert out["scored"]["scored"] > 0
+    conn = sc._connect()
+    try:
+        frag_rows = [dict(r) for r in conn.execute(
+            "SELECT source_game_id, fragment FROM prediction_scores")]
+        frag = {r["source_game_id"]: r["fragment"] for r in frag_rows}
+        assert frag.get("9601") == 0 and frag.get("9602") == 1
+        n_full = sum(1 for r in frag_rows if r["fragment"] == 0)
+        n_frag = sum(1 for r in frag_rows if r["fragment"] == 1)
+        assert n_full > 0 and n_frag > 0
+    finally:
+        conn.close()
+    summary = sc.summary()
+    ver = summary["versions"]["v4-pace-1"]
+    assert ver["predictions"] == n_full            # headline = FULL only
+    assert ver["games"] == 1
+    frags = summary["versions"]["_fragments"]
+    assert frags["excluded_from_headline"] is True
+    assert frags["games"] == 1
+    assert frags["predictions"] == n_frag
+
+
+def test_event_view_verify_guard(tmp_path, monkeypatch):
+    """Lobby/foreign event-view content must never be stored — the parsed
+    page is only accepted when its scoreboard teams match the tracked game."""
+    st = _make_store(tmp_path)
+    monkeypatch.setenv("BLM_POKERBET_DB", str(tmp_path / "blm.db"))
+    c = PokerBetCollector(store=st)
+    game = PokerBetGame(
+        source="PokerBet", source_game_id="9701", competition_id="comp",
+        competition_slug="b", competition="Betual NBA", region="R",
+        game_family="betual", classification="BETUAL_NBA", sport="basketball",
+        home_team="Maccabi Tel Aviv Virtual",
+        away_team="KK Partizan Belgrade Virtual",
+        game_slug="m-p", source_url="https://x/9701", status="live")
+    assert c._verified_event_view(
+        game, {"home_team": "Maccabi Tel Aviv Virtual",
+               "away_team": "KK Partizan Belgrade Virtual"}) is True
+    # lobby text: no scoreboard teams within the parse window
+    assert c._verified_event_view(game, {"home_team": "", "away_team": ""}) is False
+    # a different game's event view (the WNBA state seen on every fixture)
+    assert c._verified_event_view(
+        game, {"home_team": "Minnesota Lynx", "away_team": "Atlanta Dream"}) is False
+    # case/whitespace insensitive
+    assert c._verified_event_view(
+        game, {"home_team": "  maccabi tel aviv virtual ",
+               "away_team": "kk partizan belgrade virtual"}) is True
+
+
 # ═══════════ Helpers ══════════════════════════════════════════
 
 def test_checkpoint_for_and_progress():

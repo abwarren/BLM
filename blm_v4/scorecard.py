@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS prediction_scores (
     ou_result         INTEGER,  -- actual vs market:  1 OVER, -1 UNDER, 0 push
     ou_correct        INTEGER,  -- 1/0, NULL when no valid market
     scored_at         TEXT NOT NULL,
+    fragment          INTEGER NOT NULL DEFAULT 0,  -- 1 = incomplete history (diagnostics only)
     UNIQUE(prediction_id)
 );
 
@@ -120,6 +121,17 @@ CREATE INDEX IF NOT EXISTS idx_scores_game  ON prediction_scores(source_game_id)
 """
 
 _CHECKPOINTS = ("q1", "q2", "q3", "q4", "final")
+
+# A game is a FRAGMENT (diagnostics only, never headline) unless captured
+# with >= 15 snapshots starting in its 1st quarter — a short or mid-game
+# capture's errors are capture artifacts, not model accuracy (a 96-second
+# Q4-only window can't pace a full game).  `starts_q1` uses the quarter
+# column when present (list/event rows sometimes carry quarter=NULL).
+_STARTS_Q1_SQL = """(
+    SELECT CASE WHEN s.quarter IS NOT NULL THEN (s.quarter <= 1)
+                ELSE LOWER(COALESCE(s.period_label, '')) LIKE '1st%' END
+    FROM snapshots s WHERE s.game_id = g.id
+    ORDER BY s.captured_at ASC LIMIT 1)"""
 
 # Fixed game-completion checkpoints (percent of the 40-minute game).
 # The snapshot closest to each target (within tolerance) is selected and
@@ -246,6 +258,24 @@ class Scorecard:
             conn = self._connect()
             try:
                 conn.executescript(SCORECARD_SCHEMA)
+                # migrate pre-fragment DBs (ADD COLUMN is cheap + idempotent)
+                cols = {r["name"] for r in conn.execute(
+                    "PRAGMA table_info(prediction_scores)")}
+                if "fragment" not in cols:
+                    conn.execute(
+                        "ALTER TABLE prediction_scores "
+                        "ADD COLUMN fragment INTEGER NOT NULL DEFAULT 0")
+                # backfill existing rows with their TRUE fragment (the ADD
+                # COLUMN default of 0 would mislabel every old fragment game)
+                conn.execute(
+                    f"""UPDATE prediction_scores
+                        SET fragment = CASE WHEN EXISTS (
+                            SELECT 1 FROM games g
+                            WHERE g.source_game_id = prediction_scores.source_game_id
+                              AND (SELECT COUNT(*) FROM snapshots s
+                                   WHERE s.game_id = g.id) >= 15
+                              AND {_STARTS_Q1_SQL})
+                        THEN 0 ELSE 1 END""")
                 conn.commit()
             finally:
                 conn.close()
@@ -440,6 +470,8 @@ class Scorecard:
                         "SELECT * FROM snapshots WHERE game_id=? ORDER BY captured_at ASC",
                         (g["id"],),
                     ).fetchall()]
+                    if not rows:
+                        continue  # never captured — nothing to verify
                     qual, reason = _snapshot_history_quality(rows)
                     if qual == "INVALID":
                         stats["invalid"] += 1
@@ -537,6 +569,17 @@ class Scorecard:
         with self._lock:
             conn = self._connect()
             try:
+                # per-game history completeness: fragment = < 15 snaps OR the
+                # game wasn't captured from its 1st quarter.  Fragments are
+                # scored for diagnostics but EXCLUDED from headline metrics.
+                comp = {}
+                for r in conn.execute(
+                        f"""SELECT g.source_game_id,
+                                  (SELECT COUNT(*) FROM snapshots s
+                                   WHERE s.game_id = g.id) AS n,
+                                  {_STARTS_Q1_SQL} AS starts_q1
+                           FROM games g"""):
+                    comp[r["source_game_id"]] = (r["n"], r["starts_q1"])
                 rows = conn.execute(
                     """SELECT p.id AS pid, p.source_game_id, p.classification,
                               p.model_version, p.projected_home, p.projected_away,
@@ -550,16 +593,20 @@ class Scorecard:
                     if r["source_snapshot_at"] >= r["result_at"]:
                         stats["rejected"] += 1
                         continue
+                    n, starts_q1 = comp.get(r["source_game_id"], (0, 0))
+                    fragment = 0 if (n >= 15 and starts_q1) else 1
                     conn.execute(
-                        """INSERT OR IGNORE INTO prediction_scores (
+                        """INSERT INTO prediction_scores (
                             prediction_id, source_game_id, classification, model_version,
                             home_error, away_error, total_error,
                             abs_home_error, abs_away_error, abs_total_error, total_pct_error,
                             model_total, market_total, actual_total,
                             market_error, model_beat_market,
-                            ou_prediction, ou_result, ou_correct, scored_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        self._score_row(r),
+                            ou_prediction, ou_result, ou_correct, scored_at, fragment)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(prediction_id) DO UPDATE SET
+                            fragment = excluded.fragment""",
+                        self._score_row(r) + (fragment,),
                     )
                     stats["scored"] += 1
                 conn.commit()
@@ -636,7 +683,7 @@ class Scorecard:
                 """SELECT s.source_game_id, s.classification, s.model_version,
                           s.model_total, s.market_total, s.actual_total,
                           s.total_error, s.abs_total_error, s.ou_prediction,
-                          s.ou_result, s.ou_correct, s.scored_at,
+                          s.ou_result, s.ou_correct, s.scored_at, s.fragment,
                           g.home_team, g.away_team,
                           p.checkpoint, p.checkpoint_percent, p.distance_pct,
                           p.progress, p.source_snapshot_at
@@ -687,25 +734,32 @@ def _per_version_metrics(conn, where: str = "1=1", params: tuple = ()) -> dict:
 
 
 def _summary_sql(conn) -> dict[str, Any]:
-    total = _per_version_metrics(conn)
-    home = _per_version_metrics(conn, "home_error IS NOT NULL", ())
-    away = _per_version_metrics(conn, "away_error IS NOT NULL", ())
+    # Headline metrics: FULL histories only (fragment = 0).  Fragment games
+    # (short or mid-game capture) are scored for diagnostics but excluded —
+    # their errors are capture artifacts, not model accuracy.
+    total = _per_version_metrics(conn, "fragment = 0", ())
+    home = _per_version_metrics(conn, "home_error IS NOT NULL AND fragment = 0", ())
+    away = _per_version_metrics(conn, "away_error IS NOT NULL AND fragment = 0", ())
     # home/away MAE + bias per version
     for ver in total:
         hs = [x["abs_home_error"] for x in conn.execute(
-            "SELECT abs_home_error FROM prediction_scores WHERE model_version=? AND home_error IS NOT NULL",
+            "SELECT abs_home_error FROM prediction_scores "
+            "WHERE model_version=? AND home_error IS NOT NULL AND fragment = 0",
             (ver,),
         ).fetchall()]
         hb = [x["home_error"] for x in conn.execute(
-            "SELECT home_error FROM prediction_scores WHERE model_version=? AND home_error IS NOT NULL",
+            "SELECT home_error FROM prediction_scores "
+            "WHERE model_version=? AND home_error IS NOT NULL AND fragment = 0",
             (ver,),
         ).fetchall()]
         as_ = [x["abs_away_error"] for x in conn.execute(
-            "SELECT abs_away_error FROM prediction_scores WHERE model_version=? AND away_error IS NOT NULL",
+            "SELECT abs_away_error FROM prediction_scores "
+            "WHERE model_version=? AND away_error IS NOT NULL AND fragment = 0",
             (ver,),
         ).fetchall()]
         ab = [x["away_error"] for x in conn.execute(
-            "SELECT away_error FROM prediction_scores WHERE model_version=? AND away_error IS NOT NULL",
+            "SELECT away_error FROM prediction_scores "
+            "WHERE model_version=? AND away_error IS NOT NULL AND fragment = 0",
             (ver,),
         ).fetchall()]
         total[ver]["home_mae"] = round(statistics.mean(hs), 2) if hs else None
@@ -728,6 +782,19 @@ def _summary_sql(conn) -> dict[str, Any]:
         "excluded_reasons": {r["reason"]: r["c"] for r in conn.execute(
             "SELECT reason, COUNT(*) c FROM game_quality WHERE status='INVALID' GROUP BY reason")},
     }
+    # fragment diagnostics — NEVER headline accuracy
+    frag = conn.execute(
+        """SELECT COUNT(DISTINCT source_game_id) games, COUNT(*) n,
+                  AVG(abs_total_error) mae, AVG(total_pct_error) mape
+           FROM prediction_scores WHERE fragment = 1"""
+    ).fetchone()
+    total["_fragments"] = {
+        "excluded_from_headline": True,
+        "games": frag["games"],
+        "predictions": frag["n"],
+        "mae": round(frag["mae"], 2) if frag["mae"] is not None else None,
+        "mape": round(frag["mape"], 2) if frag["mape"] is not None else None,
+    }
     return {"versions": total}
 
 
@@ -739,7 +806,7 @@ def _fixed_checkpoints_sql(conn) -> list[dict[str, Any]]:
         rows = conn.execute(
             """SELECT s.abs_total_error FROM prediction_scores s
                JOIN predictions p ON p.id = s.prediction_id
-               WHERE p.checkpoint = ?""",
+               WHERE p.checkpoint = ? AND s.fragment = 0""",
             (cp,),
         ).fetchall()
         errs = [r["abs_total_error"] for r in rows]
@@ -761,7 +828,8 @@ def _by_progress_sql(conn) -> list[dict[str, Any]]:
         rows = conn.execute(
             """SELECT s.abs_total_error FROM prediction_scores s
                JOIN predictions p ON p.id = s.prediction_id
-               WHERE p.progress IS NOT NULL AND p.progress >= ? AND p.progress < ?""",
+               WHERE p.progress IS NOT NULL AND p.progress >= ? AND p.progress < ?
+                 AND s.fragment = 0""",
             (lo, hi),
         ).fetchall()
         errs = [r["abs_total_error"] for r in rows]
@@ -778,7 +846,7 @@ def _market_compare_sql(conn) -> dict[str, Any]:
     rows = conn.execute(
         """SELECT model_total, market_total, actual_total, total_error,
                   market_error, model_beat_market, ou_prediction, ou_result, ou_correct
-           FROM prediction_scores WHERE market_total IS NOT NULL""",
+           FROM prediction_scores WHERE market_total IS NOT NULL AND fragment = 0""",
     ).fetchall()
     rows = [dict(r) for r in rows]
     n = len(rows)
