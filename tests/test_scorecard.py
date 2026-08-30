@@ -1172,6 +1172,25 @@ def test_trends_model_vs_market(tmp_path, monkeypatch):
 
 # ═══════════ Market data first-class (live PokerBet lines) ═════════
 
+def test_opening_snapshot_returns_first_line():
+    """opening_snapshot = FIRST verified line (never moves with the market);
+    market_snapshot = LATEST.  Empty history → None (honest, no fabrication)."""
+    from blm_v4.projection import market_snapshot, opening_snapshot
+    rows = [
+        {"total_line": 190.0, "captured_at": "2026-08-30T20:00:00Z"},
+        {"total_line": None,  "captured_at": "2026-08-30T20:00:20Z"},
+        {"total_line": 195.0, "captured_at": "2026-08-30T20:00:40Z"},
+        {"total_line": 193.0, "captured_at": "2026-08-30T20:01:00Z"},
+    ]
+    op = opening_snapshot(rows)
+    assert op is not None and op["total_line"] == 190.0
+    assert op["captured_at"] == "2026-08-30T20:00:00Z"
+    latest = market_snapshot(rows)
+    assert latest is not None and latest["total_line"] == 193.0   # latest, not opening
+    assert opening_snapshot([]) is None
+    assert opening_snapshot([{"total_line": None}]) is None  # stubs ≠ market
+
+
 def test_prediction_freezes_market_at_checkpoint(tmp_path):
     """A prediction's market_total must be the last observed PokerBet line
     AT that checkpoint — a later line movement must NEVER rewrite it.

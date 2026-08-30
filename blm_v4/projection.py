@@ -99,6 +99,20 @@ def market_snapshot(rows: list[dict]) -> Optional[dict]:
     return None
 
 
+def opening_snapshot(rows: list[dict]) -> Optional[dict]:
+    """FIRST snapshot carrying a market total — the event's opening line.
+
+    Distinct from market_snapshot (latest): the opening line is the first
+    verified PokerBet observation for this event and never changes as the
+    market moves.  Games captured mid-game report the first line observed
+    at capture time (honest: no pre-game line exists for them).
+    """
+    for r in rows:
+        if r.get("total_line") is not None:
+            return r
+    return None
+
+
 def project(rows: list[dict], market_override: Optional[float] = None) -> dict[str, Any]:
     """Full projection for a game from its snapshots (ascending).
 

@@ -33,7 +33,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from blm_v4.projection import project
+from blm_v4.projection import opening_snapshot, project
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -395,6 +395,9 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     # what the model sees — never a fabricated value.
     mlatest = _market_snapshot(rows)
     total_line = _f(mlatest["total_line"]) if mlatest else None
+    oline = opening_snapshot(rows)
+    opening_line = _f(oline["total_line"]) if oline else None
+    opening_line_at = oline["captured_at"] if oline else None
     spread = _f(mlatest["spread"]) if mlatest else None
     home_total_line = _f(mlatest["home_total_line"]) if mlatest else None
     away_total_line = _f(mlatest["away_total_line"]) if mlatest else None
@@ -480,6 +483,8 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "snapshot_count": snap_count,
         "source_url": game.get("source_url"),
         "market": {
+            "opening_line": opening_line,
+            "opening_line_at": opening_line_at,
             "total_line": market_total,
             "total_line_at": (
                 ws_obs["captured_at"] if mkt_src == "ws" and ws_obs
