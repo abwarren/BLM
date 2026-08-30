@@ -28,6 +28,7 @@ accepted.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Optional
 
@@ -120,12 +121,17 @@ def reconcile_event(
         failures.append("no pricing markets present on event page")
 
     # 6. displayed competition header (normalized — the page may render
-    #    "Cyber Basketball. 2K26 Matches" vs canonical "Cyber Basketball 2K26")
+    #    "Cyber Basketball. 2K26 Matches" vs canonical "Cyber Basketball 2K26",
+    #    or add/omit suffixes like "Matches" / "Virtual")
     comp_header = recorded.get("competition", "")
     if comp_header:
         norm = re.sub(r"[^a-z0-9]+", "", comp_header.lower())
         page_norm = re.sub(r"[^a-z0-9]+", "", page_text.lower())
-        checks["competition_header_matches"] = norm in page_norm
+        # symmetric containment + shared-prefix tolerance for naming variants
+        common = os.path.commonprefix([norm, page_norm])
+        checks["competition_header_matches"] = (
+            norm in page_norm or page_norm in norm or len(common) >= 10
+        )
         if not checks["competition_header_matches"]:
             failures.append(f"competition header '{comp_header}' not on page")
     else:
