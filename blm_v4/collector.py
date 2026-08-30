@@ -81,12 +81,14 @@ NAV_TIMEOUT = 45000
 PANEL_WAIT_S = 8.0
 ENDED_GRACE_TICKS = 3
 
-# Market data is first-class live data: capture a batch of event views
-# every tick so every tracked game's PokerBet total is observed at least
-# once per MARKET_REFRESH window.  Batch is kept modest — the SPA event
-# view needs ~2.5s hydration per click, so 2-3 per tick at a 20s tick
-# keeps ~8-10 min full refresh and avoids overwhelming the degraded SPA.
-MARKET_BATCH = 3
+# Market data is first-class live data.  The SPA's event view hydrates
+# only via an in-app row click + ~2.5s wait; back-to-back clicks in one
+# tick leave the SPA on blank views (observed: empty-team parses).  So
+# capture ONE event view per tick (proven path) — at a 20s tick that is
+# a full market refresh of ~21 tracked games every ~7 min, and every
+# game is refreshed at least once per MARKET_REFRESH window thanks to
+# per-game freshness tracking.
+MARKET_BATCH = 1
 MARKET_REFRESH_S = 480
 
 # Resilience: the BetConstruct SPA slowly degrades in long-lived sessions
