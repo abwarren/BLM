@@ -556,6 +556,10 @@ def test_collector_detects_reset_via_clock_regression(tmp_path):
     assert c._detect_event_reset(game, 44, 54, "4th Quarter", "00:30") is False
     # clock regression alone (even with a rising score) triggers
     assert c._detect_event_reset(game, 50, 55, "2nd Quarter", "05:00") is True
+    # score explosion within a short window (Q1 19-14 -> Q4 62-71 in 11s)
+    # is a different replay — triggers even with a rising score and phase
+    _snap(st, gid_db, "5002", "BETUAL_NBA", datetime.now(timezone.utc), 19, 14, 1, "03:45")
+    assert c._detect_event_reset(game, 62, 71, "4th Quarter", "21:00") is True
 
 
 def test_collector_restart_safe_split(tmp_path, monkeypatch):

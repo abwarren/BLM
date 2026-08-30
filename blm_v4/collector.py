@@ -699,6 +699,19 @@ class PokerBetCollector:
         new_el = self._elapsed_minutes(None, clock, period_label)
         if last_el is not None and new_el is not None and new_el < last_el - 2.0:
             return True
+        # 3. score explosion within a short wall-clock window: a jump of
+        #    > 15 points in < 90s is impossible for a real game — the
+        #    observation is a DIFFERENT virtual replay of the same fixture
+        #    (observed live: Q1 19-14 -> '4th Quarter 21:00 62-71' in 11s).
+        if prev > 0 and cur - prev > 15:
+            last_ts = last_row.get("captured_at")
+            try:
+                last_dt = datetime.fromisoformat(str(last_ts).replace("Z", "+00:00"))
+                gap = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if 0 <= gap <= 90:
+                    return True
+            except Exception:
+                pass
         return False
 
     def _split_instance(self, game: PokerBetGame, row: RowGame, cls) -> PokerBetGame:
