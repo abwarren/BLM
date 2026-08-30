@@ -154,12 +154,13 @@ def test_dashboard_served_at_root(client):
 
 
 def test_dashboard_production_ui_has_no_raw_debug(client):
-    """Production dashboard must not surface RAW/DEBUG UI by default."""
+    """Production dashboard must not surface RAW/DEBUG UI at all."""
     html = client.get("/").text
-    # raw toggle present but hidden unless ?debug=1
-    assert 'id="rawToggle" hidden' in html
-    # no RAW button inside the detail modal header
-    assert "mRawToggle" not in html
+    # no raw drawer, toggle, or debug panel anywhere
+    assert "rawToggle" not in html
+    assert "rawDrawer" not in html
+    assert "rawClose" not in html
+    assert "RAW / DEBUG" not in html
     # filters present
     assert 'data-filter="CYBER_2K26"' in html
     assert 'data-filter="BETUAL_NBA"' in html

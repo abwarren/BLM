@@ -9,7 +9,6 @@
 const POLL_MS = 5000;
 const API_LIVE = "/api/v4/live";
 const API_GAME = (id) => `/api/v4/game/${encodeURIComponent(id)}`;
-const DEBUG = new URLSearchParams(location.search).has("debug");
 
 const state = {
   filter: "",
@@ -540,27 +539,6 @@ async function loadModalDetail(gameId) {
   }
 }
 
-/* ── Debug mode (?debug=1) — raw drawer, hidden in production ── */
-
-function wireDebug() {
-  if (!DEBUG) {
-    // production: remove debug UI from the DOM entirely
-    $("rawToggle")?.remove();
-    $("rawDrawer")?.remove();
-    return;
-  }
-  $("rawToggle").hidden = false;
-  const setRaw = (on) => {
-    $("rawDrawer").hidden = !on;
-    $("rawToggle").classList.toggle("on", on);
-    if (on && state.lastPayload) {
-      $("rawJson").textContent = JSON.stringify(state.lastPayload, null, 2);
-    }
-  };
-  $("rawToggle").addEventListener("click", () => setRaw($("rawDrawer").hidden));
-  $("rawClose").addEventListener("click", () => setRaw(false));
-}
-
 /* ── Polling ─────────────────────────────────────────────── */
 
 async function refresh() {
@@ -578,9 +556,6 @@ async function refresh() {
       closeModal();
     } else if (state.modalGameId && !$("modalBackdrop").hidden) {
       loadModalDetail(state.modalGameId);
-    }
-    if (DEBUG && !$("rawDrawer").hidden && state.lastPayload) {
-      $("rawJson").textContent = JSON.stringify(state.lastPayload, null, 2);
     }
   } catch (err) {
     const livePill = $("livePill");
@@ -611,6 +586,5 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !$("modalBackdrop").hidden) closeModal();
 });
 
-wireDebug();
 refresh();
 setInterval(refresh, POLL_MS);
