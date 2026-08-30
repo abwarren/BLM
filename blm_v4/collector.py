@@ -661,7 +661,7 @@ class PokerBetCollector:
         two games never share a history.
         """
         if self._detect_instance_reset(game, row):
-            game = self._split_instance(game, row, comp.classification)
+            game = self._split_instance(game, row, comp)
         obs = MarketObservation(
             source=SOURCE_POKERBET,
             source_game_id=game.source_game_id,

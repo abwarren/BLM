@@ -122,7 +122,7 @@ function renderScorecard(d) {
   const recent = d.recent || [];
   const html = [];
   // current model performance
-  const v = ver;
+  const v = { model_version: d.model_version || "v4-pace-1", ...ver };
   html.push(`<div class="sc-block">
     <h4>MODEL ${esc(v.model_version || "?")}</h4>
     <table class="sc-table">
