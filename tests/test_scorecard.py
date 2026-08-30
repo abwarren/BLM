@@ -898,6 +898,49 @@ def test_api_card_parity_with_projection():
     assert card["home_score"] == 109 and card["away_score"] == 114
 
 
+# ═══════════ Prediction rebase (current code always wins) ═════════
+
+def test_predictions_rebased_onto_current_code(tmp_path):
+    """A prediction stored by an OLDER model build (pre live-score-floor)
+    must be recomputed from the same snapshots on the next run — the
+    scorecard measures v4-pace-1 AS DEFINED TODAY, never a dead build.
+
+    Legacy rows like 'projected 58.0/85.1/143.2 while the board read
+    95-104' violate the floor; rebase lifts them to the floored split."""
+    st = _make_store(tmp_path)
+    _ended_game_snapshots(st)                     # final 96-88 (184 total)
+    sc = Scorecard(tmp_path / "blm.db")
+    stats = sc.run()
+    assert stats["recorded"]["recorded"] > 0
+    conn = sc._connect()
+    try:
+        # simulate an old-build row: floor-violating total on the final cp
+        conn.execute(
+            "UPDATE predictions SET projected_home=58.0, projected_away=85.1,"
+            " projected_total=143.2 WHERE checkpoint='final'")
+        conn.commit()
+    finally:
+        conn.close()
+    # rebase on next run: same snapshots, current code → floor-compliant
+    stats = sc.run()
+    assert stats["recorded"]["rebased"] >= 1
+    conn = sc._connect()
+    try:
+        row = conn.execute(
+            "SELECT projected_home, projected_away, projected_total, home_score, away_score"
+            " FROM predictions WHERE checkpoint='final'").fetchone()
+        # floor: projected_home >= home_score, projected_away >= away_score
+        assert row["projected_home"] >= row["home_score"]
+        assert row["projected_away"] >= row["away_score"]
+        assert row["projected_total"] >= row["projected_home"] + row["projected_away"] - 0.05
+        assert row["projected_total"] != 143.2
+    finally:
+        conn.close()
+    # idempotent: a second rebase run changes nothing more
+    stats = sc.run()
+    assert stats["recorded"]["rebased"] == 0
+
+
 # ═══════════ Historical market history + trends ═════════════════
 
 def _clean_game(st: PokerBetStore, gid: str, t0: datetime | None = None,

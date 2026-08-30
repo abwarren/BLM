@@ -338,15 +338,19 @@ class Scorecard:
     # ── Record predictions ─────────────────────────────────────────
 
     def record_predictions(self) -> dict[str, int]:
-        """Record missing checkpoint predictions for every game.
+        """Record checkpoint predictions for every game — and REBASE any
+        existing row onto the CURRENT projection code.
 
-        Idempotent: one prediction per (game, checkpoint, model_version).
-        Works for live games (new checkpoints appear as quarters advance)
-        and, on first run after deploy, backfills ended games from their
-        stored mid-game snapshots — recomputing the exact projection the
-        model would have shown at that moment (no final-result leakage).
+        v4-pace-1 is defined by projection.py as it exists today: a
+        prediction stored by an older build (pre live-score-floor, pre
+        single-source) is NOT a v4-pace-1 output.  Every run recomputes
+        each checkpoint from the same snapshots (deterministic, no
+        final-result leakage — snapshots are immutable inputs) and
+        upserts, so the stored table always reflects the current model
+        version definition and the scorecard never measures a dead build.
         """
-        stats = {"checked": 0, "recorded": 0, "skipped_no_checkpoint": 0}
+        stats = {"checked": 0, "recorded": 0, "rebased": 0,
+                 "skipped_no_checkpoint": 0}
         with self._lock:
             conn = self._connect()
             try:
@@ -360,39 +364,62 @@ class Scorecard:
                         (g["id"],),
                     ).fetchall()
                     rows = [dict(r) for r in rows]
-                    recorded = self._record_game(conn, g, rows)
+                    recorded, rebased = self._record_game(conn, g, rows)
                     stats["recorded"] += recorded
+                    stats["rebased"] += rebased
                 conn.commit()
             finally:
                 conn.close()
         return stats
 
-    def _record_game(self, conn, g, rows: list[dict]) -> int:
-        """Record missing checkpoints for one game. Returns count recorded."""
+    def _record_game(self, conn, g, rows: list[dict]) -> tuple[int, int]:
+        """Record or REBASE checkpoints for one game.
+
+        Returns (recorded, rebased): newly inserted rows vs existing rows
+        whose projection changed (i.e. an older model build had stored it).
+        Each checkpoint is defined by the FIRST snapshot that carries it
+        (the moment the quarter started) and is written exactly once per
+        run — deterministic and idempotent."""
         n = 0
+        rb = 0
+        seen: set[str] = set()
         for i, r in enumerate(rows):
             cp = _checkpoint_for(r.get("quarter"), r.get("clock"),
                                  r.get("period_label"))
-            if cp is None:
+            if cp is None or cp in seen:
                 continue
-            has = conn.execute(
-                "SELECT 1 FROM predictions WHERE source_game_id=? AND checkpoint=? AND model_version=?",
-                (g["source_game_id"], cp, MODEL_VERSION),
-            ).fetchone()
-            if has:
-                continue
+            seen.add(cp)
             proj = project(rows[: i + 1])
             if proj["home_projection"] is None or proj["away_projection"] is None:
                 continue
             combined = (proj["home_score"] or 0) + (proj["away_score"] or 0) \
                 if proj["home_score"] is not None else None
+            cur = conn.execute(
+                "SELECT projected_total FROM predictions "
+                "WHERE source_game_id=? AND checkpoint=? AND model_version=?",
+                (g["source_game_id"], cp, MODEL_VERSION),
+            ).fetchone()
             conn.execute(
-                """INSERT OR IGNORE INTO predictions (
+                """INSERT INTO predictions (
                     source_game_id, classification, model_version, checkpoint,
                     quarter, predicted_at, source_snapshot_at, elapsed_minutes,
                     progress, home_score, away_score, combined,
                     projected_home, projected_away, projected_total, market_total, valid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(source_game_id, checkpoint, model_version) DO UPDATE SET
+                    classification = excluded.classification,
+                    quarter = excluded.quarter,
+                    source_snapshot_at = excluded.source_snapshot_at,
+                    elapsed_minutes = excluded.elapsed_minutes,
+                    progress = excluded.progress,
+                    home_score = excluded.home_score,
+                    away_score = excluded.away_score,
+                    combined = excluded.combined,
+                    projected_home = excluded.projected_home,
+                    projected_away = excluded.projected_away,
+                    projected_total = excluded.projected_total,
+                    market_total = excluded.market_total,
+                    valid = 1""",
                 (
                     g["source_game_id"], g["classification"], MODEL_VERSION, cp,
                     r.get("quarter"), _utcnow(), r["captured_at"],
@@ -402,8 +429,11 @@ class Scorecard:
                     proj["expected_total"], proj["market_total"],
                 ),
             )
-            n += 1
-        return n
+            if cur is None:
+                n += 1
+            elif abs((cur["projected_total"] or 0) - (proj["expected_total"] or 0)) > 0.05:
+                rb += 1
+        return n, rb
 
     # ── Fixed game-completion checkpoints ─────────────────────────
 
@@ -436,16 +466,12 @@ class Scorecard:
         return stats
 
     def _record_fixed_game(self, conn, g, rows: list[dict], stats: dict) -> int:
+        """Record or REBASE fixed % checkpoints for one game (same
+        current-code-wins semantics as _record_game)."""
         n = 0
         for pct in FIXED_CHECKPOINT_PCTS:
             target = pct / 100.0
             cp_key = f"pct{pct}"
-            has = conn.execute(
-                "SELECT 1 FROM predictions WHERE source_game_id=? AND checkpoint=? AND model_version=?",
-                (g["source_game_id"], cp_key, MODEL_VERSION),
-            ).fetchone()
-            if has:
-                continue
             # closest snapshot to the target
             best: Optional[tuple[float, int]] = None
             for i, r in enumerate(rows):
@@ -470,14 +496,35 @@ class Scorecard:
                 continue
             combined = ((proj["home_score"] or 0) + (proj["away_score"] or 0)
                         if proj["home_score"] is not None else None)
+            cur = conn.execute(
+                "SELECT projected_total FROM predictions "
+                "WHERE source_game_id=? AND checkpoint=? AND model_version=?",
+                (g["source_game_id"], cp_key, MODEL_VERSION),
+            ).fetchone()
             conn.execute(
-                """INSERT OR IGNORE INTO predictions (
+                """INSERT INTO predictions (
                     source_game_id, classification, model_version, checkpoint,
                     checkpoint_percent, distance_pct, quarter, predicted_at,
                     source_snapshot_at, elapsed_minutes, progress,
                     home_score, away_score, combined,
                     projected_home, projected_away, projected_total, market_total, valid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(source_game_id, checkpoint, model_version) DO UPDATE SET
+                    classification = excluded.classification,
+                    checkpoint_percent = excluded.checkpoint_percent,
+                    distance_pct = excluded.distance_pct,
+                    quarter = excluded.quarter,
+                    source_snapshot_at = excluded.source_snapshot_at,
+                    elapsed_minutes = excluded.elapsed_minutes,
+                    progress = excluded.progress,
+                    home_score = excluded.home_score,
+                    away_score = excluded.away_score,
+                    combined = excluded.combined,
+                    projected_home = excluded.projected_home,
+                    projected_away = excluded.projected_away,
+                    projected_total = excluded.projected_total,
+                    market_total = excluded.market_total,
+                    valid = 1""",
                 (
                     g["source_game_id"], g["classification"], MODEL_VERSION, cp_key,
                     target, dist_pct, r.get("quarter"), _utcnow(), r["captured_at"],
