@@ -584,6 +584,13 @@ def test_collector_restart_safe_split(tmp_path, monkeypatch):
                       "period_label": "1st Quarter", "clock": "01:30"},
     )
     assert c._restart_split_suffix("ignored", tax, game) == "5003#i1"
+    # existing instances must be skipped — #i1 already recorded (collision
+    # seen live: a restarted collector re-created base#i1 and contaminated
+    # the finished game) → next free id is #i3
+    _add_game(st, "5003#i1", "BETUAL_NBA", "Home Virtual", "Away Virtual", status="ended")
+    _add_game(st, "5003#i2", "BETUAL_NBA", "Home Virtual", "Away Virtual", status="ended")
+    assert c._restart_split_suffix("ignored", tax, game) == "5003#i3"
+    assert c._next_instance_id("5003") == "5003#i3"
     # continuation (Q4, rising score) → no split
     monkeypatch.setattr(
         "blm_v4.collector.parse_event_view",

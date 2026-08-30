@@ -182,6 +182,19 @@ class PokerBetStore:
             finally:
                 conn.close()
 
+    def list_instance_ids(self, base_id: str) -> list[str]:
+        """All virtual-instance ids (base#iN) recorded for a fixture."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT source_game_id FROM games WHERE source_game_id LIKE ?",
+                    (f"{base_id}#i%",),
+                ).fetchall()
+                return [r["source_game_id"] for r in rows]
+            finally:
+                conn.close()
+
     def list_games(
         self, classification: Optional[str] = None, limit: int = 200,
     ) -> list[dict]:

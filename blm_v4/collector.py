@@ -564,10 +564,7 @@ class PokerBetCollector:
                 game, int(eh), int(ea),
                 ev.get("period_label"), ev.get("clock")):
             return None
-        base = self._base_id(tax["game_id"])
-        m = re.search(r"#i(\d+)$", tax["game_id"])
-        n = int(m.group(1)) if m else 0
-        return f"{base}#i{n + 1}"
+        return self._next_instance_id(self._base_id(tax["game_id"]))
 
     def _authoritative_teams(self, row: RowGame, tax: dict, text: str) -> tuple[str, str]:
         """Pick the true team names for the event.
@@ -622,6 +619,21 @@ class PokerBetCollector:
         )
 
     # ── Snapshot capture ─────────────────────────────────────────
+
+    def _next_instance_id(self, base: str) -> str:
+        """Next free virtual-instance id for a fixture.
+
+        Skips suffixes that already exist in the DB: after a collector
+        restart a re-resolved fixture must continue at base#i3, not
+        re-create base#i1 (which a previous process may already have
+        recorded a finished game under)."""
+        n = 0
+        pat = re.compile(rf"^{re.escape(base)}#i(\d+)$")
+        for gid in self.store.list_instance_ids(base):
+            m = pat.match(gid)
+            if m:
+                n = max(n, int(m.group(1)))
+        return f"{base}#i{n + 1}"
 
     @staticmethod
     def _base_id(gid: str) -> str:
@@ -694,9 +706,7 @@ class PokerBetCollector:
         with a distinct identity (base#iN) so replay snapshots never mix
         into the finished game's history."""
         base = self._base_id(game.source_game_id)
-        m = re.search(r"#i(\d+)$", game.source_game_id)
-        n = int(m.group(1)) if m else 0
-        new_id = f"{base}#i{n + 1}"
+        new_id = self._next_instance_id(base)
         self._instances[base] = new_id
 
         # end the old game
