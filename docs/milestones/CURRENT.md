@@ -75,25 +75,25 @@ game expected ~00:12Z (02:12 SAST). Watcher `proc_a36aec40e075` armed.
 - docs/milestones/CURRENT.md (this checkpoint).
 
 ## COMMIT
-- HEAD: af3e4c2 (rebase) — deployed 23:49:00Z
+- HEAD: 7d1bb8e (dashboard 4-concept distinction) — deployed
+- 7eed84a (quality-gate gap-aware) — deployed
+- af3e4c2 (rebase) — deployed 23:49:00Z
 - db650d7 (trends) — deployed 23:47:40Z
 - 79c4c0d (floor + collector) — deployed 23:32:48Z
-- aa7aef1 (M004 checkpoint) — pushed
 - All services active.
 
 ## TEST RESULTS
-- 174 passed / 0 failed (af3e4c2 tree).
+- 175 passed / 0 failed (7d1bb8e tree).
 
 ## LIVE VERIFICATION
-- blm-server + blm-collector: active. Server PID 218023 (af3e4c2).
+- blm-server + blm-collector: active. HEAD 7d1bb8e deployed.
 - /api/v4/trends live: analytics_tz Africa/Johannesburg, grouped periods
   configured, empty clean-game base (correct).
-- /api/v4/scorecard after rebase: versions=[] (0 predictions — legacy
-  dead rows cleared), quality: valid 0, invalid 86 (20 impossible jump +
-  66 score regression), excluded 211, fragments 10 games / 50 preds /
-  mae 63.82 / mape 33.47. RECENT = 25 rows (unscored, diagnostics).
-- Live games 3074120x#i1: 16 snaps, first '1st Quarter' → clean start
-  working (collector fix live-proof).
+- /api/v4/scorecard: FOUR concepts live — recorded_predictions 1460,
+  completed_games 10, valid_scored_games 0, invalid 86 (20 impossible
+  jump + 66 score regression), excluded 211.  RECENT = 25 rows
+  (fragment rows now FRAGMENT-badged, diagnostics only).
+- Live games 3074120x#i1: began 1st Quarter (clean start), now mid-game.
 
 ## KNOWN ISSUES
 - 30740069#i11 q3 pace unavailable (single event-view row, quarter=NULL):
