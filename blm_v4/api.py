@@ -738,12 +738,12 @@ def v4_games(classification: Optional[str] = Query(None), limit: int = Query(200
 @router.get("/scorecard")
 def v4_scorecard() -> dict:
     """Projection-accuracy scorecard (persisted, quality-gated)."""
+    from blm_v4.projection import MODEL_VERSION
     from blm_v4.scorecard import Scorecard
     db = _db_path()
     sc = Scorecard(db)
     return {
-        "model_version": sc.summary()["versions"].get(
-            "v4-pace-1", {}).get("model_version"),
+        "model_version": MODEL_VERSION,
         "summary": sc.summary(),
         "fixed_checkpoints": sc.fixed_checkpoints(),
         "by_progress": sc.by_progress(),
