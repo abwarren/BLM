@@ -32,7 +32,7 @@ import pytest
 from blm_v4.collector import PokerBetCollector
 from blm_v4.discovery import RowGame
 from blm_v4.models import MarketObservation, PokerBetGame, utcnow_iso
-from blm_v4.projection import MODEL_VERSION
+from blm_v4.projection import MODEL_VERSION, project
 from blm_v4.scorecard import (
     MAX_DISTANCE_PCT,
     FIXED_CHECKPOINT_PCTS,
@@ -490,9 +490,9 @@ def test_collector_detects_instance_reset(tmp_path):
     _ended_game_snapshots(st, gid="5001")  # game 5001 ends 96-88
     c = _collector(st)
     assert c._detect_instance_reset(c._tracked["BETUAL_NBA"]["Home Virtual|Away Virtual"],
-                                    _row(31, 24, 2, "20:00")) is True
+                                    _row(31, 24, 2, "20:00")) == "score_drop"
     assert c._detect_instance_reset(c._tracked["BETUAL_NBA"]["Home Virtual|Away Virtual"],
-                                    _row(100, 92, 4, "01:00")) is False  # continuation
+                                    _row(100, 92, 4, "01:00")) is None  # continuation
 
 
 def test_collector_detects_event_view_reset(tmp_path):
@@ -501,8 +501,8 @@ def test_collector_detects_event_view_reset(tmp_path):
     _ended_game_snapshots(st, gid="5001")  # last snapshot 96-88
     c = _collector(st)
     game = c._tracked["BETUAL_NBA"]["Home Virtual|Away Virtual"]
-    assert c._detect_event_reset(game, 25, 32) is True    # new replay, big drop
-    assert c._detect_event_reset(game, 97, 89) is False   # continuation
+    assert c._detect_event_reset(game, 25, 32) == "score_drop"   # new replay, big drop
+    assert c._detect_event_reset(game, 97, 89) is None           # continuation
 
 
 def test_collector_splits_instance(tmp_path):
@@ -551,15 +551,123 @@ def test_collector_detects_reset_via_clock_regression(tmp_path):
         game_slug="h-a", source_url="https://x/5002", status="live",
     )
     # new replay first row: Q1 01:30, 28-28 (56 total — ABOVE 50% of 93)
-    assert c._detect_event_reset(game, 28, 28, "1st Quarter", "01:30") is True
+    assert c._detect_event_reset(game, 28, 28, "1st Quarter", "01:30") == "clock_regression"
     # same-phase continuation must NOT trigger
-    assert c._detect_event_reset(game, 44, 54, "4th Quarter", "00:30") is False
+    assert c._detect_event_reset(game, 44, 54, "4th Quarter", "00:30") is None
     # clock regression alone (even with a rising score) triggers
-    assert c._detect_event_reset(game, 50, 55, "2nd Quarter", "05:00") is True
-    # score explosion within a short window (Q1 19-14 -> Q4 62-71 in 11s)
-    # is a different replay — triggers even with a rising score and phase
+    assert c._detect_event_reset(game, 50, 55, "2nd Quarter", "05:00") == "clock_regression"
+    # a forward score jump (even a big one in a short window) is NOT a new
+    # replay — the live list feed lags the true ~7x game by minutes, so the
+    # event view legitimately shows a much later state of the SAME game.
+    # Splitting on forward jumps fragmented every game into #iN churn
+    # (2026-08-30 forensics: #i3 -> #i4 -> #i5 on one legit game).
     _snap(st, gid_db, "5002", "BETUAL_NBA", datetime.now(timezone.utc), 19, 14, 1, "03:45")
-    assert c._detect_event_reset(game, 62, 71, "4th Quarter", "21:00") is True
+    assert c._detect_event_reset(game, 62, 71, "4th Quarter", "21:00") is None
+    # same-phase continuation must NOT trigger
+    assert c._detect_event_reset(game, 44, 54, "4th Quarter", "00:30") is None
+
+
+def test_collector_event_view_final_ends_game_not_split(tmp_path):
+    """A VERIFIED event view showing the tracked game's own final state
+    (4th Quarter + sentinel clock, forward score) ENDS the game — it is the
+    same replay finishing while the lagging list feed still shows mid-game,
+    NOT a new replay.  Before this rule the event view's final split the
+    game and the stale list split it AGAIN (the #i3->#i4->#i5 churn)."""
+    st = _make_store(tmp_path)
+    gid_db = _add_game(st, "5101", "BETUAL_NBA", "Home Virtual", "Away Virtual", status="live")
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=2)
+    _snap(st, gid_db, "5101", "BETUAL_NBA", t0, 34, 37, 2, "00:45")
+    c = _collector(st)
+    game = c._tracked["BETUAL_NBA"]["Home Virtual|Away Virtual"]
+    assert c._is_final_state({"period_label": "4th Quarter", "clock": "21:00"}) is True
+    assert c._is_final_state({"period_label": "4th Quarter", "clock": "05:00"}) is False
+    assert c._is_final_state({"period_label": "Half End", "clock": "21:00"}) is False
+    # the final-state branch in _capture_next_market: forward final ends,
+    # no split.  (The branch logic is exercised via _is_final_state + the
+    # cur >= prev guard; the full navigation path needs a live page.)
+    assert c._is_final_state({"period_label": "Full Time", "clock": "21:00"}) is True
+
+
+def test_capture_event_state_rejects_foreign_teams(tmp_path):
+    """The identity guard must live INSIDE the shared capture so the
+    _resolve_new_game path (which calls it directly, bypassing
+    _capture_next_market) can never store lobby/foreign content."""
+    st = _make_store(tmp_path)
+    gid_db = _add_game(st, "5201", "BETUAL_NBA", "Home Virtual", "Away Virtual", status="live")
+    c = _collector(st)
+    game = c._tracked["BETUAL_NBA"]["Home Virtual|Away Virtual"]
+    parsed_foreign = {"home_team": "Minnesota Lynx", "away_team": "Atlanta Dream",
+                      "home_score": 66, "away_score": 79,
+                      "period_label": "4th Quarter", "clock": "21:00",
+                      "total": None, "handicap": None, "team_totals": {},
+                      "match_winner": None, "markets_json": "{}", "raw_json": "{}"}
+    assert c._verified_event_view(game, parsed_foreign) is False
+    assert c._capture_event_state(None, __import__("blm_v4.classifications",
+                                                   fromlist=["Classification"]).Classification.BETUAL_NBA,
+                                  game, "ignored") is False
+    conn = st._connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) c FROM snapshots WHERE source_game_id='5201'").fetchone()["c"] == 0
+    finally:
+        conn.close()
+
+
+def test_restart_split_suffix_ignores_foreign_text(tmp_path, monkeypatch):
+    """A lobby/foreign page must never drive a restart split — only the
+    fixture's own verified event view can (the resolve path previously
+    split every fixture on the lobby's first-listed game)."""
+    st = _make_store(tmp_path)
+    gid_db = _add_game(st, "5301", "BETUAL_NBA", "Home Virtual", "Away Virtual", status="ended")
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=10)
+    _snap(st, gid_db, "5301", "BETUAL_NBA", t0, 100, 66, 4, "02:00")
+    c = PokerBetCollector(store=st)
+    game = PokerBetGame(
+        source="PokerBet", source_game_id="5301",
+        competition_id="c", competition_slug="betual-nba",
+        competition="Betual NBA", region="Virtual Matches",
+        game_family="betual", classification="BETUAL_NBA", sport="basketball",
+        home_team="Home Virtual", away_team="Away Virtual",
+        game_slug="h-a", source_url="https://x/5301", status="live",
+    )
+    tax = {"game_id": "5301"}
+    # foreign lobby text (other teams) with a big drop -> NO split
+    monkeypatch.setattr(
+        "blm_v4.collector.parse_event_view",
+        lambda text: {"home_team": "Minnesota Lynx", "away_team": "Atlanta Dream",
+                      "home_score": 2, "away_score": 2,
+                      "period_label": "1st Quarter", "clock": "12:00"},
+    )
+    assert c._restart_split_suffix("ignored", tax, game) is None
+    # the fixture's OWN event view (teams match) with a drop -> split
+    monkeypatch.setattr(
+        "blm_v4.collector.parse_event_view",
+        lambda text: {"home_team": "Home Virtual", "away_team": "Away Virtual",
+                      "home_score": 28, "away_score": 28,
+                      "period_label": "1st Quarter", "clock": "01:30"},
+    )
+    assert c._restart_split_suffix("ignored", tax, game) == "5301#i1"
+
+
+def test_split_instance_writes_audit_row(tmp_path):
+    """Every split persists an instance_splits audit row with the tracked
+    instance's last state vs the triggering observation."""
+    st = _make_store(tmp_path)
+    _ended_game_snapshots(st, gid="5001")
+    c = _collector(st)
+    game = c._tracked["BETUAL_NBA"]["Home Virtual|Away Virtual"]
+    c._split_instance(game, _row(31, 24, 2, "20:00"),
+                      __import__("blm_v4.classifications", fromlist=["Classification"]).Classification.BETUAL_NBA,
+                      signal="score_drop", path="event")
+    conn = st._connect()
+    try:
+        rows = conn.execute("SELECT * FROM instance_splits").fetchall()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["base_id"] == "5001" and r["new_id"] == "5001#i1"
+        assert r["path"] == "event" and r["signal"] == "score_drop"
+        assert r["prev_home"] is not None and r["new_home"] == 31
+    finally:
+        conn.close()
 
 
 def test_collector_restart_safe_split(tmp_path, monkeypatch):
@@ -584,7 +692,8 @@ def test_collector_restart_safe_split(tmp_path, monkeypatch):
     # threshold but clock regressed from Q4) → must split
     monkeypatch.setattr(
         "blm_v4.collector.parse_event_view",
-        lambda text: {"home_score": 28, "away_score": 28,
+        lambda text: {"home_team": "Home Virtual", "away_team": "Away Virtual",
+                      "home_score": 28, "away_score": 28,
                       "period_label": "1st Quarter", "clock": "01:30"},
     )
     assert c._restart_split_suffix("ignored", tax, game) == "5003#i1"
@@ -598,7 +707,8 @@ def test_collector_restart_safe_split(tmp_path, monkeypatch):
     # continuation (Q4, rising score) → no split
     monkeypatch.setattr(
         "blm_v4.collector.parse_event_view",
-        lambda text: {"home_score": 103, "away_score": 68,
+        lambda text: {"home_team": "Home Virtual", "away_team": "Away Virtual",
+                      "home_score": 103, "away_score": 68,
                       "period_label": "4th Quarter", "clock": "01:00"},
     )
     assert c._restart_split_suffix("ignored", tax, game) is None
@@ -678,6 +788,114 @@ def test_market_total_survives_list_stubs(tmp_path, monkeypatch):
         assert row["market_total"] in (187.5, 189.5)
     finally:
         conn.close()
+
+
+# ═══════════ Live-score floor (final projection >= live score) ═══════
+
+def _proj_rows(scores, quarters, clocks, span_min=30.0,
+               start="2026-08-30T20:00:00Z", total_line=None):
+    """Build ascending snapshot rows; scores [(h, a), ...] parallel to
+    quarters/clocks, spread evenly over span_min wall-clock minutes."""
+    from datetime import timedelta
+    t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    n = len(scores)
+    rows = []
+    for i, ((h, a), q, c) in enumerate(zip(scores, quarters, clocks)):
+        rows.append({
+            "captured_at": (t0 + timedelta(minutes=span_min * i / max(n - 1, 1))).isoformat(),
+            "home_score": h, "away_score": a,
+            "quarter": q, "clock": c, "period_label": None,
+            "total_line": total_line, "spread": None,
+            "home_total_line": None, "away_total_line": None,
+            "w1_odds": None, "w2_odds": None,
+            "total_over_odds": None, "total_under_odds": None,
+            "spread_indicator": None,
+        })
+    return rows
+
+
+def test_projection_never_below_live_score_109_114():
+    """The live case: Boston 109-114 in Q4 with a slow pace window — the raw
+    rate split would print home 89 / away 95 while the board already shows
+    109-114.  The floor must start the projection FROM the live score:
+    home >= 109, away >= 114, total >= 223, margin re-derived coherently."""
+    rows = _proj_rows(
+        [(40, 45), (52, 58), (61, 66), (73, 79), (88, 92), (98, 103), (109, 114)],
+        [1, 1, 2, 2, 3, 3, 4],
+        ["06:00", "05:00", "09:00", "07:30", "05:00", "03:30", "02:00"],
+        span_min=30.0,
+    )
+    p = project(rows)
+    assert p["home_score"] == 109 and p["away_score"] == 114
+    assert p["home_projection"] >= 109
+    assert p["away_projection"] >= 114
+    assert p["expected_total"] >= 223
+    assert abs(p["home_projection"] + p["away_projection"] - p["expected_total"]) < 0.11
+    assert abs(p["expected_margin"] - (p["home_projection"] - p["away_projection"])) < 0.11
+
+
+def test_projection_floor_all_quarters():
+    """The invariant must hold at every game phase: Q1..Q4 and near-final."""
+    cases = [
+        (1, "08:00", 18, 16),
+        (2, "06:00", 42, 39),
+        (3, "04:00", 68, 71),
+        (4, "02:00", 95, 97),
+        (4, "00:30", 109, 114),
+    ]
+    for q, c, h, a in cases:
+        rows = _proj_rows([(h - 14, a - 12), (h, a)], [max(q - 1, 1), q],
+                          ["08:30", c], span_min=8.0)
+        p = project(rows)
+        assert p["home_projection"] >= h, (q, c, p)
+        assert p["away_projection"] >= a, (q, c, p)
+        assert p["expected_total"] >= h + a, (q, c, p)
+        assert abs(p["home_projection"] + p["away_projection"] - p["expected_total"]) < 0.11
+
+
+def test_projection_floor_one_team_only():
+    """When only ONE team's raw split sits below the board (the other is
+    already covered by the model), only that team is floored; total lifts
+    to the sum of floored teams and the margin stays coherent."""
+    # home 160 - away 120 at Q3 start; pace 272 -> raw home 176 (survives),
+    # raw away 96 < 120 (trips).
+    rows = _proj_rows(
+        [(70, 40), (160, 120)],
+        [1, 3], ["06:00", "10:00"], span_min=25.0,
+    )
+    p = project(rows)
+    assert p["home_projection"] >= 160
+    assert p["away_projection"] >= 120
+    assert p["expected_total"] >= 280
+    assert abs(p["home_projection"] + p["away_projection"] - p["expected_total"]) < 0.11
+    assert abs(p["expected_margin"] - (p["home_projection"] - p["away_projection"])) < 0.11
+
+
+def test_api_card_parity_with_projection():
+    """api.py must NOT re-implement the model: the dashboard card's model
+    block is exactly projection.project() (single source of truth), and the
+    score shown on the card is the same snapshot the projection was built
+    from."""
+    from blm_v4.api import _analyze_game
+    rows = _proj_rows(
+        [(40, 45), (52, 58), (61, 66), (73, 79), (88, 92), (98, 103), (109, 114)],
+        [1, 1, 2, 2, 3, 3, 4],
+        ["06:00", "05:00", "09:00", "07:30", "05:00", "03:30", "02:00"],
+        span_min=30.0, total_line=230.0,
+    )
+    p = project(rows)
+    game = {"source_game_id": "t1", "source": "PokerBet", "classification": "BETUAL_NBA",
+            "competition": "Betual NBA", "region": "Virtual Matches", "sport": "basketball",
+            "home_team": "Boston Celtics Virtual", "away_team": "Sacramento Kings Virtual",
+            "status": "live", "last_seen_at": rows[-1]["captured_at"], "id": 1}
+    card = _analyze_game(dict(game), rows, datetime.now(timezone.utc))
+    m = card["model"]
+    assert m["home_projection"] == p["home_projection"]
+    assert m["away_projection"] == p["away_projection"]
+    assert m["expected_total"] == p["expected_total"]
+    assert m["expected_margin"] == p["expected_margin"]
+    assert m["pace"] == p["pace"]
+    assert card["home_score"] == 109 and card["away_score"] == 114
 
 
 # ═══════════ Fragment classification (short histories never headline) ═

@@ -298,11 +298,16 @@ def test_implied_win():
 
 
 def test_clock_minutes():
-    assert v4api._clock_minutes(1, "08:00") == 8.0
-    assert v4api._clock_minutes(2, "05:00") == 15.0
-    assert v4api._clock_minutes(1, "12`") == 12.0
-    assert v4api._clock_minutes(4, "16:05") == pytest.approx(46.0833, abs=1e-3)
-    assert v4api._clock_minutes(None, "08:00") is None
+    """The authoritative clock parser lives in projection.py (single
+    source of truth) — api.py no longer re-implements it.  Note the
+    mm>12 guard: '16:05' is the period-over sentinel style clock, not a
+    real 40-min-game clock (the '21:00' sentinel case)."""
+    from blm_v4.projection import clock_minutes
+    assert clock_minutes(1, "08:00") == 2.0    # 8:00 remaining in Q1 → 2 elapsed
+    assert clock_minutes(2, "05:00") == 15.0   # Q2, 5:00 left → 15 elapsed
+    assert clock_minutes(1, "12`") == 12.0     # M' style = elapsed minutes
+    assert clock_minutes(4, "16:05") is None   # mm>12 guard (sentinel style)
+    assert clock_minutes(None, "08:00") is None
 
 
 def _rows_from(specs):
@@ -328,13 +333,16 @@ def test_confidence_grows_with_evidence():
 
 
 def test_pace_from_snapshots():
+    """The authoritative pace estimator lives in projection.py — api.py
+    calls projection.project() rather than re-implementing it."""
+    from blm_v4.projection import pace_from_snapshots
     # 20 pts combined per 2-minute snapshot gap → 40 pts/40min... sanity band
     rows = _rows_from([(0, 0), (5, 5), (10, 10)])
-    pace = v4api._pace_from_snapshots(rows)
+    pace = pace_from_snapshots(rows)
     assert pace is None or 20 <= pace <= 400
     # static scores → no pace from wall time
     rows2 = _rows_from([(0, 0), (0, 0), (0, 0)])
-    assert v4api._pace_from_snapshots(rows2) in (None, 0.0) or True
+    assert pace_from_snapshots(rows2) in (None, 0.0) or True
 
 
 def test_momentum_direction():

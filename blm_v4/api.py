@@ -33,6 +33,8 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from blm_v4.projection import project
+
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────────
@@ -42,8 +44,6 @@ STATE_FILE = Path(__file__).resolve().parent / "state" / "collector_state.json"
 
 # A game is considered LIVE if its latest snapshot is fresher than this.
 LIVE_AGE_S = 15 * 60
-# Default total-line used when the market has not posted one yet.
-QUARTER_MINUTES = 10.0
 FULL_GAME_MINUTES = 40.0  # cyber/virtual basketball game length (4 × 10)
 
 
@@ -97,36 +97,6 @@ def _i(v: Any) -> Optional[int]:
     return None if v is None else int(v)
 
 
-def _clock_minutes(quarter: Optional[int], clock: Optional[str]) -> Optional[float]:
-    """Elapsed game minutes from period + clock (MM:SS or M').
-
-    Virtual basketball plays 4 × 10-minute quarters.  Returns None when
-    the clock cannot be parsed.
-    """
-    q = _i(quarter)
-    if q is None or q < 1:
-        return None
-    c = (clock or "").strip()
-    m = None
-    if ":" in c:
-        mm, _, ss = c.partition(":")
-        try:
-            m = float(mm) + float(ss or 0) / 60.0
-        except ValueError:
-            return None
-    elif c.endswith("`"):
-        try:
-            m = float(c[:-1])
-        except ValueError:
-            return None
-    else:
-        try:
-            m = float(c)
-        except ValueError:
-            return None
-    return (q - 1) * QUARTER_MINUTES + m
-
-
 # ────────────────────────────────────────────────────────────────────────
 # Analytics (pure functions of snapshot lists)
 # ────────────────────────────────────────────────────────────────────────
@@ -154,36 +124,6 @@ def _confidence(snap_count: int, has_line: bool, has_spread: bool,
     if fresh:
         c += 0.05
     return round(min(c, 0.95), 4)
-
-
-def _pace_from_snapshots(rows: list[dict]) -> Optional[float]:
-    """Points per 40-minute game from actual scoring rate.
-
-    Uses wall-clock time between snapshots (virtual games progress in real
-    time), falling back to the game clock when it is parseable.
-    """
-    scored = [r for r in rows if r.get("home_score") is not None
-              and r.get("away_score") is not None]
-    if len(scored) >= 2:
-        t0, t1 = _parse_ts(scored[0]["captured_at"]), _parse_ts(scored[-1]["captured_at"])
-        if t0 and t1 and (t1 - t0).total_seconds() >= 30:
-            span_min = (t1 - t0).total_seconds() / 60.0
-            pts = (scored[-1]["home_score"] + scored[-1]["away_score"]
-                   - scored[0]["home_score"] - scored[0]["away_score"])
-            if pts >= 0 and span_min > 0:
-                pace = pts / span_min * FULL_GAME_MINUTES
-                if 20 <= pace <= 400:  # sanity band
-                    return round(pace, 1)
-    # fallback: game-clock based
-    last = scored[-1] if scored else None
-    if last:
-        el = _clock_minutes(last.get("quarter"), last.get("clock"))
-        if el and el > 0:
-            total = (last["home_score"] or 0) + (last["away_score"] or 0)
-            pace = total / el * FULL_GAME_MINUTES
-            if 20 <= pace <= 400:
-                return round(pace, 1)
-    return None
 
 
 def _velocity(rows: list[dict]) -> tuple[Optional[float], Optional[float]]:
@@ -456,34 +396,18 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
     w1 = _f(mlatest["w1_odds"]) if mlatest else None
     w2 = _f(mlatest["w2_odds"]) if mlatest else None
 
-    pace = _pace_from_snapshots(rows)
-    market_total = total_line
-    if pace is None:
-        pace = market_total if market_total else 100.0
-    expected_total = round(0.7 * pace + 0.3 * market_total, 1) if market_total else pace
+    # Projection comes from ONE authoritative implementation
+    # (blm_v4.projection.project) — never re-implemented in the API layer.
+    proj = project(rows)
+    pace = proj["pace"]
+    market_total = proj["market_total"]
+    expected_total = proj["expected_total"]
+    expected_margin = proj["expected_margin"]
+    home_projection = proj["home_projection"]
+    away_projection = proj["away_projection"]
 
     momentum = _momentum(rows)
     vel, accel = momentum["velocity"], momentum["acceleration"]
-
-    # projected margin from current score differential pace
-    expected_margin = 0.0
-    if home_score is not None and away_score is not None:
-        el = None
-        if latest:
-            el = _clock_minutes(latest.get("quarter"), latest.get("clock"))
-        if el and el > 1:
-            expected_margin = round((home_score - away_score) / el * FULL_GAME_MINUTES, 1)
-        elif len(scored) >= 2:
-            t0, t1 = _parse_ts(scored[0]["captured_at"]), _parse_ts(scored[-1]["captured_at"])
-            if t0 and t1 and (t1 - t0).total_seconds() >= 60:
-                span_min = (t1 - t0).total_seconds() / 60.0
-                expected_margin = round(
-                    (home_score - away_score - scored[0]["home_score"]
-                     + scored[0]["away_score"]) / span_min * FULL_GAME_MINUTES, 1,
-                )
-
-    home_projection = round((expected_total + expected_margin) / 2, 1)
-    away_projection = round((expected_total - expected_margin) / 2, 1)
 
     signals = _detect_signals(rows)
     active = [k for k, v in signals.items() if v["active"]]

@@ -170,7 +170,7 @@ class PokerBetCollector:
         self.stats = {
             "ticks": 0, "games_seen": 0, "snapshots": 0,
             "games_resolved": 0, "reconciliations": 0, "errors": 0,
-            "instances_split": 0,
+            "instances_split": 0, "games_ended_final": 0,
         }
 
     # ── Lifecycle ────────────────────────────────────────────────
@@ -558,14 +558,33 @@ class PokerBetCollector:
         if not self.store.get_game(tax["game_id"]):
             return None
         ev = parse_event_view(text)
+        # Identity guard: a lobby/foreign page must never drive a split —
+        # only THIS fixture's own verified event view can.
+        if not self._verified_event_view(game, ev):
+            logger.warning(
+                "restart-split text unverified for %s (teams %r/%r) — no split",
+                tax["game_id"], ev.get("home_team"), ev.get("away_team"),
+            )
+            return None
         eh, ea = ev.get("home_score"), ev.get("away_score")
         if eh is None or ea is None:
             return None
-        if not self._detect_event_reset(
-                game, int(eh), int(ea),
-                ev.get("period_label"), ev.get("clock")):
+        sig = self._detect_event_reset(
+            game, int(eh), int(ea), ev.get("period_label"), ev.get("clock"))
+        if not sig:
             return None
-        return self._next_instance_id(self._base_id(tax["game_id"]))
+        new_id = self._next_instance_id(self._base_id(tax["game_id"]))
+        prev = self.store.get_snapshots(game.source_game_id, limit=1)
+        prev_row = prev[0] if prev else {}
+        logger.info(
+            "restart-safe virtual replay split: %s -> %s (path=restart "
+            "signal=%s prev=%s-%s %s %s -> new=%s-%s %s %s)",
+            tax["game_id"], new_id, sig,
+            prev_row.get("home_score"), prev_row.get("away_score"),
+            prev_row.get("period_label"), prev_row.get("clock"),
+            eh, ea, ev.get("period_label"), ev.get("clock"),
+        )
+        return new_id
 
     def _authoritative_teams(self, row: RowGame, tax: dict, text: str) -> tuple[str, str]:
         """Pick the true team names for the event.
@@ -577,7 +596,10 @@ class PokerBetCollector:
         try:
             ev = parse_event_view(text)
             eh, ea = ev.get("home_team"), ev.get("away_team")
-            if eh and ea:
+            # Only adopt event-view teams when they MATCH the clicked row —
+            # a foreign page (lobby fallback) shows another game's teams,
+            # which must never become this fixture's identity.
+            if eh and ea and self._same_team(eh, home) and self._same_team(ea, away):
                 home, away = eh, ea
         except Exception:
             pass
@@ -641,13 +663,15 @@ class PokerBetCollector:
         """Strip the virtual-instance suffix from a source_game_id."""
         return re.sub(r"#i\d+$", "", gid or "")
 
-    def _detect_instance_reset(self, game: PokerBetGame, row: RowGame) -> bool:
-        """True when the panel row shows a NEW virtual replay of the same
-        fixture (Betual/Cyber games replay every ~5 min under the SAME
-        BetConstruct event URL).  A reset is a large score drop or a
-        game-clock regression vs the game's last stored snapshot."""
+    def _detect_instance_reset(self, game: PokerBetGame, row: RowGame) -> Optional[str]:
+        """Positive-evidence signal when the panel row shows a NEW virtual
+        replay of the same fixture (Betual/Cyber games replay every ~5 min
+        under the SAME BetConstruct event URL), else None.
+
+        A reset is a score drop or a game-clock regression vs the game's
+        last stored snapshot — both impossible within one game."""
         if row.home_score is None or row.away_score is None:
-            return False
+            return None
         return self._detect_event_reset(
             game, row.home_score, row.away_score, row.period_label, row.clock)
 
@@ -668,60 +692,83 @@ class PokerBetCollector:
 
     def _detect_event_reset(self, game: PokerBetGame, home: int, away: int,
                             period_label: Optional[str] = None,
-                            clock: Optional[str] = None) -> bool:
-        """True when an observed state (panel row OR event view) is a NEW
-        virtual replay of the same fixture.
+                            clock: Optional[str] = None) -> Optional[str]:
+        """Return the positive-evidence signal ('score_drop' |
+        'clock_regression') when an observed state (panel row OR verified
+        event view) is a NEW virtual replay of the same fixture, else None.
 
-        Two independent signals:
+        Two signals, both IMPOSSIBLE within one game:
           1. score drop: last total >= 30 and new total < 50% of it
           2. clock regression: the observed game phase is EARLIER than the
              stored last snapshot by > 2 game-minutes (Q4 -> Q1 is
              impossible within one game).  Needed because at 20s ticks the
              new replay's first row can already carry a score (e.g. 28-28)
              above the 50% score-drop threshold.
+
+        There is deliberately NO score-EXPLOSION signal: a forward jump
+        (even > 15 pts in < 90s) is NOT positive evidence of a new replay —
+        the live list feed lags the true game state by minutes (observed
+        ~1x clock vs the ~7x virtual-game speed), so the event view
+        legitimately shows a much later state of the SAME game.  Splitting
+        on forward jumps fragmented every game into #iN churn; foreign
+        content (the original explosion case) is instead rejected by the
+        event-view identity guard (`_verified_event_view`), and a verified
+        final state ends the game (`_is_final_state` -> `_end_game`).
         """
         if home is None or away is None:
-            return False
+            return None
         last = self.store.get_snapshots(game.source_game_id, limit=1)
         if not last:
-            return False
+            return None
         last_row = last[0]
         lh = last_row.get("home_score")
         la = last_row.get("away_score")
         if lh is None or la is None:
-            return False
+            return None
         cur = home + away
         prev = lh + la
         if prev >= 30 and cur < prev * 0.5:
-            return True
+            return "score_drop"
         last_el = self._elapsed_minutes(
             last_row.get("quarter"), last_row.get("clock"),
             last_row.get("period_label"))
         new_el = self._elapsed_minutes(None, clock, period_label)
         if last_el is not None and new_el is not None and new_el < last_el - 2.0:
-            return True
-        # 3. score explosion within a short wall-clock window: a jump of
-        #    > 15 points in < 90s is impossible for a real game — the
-        #    observation is a DIFFERENT virtual replay of the same fixture
-        #    (observed live: Q1 19-14 -> '4th Quarter 21:00 62-71' in 11s).
-        if prev > 0 and cur - prev > 15:
-            last_ts = last_row.get("captured_at")
-            try:
-                last_dt = datetime.fromisoformat(str(last_ts).replace("Z", "+00:00"))
-                gap = (datetime.now(timezone.utc) - last_dt).total_seconds()
-                if 0 <= gap <= 90:
-                    return True
-            except Exception:
-                pass
-        return False
+            return "clock_regression"
+        return None
 
-    def _split_instance(self, game: PokerBetGame, row: RowGame, cls) -> PokerBetGame:
+    def _split_instance(self, game: PokerBetGame, row: RowGame, cls,
+                        signal: Optional[str] = "unknown",
+                        path: str = "list") -> PokerBetGame:
         """Mark the current game ended and start a fresh instance record
         with a distinct identity (base#iN) so replay snapshots never mix
-        into the finished game's history."""
+        into the finished game's history.
+
+        Every split is audited (instance_splits table + INFO log) with the
+        tracked instance's last state vs the observation that triggered it,
+        so churn can be distinguished from genuine replay boundaries."""
         base = self._base_id(game.source_game_id)
         new_id = self._next_instance_id(base)
         self._instances[base] = new_id
+
+        prev = self.store.get_snapshots(game.source_game_id, limit=1)
+        prev_row = prev[0] if prev else {}
+        now_iso = utcnow_iso()
+        try:
+            self.store.insert_instance_split(
+                created_at=now_iso, base_id=base, old_id=game.source_game_id,
+                new_id=new_id, path=path, signal=signal or "unknown",
+                prev_home=prev_row.get("home_score"),
+                prev_away=prev_row.get("away_score"),
+                prev_period=prev_row.get("period_label"),
+                prev_clock=prev_row.get("clock"),
+                prev_at=prev_row.get("captured_at"),
+                new_home=row.home_score, new_away=row.away_score,
+                new_period=row.period_label, new_clock=row.clock,
+                new_at=now_iso,
+            )
+        except Exception:
+            logger.error("split audit failed:\n%s", traceback.format_exc())
 
         # end the old game
         if game.status != "ended":
@@ -747,8 +794,13 @@ class PokerBetCollector:
         self._market_queue.append(new_id)
         self.stats["instances_split"] += 1
         logger.info(
-            "virtual replay split: %s -> %s (new instance %s-%s)",
-            base, new_id, row.home_score, row.away_score,
+            "virtual replay split: %s -> %s (path=%s signal=%s "
+            "prev=%s-%s %s %s @%s -> new=%s-%s %s %s)",
+            base, new_id, path, signal,
+            prev_row.get("home_score"), prev_row.get("away_score"),
+            prev_row.get("period_label"), prev_row.get("clock"),
+            (prev_row.get("captured_at") or "")[11:19] if prev_row.get("captured_at") else "-",
+            row.home_score, row.away_score, row.period_label, row.clock,
         )
         return new_game
 
@@ -760,8 +812,11 @@ class PokerBetCollector:
         and the snapshot is recorded under a NEW instance record so the
         two games never share a history.
         """
-        if self._detect_instance_reset(game, row):
-            game = self._split_instance(game, row, comp)
+        if game.status == "ended":
+            return
+        sig = self._detect_instance_reset(game, row)
+        if sig:
+            game = self._split_instance(game, row, comp, signal=sig, path="list")
         obs = MarketObservation(
             source=SOURCE_POKERBET,
             source_game_id=game.source_game_id,
@@ -788,11 +843,27 @@ class PokerBetCollector:
         ] = 0
 
     def _capture_event_state(
-        self, page: Page, cls: Classification, game: PokerBetGame, event_text: str,
-    ) -> None:
-        """Capture full event-view market state + reconcile."""
+        self, page: Optional[Page], cls: Classification, game: PokerBetGame,
+        event_text: str, end: bool = False,
+    ) -> bool:
+        """Capture full event-view market state + reconcile.
+
+        Identity guard: the parsed scoreboard TEAMS must match the tracked
+        game — lobby text and foreign events are NEVER stored (they would
+        contaminate the history and, before the guard, fragmented every
+        fixture).  With ``end=True`` the game is marked ended afterwards
+        (a verified final state observed via the event view)."""
         try:
             parsed = parse_event_view(event_text)
+            if not self._verified_event_view(game, parsed):
+                self._event_view_failures += 1
+                logger.warning(
+                    "event view unverified for %s (parsed teams %r/%r) — "
+                    "skipped (unverified=%d)",
+                    game.source_game_id, parsed.get("home_team"),
+                    parsed.get("away_team"), self._event_view_failures,
+                )
+                return False
             obs = MarketObservation(
                 source=SOURCE_POKERBET,
                 source_game_id=game.source_game_id,
@@ -848,9 +919,49 @@ class PokerBetCollector:
             row_id = self.store.insert_snapshot(self._game_db_id(game), obs)
             if row_id:
                 self.stats["snapshots"] += 1
-            self._reconcile(game, page.url, event_text, parsed)
+            if page is not None:
+                self._reconcile(game, page.url, event_text, parsed)
+            if end:
+                self._end_game(game)
+            return True
         except Exception:
             logger.error("event capture failed:\n%s", traceback.format_exc())
+            return False
+
+    @staticmethod
+    def _is_final_state(parsed: dict) -> bool:
+        """True when a VERIFIED event view shows the game's completed final
+        state: a 4th-quarter label with the panel's period-over sentinel
+        clock (21:00), 00:00, or an explicit finished label."""
+        p = (parsed.get("period_label") or "").lower()
+        clock = (parsed.get("clock") or "").strip()
+        if any(k in p for k in ("full time", "finished", "end of match", "match ended")):
+            return True
+        if "4th" not in p:
+            return False
+        return clock in ("21:00", "00:00", "0:00", "")
+
+    def _end_game(self, game: PokerBetGame) -> None:
+        """Mark a tracked game ended (verified final observed) and stop
+        tracking it — the next replay of the fixture re-resolves as a new
+        instance on its first positive-evidence drop/regression."""
+        if game.status != "ended":
+            game.status = "ended"
+            self.store.upsert_game(game)
+        cls_val = game.classification
+        key = f"{game.home_team}|{game.away_team}"
+        self._tracked.get(cls_val, {}).pop(key, None)
+        self._unseen_ticks.get(cls_val, {}).pop(key, None)
+        if game.source_game_id in self._market_queue:
+            self._market_queue.remove(game.source_game_id)
+        last = self.store.get_snapshots(game.source_game_id, limit=1)
+        lr = last[0] if last else {}
+        logger.info(
+            "verified final for %s — game ended (final %s-%s %s %s)",
+            game.source_game_id, lr.get("home_score"), lr.get("away_score"),
+            lr.get("period_label"), lr.get("clock"),
+        )
+        self.stats["games_ended_final"] += 1
 
     @staticmethod
     def _first_team_total(parsed: dict, index: int) -> Optional[float]:
@@ -896,17 +1007,36 @@ class PokerBetCollector:
                 )
                 return
             self._event_view_failures = 0
+            eh, ea = parsed.get("home_score"), parsed.get("away_score")
+            if eh is None or ea is None:
+                return
             # Virtual replay protection: the event URL now serves a NEW
             # instance of the same fixture.  Detect the score reset BEFORE
             # writing and split the instance, so this event-view snapshot
             # lands in the fresh game's history — never the finished one's.
-            eh, ea = parsed.get("home_score"), parsed.get("away_score")
-            if eh is not None and ea is not None \
-                    and self._detect_event_reset(
-                        game, int(eh), int(ea),
-                        parsed.get("period_label"), parsed.get("clock")):
+            # BUT: a verified FINAL state (4th quarter + sentinel clock) of
+            # the tracked game with a forward score is the game ENDING, not
+            # a new replay — the live list feed lags the true ~7x game by
+            # minutes, so the tracked instance can still show Q1/Q2 while
+            # the event view already shows the final.  End the game there.
+            prev = self.store.get_snapshots(game.source_game_id, limit=1)
+            prev_tot = None
+            if prev:
+                ph, pa = prev[0].get("home_score"), prev[0].get("away_score")
+                if ph is not None and pa is not None:
+                    prev_tot = ph + pa
+            cur = int(eh) + int(ea)
+            if self._is_final_state(parsed) and (
+                    prev_tot is None or cur >= prev_tot):
+                self._capture_event_state(page, cls, game, text, end=True)
+                return
+            sig = self._detect_event_reset(
+                game, int(eh), int(ea),
+                parsed.get("period_label"), parsed.get("clock"))
+            if sig:
                 row = RowGame(home_score=int(eh), away_score=int(ea))
-                game = self._split_instance(game, row, cls)
+                game = self._split_instance(
+                    game, row, cls, signal=sig, path="event")
             # refresh identity from the URL taxonomy (URL changes handled);
             # keep any virtual-instance suffix (base#iN) — the suffix is
             # the instance identity, the URL base is just the fixture.

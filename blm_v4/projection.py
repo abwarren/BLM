@@ -137,6 +137,26 @@ def project(rows: list[dict]) -> dict[str, Any]:
     home_projection = round((expected_total + expected_margin) / 2, 1)
     away_projection = round((expected_total - expected_margin) / 2, 1)
 
+    # Live-score floor: a FINAL projection must never sit below the points
+    # already on the board.  Conceptually the rate-based model computes
+    #   CURRENT SCORE + MODELLED REMAINING POINTS = PROJECTED FINAL
+    # (pace = full-game total at the observed scoring rate), but a short or
+    # stale pace window can under-sample the true rate and produce a split
+    # that contradicts the scoreboard (observed live: home projection 86.7
+    # while the home team had already scored 109).  Floor each team, then
+    # lift the total to the sum of the floored teams and re-derive the
+    # margin so every consumer (API, dashboard, scorecard) sees one
+    # coherent final projection satisfying:
+    #   home_projection >= home_score
+    #   away_projection >= away_score
+    #   expected_total  >= home_projection + away_projection
+    if home_score is not None:
+        home_projection = max(home_projection, float(home_score))
+    if away_score is not None:
+        away_projection = max(away_projection, float(away_score))
+    expected_total = max(expected_total, round(home_projection + away_projection, 1))
+    expected_margin = round(home_projection - away_projection, 1)
+
     elapsed = clock_minutes(latest.get("quarter"), latest.get("clock")) if latest else None
     progress = None
     if elapsed is not None:

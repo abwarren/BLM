@@ -96,6 +96,30 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_game_ts
     ON snapshots(game_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_games_class
     ON games(classification);
+
+-- Virtual-replay split audit: positive evidence for EVERY instance split.
+-- Each row records the exact observation that triggered it (path + signal)
+-- plus the tracked instance's last state vs the observed state, so churn
+-- can be forensically reconstructed (one game -> one #iN history rule).
+CREATE TABLE IF NOT EXISTS instance_splits (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   TEXT NOT NULL,
+    base_id      TEXT NOT NULL,
+    old_id       TEXT NOT NULL,
+    new_id       TEXT NOT NULL,
+    path         TEXT NOT NULL,          -- list | event | restart
+    signal       TEXT NOT NULL,          -- score_drop | clock_regression
+    prev_home    INTEGER,
+    prev_away    INTEGER,
+    prev_period  TEXT,
+    prev_clock   TEXT,
+    prev_at      TEXT,
+    new_home     INTEGER,
+    new_away     INTEGER,
+    new_period   TEXT,
+    new_clock    TEXT,
+    new_at       TEXT
+);
 """
 
 
@@ -175,10 +199,30 @@ class PokerBetStore:
             conn = self._connect()
             try:
                 row = conn.execute(
-                    "SELECT * FROM games WHERE source_game_id=?",
+                    "SELECT * FROM games WHERE source_game_id = ?",
                     (source_game_id,),
                 ).fetchone()
                 return dict(row) if row else None
+            finally:
+                conn.close()
+
+    def insert_instance_split(self, **fields: Any) -> int:
+        """Persist one virtual-replay split audit row (see instance_splits)."""
+        cols = [c for c in (
+            "created_at", "base_id", "old_id", "new_id", "path", "signal",
+            "prev_home", "prev_away", "prev_period", "prev_clock", "prev_at",
+            "new_home", "new_away", "new_period", "new_clock", "new_at",
+        ) if fields.get(c) is not None]
+        with self._lock:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    f"INSERT INTO instance_splits ({', '.join(cols)}) "
+                    f"VALUES ({', '.join('?' * len(cols))})",
+                    [fields[c] for c in cols],
+                )
+                conn.commit()
+                return cur.lastrowid or 0
             finally:
                 conn.close()
 
