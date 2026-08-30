@@ -49,6 +49,7 @@ from blm_v4.discovery import (
     find_relevant_competitions,
 )
 from blm_v4.event_parser import parse_event_view
+from blm_v4.projection import clock_minutes
 from blm_v4.models import (
     SOURCE_POKERBET,
     MarketObservation,
@@ -593,25 +594,63 @@ class PokerBetCollector:
     def _detect_instance_reset(self, game: PokerBetGame, row: RowGame) -> bool:
         """True when the panel row shows a NEW virtual replay of the same
         fixture (Betual/Cyber games replay every ~5 min under the SAME
-        BetConstruct event URL).  A reset is a large score drop vs the
-        game's last stored snapshot."""
+        BetConstruct event URL).  A reset is a large score drop or a
+        game-clock regression vs the game's last stored snapshot."""
         if row.home_score is None or row.away_score is None:
             return False
-        return self._detect_event_reset(game, row.home_score, row.away_score)
+        return self._detect_event_reset(
+            game, row.home_score, row.away_score, row.period_label, row.clock)
 
-    def _detect_event_reset(self, game: PokerBetGame, home: int, away: int) -> bool:
-        """True when an observed score (panel row OR event view) is a NEW
-        virtual replay: a large drop vs the game's last stored snapshot."""
+    @staticmethod
+    def _elapsed_minutes(quarter: Optional[int], clock: Optional[str],
+                         period_label: Optional[str] = None) -> Optional[float]:
+        """Game-clock position in minutes (0..40). Falls back to the
+        period label when the structured quarter is missing."""
+        q = quarter
+        if q is None and period_label:
+            p = (period_label or "").lower()
+            m = re.search(r"(\d)(?:st|nd|rd|th)?\s*quarter", p)
+            if m:
+                q = int(m.group(1))
+            elif p.startswith("half"):
+                q = 2
+        return clock_minutes(q, clock)
+
+    def _detect_event_reset(self, game: PokerBetGame, home: int, away: int,
+                            period_label: Optional[str] = None,
+                            clock: Optional[str] = None) -> bool:
+        """True when an observed state (panel row OR event view) is a NEW
+        virtual replay of the same fixture.
+
+        Two independent signals:
+          1. score drop: last total >= 30 and new total < 50% of it
+          2. clock regression: the observed game phase is EARLIER than the
+             stored last snapshot by > 2 game-minutes (Q4 -> Q1 is
+             impossible within one game).  Needed because at 20s ticks the
+             new replay's first row can already carry a score (e.g. 28-28)
+             above the 50% score-drop threshold.
+        """
+        if home is None or away is None:
+            return False
         last = self.store.get_snapshots(game.source_game_id, limit=1)
         if not last:
             return False
-        lh = last[0].get("home_score")
-        la = last[0].get("away_score")
+        last_row = last[0]
+        lh = last_row.get("home_score")
+        la = last_row.get("away_score")
         if lh is None or la is None:
             return False
         cur = home + away
         prev = lh + la
-        return prev >= 30 and cur < prev * 0.5
+        if prev >= 30 and cur < prev * 0.5:
+            return True
+        last_el = self._elapsed_minutes(
+            last_row.get("quarter"), last_row.get("clock"),
+            last_row.get("period_label"))
+        new_el = self._elapsed_minutes(None, clock, period_label)
+        if last_el is not None and new_el is not None and new_el < last_el - 2.0:
+            return True
+        return False
 
     def _split_instance(self, game: PokerBetGame, row: RowGame, cls) -> PokerBetGame:
         """Mark the current game ended and start a fresh instance record
@@ -783,7 +822,9 @@ class PokerBetCollector:
             # lands in the fresh game's history — never the finished one's.
             eh, ea = parsed.get("home_score"), parsed.get("away_score")
             if eh is not None and ea is not None \
-                    and self._detect_event_reset(game, int(eh), int(ea)):
+                    and self._detect_event_reset(
+                        game, int(eh), int(ea),
+                        parsed.get("period_label"), parsed.get("clock")):
                 row = RowGame(home_score=int(eh), away_score=int(ea))
                 game = self._split_instance(game, row,
                                             Classification(game.classification))

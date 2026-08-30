@@ -532,6 +532,32 @@ def test_base_id_strips_suffix():
     assert PokerBetCollector._base_id("30739645#i3") == "30739645"
 
 
+def test_collector_detects_reset_via_clock_regression(tmp_path):
+    """At 20s ticks the new replay's first row can already carry a score
+    above the 50% drop threshold — the game-clock regression (Q4 -> Q1)
+    must still trigger the split."""
+    st = _make_store(tmp_path)
+    gid_db = _add_game(st, "5002", "BETUAL_NBA", "Home Virtual", "Away Virtual", status="live")
+    # stored history ends late Q4 with a high total
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=5)
+    _snap(st, gid_db, "5002", "BETUAL_NBA", t0, 41, 52, 4, "00:45")
+    c = PokerBetCollector(store=st)
+    game = PokerBetGame(
+        source="PokerBet", source_game_id="5002",
+        competition_id="c", competition_slug="betual-nba",
+        competition="Betual NBA", region="Virtual Matches",
+        game_family="betual", classification="BETUAL_NBA", sport="basketball",
+        home_team="Home Virtual", away_team="Away Virtual",
+        game_slug="h-a", source_url="https://x/5002", status="live",
+    )
+    # new replay first row: Q1 01:30, 28-28 (56 total — ABOVE 50% of 93)
+    assert c._detect_event_reset(game, 28, 28, "1st Quarter", "01:30") is True
+    # same-phase continuation must NOT trigger
+    assert c._detect_event_reset(game, 44, 54, "4th Quarter", "00:30") is False
+    # clock regression alone (even with a rising score) triggers
+    assert c._detect_event_reset(game, 50, 55, "2nd Quarter", "05:00") is True
+
+
 # ═══════════ Market-total path (stub snapshots must not null market) ═
 
 def test_market_total_survives_list_stubs(tmp_path, monkeypatch):
