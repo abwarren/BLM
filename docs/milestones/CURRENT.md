@@ -6,7 +6,25 @@ projections + accuracy scorecard + historical market analytics. Live on
 `blm-server:2262` / `blm-collector` (systemd).
 
 ## CURRENT MILESTONE
-M006 — First-class live PokerBet market data (capture frequency + prediction freeze).
+M007 — Game detail window: live market + prematch + live model.
+M007-M1 (COMPLETE, deployed 3c8183c): backend exposes the four line
+concepts through the existing game-detail API.
+- OPENING LINE: market.opening_line + opening_line_at (first verified
+  total_line via opening_snapshot — never moves with the market).
+- CURRENT LIVE LINE: market.total_line + total_line_at + total_line_age_s
+  + market_source (existing).
+- LIVE BLM PREDICTION: model.expected_total (existing, pure function).
+- PREMATCH PREDICTION: NOT STORED — genuine gap. No prematch checkpoint
+  exists; games are discovered live (period labels are only quarter states
+  + Finished); no pre-game prediction is ever recorded.  API returns honest
+  null; dashboard must show PREMATCH BLM = – for these games.  Capturing
+  prematch requires a new collector slice (prematch tab scan + fixture
+  correspondence) — decision pending.
+- Verified live: 30740053 opening=171.5@20:30:52Z live=181.5@21:07:44Z
+  (stale, honest age 8545s); live 30741613 opening=null total=null (event
+  view starved — honest), live prediction 165.7 computed.
+- Tests: 185 pass (new test_opening_snapshot_returns_first_line).
+NEXT: M007-M2 — connect the existing game-detail pane to these API values.
 
 ## COMPLETED
 - 79c4c0d: projection live-score floor at source + single-source api.py +
