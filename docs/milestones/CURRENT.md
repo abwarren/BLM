@@ -30,20 +30,32 @@ M006 — First-class live PokerBet market data (capture frequency + prediction f
   Tests: 177 pass (2 new freeze tests).
 
 ## CURRENT STATE — market data
-- Root cause of MKT TOTAL = –: market lines captured only on the single
-  round-robin event-view pass (~1 game/tick ≈ 33 min/game with 100 live
-  games).  Games between rotations showed no market.
-- Fix deployed: per-game freshness tracking + API freshness fields +
-  prediction market freeze.  The freeze is PROVEN by tests (190.0 at Q1
-  never rewritten by the later 195.0).
-- LIVE BLOCKER: PokerBet event-view SPA is currently degraded — panel
-  rows parse fine (56 snapshots/5min) but event-view clicks parse to
-  empty teams (''/''), so no new market captures land right now.  The
-  rotation self-heals when the SPA recovers; 984 historical captures
-  prove the capture path works when the SPA is healthy.
-- API verified live: game 30727748 market.total_line=218.5,
-  total_line_at=20:43Z, total_line_age_s=6428 (~107 min stale — the
-  dashboard now honestly shows "stale").
+- **ROOT CAUSE of MKT TOTAL = – (CONFIRMED by full trace)**: the PokerBet
+  market total exists ONLY on the event-view page.  The collector captures
+  it ONLY when it successfully opens an event view.  Since ~21:07Z the
+  SPA's event-view route has stopped hydrating (row click no longer
+  navigates; parse yields empty teams ''/'').  Panel/list capture keeps
+  working (90 snaps/10min) but carries NO market.  So the market is NOT
+  lost in the pipeline — it is NOT CAPTURED because the event-view route
+  is a hard single dependency that PokerBet-side SPA changes broke.
+- **PROOF the pipeline is correct when the SPA works**: 30740053 has 104
+  market observations with REAL live movement (171.5→183.5→184.5 every
+  ~20s); 30739886 shows the user's exact 164.5→162.5→172.5 series; 30739890
+  has 66 obs.  The 183.5 one-liners on 8 games are each at DISTINCT
+  timestamps (per-game discovery captures, NOT contamination).
+- **User's named games (Panathinaikos 70-92, Maccabi 101-88)**: both
+  correctly INVALID (score regression) — their snapshot series contain
+  foreign snaps (81-89 Q1 then 60-77 Q4; 76-87 Q4 then 69-59 Q3, then an
+  81-89 spike mid-game).  0 scored predictions.  The 198.4/76.9 projections
+  are the model operating on contaminated series — the dashboard showing
+  them as "completed games" is presentation, not a model bug.
+- **Fix (deployed)**: per-game freshness tracking + API freshness fields
+  + prediction market freeze + event-view failure rotation (self-healing).
+  The freeze is PROVEN by tests (190.0 at Q1 never rewritten by 195.0).
+- **LIVE BLOCKER (external)**: PokerBet event-view SPA route not hydrating.
+  Collector rotates gracefully (verified stable), cycles games, but cannot
+  capture new market lines until the route recovers.  Manual browser check
+  confirms row click does not navigate (SPA change on PokerBet side).
 
 ## M004 (previous milestone) — audit answers retained
 
