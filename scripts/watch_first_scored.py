@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Watch for the first clean completed BLM game passing the quality gate.
+"""Watch for the first clean completed BLM game passing the quality gate
+(post-fix: collector deployed 22:03 with clock-regression split detection).
 
-Polls the scorecard tables read-only every 60s for up to ~20 minutes.
-Prints the first scored game's details (id, checkpoint results, metrics)
-when it appears, then exits 0.  If nothing scores, prints a summary of
-the newest ended games' status and exits 1.
+Polls read-only every 60s for up to 25 minutes. Prints the first scored
+game's details when it appears, then exits 0. Exits 1 with a summary of
+the newest ended games if nothing scores in the window.
 """
 import json
 import sqlite3
@@ -13,8 +13,8 @@ import time
 from datetime import datetime, timezone
 
 DB = "/home/gdi/BLM/blm_pokerbet.db"
-DEADLINE = time.time() + 20 * 60
-first = True
+DEADLINE = time.time() + 25 * 60
+FIX_DEPLOY = "2026-08-30T20:03:00Z"  # UTC; instances created after this
 
 
 def check():
@@ -48,7 +48,6 @@ def check():
             out = {
                 "scored_game": {
                     "source_game_id": gid,
-                    "instance": gid,
                     "home": game["home_team"], "away": game["away_team"],
                     "classification": game["classification"],
                     "snapshot_count": nsnaps,
@@ -60,14 +59,17 @@ def check():
             }
             print(json.dumps(out, indent=1, default=str))
             return True
-        # no scored game yet — show newest ended games
+        # nothing scored — report post-fix ended games
         ended = conn.execute(
             """SELECT g.source_game_id, g.classification, g.status,
                       (SELECT COUNT(*) FROM snapshots s WHERE s.game_id=g.id) snaps,
-                      (SELECT r.final_result_status FROM game_results r WHERE r.source_game_id=g.source_game_id) result_status
-               FROM games g WHERE g.status='ended' ORDER BY g.last_seen_at DESC LIMIT 5""").fetchall()
+                      (SELECT r.final_result_status FROM game_results r
+                       WHERE r.source_game_id=g.source_game_id) result_status
+               FROM games g
+               WHERE g.status='ended' AND g.first_seen_at >= ?
+               ORDER BY g.last_seen_at DESC LIMIT 6""", (FIX_DEPLOY,)).fetchall()
         print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%SZ')}] scored={scored} ok_games={len(ok_games)} "
-              f"recent_ended={[dict(r) for r in ended]}")
+              f"post-fix_ended={[dict(r) for r in ended]}")
         return False
     finally:
         conn.close()
@@ -81,5 +83,5 @@ while time.time() < DEADLINE:
         print(f"check error: {e}")
     time.sleep(60)
 
-print("NO_CLEAN_GAME_YET within 20min watch window")
+print("NO_CLEAN_GAME_YET within 25min watch window")
 sys.exit(1)
