@@ -558,6 +558,43 @@ def test_collector_detects_reset_via_clock_regression(tmp_path):
     assert c._detect_event_reset(game, 50, 55, "2nd Quarter", "05:00") is True
 
 
+def test_collector_restart_safe_split(tmp_path, monkeypatch):
+    """After a collector restart, _tracked is empty — a fixture re-resolved
+    from an event URL whose DB row holds a finished game must start a fresh
+    #iN instance, not append the new replay to the finished history."""
+    st = _make_store(tmp_path)
+    gid_db = _add_game(st, "5003", "BETUAL_NBA", "Home Virtual", "Away Virtual", status="ended")
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=10)
+    _snap(st, gid_db, "5003", "BETUAL_NBA", t0 + timedelta(seconds=0), 100, 66, 4, "02:00")
+    c = PokerBetCollector(store=st)
+    game = PokerBetGame(
+        source="PokerBet", source_game_id="5003",
+        competition_id="c", competition_slug="betual-nba",
+        competition="Betual NBA", region="Virtual Matches",
+        game_family="betual", classification="BETUAL_NBA", sport="basketball",
+        home_team="Home Virtual", away_team="Away Virtual",
+        game_slug="h-a", source_url="https://x/5003", status="live",
+    )
+    tax = {"game_id": "5003"}
+    # new replay event text: Q1 01:30, 28-28 (score above the 50% drop
+    # threshold but clock regressed from Q4) → must split
+    monkeypatch.setattr(
+        "blm_v4.collector.parse_event_view",
+        lambda text: {"home_score": 28, "away_score": 28,
+                      "period_label": "1st Quarter", "clock": "01:30"},
+    )
+    assert c._restart_split_suffix("ignored", tax, game) == "5003#i1"
+    # continuation (Q4, rising score) → no split
+    monkeypatch.setattr(
+        "blm_v4.collector.parse_event_view",
+        lambda text: {"home_score": 103, "away_score": 68,
+                      "period_label": "4th Quarter", "clock": "01:00"},
+    )
+    assert c._restart_split_suffix("ignored", tax, game) is None
+    # unknown game id → no split
+    assert c._restart_split_suffix("ignored", {"game_id": "9999"}, game) is None
+
+
 # ═══════════ Market-total path (stub snapshots must not null market) ═
 
 def test_market_total_survives_list_stubs(tmp_path, monkeypatch):

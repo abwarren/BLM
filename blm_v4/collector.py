@@ -516,6 +516,20 @@ class PokerBetCollector:
                 return existing, text
 
             game = self._build_game(comp, row, tax, url, home, away)
+            # Restart-safe virtual replay identity: after a collector restart
+            # _tracked is empty, so a fixture with existing DB history gets
+            # re-resolved as "new" — if the DB's last snapshot is a finished
+            # game and the observed state is a NEW replay (score drop or
+            # clock regression), start a fresh #iN instance instead of
+            # contaminating the finished row.
+            new_id = self._restart_split_suffix(text, tax, game)
+            if new_id:
+                game.source_game_id = new_id
+                self._instances[self._base_id(new_id)] = new_id
+                logger.info(
+                    "restart-safe virtual replay split: %s -> %s",
+                    tax["game_id"], new_id,
+                )
             gid = self.store.upsert_game(game)
             key = f"{home}|{away}"
             self._tracked[comp.classification.value][key] = game
@@ -531,6 +545,29 @@ class PokerBetCollector:
         except Exception:
             logger.error("resolve failed:\n%s", traceback.format_exc())
             return None
+
+    def _restart_split_suffix(self, text: str, tax: dict,
+                              game: PokerBetGame) -> Optional[str]:
+        """If the fixture already has DB history and the observed event-view
+        state is a NEW virtual replay, return the fresh instance id.
+
+        The in-memory _tracked/_instances maps don't survive a collector
+        restart, so a re-resolved fixture would otherwise append the new
+        replay's snapshots to the finished game's DB row."""
+        if not self.store.get_game(tax["game_id"]):
+            return None
+        ev = parse_event_view(text)
+        eh, ea = ev.get("home_score"), ev.get("away_score")
+        if eh is None or ea is None:
+            return None
+        if not self._detect_event_reset(
+                game, int(eh), int(ea),
+                ev.get("period_label"), ev.get("clock")):
+            return None
+        base = self._base_id(tax["game_id"])
+        m = re.search(r"#i(\d+)$", tax["game_id"])
+        n = int(m.group(1)) if m else 0
+        return f"{base}#i{n + 1}"
 
     def _authoritative_teams(self, row: RowGame, tax: dict, text: str) -> tuple[str, str]:
         """Pick the true team names for the event.
