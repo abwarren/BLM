@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BLM LIVE ANALYTICS — PokerBet Terminal</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- ═══════════ HEADER ═══════════ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-logo">BLM</span>
+      <span class="brand-title">LIVE ANALYTICS</span>
+      <span class="brand-sub">PokerBet · Cyber 2K26 / Betual NBA</span>
+    </div>
+    <div class="status-cluster">
+      <span class="pill live-pill" id="livePill"><span class="dot" id="liveDot"></span><span id="liveLabel">LIVE</span></span>
+      <span class="pill" id="collectorPill">collector: --</span>
+      <span class="pill muted" id="lastUpdatePill">--</span>
+      <span class="pill muted" id="gamesMonitoredPill">0 games</span>
+    </div>
+    <div class="filters" id="filters">
+      <button class="filter active" data-filter="">ALL</button>
+      <button class="filter" data-filter="CYBER_2K26">CYBER 2K26</button>
+      <button class="filter" data-filter="BETUAL_NBA">BETUAL NBA</button>
+      <button class="raw-toggle" id="rawToggle" title="Show raw JSON debug panel">RAW / DEBUG</button>
+    </div>
+  </header>
+
+  <!-- ═══════════ SUMMARY STRIP ═══════════ -->
+  <section class="summary" id="summary">
+    <div class="sum-card"><div class="sum-label">CYBER 2K26</div><div class="sum-value" id="sumCyber">–</div><div class="sum-sub" id="sumCyberSub">–</div></div>
+    <div class="sum-card"><div class="sum-label">BETUAL NBA</div><div class="sum-value" id="sumBetual">–</div><div class="sum-sub" id="sumBetualSub">–</div></div>
+    <div class="sum-card"><div class="sum-label">SNAPSHOTS</div><div class="sum-value" id="sumSnaps">–</div><div class="sum-sub">stored</div></div>
+    <div class="sum-card"><div class="sum-label">RECONCILED</div><div class="sum-value" id="sumRecon">–</div><div class="sum-sub" id="sumReconSub">–</div></div>
+    <div class="sum-card"><div class="sum-label">LAST SNAPSHOT</div><div class="sum-value" id="sumAge">–</div><div class="sum-sub" id="sumAgeSub">–</div></div>
+  </section>
+
+  <!-- ═══════════ GAME CARDS GRID ═══════════ -->
+  <main class="grid" id="grid">
+    <div class="empty" id="empty">Waiting for live data…</div>
+  </main>
+
+  <!-- ═══════════ DETAIL MODAL ═══════════ -->
+  <div class="modal-backdrop" id="modalBackdrop" hidden>
+    <div class="modal" id="modal">
+      <div class="modal-head">
+        <div>
+          <span class="cat-badge" id="mCat">–</span>
+          <span class="modal-title" id="mTitle">–</span>
+        </div>
+        <div class="modal-actions">
+          <button class="raw-toggle" id="mRawToggle">RAW</button>
+          <button class="close" id="modalClose">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <!-- ═══════════ RAW DEBUG DRAWER ═══════════ -->
+  <div class="raw-drawer" id="rawDrawer" hidden>
+    <div class="raw-head">
+      <span>RAW / DEBUG — /api/v4/live</span>
+      <button class="close" id="rawClose">✕</button>
+    </div>
+    <pre id="rawJson" class="raw-json">–</pre>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

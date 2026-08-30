@@ -1,0 +1,712 @@
+"""
+BLM V4 — PokerBet Pipeline API (dashboard data source).
+
+Serves the classification-aware live view the operator dashboard renders:
+
+    GET /api/v4/status   — collector heartbeat + DB freshness (per class)
+    GET /api/v4/live     — every live/recent game with latest market state,
+                            derived BLM-style analytics, signals and the
+                            snapshot history needed for charts
+    GET /api/v4/games    — all known games (summary)
+    GET /api/v4/history/{game_id} — full snapshot history for one game
+    GET /api/v4/game/{game_id}    — single-game detail (live + history +
+                            timeline events)
+
+Everything is read from the SAME ``blm_pokerbet.db`` the collector writes
+(read-only URI connection, WAL-safe).  No new pipeline, no duplicated
+storage — classification, identity and snapshots are the collector's own.
+
+Derived analytics (win probability, confidence, pace, projections,
+momentum, traps) are computed HERE from the actual collected snapshots so
+every game — not just the single V2-engine game — gets a full model card.
+They are labelled as derived and are a pure function of stored data.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import APIRouter, HTTPException, Query
+
+# ────────────────────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────────────────────
+
+DEFAULT_DB = Path(__file__).resolve().parent.parent / "blm_pokerbet.db"
+STATE_FILE = Path(__file__).resolve().parent / "state" / "collector_state.json"
+
+# A game is considered LIVE if its latest snapshot is fresher than this.
+LIVE_AGE_S = 15 * 60
+# Default total-line used when the market has not posted one yet.
+QUARTER_MINUTES = 10.0
+FULL_GAME_MINUTES = 40.0  # cyber/virtual basketball game length (4 × 10)
+
+
+def _db_path() -> Path:
+    return Path(os.environ.get("BLM_POKERBET_DB") or DEFAULT_DB)
+
+
+def _connect() -> sqlite3.Connection:
+    """Read-only connection — the API never writes to the pipeline DB."""
+    conn = sqlite3.connect(f"file:{_db_path()}?mode=ro", uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _parse_ts(iso: Optional[str]) -> Optional[datetime]:
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _age_s(iso: Optional[str], now: Optional[datetime] = None) -> Optional[float]:
+    dt = _parse_ts(iso)
+    if dt is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    return (now - dt).total_seconds()
+
+
+def _f(v: Any) -> Optional[float]:
+    """SQLite NULL-safe float coercion."""
+    return None if v is None else float(v)
+
+
+def _i(v: Any) -> Optional[int]:
+    return None if v is None else int(v)
+
+
+def _clock_minutes(quarter: Optional[int], clock: Optional[str]) -> Optional[float]:
+    """Elapsed game minutes from period + clock (MM:SS or M').
+
+    Virtual basketball plays 4 × 10-minute quarters.  Returns None when
+    the clock cannot be parsed.
+    """
+    q = _i(quarter)
+    if q is None or q < 1:
+        return None
+    c = (clock or "").strip()
+    m = None
+    if ":" in c:
+        mm, _, ss = c.partition(":")
+        try:
+            m = float(mm) + float(ss or 0) / 60.0
+        except ValueError:
+            return None
+    elif c.endswith("`"):
+        try:
+            m = float(c[:-1])
+        except ValueError:
+            return None
+    else:
+        try:
+            m = float(c)
+        except ValueError:
+            return None
+    return (q - 1) * QUARTER_MINUTES + m
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Analytics (pure functions of snapshot lists)
+# ────────────────────────────────────────────────────────────────────────
+
+def _implied_win(home_odds: Optional[float], away_odds: Optional[float]) -> float:
+    if home_odds and away_odds and home_odds > 1 and away_odds > 1:
+        ih, ia = 1.0 / home_odds, 1.0 / away_odds
+        return round(ih / (ih + ia), 4)
+    return 0.5
+
+
+def _confidence(snap_count: int, has_line: bool, has_spread: bool,
+                has_odds: bool, fresh: bool) -> float:
+    c = 0.45
+    if snap_count >= 5:
+        c += 0.15
+    if snap_count >= 15:
+        c += 0.10
+    if has_line:
+        c += 0.10
+    if has_spread:
+        c += 0.10
+    if has_odds:
+        c += 0.10
+    if fresh:
+        c += 0.05
+    return round(min(c, 0.95), 4)
+
+
+def _pace_from_snapshots(rows: list[dict]) -> Optional[float]:
+    """Points per 40-minute game from actual scoring rate.
+
+    Uses wall-clock time between snapshots (virtual games progress in real
+    time), falling back to the game clock when it is parseable.
+    """
+    scored = [r for r in rows if r.get("home_score") is not None
+              and r.get("away_score") is not None]
+    if len(scored) >= 2:
+        t0, t1 = _parse_ts(scored[0]["captured_at"]), _parse_ts(scored[-1]["captured_at"])
+        if t0 and t1 and (t1 - t0).total_seconds() >= 30:
+            span_min = (t1 - t0).total_seconds() / 60.0
+            pts = (scored[-1]["home_score"] + scored[-1]["away_score"]
+                   - scored[0]["home_score"] - scored[0]["away_score"])
+            if pts >= 0 and span_min > 0:
+                pace = pts / span_min * FULL_GAME_MINUTES
+                if 20 <= pace <= 400:  # sanity band
+                    return round(pace, 1)
+    # fallback: game-clock based
+    last = scored[-1] if scored else None
+    if last:
+        el = _clock_minutes(last.get("quarter"), last.get("clock"))
+        if el and el > 0:
+            total = (last["home_score"] or 0) + (last["away_score"] or 0)
+            pace = total / el * FULL_GAME_MINUTES
+            if 20 <= pace <= 400:
+                return round(pace, 1)
+    return None
+
+
+def _velocity(rows: list[dict]) -> tuple[Optional[float], Optional[float]]:
+    """(velocity pts/min, acceleration pts/min²) over the last 3 snapshots."""
+    scored = [r for r in rows if r.get("home_score") is not None
+              and r.get("away_score") is not None]
+    if len(scored) < 2:
+        return None, None
+    times = [_parse_ts(r["captured_at"]) for r in scored]
+    vals = [r["home_score"] + r["away_score"] for r in scored]
+    deltas: list[float] = []
+    for i in range(1, len(scored)):
+        if times[i - 1] and times[i]:
+            dt = (times[i] - times[i - 1]).total_seconds() / 60.0
+            if dt >= 1 / 60:
+                deltas.append((vals[i] - vals[i - 1]) / max(dt, 1 / 60))
+    if not deltas:
+        return None, None
+    window = deltas[-3:]
+    vel = sum(window) / len(window)
+    accel = None
+    if len(window) >= 2:
+        accel = window[-1] - window[-2]
+    return round(vel, 3), (round(accel, 3) if accel is not None else None)
+
+
+def _momentum(rows: list[dict]) -> dict:
+    vel, accel = _velocity(rows)
+    if vel is None:
+        return {
+            "score": 50.0, "direction": "flat", "velocity": 0.0,
+            "acceleration": 0.0, "strength": 0.0, "strength_label": "none",
+        }
+    score = 50.0 + vel * 8.0 + (accel or 0) * 4.0
+    score = max(0.0, min(100.0, score))
+    direction = "up" if vel > 0.15 else ("down" if vel < -0.15 else "flat")
+    dev = abs(score - 50.0)
+    if dev < 5:
+        strength, label = 0.0, "weak"
+    elif dev < 15:
+        strength, label = 1.0, "moderate"
+    elif dev < 30:
+        strength, label = 2.0, "strong"
+    else:
+        strength, label = 3.0, "extreme"
+    return {
+        "score": round(score, 1), "direction": direction,
+        "velocity": vel, "acceleration": accel or 0.0,
+        "strength": strength, "strength_label": label,
+    }
+
+
+def _signal(active: bool, confidence: float) -> dict:
+    return {"active": bool(active), "confidence": round(float(confidence), 4)}
+
+
+def _detect_signals(rows: list[dict]) -> dict:
+    """Heuristic trap/signal detection from line-vs-score dynamics.
+
+    Pure function of the snapshot history — honest, data-backed signals:
+      dead_market        line static while score keeps moving
+      false_momentum     score burst with no line response
+      bull_trap          line up while scoring has stalled
+      bear_trap          line down while scoring accelerates
+      late_trap          line moved in the most recent tick
+      sharp_trap         big line move without score movement
+      reverse_bull_trap  line down while score surges
+    """
+    out = {
+        "bull_trap": _signal(False, 0.0), "bear_trap": _signal(False, 0.0),
+        "reverse_bull_trap": _signal(False, 0.0), "dead_market": _signal(False, 0.0),
+        "false_momentum": _signal(False, 0.0), "late_trap": _signal(False, 0.0),
+        "sharp_trap": _signal(False, 0.0),
+    }
+    rows = [r for r in rows if r.get("home_score") is not None
+            and r.get("away_score") is not None]
+    if len(rows) < 3:
+        return out
+    lines = [(_f(r["total_line"]), _parse_ts(r["captured_at"])) for r in rows]
+    last_ts = _parse_ts(rows[-1]["captured_at"])
+    last_age = _age_s(last_ts.isoformat()) if last_ts else None
+    fresh = last_age is not None and last_age <= 120
+    scores = [r["home_score"] + r["away_score"] for r in rows]
+    score_moved = scores[-1] - scores[0]
+
+    def _line_series() -> list[Optional[float]]:
+        return [l for l, _ in lines]
+
+    series = _line_series()
+    line_moved = any(l is not None and l != series[0] for l in series)
+    last_interval_line = (
+        series[-1] - series[-2] if series[-1] is not None
+        and series[-2] is not None else 0.0
+    )
+    last_interval_score = scores[-1] - scores[-2]
+
+    # dead market: ≥3 ticks with identical line while score advanced ≥ 4
+    static_run = 0
+    for i in range(len(series) - 1, 0, -1):
+        if series[i] is not None and series[i] == series[i - 1]:
+            static_run += 1
+        else:
+            break
+    if static_run >= 2 and score_moved >= 4 and series[-1] is not None:
+        out["dead_market"] = _signal(True, min(0.9, 0.45 + 0.08 * static_run))
+
+    vel, accel = _velocity(rows)
+    mean_vel = None
+    if len(scores) >= 3:
+        mean_vel = abs(scores[-1] - scores[0]) / max(len(scores) - 1, 1)
+
+    # false momentum: recent burst, line did not follow
+    if vel and vel > 2.5 and abs(last_interval_line) < 0.5:
+        out["false_momentum"] = _signal(True, min(0.9, 0.4 + 0.1 * vel))
+
+    # bull trap: line raised while scoring stalled
+    if last_interval_line > 0.5 and last_interval_score <= 1:
+        out["bull_trap"] = _signal(True, min(0.9, 0.45 + 0.25 * last_interval_line))
+
+    # bear trap: line cut while scoring keeps coming
+    if last_interval_line < -0.5 and last_interval_score >= 2:
+        out["bear_trap"] = _signal(True, min(0.9, 0.45 + 0.2 * abs(last_interval_line)))
+
+    # reverse bull trap: line cut into a scoring surge
+    if last_interval_line < -0.5 and vel and vel > 2.0:
+        out["reverse_bull_trap"] = _signal(True, min(0.9, 0.4 + 0.2 * vel))
+
+    # late trap: line moved on the freshest tick after being quiet
+    if fresh and abs(last_interval_line) >= 0.5 and static_run >= 2:
+        out["late_trap"] = _signal(True, min(0.9, 0.45 + 0.15 * abs(last_interval_line)))
+
+    # sharp trap: abrupt line move without score movement
+    if abs(last_interval_line) >= 2.0 and abs(last_interval_score) < 2:
+        out["sharp_trap"] = _signal(True, min(0.95, 0.5 + 0.1 * abs(last_interval_line)))
+
+    return out
+
+
+def _timeline_events(rows: list[dict], classification: str) -> list[dict]:
+    """Human-readable event timeline derived from actual snapshots."""
+    events: list[dict] = []
+    rows = [r for r in rows if r.get("home_score") is not None
+            and r.get("away_score") is not None]
+    if not rows:
+        return events
+    first = rows[0]
+    events.append({
+        "t": first["captured_at"], "type": "detected",
+        "label": f"Game detected — {first.get('home_team') or '?'} vs "
+                 f"{first.get('away_team') or '?'}",
+    })
+    prev_line, prev_pace, prev_dir = None, None, None
+    for i, r in enumerate(rows):
+        ts = r["captured_at"]
+        if i > 0:
+            p = rows[i - 1]
+            if (r["home_score"], r["away_score"]) != (p["home_score"], p["away_score"]):
+                events.append({
+                    "t": ts, "type": "score",
+                    "label": f"Score update — {r['home_score']}-{r['away_score']}"
+                             f" ({r.get('period_label') or 'Q' + str(r.get('quarter') or '')})",
+                })
+        line = _f(r["total_line"])
+        if line is not None and line != prev_line:
+            if prev_line is not None:
+                arrow = "▲" if line > prev_line else "▼"
+                events.append({
+                    "t": ts, "type": "market",
+                    "label": f"Market total {prev_line:g} {arrow} {line:g}",
+                })
+            prev_line = line
+    # momentum / pace changes on the aggregated series
+    scored = rows
+    if len(scored) >= 4:
+        for i in range(2, len(scored)):
+            win = scored[max(0, i - 2):i + 1]
+            vel, _ = _velocity(win)
+            if vel is None:
+                continue
+            direction = "up" if vel > 0.3 else ("down" if vel < -0.3 else "flat")
+            if direction != prev_dir and direction != "flat":
+                events.append({
+                    "t": scored[i]["captured_at"], "type": "momentum",
+                    "label": f"Momentum {'building' if direction == 'up' else 'fading'} "
+                             f"({vel:+.1f} pts/min)",
+                })
+            prev_dir = direction
+    events.sort(key=lambda e: e["t"])
+    # de-dup adjacent identical labels
+    out: list[dict] = []
+    for e in events:
+        if out and out[-1]["label"] == e["label"]:
+            continue
+        out.append(e)
+    return out[-50:]
+
+
+def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
+    """Build the full dashboard payload for one game from its snapshots."""
+    scored = [r for r in rows if r.get("home_score") is not None
+              and r.get("away_score") is not None]
+    latest = scored[-1] if scored else (rows[-1] if rows else None)
+    snap_count = len(rows)
+    age = _age_s(latest["captured_at"] if latest else game.get("last_seen_at"), now)
+
+    home_score = _i(latest["home_score"]) if latest else None
+    away_score = _i(latest["away_score"]) if latest else None
+
+    total_line = _f(latest["total_line"]) if latest else None
+    spread = _f(latest["spread"]) if latest else None
+    home_total_line = _f(latest["home_total_line"]) if latest else None
+    away_total_line = _f(latest["away_total_line"]) if latest else None
+    w1 = _f(latest["w1_odds"]) if latest else None
+    w2 = _f(latest["w2_odds"]) if latest else None
+
+    pace = _pace_from_snapshots(rows)
+    market_total = total_line
+    if pace is None:
+        pace = market_total if market_total else 100.0
+    expected_total = round(0.7 * pace + 0.3 * market_total, 1) if market_total else pace
+
+    momentum = _momentum(rows)
+    vel, accel = momentum["velocity"], momentum["acceleration"]
+
+    # projected margin from current score differential pace
+    expected_margin = 0.0
+    if home_score is not None and away_score is not None:
+        el = None
+        if latest:
+            el = _clock_minutes(latest.get("quarter"), latest.get("clock"))
+        if el and el > 1:
+            expected_margin = round((home_score - away_score) / el * FULL_GAME_MINUTES, 1)
+        elif len(scored) >= 2:
+            t0, t1 = _parse_ts(scored[0]["captured_at"]), _parse_ts(scored[-1]["captured_at"])
+            if t0 and t1 and (t1 - t0).total_seconds() >= 60:
+                span_min = (t1 - t0).total_seconds() / 60.0
+                expected_margin = round(
+                    (home_score - away_score - scored[0]["home_score"]
+                     + scored[0]["away_score"]) / span_min * FULL_GAME_MINUTES, 1,
+                )
+
+    home_projection = round((expected_total + expected_margin) / 2, 1)
+    away_projection = round((expected_total - expected_margin) / 2, 1)
+
+    signals = _detect_signals(rows)
+    active = [k for k, v in signals.items() if v["active"]]
+    trap_meter = min(100.0, 5.0 * len(active) + sum(
+        v["confidence"] * 40 for v in signals.values() if v["active"]))
+    trap_level = ("high" if trap_meter >= 60 else
+                  "medium" if trap_meter >= 30 else "low")
+
+    market_efficiency = None
+    if market_total and home_score is not None and away_score is not None:
+        combined = home_score + away_score
+        market_efficiency = round(
+            1 - min(abs(combined - market_total) / market_total, 1), 4)
+
+    market_momentum = 0.0
+    lines = [_f(r["total_line"]) for r in rows]
+    if len(lines) >= 3 and lines[-1] is not None and lines[-2] is not None:
+        market_momentum = round(lines[-1] - lines[-2], 2)
+
+    # chart series (score + market + pace over time) — actual stored data
+    history: list[dict] = []
+    step = max(1, len(rows) // 80)
+    for r in rows[::step]:
+        history.append({
+            "t": r["captured_at"],
+            "home": _i(r["home_score"]),
+            "away": _i(r["away_score"]),
+            "total_line": _f(r["total_line"]),
+            "spread": _f(r["spread"]),
+            "quarter": _i(r["quarter"]),
+            "period": r.get("period_label") or "",
+        })
+
+    return {
+        "game_id": game["source_game_id"],
+        "game_db_id": game["id"],
+        "source": game["source"],
+        "classification": game["classification"],
+        "competition": game.get("competition") or "",
+        "region": game.get("region") or "",
+        "sport": game.get("sport") or "basketball",
+        "status": game.get("status") or "live",
+        "live": bool(age is not None and age <= LIVE_AGE_S),
+        "home_team": game["home_team"],
+        "away_team": game["away_team"],
+        "home_score": home_score,
+        "away_score": away_score,
+        "period_label": (latest.get("period_label") if latest else None),
+        "quarter": (latest.get("quarter") if latest else None),
+        "clock": (latest.get("clock") if latest else None),
+        "last_update": (latest["captured_at"] if latest else game.get("last_seen_at")),
+        "age_s": round(age, 1) if age is not None else None,
+        "snapshot_count": snap_count,
+        "source_url": game.get("source_url"),
+        "market": {
+            "total_line": market_total,
+            "over_odds": _f(latest["total_over_odds"]) if latest else None,
+            "under_odds": _f(latest["total_under_odds"]) if latest else None,
+            "spread": spread,
+            "spread_indicator": (latest.get("spread_indicator") if latest else None),
+            "home_total_line": home_total_line,
+            "away_total_line": away_total_line,
+            "w1_odds": w1,
+            "w2_odds": w2,
+        },
+        "model": {
+            "win_probability": _implied_win(w1, w2),
+            "confidence": _confidence(
+                snap_count, market_total is not None, spread is not None,
+                w1 is not None and w2 is not None,
+                bool(age is not None and age <= 120),
+            ),
+            "expected_total": expected_total,
+            "expected_margin": expected_margin,
+            "home_projection": home_projection,
+            "away_projection": away_projection,
+            "pace": pace,
+            "possessions": None,
+        },
+        "momentum": momentum,
+        "signals": {
+            **signals,
+            "trap_meter": round(trap_meter, 1),
+            "trap_meter_level": trap_level,
+            "active": active,
+        },
+        "market_efficiency": market_efficiency,
+        "market_momentum": market_momentum,
+        "foul_correlation": None,
+        "history": history,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DB reads
+# ────────────────────────────────────────────────────────────────────────
+
+def _load_games(conn: sqlite3.Connection, classification: Optional[str] = None,
+                limit: int = 100) -> list[dict]:
+    q = "SELECT * FROM games"
+    params: tuple = ()
+    if classification:
+        q += " WHERE classification=?"
+        params = (classification,)
+    q += " ORDER BY last_seen_at DESC LIMIT ?"
+    return [dict(r) for r in conn.execute(q, params + (limit,))]
+
+
+def _load_snapshots(conn: sqlite3.Connection, source_game_id: str,
+                    limit: int = 400) -> list[dict]:
+    rows = conn.execute("""
+        SELECT s.* FROM snapshots s
+        JOIN games g ON g.id = s.game_id
+        WHERE g.source_game_id = ?
+        ORDER BY s.captured_at ASC LIMIT ?
+    """, (source_game_id, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _load_collector_state() -> Optional[dict]:
+    try:
+        if STATE_FILE.exists():
+            return json.loads(STATE_FILE.read_text())
+    except Exception:
+        pass
+    return None
+
+
+def _db_stats(conn: sqlite3.Connection, now: datetime) -> dict:
+    per_class: dict[str, dict] = {}
+    for r in conn.execute(
+        "SELECT classification, COUNT(*) AS c FROM games GROUP BY classification"
+    ):
+        per_class[r["classification"]] = {"games": r["c"], "snapshots": 0}
+    for r in conn.execute(
+        "SELECT classification, COUNT(*) AS c FROM snapshots GROUP BY classification"
+    ):
+        per_class.setdefault(r["classification"], {"games": 0, "snapshots": 0})
+        per_class[r["classification"]]["snapshots"] = r["c"]
+    last = conn.execute(
+        "SELECT MAX(captured_at) AS m FROM snapshots"
+    ).fetchone()["m"]
+    live = conn.execute("""
+        SELECT COUNT(*) AS c FROM games g
+        WHERE g.status = 'live'
+          AND EXISTS (SELECT 1 FROM snapshots s
+                      WHERE s.game_id = g.id
+                        AND s.captured_at >= ?)
+    """, (now.replace(microsecond=0).isoformat(),)).fetchone()["c"]
+    return {
+        "total_games": conn.execute("SELECT COUNT(*) AS c FROM games").fetchone()["c"],
+        "total_snapshots": conn.execute("SELECT COUNT(*) AS c FROM snapshots").fetchone()["c"],
+        "reconciliations": conn.execute(
+            "SELECT COUNT(*) AS c FROM reconciliation").fetchone()["c"],
+        "reconciled_ok": conn.execute(
+            "SELECT COUNT(*) AS c FROM reconciliation WHERE result='matched'"
+        ).fetchone()["c"],
+        "per_class": per_class,
+        "last_snapshot_at": last,
+        "last_snapshot_age_s": _age_s(last, now),
+        "live_games": live,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Router
+# ────────────────────────────────────────────────────────────────────────
+
+router = APIRouter(prefix="/api/v4", tags=["blm-v4"])
+
+
+@router.get("/status")
+def v4_status() -> dict:
+    now = datetime.now(timezone.utc)
+    state = _load_collector_state()
+    try:
+        conn = _connect()
+    except Exception:
+        return {"status": "offline", "collector": state, "db": None,
+                "server_time": now.isoformat()}
+    try:
+        db = _db_stats(conn, now)
+    finally:
+        conn.close()
+    # collector status: running (heartbeat fresh), stalled, offline
+    if state is None:
+        col_status = "offline"
+    else:
+        last_tick_age = _age_s(state.get("last_tick_at"), now)
+        if last_tick_age is not None and last_tick_age <= 90:
+            col_status = "running" if state.get("status") == "running" else "stalled"
+        else:
+            col_status = "offline"
+    return {
+        "status": col_status,
+        "collector": state,
+        "db": db,
+        "server_time": now.isoformat(),
+    }
+
+
+@router.get("/live")
+def v4_live(classification: Optional[str] = Query(None)) -> dict:
+    now = datetime.now(timezone.utc)
+    conn = _connect()
+    try:
+        games = _load_games(conn, classification)
+        out = []
+        for g in games:
+            rows = _load_snapshots(conn, g["source_game_id"])
+            if not rows:
+                # games table entry with no snapshots yet — still show it
+                out.append(_analyze_game(g, [], now))
+            else:
+                out.append(_analyze_game(g, rows, now))
+    finally:
+        conn.close()
+    out.sort(key=lambda g: (not g["live"], -(g["age_s"] or 0)))
+    return {
+        "generated_at": now.isoformat(),
+        "collector": _load_collector_state(),
+        "games": out,
+        "totals": {
+            "live": sum(1 for g in out if g["live"]),
+            "total": len(out),
+        },
+    }
+
+
+@router.get("/games")
+def v4_games(classification: Optional[str] = Query(None), limit: int = Query(200, le=1000)) -> dict:
+    conn = _connect()
+    try:
+        games = _load_games(conn, classification, limit)
+        items = []
+        for g in games:
+            rows = _load_snapshots(conn, g["source_game_id"], limit=5)
+            latest = rows[-1] if rows else None
+            items.append({
+                "game_id": g["source_game_id"],
+                "classification": g["classification"],
+                "competition": g.get("competition") or "",
+                "home_team": g["home_team"],
+                "away_team": g["away_team"],
+                "status": g.get("status") or "live",
+                "first_seen_at": g.get("first_seen_at"),
+                "last_seen_at": g.get("last_seen_at"),
+                "home_score": _i(latest["home_score"]) if latest else None,
+                "away_score": _i(latest["away_score"]) if latest else None,
+                "quarter": _i(latest["quarter"]) if latest else None,
+                "clock": latest.get("clock") if latest else None,
+                "snapshot_count": len(rows),
+            })
+    finally:
+        conn.close()
+    return {"total": len(items), "games": items}
+
+
+@router.get("/history/{game_id}")
+def v4_history(game_id: str, limit: int = Query(500, le=2000)) -> dict:
+    conn = _connect()
+    try:
+        rows = _load_snapshots(conn, game_id, limit)
+        game = conn.execute(
+            "SELECT * FROM games WHERE source_game_id=?", (game_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not rows and not game:
+        raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found")
+    return {
+        "game_id": game_id,
+        "classification": game["classification"] if game else None,
+        "home_team": game["home_team"] if game else None,
+        "away_team": game["away_team"] if game else None,
+        "total": len(rows),
+        "snapshots": rows[-limit:],
+    }
+
+
+@router.get("/game/{game_id}")
+def v4_game_detail(game_id: str) -> dict:
+    conn = _connect()
+    try:
+        game = conn.execute(
+            "SELECT * FROM games WHERE source_game_id=?", (game_id,)
+        ).fetchone()
+        if not game:
+            raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found")
+        rows = _load_snapshots(conn, game_id, 1000)
+    finally:
+        conn.close()
+    detail = _analyze_game(dict(game), rows, datetime.now(timezone.utc))
+    detail["timeline"] = _timeline_events(rows, game["classification"])
+    detail["raw"] = rows[-1] if rows else None
+    return detail

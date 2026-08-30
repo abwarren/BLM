@@ -85,6 +85,29 @@ def main() -> None:
     from blm_v2.dashboard.server import create_dashboard_app
     app.mount("/dashboard", create_dashboard_app())
 
+    # ── BLM V4 PokerBet pipeline API (classification-aware) ──
+    from blm_v4.api import router as v4_router
+    app.include_router(v4_router)
+
+    # ── Operator dashboard at the root ───────────────────────
+    # http://<host>:2262/ is the live analytics terminal;
+    # /api/v2/live and /api/v4/* remain the API/debug endpoints.
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse
+    _dashboard_static = root / "blm_v4" / "dashboard" / "static"
+    if _dashboard_static.is_dir():
+        app.mount(
+            "/static",
+            StaticFiles(directory=str(_dashboard_static)),
+            name="blm_operator_dashboard",
+        )
+
+        @app.get("/", include_in_schema=False)
+        async def operator_dashboard():
+            return FileResponse(str(_dashboard_static / "index.html"))
+    else:
+        logger.warning("operator dashboard static dir missing: %s", _dashboard_static)
+
     # ── Wire deps into global state for API endpoints ────────
     from blm_v2.api.dependencies import wire_dependencies
     wire_dependencies(

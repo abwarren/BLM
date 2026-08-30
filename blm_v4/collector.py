@@ -79,8 +79,19 @@ NAV_TIMEOUT = 45000
 PANEL_WAIT_S = 8.0
 ENDED_GRACE_TICKS = 3
 
+# Resilience: the BetConstruct SPA slowly degrades in long-lived sessions
+# (the live-panel tree stops hydrating even though a fresh browser renders
+# it fine).  When parsing keeps coming up empty, rotate the session:
+#   FRESH_CONTEXT_AFTER_EMPTY     → new context/page in the same browser
+#   BROWSER_RELAUNCH_AFTER_EMPTY  → full browser relaunch
+#   BROWSER_MAX_LIFETIME_S        → force a fresh browser even on success
+FRESH_CONTEXT_AFTER_EMPTY = 3
+BROWSER_RELAUNCH_AFTER_EMPTY = 10
+BROWSER_MAX_LIFETIME_S = 3600.0
+
 STATE_DIR = Path(__file__).resolve().parent / "state"
 COMP_IDS_FILE = STATE_DIR / "comp_ids.json"
+STATE_FILE = STATE_DIR / "collector_state.json"
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -146,6 +157,12 @@ class PokerBetCollector:
         self._market_queue: list[str] = []   # round-robin of source_game_ids
         self._running = False
         self._browser: Optional[Browser] = None
+        self._pw: Any = None                  # active sync_playwright scope
+        self._empty_ticks = 0                 # consecutive empty-parses
+        self._browser_started_at = 0.0
+        self._started_at_iso = utcnow_iso()
+        self._last_success_iso = ""
+        self._last_error_iso = ""
         self.stats = {
             "ticks": 0, "games_seen": 0, "snapshots": 0,
             "games_resolved": 0, "reconciliations": 0, "errors": 0,
@@ -153,34 +170,115 @@ class PokerBetCollector:
 
     # ── Lifecycle ────────────────────────────────────────────────
 
+    def _session_options(self) -> dict:
+        """Browser context options shared by every session."""
+        return {
+            "viewport": {"width": 1600, "height": 900},
+            "user_agent": _USER_AGENT,
+            "locale": "en-ZA",
+            "extra_http_headers": {"Accept-Language": "en-ZA,en;q=0.9"},
+        }
+
+    def _new_session(self) -> Page:
+        """Launch a fresh browser + context + page, land on the discovery page."""
+        assert self._pw is not None, "sync_playwright scope not active"
+        browser = self._pw.chromium.launch(
+            headless=self.headless,
+            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+        )
+        context = browser.new_context(**self._session_options())
+        page = context.new_page()
+        self._browser = browser
+        self._browser_started_at = time.monotonic()
+        self._ensure_discovery_page(page)
+        logger.info("new browser session started (age=%ds)", 0)
+        return page
+
+    def _fresh_context(self, reason: str) -> Page:
+        """New context/page in the same browser (SPA state is per-context)."""
+        try:
+            if self._browser is None:
+                return self._relaunch(reason)
+            context = self._browser.new_context(**self._session_options())
+            page = context.new_page()
+            self._empty_ticks = 0
+            self._ensure_discovery_page(page)
+            logger.warning("fresh context created: %s", reason)
+            return page
+        except Exception:
+            logger.error("fresh context failed:\n%s", traceback.format_exc())
+            return self._relaunch(reason)
+
+    def _relaunch(self, reason: str) -> Page:
+        """Close the browser and start a completely fresh session."""
+        logger.warning("relaunching browser: %s", reason)
+        try:
+            if self._browser is not None:
+                self._browser.close()
+        except Exception:
+            pass
+        self._browser = None
+        self._empty_ticks = 0
+        try:
+            return self._new_session()
+        except Exception:
+            logger.error("relaunch failed:\n%s", traceback.format_exc())
+            raise
+
+    def _write_state(self, *, success: bool) -> None:
+        """Heartbeat file the dashboard API reads for collector status."""
+        now_iso = utcnow_iso()
+        if success:
+            self._last_success_iso = now_iso
+        state = {
+            "tick": self.stats["ticks"],
+            "status": "running" if success else "stalled",
+            "started_at": self._started_at_iso,
+            "last_tick_at": now_iso,
+            "last_success_at": self._last_success_iso,
+            "last_error_at": self._last_error_iso,
+            "consecutive_empty_ticks": self._empty_ticks,
+            "browser_age_s": round(time.monotonic() - self._browser_started_at, 1)
+            if self._browser_started_at else 0,
+            "games_tracked": self.stats["games_seen"],
+            "snapshots_total": self.stats["snapshots"],
+            "games_resolved": self.stats["games_resolved"],
+            "reconciliations": self.stats["reconciliations"],
+            "errors": self.stats["errors"],
+        }
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            STATE_FILE.write_text(json.dumps(state, indent=2))
+        except Exception:
+            logger.exception("state write failed")
+
     def start(self) -> None:
         if self._running:
             return
         self._running = True
         try:
             with sync_playwright() as pw:
-                self._browser = pw.chromium.launch(
-                    headless=self.headless,
-                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-                )
-                context = self._browser.new_context(
-                    viewport={"width": 1600, "height": 900},
-                    user_agent=_USER_AGENT,
-                    locale="en-ZA",
-                    extra_http_headers={
-                        "Accept-Language": "en-ZA,en;q=0.9",
-                    },
-                )
-                page = context.new_page()
-                self._ensure_discovery_page(page)
+                self._pw = pw
+                page = self._new_session()
                 while self._running:
                     tick_start = time.monotonic()
                     try:
-                        self._tick(page)
+                        page = self._tick(page)
                     except Exception:
                         self.stats["errors"] += 1
+                        self._last_error_iso = utcnow_iso()
                         logger.error("tick error:\n%s", traceback.format_exc())
-                        self._recover(page)
+                        try:
+                            page = self._relaunch("tick error")
+                        except Exception:
+                            logger.error("relaunch failed, giving up:\n%s",
+                                         traceback.format_exc())
+                            self._running = False
+                            break
+                    # SPA sessions degrade over hours — rotate regardless
+                    if (time.monotonic() - self._browser_started_at
+                            > BROWSER_MAX_LIFETIME_S):
+                        page = self._relaunch("browser lifetime cap")
                     elapsed = time.monotonic() - tick_start
                     sleep_for = self.tick_s - elapsed
                     if sleep_for > 0:
@@ -254,16 +352,13 @@ class PokerBetCollector:
         self._wait_panel(page)
         self._expand_target_sections(page)
 
-    def _recover(self, page: Page) -> None:
-        """After a tick error, re-establish the discovery page."""
-        try:
-            self._ensure_discovery_page(page)
-        except Exception:
-            logger.error("recover failed:\n%s", traceback.format_exc())
+    def _recover(self, page: Page) -> Page:
+        """Legacy single-tick recovery — now superseded by session rotation."""
+        return self._relaunch("recover requested")
 
     # ── Main tick ────────────────────────────────────────────────
 
-    def _tick(self, page: Page) -> None:
+    def _tick(self, page: Page) -> Page:
         self.stats["ticks"] += 1
         logger.info("tick %d start (url=%s)", self.stats["ticks"], page.url)
 
@@ -276,8 +371,23 @@ class PokerBetCollector:
             html = page.content()
             comps = find_relevant_competitions(html)
         if not comps:
-            logger.warning("still no relevant competitions on page")
-            return
+            self._empty_ticks += 1
+            self._write_state(success=False)
+            logger.warning(
+                "still no relevant competitions on page "
+                "(consecutive empties: %d)",
+                self._empty_ticks,
+            )
+            if self._empty_ticks >= BROWSER_RELAUNCH_AFTER_EMPTY:
+                return self._relaunch(
+                    f"{self._empty_ticks} consecutive empty parses",
+                )
+            if self._empty_ticks >= FRESH_CONTEXT_AFTER_EMPTY:
+                return self._fresh_context(
+                    f"{self._empty_ticks} consecutive empty parses",
+                )
+            return page
+        self._empty_ticks = 0
 
         seen_keys: dict[str, set[str]] = {
             comp.classification.value: set() for comp in comps
@@ -316,6 +426,8 @@ class PokerBetCollector:
             self.stats["ticks"], self.stats["games_seen"],
             self.stats["snapshots"], self.stats["errors"],
         )
+        self._write_state(success=True)
+        return page
 
     # ── Discovery & identity ─────────────────────────────────────
 
@@ -680,6 +792,7 @@ class PokerBetCollector:
 def run_once(collector: PokerBetCollector, headless: bool = True, max_ticks: int = 1) -> dict:
     """Run N ticks synchronously (for verification / testing)."""
     with sync_playwright() as pw:
+        collector._pw = pw
         browser = pw.chromium.launch(
             headless=headless,
             args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
@@ -691,11 +804,12 @@ def run_once(collector: PokerBetCollector, headless: bool = True, max_ticks: int
         )
         page = context.new_page()
         collector._browser = browser
+        collector._browser_started_at = time.monotonic()
         collector._running = True
         try:
             collector._ensure_discovery_page(page)
             for _ in range(max_ticks):
-                collector._tick(page)
+                page = collector._tick(page)
         finally:
             collector._running = False
             browser.close()
