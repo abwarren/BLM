@@ -898,6 +898,203 @@ def test_api_card_parity_with_projection():
     assert card["home_score"] == 109 and card["away_score"] == 114
 
 
+# ═══════════ Historical market history + trends ═════════════════
+
+def _clean_game(st: PokerBetStore, gid: str, t0: datetime | None = None,
+                olvc: float = 190.0, clv: float = 190.0,
+                cls: str = "BETUAL_NBA") -> int:
+    """Full monotonic Q1..Q4 game ending 96-88 (total 184).  First snap
+    carries OLVC, last carries CLV; middle snaps are line-less stubs."""
+    t0 = t0 or (datetime.now(timezone.utc) - timedelta(minutes=20))
+    gid_db = _add_game(st, gid, cls, "Home Virtual", "Away Virtual", status="ended")
+    snaps = [
+        (0, 0, 1, "09:00"), (8, 6, 1, "06:00"), (16, 12, 1, "03:00"),
+        (24, 20, 1, "00:00"), (30, 26, 2, "09:00"), (40, 34, 2, "06:00"),
+        (52, 42, 2, "03:00"), (60, 50, 2, "00:00"), (66, 58, 3, "09:00"),
+        (76, 66, 3, "06:00"), (82, 72, 3, "03:00"), (86, 78, 3, "00:00"),
+        (88, 80, 4, "09:00"), (92, 84, 4, "06:00"), (96, 88, 4, "00:00"),
+    ]
+    n = len(snaps)
+    for i, (hs, as_, q, clock) in enumerate(snaps):
+        line = olvc if i == 0 else clv if i == n - 1 else None
+        _snap(st, gid_db, gid, cls, t0 + timedelta(minutes=i * 1.2),
+              hs, as_, q, clock, line)
+    return gid_db
+
+
+def test_market_history_recorded_for_clean_game(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLM_ANALYTICS_TZ", "UTC")
+    st = _make_store(tmp_path)
+    t0 = datetime(2026, 8, 30, 1, 30, tzinfo=timezone.utc)
+    _clean_game(st, "9701", t0=t0, olvc=190.0, clv=195.0)  # final 184 -> UNDER
+    sc = Scorecard(tmp_path / "blm.db")
+    stats = sc.run()
+    assert stats["market"]["recorded"] == 1
+    conn = sc._connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM market_history WHERE source_game_id='9701'").fetchone()
+        assert row["opening_total"] == 190.0
+        assert row["closing_total"] == 195.0          # OLVC never overwritten
+        assert row["total_line_move"] == 5.0
+        assert row["market_move"] == "UP"
+        assert row["outcome_olvc"] == "UNDER"
+        assert row["outcome_clv"] == "UNDER"
+        assert row["opening_total_edge"] == -6.0      # 184 - 190
+        assert row["closing_total_edge"] == -11.0     # 184 - 195
+        assert row["started_hour"] == 1
+        assert row["analytics_tz"] == "UTC"
+        assert row["started_date"] == "2026-08-30"
+        assert row["started_dow"] is not None
+        assert row["duration_min"] > 0
+        assert "v4-pace-1" in (row["model_versions"] or "")
+    finally:
+        conn.close()
+    # idempotent: re-run never duplicates
+    sc.run()
+    conn = sc._connect()
+    try:
+        n = conn.execute("SELECT COUNT(*) c FROM market_history "
+                         "WHERE source_game_id='9701'").fetchone()["c"]
+        assert n == 1
+    finally:
+        conn.close()
+
+
+def test_market_history_timezone_basis(tmp_path, monkeypatch):
+    """The analytical timezone is explicit: 23:30 UTC = 01:30 SAST next
+    day — hour AND date must reflect the configured basis."""
+    monkeypatch.setenv("BLM_ANALYTICS_TZ", "Africa/Johannesburg")
+    st = _make_store(tmp_path)
+    t0 = datetime(2026, 8, 30, 23, 30, tzinfo=timezone.utc)
+    _clean_game(st, "9905", t0=t0)
+    sc = Scorecard(tmp_path / "blm.db")
+    sc.run()
+    conn = sc._connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM market_history WHERE source_game_id='9905'").fetchone()
+        assert row["analytics_tz"] == "Africa/Johannesburg"
+        assert row["started_hour"] == 1
+        assert row["started_date"] == "2026-08-31"
+    finally:
+        conn.close()
+
+
+def test_market_history_skips_fragment_and_invalid(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLM_ANALYTICS_TZ", "UTC")
+    st = _make_store(tmp_path)
+    # fragment: 6 snaps, all 4th quarter (the 30739952#i2 shape)
+    gid_db = _add_game(st, "9702", "BETUAL_NBA", "H", "A", status="ended")
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=2)
+    for i, (hs, as_, clock) in enumerate([(60, 66, "02:00"), (64, 70, "01:30"),
+                                          (70, 74, "01:00"), (78, 80, "00:45"),
+                                          (86, 84, "00:30"), (92, 88, "00:15")]):
+        _snap(st, gid_db, "9702", "BETUAL_NBA",
+              t0 + timedelta(seconds=20 * i), hs, as_, 4, clock, 185.0)
+    # invalid: score regression (away 6 -> 5)
+    gid_db2 = _add_game(st, "9703", "BETUAL_NBA", "H", "A", status="ended")
+    t0b = datetime.now(timezone.utc) - timedelta(minutes=20)
+    snaps = [(0, 0, 1, "09:00"), (8, 6, 1, "06:00"), (10, 5, 1, "03:00"),
+             (24, 20, 1, "00:00"), (30, 26, 2, "09:00"), (40, 34, 2, "06:00"),
+             (52, 42, 2, "03:00"), (60, 50, 2, "00:00"), (66, 58, 3, "09:00"),
+             (76, 66, 3, "06:00"), (82, 72, 3, "03:00"), (86, 78, 3, "00:00"),
+             (88, 80, 4, "09:00"), (92, 84, 4, "06:00"), (96, 88, 4, "00:00")]
+    for i, (hs, as_, q, clock) in enumerate(snaps):
+        _snap(st, gid_db2, "9703", "BETUAL_NBA",
+              t0b + timedelta(minutes=i * 1.2), hs, as_, q, clock,
+              190.0 if i in (0, len(snaps) - 1) else None)
+    sc = Scorecard(tmp_path / "blm.db")
+    sc.run()
+    conn = sc._connect()
+    try:
+        n = conn.execute("SELECT COUNT(*) c FROM market_history").fetchone()["c"]
+        assert n == 0  # neither fragments nor invalid games enter the base
+    finally:
+        conn.close()
+
+
+def test_market_history_single_line_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLM_ANALYTICS_TZ", "UTC")
+    st = _make_store(tmp_path)
+    _clean_game(st, "9704", olvc=184.0, clv=184.0)  # final 184 -> PUSH, no move
+    sc = Scorecard(tmp_path / "blm.db")
+    sc.run()
+    conn = sc._connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM market_history WHERE source_game_id='9704'").fetchone()
+        assert row["outcome_olvc"] == "PUSH" and row["outcome_clv"] == "PUSH"
+        assert row["total_line_move"] == 0.0
+        assert row["market_move"] == "UNCHANGED"
+        assert row["opening_total_edge"] == 0.0
+    finally:
+        conn.close()
+
+
+def test_trends_market_performance_and_time_of_day(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLM_ANALYTICS_TZ", "UTC")
+    st = _make_store(tmp_path)
+    # hour 1: 184 vs 190/195 -> UNDER both (edges -6 / -11)
+    _clean_game(st, "9801", t0=datetime(2026, 8, 30, 1, 30, tzinfo=timezone.utc),
+                olvc=190.0, clv=195.0)
+    # hour 12: 184 vs 175/178 -> OVER both (edges +9 / +6)
+    _clean_game(st, "9802", t0=datetime(2026, 8, 30, 12, 30, tzinfo=timezone.utc),
+                olvc=175.0, clv=178.0)
+    # hour 12: 184 vs 184/184 -> PUSH both
+    _clean_game(st, "9803", t0=datetime(2026, 8, 30, 12, 45, tzinfo=timezone.utc),
+                olvc=184.0, clv=184.0)
+    sc = Scorecard(tmp_path / "blm.db")
+    sc.run()
+    conn = sc._connect()
+    try:
+        from blm_v4.trends import market_performance, time_of_day
+        mp = market_performance(conn)
+        assert mp["clv"]["n"] == 3
+        assert mp["clv"]["over"] == 1 and mp["clv"]["under"] == 1
+        assert mp["clv"]["push"] == 1
+        assert mp["clv"]["over_pct"] == 33.3
+        assert mp["olvc"]["n"] == 3
+        assert mp["olvc"]["over"] == 1 and mp["olvc"]["under"] == 1
+        assert mp["clv"]["avg_edge"] == round((-11 + 6 + 0) / 3, 2)
+        assert mp["olvc"]["avg_edge"] == round((-6 + 9 + 0) / 3, 2)
+        tod = time_of_day(conn)
+        h1 = next(b for b in tod["hourly"] if b["hour"] == "01-02")
+        assert h1["games"] == 1 and h1["clv_n"] == 1
+        h12 = next(b for b in tod["hourly"] if b["hour"] == "12-13")
+        assert h12["games"] == 2 and h12["clv_n"] == 2
+        assert h12["over_clv"] == 1 and h12["push_clv"] == 1
+        g01 = next(b for b in tod["grouped"] if b["period"] == "01-05")
+        assert g01["games"] == 1
+        g10 = next(b for b in tod["grouped"] if b["period"] == "10-13")
+        assert g10["games"] == 2 and g10["over_clv"] == 1
+        assert g10["mae_clv"] == round((abs(6) + abs(0)) / 2, 2)  # 3.0
+    finally:
+        conn.close()
+
+
+def test_trends_model_vs_market(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLM_ANALYTICS_TZ", "UTC")
+    st = _make_store(tmp_path)
+    _clean_game(st, "9901", olvc=190.0, clv=195.0)  # final 184 -> UNDER
+    sc = Scorecard(tmp_path / "blm.db")
+    sc.run()
+    conn = sc._connect()
+    try:
+        from blm_v4.trends import model_vs_market
+        mm = model_vs_market(conn)
+        by = mm["by_version"]
+        assert "v4-pace-1" in by
+        v = by["v4-pace-1"]
+        assert v["n"] > 0
+        assert v["dir_valid"] == v["n"]            # every pred has a market line
+        assert v["dir_hit_rate"] is not None
+        assert v["beat_market_rate"] is not None
+        assert v["by_checkpoint"]                  # checkpoint breakdown present
+    finally:
+        conn.close()
+
+
 # ═══════════ Fragment classification (short histories never headline) ═
 
 def test_fragments_excluded_from_headline(tmp_path, monkeypatch):

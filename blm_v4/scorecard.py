@@ -42,8 +42,10 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from blm_v4.projection import FULL_GAME_MINUTES, MODEL_VERSION, clock_minutes, project
+from blm_v4.trends import analytics_tz
 
 SCORECARD_SCHEMA = """
 CREATE TABLE IF NOT EXISTS predictions (
@@ -118,6 +120,44 @@ CREATE TABLE IF NOT EXISTS prediction_scores (
 CREATE INDEX IF NOT EXISTS idx_pred_games   ON predictions(source_game_id);
 CREATE INDEX IF NOT EXISTS idx_scores_ver   ON prediction_scores(model_version);
 CREATE INDEX IF NOT EXISTS idx_scores_game  ON prediction_scores(source_game_id);
+
+-- Historical market-outcome record: ONE row per CLEAN (OK, non-fragment)
+-- completed game.  Opening and closing lines are preserved SEPARATELY
+-- (OLVC is never overwritten by CLV); every outcome classifies against
+-- both.  The analytical timezone is stored with the derived hour/day so
+-- the bucketing basis is explicit and never silently re-interpreted.
+CREATE TABLE IF NOT EXISTS market_history (
+    source_game_id      TEXT PRIMARY KEY,
+    classification      TEXT NOT NULL,
+    competition         TEXT,
+    home_team           TEXT,
+    away_team           TEXT,
+    started_at          TEXT NOT NULL,       -- UTC (first snapshot)
+    analytics_tz        TEXT NOT NULL,       -- timezone basis for the local fields
+    started_hour        INTEGER,             -- local hour 0..23
+    started_dow         INTEGER,             -- local day of week (0=Mon .. 6=Sun)
+    started_date        TEXT,                -- local YYYY-MM-DD
+    duration_min        REAL,                -- wall clock first -> last snapshot
+    opening_total       REAL,                -- OLVC: first observed total line
+    closing_total       REAL,                -- CLV:  last observed total line
+    opening_spread      REAL,
+    closing_spread      REAL,
+    total_line_move     REAL,                -- CLV - OLVC
+    spread_line_move    REAL,
+    market_move         TEXT,                -- UP | DOWN | UNCHANGED (total line)
+    final_home          INTEGER,
+    final_away          INTEGER,
+    final_total         INTEGER,
+    outcome_olvc        TEXT,                -- OVER | UNDER | PUSH
+    outcome_clv         TEXT,
+    opening_total_edge  REAL,                -- actual_total - OLVC (unrounded)
+    closing_total_edge  REAL,                -- actual_total - CLV (unrounded)
+    model_versions      TEXT,                -- comma-joined distinct versions seen
+    recorded_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mh_hour    ON market_history(started_hour);
+CREATE INDEX IF NOT EXISTS idx_mh_clv     ON market_history(closing_total);
 """
 
 _CHECKPOINTS = ("q1", "q2", "q3", "q4", "final")
@@ -190,6 +230,21 @@ def _progress_of(r: dict) -> Optional[float]:
     if el is None:
         return None
     return round(min(1.0, max(0.0, el / FULL_GAME_MINUTES)), 4)
+
+
+def _outcome_vs_line(final_total: Optional[int], line: Optional[float]) -> Optional[str]:
+    """OVER | UNDER | PUSH against a market line — exact comparison, no
+    rounding of the underlying values before classification."""
+    if final_total is None or line is None:
+        return None
+    return "OVER" if final_total > line else "UNDER" if final_total < line else "PUSH"
+
+
+def _edge_vs_line(final_total: Optional[int], line: Optional[float]) -> Optional[float]:
+    """actual_total - line, unrounded edge (rounded only for storage)."""
+    if final_total is None or line is None:
+        return None
+    return round(final_total - line, 2)
 
 
 def _snapshot_history_quality(rows: list[dict]) -> tuple[str, str]:
@@ -637,6 +692,133 @@ class Scorecard:
             ou_pred, ou_res, ou_correct, _utcnow(),
         )
 
+    # ── Historical market-outcome records ──────────────────────────
+
+    def record_market_history(self) -> dict[str, int]:
+        """Persist one market_history row per CLEAN completed game (OK +
+        non-fragment): OLVC/CLV preserved separately, unrounded edges,
+        outcome vs both lines, line movement, and local hour/day/date in
+        the configured analytics timezone.  Idempotent upsert — re-runs
+        never duplicate.  Fragments/INVALID games never enter the table
+        (they would poison the historical base)."""
+        stats = {"recorded": 0, "skipped_fragment": 0}
+        with self._lock:
+            conn = self._connect()
+            try:
+                comp = {}
+                for r in conn.execute(
+                        f"""SELECT g.source_game_id,
+                                  (SELECT COUNT(*) FROM snapshots s
+                                   WHERE s.game_id = g.id) AS n,
+                                  {_STARTS_Q1_SQL} AS starts_q1
+                           FROM games g"""):
+                    comp[r["source_game_id"]] = (r["n"], r["starts_q1"])
+                tz_name = analytics_tz()
+                try:
+                    tz = ZoneInfo(tz_name)
+                except Exception:
+                    tz = timezone.utc
+                rows = conn.execute(
+                    """SELECT r.source_game_id, r.classification, r.final_home,
+                              r.final_away, r.final_total,
+                              g.competition, g.home_team, g.away_team
+                       FROM game_results r
+                       JOIN games g ON g.source_game_id = r.source_game_id
+                       WHERE r.final_result_status = 'OK'"""
+                ).fetchall()
+                for r in rows:
+                    n, starts_q1 = comp.get(r["source_game_id"], (0, 0))
+                    if not (n >= 15 and starts_q1):
+                        stats["skipped_fragment"] += 1
+                        continue
+                    snaps = conn.execute(
+                        """SELECT captured_at, total_line, spread
+                           FROM snapshots WHERE source_game_id = ?
+                           ORDER BY captured_at""",
+                        (r["source_game_id"],),
+                    ).fetchall()
+                    if not snaps:
+                        continue
+                    lines = [s["total_line"] for s in snaps
+                             if s["total_line"] is not None]
+                    olvc = lines[0] if lines else None
+                    clv = lines[-1] if lines else None
+                    spreads = [s["spread"] for s in snaps
+                               if s["spread"] is not None]
+                    osp = spreads[0] if spreads else None
+                    csp = spreads[-1] if spreads else None
+                    ft = r["final_total"]
+                    move = None if olvc is None or clv is None \
+                        else round(clv - olvc, 2)
+                    mv = None
+                    if move is not None:
+                        mv = ("UP" if move > 0 else "DOWN" if move < 0
+                              else "UNCHANGED")
+                    started = snaps[0]["captured_at"]
+                    local = datetime.fromisoformat(
+                        started.replace("Z", "+00:00")).astimezone(tz)
+                    dur = None
+                    try:
+                        d0 = datetime.fromisoformat(
+                            started.replace("Z", "+00:00"))
+                        d1 = datetime.fromisoformat(
+                            snaps[-1]["captured_at"].replace("Z", "+00:00"))
+                        dur = round((d1 - d0).total_seconds() / 60.0, 1)
+                    except Exception:
+                        pass
+                    versions = [v[0] for v in conn.execute(
+                        "SELECT DISTINCT model_version FROM predictions "
+                        "WHERE source_game_id = ?", (r["source_game_id"],))]
+                    conn.execute(
+                        """INSERT INTO market_history (
+                            source_game_id, classification, competition,
+                            home_team, away_team, started_at, analytics_tz,
+                            started_hour, started_dow, started_date,
+                            duration_min, opening_total, closing_total,
+                            opening_spread, closing_spread, total_line_move,
+                            spread_line_move, market_move, final_home,
+                            final_away, final_total, outcome_olvc,
+                            outcome_clv, opening_total_edge,
+                            closing_total_edge, model_versions, recorded_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(source_game_id) DO UPDATE SET
+                            classification = excluded.classification,
+                            closing_total = excluded.closing_total,
+                            closing_spread = excluded.closing_spread,
+                            total_line_move = excluded.total_line_move,
+                            spread_line_move = excluded.spread_line_move,
+                            market_move = excluded.market_move,
+                            final_home = excluded.final_home,
+                            final_away = excluded.final_away,
+                            final_total = excluded.final_total,
+                            outcome_clv = excluded.outcome_clv,
+                            closing_total_edge = excluded.closing_total_edge,
+                            model_versions = excluded.model_versions,
+                            recorded_at = excluded.recorded_at""",
+                        (
+                            r["source_game_id"], r["classification"],
+                            r["competition"], r["home_team"], r["away_team"],
+                            started, tz_name, local.hour, local.weekday(),
+                            local.strftime("%Y-%m-%d"), dur,
+                            olvc, clv, osp, csp, move,
+                            None if osp is None or csp is None
+                            else round(csp - osp, 2), mv,
+                            r["final_home"], r["final_away"], ft,
+                            _outcome_vs_line(ft, olvc),
+                            _outcome_vs_line(ft, clv),
+                            _edge_vs_line(ft, olvc),
+                            _edge_vs_line(ft, clv),
+                            ",".join(versions) or None,
+                            _utcnow(),
+                        ),
+                    )
+                    stats["recorded"] += 1
+                conn.commit()
+            finally:
+                conn.close()
+        return stats
+
     # ── Run all phases ─────────────────────────────────────────────
 
     def run(self) -> dict[str, Any]:
@@ -644,7 +826,9 @@ class Scorecard:
         fx = self.record_fixed_checkpoints()
         res = self.capture_results()
         sco = self.score_all()
-        return {"recorded": rec, "fixed": fx, "results": res, "scored": sco}
+        mkt = self.record_market_history()
+        return {"recorded": rec, "fixed": fx, "results": res,
+                "scored": sco, "market": mkt}
 
     # ── Read API (used by /api/v4/scorecard) ───────────────────────
 

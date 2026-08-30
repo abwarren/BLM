@@ -676,6 +676,32 @@ def v4_scorecard() -> dict:
     }
 
 
+@router.get("/trends")
+def v4_trends() -> dict:
+    """Historical market & time-of-day trends over CLEAN games only.
+
+    Observations, never model rules: every percentage carries its sample
+    size, and missing lines exclude the game from that metric only."""
+    from blm_v4.trends import (analytics_tz, grouped_periods,
+                               market_movement, market_performance,
+                               model_vs_market, time_of_day)
+    conn = _connect()
+    try:
+        return {
+            "analytics_tz": analytics_tz(),
+            "grouped_periods": [
+                f"{a:02d}-{b:02d}" for a, b in grouped_periods()],
+            "market_performance": market_performance(conn),
+            "time_of_day": time_of_day(conn),
+            "market_movement": market_movement(conn),
+            "model_vs_market": model_vs_market(conn),
+            "generated_at": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"),
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/history/{game_id}")
 def v4_history(game_id: str, limit: int = Query(500, le=2000)) -> dict:
     conn = _connect()

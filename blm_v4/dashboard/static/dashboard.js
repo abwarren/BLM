@@ -216,6 +216,123 @@ $("scorecardToggle").addEventListener("click", () => {
   }
 });
 
+/* ── Market & historical trends (clean games, observations only) ── */
+
+const API_TRENDS = "/api/v4/trends";
+let trendsTimer = null;
+
+function pctCell(n, denom) {
+  if (!denom) return `<td class="sc-num">–</td>`;
+  return `<td class="sc-num">${n} / ${denom} (${((n / denom) * 100).toFixed(1)}%)</td>`;
+}
+
+function renderTrends(d) {
+  const grid = $("trendsGrid");
+  if (!grid) return;
+  const mp = d.market_performance || {};
+  const mv = d.market_movement || {};
+  const mm = d.model_vs_market || {};
+  const tod = d.time_of_day || {};
+  const html = [];
+
+  // MARKET PERFORMANCE — OLVC vs CLV, counts WITH sample sizes
+  html.push(`<div class="sc-block sc-wide">
+    <h4>MARKET PERFORMANCE · tz ${esc(d.analytics_tz || "?")}</h4>
+    <table class="sc-table">
+      <tr><th></th><th>OLVC</th><th>CLV</th></tr>
+      <tr><td>OVER</td>${[mp.olvc, mp.clv].map((s) => pctCell(s.over, s.n)).join("")}</tr>
+      <tr><td>UNDER</td>${[mp.olvc, mp.clv].map((s) => pctCell(s.under, s.n)).join("")}</tr>
+      <tr><td>PUSH</td>${[mp.olvc, mp.clv].map((s) => pctCell(s.push, s.n)).join("")}</tr>
+      <tr><td>Avg Δ (actual − line)</td>
+        <td class="sc-num">${mp.olvc.avg_edge ?? "–"}</td>
+        <td class="sc-num">${mp.clv.avg_edge ?? "–"}</td></tr>
+      <tr><td>Median Δ CLV</td><td class="sc-num">–</td>
+        <td class="sc-num">${mp.clv.median_edge ?? "–"}</td></tr>
+    </table>
+  </div>`);
+
+  // TIME-OF-DAY — grouped buckets
+  const g = (tod.grouped || []).map((b) => `<tr>
+      <td>${esc(b.period)}</td>
+      <td class="sc-num">${b.games}</td>
+      <td class="sc-num">${b.clv_n}</td>
+      ${pctCell(b.over_clv, b.clv_n)}
+      ${pctCell(b.under_clv, b.clv_n)}
+      <td class="sc-num">${b.avg_delta_clv ?? "–"}</td>
+      <td class="sc-num">${b.mae_clv ?? "–"}</td>
+    </tr>`).join("");
+  html.push(`<div class="sc-block sc-wide">
+    <h4>TIME-OF-DAY (start hour, local)</h4>
+    <table class="sc-table">
+      <tr><th>Period</th><th>Games</th><th>CLV N</th><th>CLV OVER</th>
+        <th>CLV UNDER</th><th>Avg ΔCLV</th><th>MAE CLV</th></tr>
+      ${g || `<tr><td colspan="7" class="sc-num">no clean games yet</td></tr>`}
+    </table>
+  </div>`);
+
+  // MARKET MOVEMENT
+  html.push(`<div class="sc-block">
+    <h4>MARKET MOVEMENT (OLVC→CLV)</h4>
+    <table class="sc-table">
+      <tr><td>Games (both lines)</td><td class="sc-num">${mv.n ?? 0}</td></tr>
+      <tr><td>Avg move</td><td class="sc-num">${mv.avg_move ?? "–"}</td></tr>
+      <tr><td>Median move</td><td class="sc-num">${mv.median_move ?? "–"}</td></tr>
+      <tr><td>UP</td><td class="sc-num">${mv.up ?? 0}</td></tr>
+      <tr><td>DOWN</td><td class="sc-num">${mv.down ?? 0}</td></tr>
+      <tr><td>UNCHANGED</td><td class="sc-num">${mv.unchanged ?? 0}</td></tr>
+    </table>
+  </div>`);
+
+  // MODEL VS MARKET
+  const verRows = Object.entries(mm.by_version || {}).map(([ver, v]) => `<tr>
+      <td>${esc(ver)}</td>
+      <td class="sc-num">${v.n ?? 0}</td>
+      <td class="sc-num">${v.avg_model_edge ?? "–"}</td>
+      <td class="sc-num">${v.model_over_pct ?? "–"}%</td>
+      <td class="sc-num">${v.dir_hit_rate ?? "–"}%</td>
+      <td class="sc-num">${v.beat_market_rate ?? "–"}%</td>
+    </tr>`).join("");
+  html.push(`<div class="sc-block sc-wide">
+    <h4>MODEL VS MARKET (clean games)</h4>
+    <table class="sc-table">
+      <tr><th>Version</th><th>N</th><th>Avg edge</th><th>Model OVER %</th>
+        <th>Direction hit %</th><th>Beat market %</th></tr>
+      ${verRows || `<tr><td colspan="6" class="sc-num">no scored clean predictions yet</td></tr>`}
+    </table>
+  </div>`);
+
+  grid.innerHTML = html.join("");
+  $("trendsSub").textContent =
+    `clean games: ${mp.clv.n ?? 0} w/ line · tz ${d.analytics_tz || "?"} · observations only`;
+}
+
+async function refreshTrends() {
+  try {
+    const resp = await fetch(API_TRENDS);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const d = await resp.json();
+    renderTrends(d);
+  } catch (err) {
+    const grid = $("trendsGrid");
+    if (grid) grid.innerHTML = `<div class="empty">Trends unavailable: ${esc(err.message)}</div>`;
+  }
+}
+
+$("trendsToggle").addEventListener("click", () => {
+  const body = $("trendsBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("trendsToggle").setAttribute("aria-expanded", String(open));
+  $("trendsToggle").classList.toggle("open", open);
+  if (open) {
+    refreshTrends();
+    if (!trendsTimer) trendsTimer = setInterval(refreshTrends, 60000);
+  } else if (trendsTimer) {
+    clearInterval(trendsTimer);
+    trendsTimer = null;
+  }
+});
+
 /* ── Game cards ──────────────────────────────────────────── */
 
 function winprobHTML(g) {
