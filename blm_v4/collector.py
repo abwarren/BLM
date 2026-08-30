@@ -83,11 +83,11 @@ ENDED_GRACE_TICKS = 3
 
 # Market data is first-class live data: capture a batch of event views
 # every tick so every tracked game's PokerBet total is observed at least
-# once per MARKET_REFRESH window (~100 live games → 5 games/tick at a
-# 20s tick ≈ full refresh every ~7 min, vs ~33 min on the old 1-per-tick
-# round-robin).
-MARKET_BATCH = 5
-MARKET_REFRESH_S = 300
+# once per MARKET_REFRESH window.  Batch is kept modest — the SPA event
+# view needs ~2.5s hydration per click, so 2-3 per tick at a 20s tick
+# keeps ~8-10 min full refresh and avoids overwhelming the degraded SPA.
+MARKET_BATCH = 3
+MARKET_REFRESH_S = 480
 
 # Resilience: the BetConstruct SPA slowly degrades in long-lived sessions
 # (the live-panel tree stops hydrating even though a fresh browser renders
@@ -1015,6 +1015,15 @@ class PokerBetCollector:
         for _ in range(len(self._market_queue)):
             if captured >= MARKET_BATCH:
                 break
+            # A degraded SPA produces endless unverified event views —
+            # rotate the session instead of hammering it.
+            if self._event_view_failures >= BROWSER_RELAUNCH_AFTER_EMPTY:
+                logger.warning(
+                    "event-view failures %d — rotating browser",
+                    self._event_view_failures)
+                self._relaunch("event-view failure storm")
+                self._event_view_failures = 0
+                break
             gid = self._market_queue.pop(0)
             self._market_queue.append(gid)
             last = self._last_market_at.get(gid)
@@ -1096,9 +1105,11 @@ class PokerBetCollector:
             except Exception:
                 logger.error("market capture failed:\n%s", traceback.format_exc())
             finally:
-                # return to the discovery page for the next tick
+                # return to the discovery page for the next tick; let the
+                # SPA settle so the next row click hydrates correctly
                 self._goto(page, competition_url(cls, self.comp_ids))
                 self._wait_panel(page)
+                page.wait_for_timeout(1500)
 
     def _click_tracked_row(self, page: Page, game: PokerBetGame) -> bool:
         """Open ``game``'s event view by clicking its panel row.
