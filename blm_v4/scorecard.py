@@ -277,8 +277,15 @@ def _snapshot_history_quality(rows: list[dict]) -> tuple[str, str]:
         if r.get("classification") != rows[0].get("classification"):
             return "INVALID", "classification changed mid-game"
     # 3. score monotonicity (basketball scores only increase) + no
-    #    impossible transitions (a big regression = wrong event/instance)
+    #    impossible transitions (a big regression = wrong event/instance).
+    #    A >50pt hop is only impossible when the wall-clock gap between
+    #    the two captures is short: virtual games run ~7x real speed
+    #    (~33 pts/real-min), so a big hop across a multi-minute capture
+    #    gap is a legitimate fast game, while 50+ pts in under 90s is
+    #    physically impossible = foreign/contaminated state (observed:
+    #    the lobby-attribution jumps of 55-108 pts in 9-12s ticks).
     last = None
+    last_ts = None
     for r in rows:
         hs, as_ = r.get("home_score"), r.get("away_score")
         if hs is None or as_ is None:
@@ -288,8 +295,19 @@ def _snapshot_history_quality(rows: list[dict]) -> tuple[str, str]:
             if hs < lh or as_ < la:
                 return "INVALID", "score regression (contamination?)"
             if hs - lh > 50 or as_ - la > 50:
-                return "INVALID", "impossible score jump"
+                gap_sec = None
+                if last_ts:
+                    try:
+                        gap_sec = (datetime.fromisoformat(
+                            r["captured_at"].replace("Z", "+00:00"))
+                            - datetime.fromisoformat(
+                                last_ts.replace("Z", "+00:00"))).total_seconds()
+                    except Exception:
+                        pass
+                if gap_sec is None or gap_sec < 90.0:
+                    return "INVALID", "impossible score jump"
         last = (hs, as_)
+        last_ts = r.get("captured_at")
     return "OK", ""
 
 

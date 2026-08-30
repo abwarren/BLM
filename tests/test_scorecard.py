@@ -457,6 +457,38 @@ def test_quality_gate_cross_event(tmp_path):
     assert status == "INVALID" and "contamination" in reason
 
 
+def test_quality_gate_jump_is_gap_aware():
+    """A >50pt hop in under 90s is physically impossible (foreign state)
+    and rejects; the same hop across a multi-minute capture gap is a
+    legitimate fast virtual game (~7x speed) and must PASS."""
+    t0 = "2026-01-01T00:00:00Z"
+    short_gap = [
+        {"source_game_id": "1", "classification": "A", "captured_at": t0,
+         "home_score": 19, "away_score": 14},
+        {"source_game_id": "1", "classification": "A",
+         "captured_at": "2026-01-01T00:00:11Z", "home_score": 62, "away_score": 71},
+    ]
+    status, reason = _snapshot_history_quality(short_gap)
+    assert status == "INVALID" and "jump" in reason
+    long_gap = [
+        {"source_game_id": "1", "classification": "A", "captured_at": t0,
+         "home_score": 15, "away_score": 2},
+        {"source_game_id": "1", "classification": "A",
+         "captured_at": "2026-01-01T00:02:27Z", "home_score": 109, "away_score": 99},
+    ]
+    status, reason = _snapshot_history_quality(long_gap)
+    assert status == "OK", reason
+    # monotonicity still enforced regardless of gap
+    reg = [
+        {"source_game_id": "1", "classification": "A", "captured_at": t0,
+         "home_score": 100, "away_score": 66},
+        {"source_game_id": "1", "classification": "A",
+         "captured_at": "2026-01-01T00:05:00Z", "home_score": 31, "away_score": 24},
+    ]
+    status, reason = _snapshot_history_quality(reg)
+    assert status == "INVALID" and "regression" in reason
+
+
 # ═══════════ Collector virtual-replay instance split ═══════════
 
 def _collector(st: PokerBetStore) -> PokerBetCollector:
