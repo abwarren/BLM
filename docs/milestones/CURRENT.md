@@ -32,8 +32,18 @@ Same poll loop (refresh → loadModalDetail → renderModal → divergenceHTML)
 re-renders every tick — no page refresh.  Verified live on running server:
 deployed JS/CSS carry the header; API 30740053 opening=171.5 live=181.5
 expected_total=181.5.  node --check OK; 185 tests green.
-NEXT: M007-M3 — closing-line handling (populated only when the market/game
-reaches closing state).
+M007-M3 (COMPLETE, deployed 0960cbe): closing line.
+- CLOSING CONDITION: market closes = game reaches terminal state (game
+  status 'ended').  While live → closing_line = null (latest live line is
+  NOT closing).  Once ended → last verified PokerBet total, immutable.
+- closing_snapshot(rows, ended) in projection.py; API exposes
+  market.closing_line + closing_line_at; pane shows Closing Line (– null).
+- Verified live: 30741197 (ended, 1 line) closing=161.5@21:25:41Z;
+  30741518 (ended, no lines) closing=None (honest);
+  30741613 (live, line 145.5) closing=None — latest live line NOT closing.
+- opening_line untouched; historical checkpoints untouched; no provider
+  substitution.  186 tests green (new test_closing_snapshot_only_when_ended).
+NEXT: M007-M4 — historical checkpoint market values in the detail table.
 
 ## COMPLETED
 - 79c4c0d: projection live-score floor at source + single-source api.py +
