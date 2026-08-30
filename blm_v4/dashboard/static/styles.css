@@ -243,6 +243,8 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
   position: fixed; inset: 0; background: rgba(4, 8, 14, .82);
   display: flex; align-items: center; justify-content: center; z-index: 100;
 }
+/* hidden attribute must win over display:flex — modal is closed by default */
+.modal-backdrop[hidden] { display: none !important; }
 .modal {
   background: var(--panel); border: 1px solid var(--border2); border-radius: 12px;
   width: min(1180px, 96vw); max-height: 94vh; display: flex; flex-direction: column;

@@ -1,8 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════
    BLM LIVE ANALYTICS — operator dashboard
    Polls /api/v4/live every 5s; renders game cards + detail charts.
-   No manual refresh required.  Analytics first — raw JSON only in
-   debug mode (?debug=1) or behind "Technical / Raw Data" in detail.
+   No manual refresh required.  Analytics first — raw JSON is only
+   available via the API endpoints or "Technical / Raw Data" in detail.
    ═══════════════════════════════════════════════════════════════ */
 "use strict";
 
