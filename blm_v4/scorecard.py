@@ -426,11 +426,16 @@ class Scorecard:
                         continue
                     stats["checked"] += 1
                     has = conn.execute(
-                        "SELECT 1 FROM game_results WHERE source_game_id=?",
+                        "SELECT final_result_status FROM game_results WHERE source_game_id=?",
                         (g["source_game_id"],),
                     ).fetchone()
-                    if has:
+                    if has and has["final_result_status"] != "UNKNOWN":
                         continue
+                    # UNKNOWN rows are re-verified: they may have been recorded
+                    # under an older, stricter gate (e.g. quarter=NULL list
+                    # stubs before the late-Q4 rule).  Games that are UNKNOWN
+                    # BY DESIGN (half-time, <5 snaps) fail the re-check and
+                    # stay UNKNOWN — idempotent.
                     rows = [dict(r) for r in conn.execute(
                         "SELECT * FROM snapshots WHERE game_id=? ORDER BY captured_at ASC",
                         (g["id"],),
@@ -447,10 +452,13 @@ class Scorecard:
                         # record an INVALID result so it's never rescored and the
                         # dashboard can show VALID vs INVALID/EXCLUDED distinctly
                         conn.execute(
-                            """INSERT OR IGNORE INTO game_results (
+                            """INSERT INTO game_results (
                                 source_game_id, classification, final_home, final_away,
                                 final_total, result_at, final_result_status)
-                            VALUES (?, ?, NULL, NULL, NULL, ?, 'INVALID')""",
+                            VALUES (?, ?, NULL, NULL, NULL, ?, 'INVALID')
+                            ON CONFLICT(source_game_id) DO UPDATE SET
+                                final_result_status = excluded.final_result_status,
+                                result_at = excluded.result_at""",
                             (g["source_game_id"], g["classification"], rows[-1]["captured_at"]),
                         )
                         continue
@@ -460,10 +468,16 @@ class Scorecard:
                     nsnaps = len(rows)
                     status, fh, fa = self._final_result(last, nsnaps)
                     conn.execute(
-                        """INSERT OR IGNORE INTO game_results (
+                        """INSERT INTO game_results (
                             source_game_id, classification, final_home, final_away,
                             final_total, result_at, final_result_status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(source_game_id) DO UPDATE SET
+                            final_home = excluded.final_home,
+                            final_away = excluded.final_away,
+                            final_total = excluded.final_total,
+                            result_at = excluded.result_at,
+                            final_result_status = excluded.final_result_status""",
                         (
                             g["source_game_id"], g["classification"],
                             fh, fa, (fh + fa) if (fh is not None and fa is not None) else None,
@@ -491,8 +505,17 @@ class Scorecard:
             return "UNKNOWN", None, None
         if _is_final_label(period):
             return "OK", int(fh), int(fa)
-        if "quarter" in period and quarter is not None and quarter >= 4:
-            if clock in ("00:00", "0:00", "") or period.startswith("4th"):
+        # 4th-quarter ending.  List-row snapshots carry quarter=NULL (the
+        # label is authoritative), so accept the label directly — but only
+        # when the clock is within the final 2 game-minutes (or empty),
+        # otherwise the game was lost mid-quarter and the score isn't final.
+        p4 = period.startswith("4th") or (quarter is not None and quarter >= 4)
+        if p4:
+            el = clock_minutes(4, clock) if clock else None
+            if el is None:
+                el = clock_minutes(quarter if quarter is not None else 4, clock)
+            if clock in ("00:00", "0:00", "") or (
+                    el is not None and el >= FULL_GAME_MINUTES - 2.0):
                 return "OK", int(fh), int(fa)
         # Half-time / mid-game disappearance -> not a reliably finished game.
         return "UNKNOWN", None, None

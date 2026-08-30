@@ -602,6 +602,32 @@ def test_collector_restart_safe_split(tmp_path, monkeypatch):
     assert c._restart_split_suffix("ignored", {"game_id": "9999"}, game) is None
 
 
+def test_final_result_accepts_list_stub_late_q4():
+    """List-row snapshots carry quarter=NULL — a '4th Quarter' label within
+    the final 2 game-minutes must verify OK, or no virtual game can score."""
+    from blm_v4.scorecard import Scorecard
+    stub = {"home_score": 75, "away_score": 77,
+            "period_label": "4th Quarter", "clock": "00:30", "quarter": None}
+    assert Scorecard._final_result(stub, 58)[0] == "OK"
+    stub2 = dict(stub, clock="00:00")
+    assert Scorecard._final_result(stub2, 58)[0] == "OK"
+    stub3 = dict(stub, clock="")
+    assert Scorecard._final_result(stub3, 58)[0] == "OK"
+    # mid-Q4 loss (clock 05:00 = 35 game-min) is NOT a verified finish
+    early = dict(stub, clock="05:00")
+    assert Scorecard._final_result(early, 58)[0] == "UNKNOWN"
+    # event-view row with quarter=4 but unparseable clock (21:00 artifact):
+    # can't verify the game was in its final seconds -> UNKNOWN
+    ev = {"home_score": 90, "away_score": 86,
+          "period_label": "4th Quarter", "clock": "21:00", "quarter": 4}
+    assert Scorecard._final_result(ev, 58)[0] == "UNKNOWN"
+    # event-view row with a parseable late clock -> OK
+    ev2 = dict(ev, clock="00:15")
+    assert Scorecard._final_result(ev2, 58)[0] == "OK"
+    # too few snapshots stays UNKNOWN
+    assert Scorecard._final_result(stub, 4)[0] == "UNKNOWN"
+
+
 # ═══════════ Market-total path (stub snapshots must not null market) ═
 
 def test_market_total_survives_list_stubs(tmp_path, monkeypatch):
