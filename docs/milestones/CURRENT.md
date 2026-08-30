@@ -11,9 +11,13 @@ M004 — Accuracy-scorecard audit (0 valid / 85 invalid / 100-point mystery).
 ## COMPLETED
 - 79c4c0d: projection live-score floor at source + single-source api.py +
   collector honesty (no explosion-split, identity guard, audit table). 167 tests.
-- db650d7 (HEAD, NOT YET DEPLOYED — restart was interrupted): market_history
-  table + trends.py + /api/v4/trends + dashboard section. 173 tests.
-- Audit root causes (below) — INVESTIGATION COMPLETE, no code change needed.
+- db650d7 (DEPLOYED 23:47:40Z): market_history table + trends.py +
+  /api/v4/trends + dashboard section. 173 tests.
+- af3e4c2 (DEPLOYED 23:49:00Z): scorecard REBASE — record_predictions
+  recomputes every checkpoint from immutable snapshots and UPSERTS, so the
+  scorecard always measures v4-pace-1 AS DEFINED TODAY, never a dead build.
+  Cleared legacy pre-floor rows (e.g. 143.2-vs-207). 174 tests.
+- Audit root causes (below) — INVESTIGATION COMPLETE, no gate change needed.
 
 ## CURRENT STATE — the audit answers
 
@@ -65,23 +69,33 @@ FIRST='1st Quarter', Q1-starting — clean full-history games. First clean OK
 game expected ~00:12Z (02:12 SAST). Watcher `proc_a36aec40e075` armed.
 
 ## FILES CHANGED (this milestone)
-- None for the audit itself (investigation only).
-- Uncommitted/un-deployed: db650d7 (market_history + trends + dashboard).
+- Audit itself: investigation only.
+- af3e4c2: blm_v4/scorecard.py (rebase in record_predictions), tests.
+- db650d7: market_history + trends.py + api + dashboard.
+- docs/milestones/CURRENT.md (this checkpoint).
 
 ## COMMIT
-- HEAD: db650d7 (trends) — NOT deployed (restart interrupted)
-- Previous: 79c4c0d (floor + collector) — deployed 23:32:48Z, services active
+- HEAD: af3e4c2 (rebase) — deployed 23:49:00Z
+- db650d7 (trends) — deployed 23:47:40Z
+- 79c4c0d (floor + collector) — deployed 23:32:48Z
+- aa7aef1 (M004 checkpoint) — pushed
+- All services active.
 
 ## TEST RESULTS
-- 173 passed / 0 failed (db650d7 tree), 167 (79c4c0d).
+- 174 passed / 0 failed (af3e4c2 tree).
 
 ## LIVE VERIFICATION
-- blm-server + blm-collector: active. Server still on 79c4c0d code.
-- Live games 3074120x#i1: 16 snaps, first '1st Quarter' → clean start working.
+- blm-server + blm-collector: active. Server PID 218023 (af3e4c2).
+- /api/v4/trends live: analytics_tz Africa/Johannesburg, grouped periods
+  configured, empty clean-game base (correct).
+- /api/v4/scorecard after rebase: versions=[] (0 predictions — legacy
+  dead rows cleared), quality: valid 0, invalid 86 (20 impossible jump +
+  66 score regression), excluded 211, fragments 10 games / 50 preds /
+  mae 63.82 / mape 33.47. RECENT = 25 rows (unscored, diagnostics).
+- Live games 3074120x#i1: 16 snaps, first '1st Quarter' → clean start
+  working (collector fix live-proof).
 
 ## KNOWN ISSUES
-- **db650d7 NOT deployed** — restart was interrupted mid-command. Deploy now:
-  `sudo systemctl restart blm-server.service blm-collector.service`
 - 30740069#i11 q3 pace unavailable (single event-view row, quarter=NULL):
   a future improvement is to compute elapsed from period-label when
   quarter is missing (label→quarter map exists for progress). NOT required
