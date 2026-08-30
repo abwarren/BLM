@@ -38,7 +38,6 @@ class BlmEngineAdapter:
         """Run the BLM pipeline on a raw snapshot. Returns enriched dict."""
         self._tick_counter += 1
         snapshot_id = f"{snapshot.game_id}-{self._tick_counter:05d}"
-
         clock_sec = _clock_to_seconds(snapshot.clock)
         total = (snapshot.home_score or 0) + (snapshot.away_score or 0)
 
@@ -142,14 +141,43 @@ class BlmEngineAdapter:
         # ── Flatten nested fields for SQLite storage ─────────────
         # The snapshot_v2 schema expects scalar columns for pace,
         # possessions, home/away projections, total_line, spread.
-        enriched["pace"] = enriched.get("pace", {}).get("real_pace")
-        enriched["possessions"] = enriched.get("pace", {}).get("possessions")
+        # Extract nested values BEFORE overwriting `pace` with a scalar.
+        pace_nested = enriched.get("pace", {}) if isinstance(enriched.get("pace"), dict) else {}
         tt = enriched.get("team_totals", {})
+        bm = enriched.get("betting_market", {})
+        enriched["pace"] = pace_nested.get("real_pace")
+        enriched["possessions"] = pace_nested.get("possessions")
         enriched["home_projection"] = tt.get("home_projection")
         enriched["away_projection"] = tt.get("away_projection")
-        bm = enriched.get("betting_market", {})
         if enriched.get("total_line") is None:
             enriched["total_line"] = bm.get("total") or bm.get("live_total")
         if enriched.get("spread") is None:
             enriched["spread"] = bm.get("spread") or bm.get("live_spread")
         return enriched
+
+    async def enrich_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """API-interface entry: enrich a snapshot DICT (from the timeseries
+        live query) via the same pipeline as ``enrich``.
+
+        The V2 API's ``GET /api/v2/live`` handler calls
+        ``engine.enrich_snapshot(live_dict)`` per the BLMEngineInterface
+        protocol. This bridges a stored snapshot dict into the RawSnapshot
+        path so live enrichment works end-to-end.
+        """
+        from blm_v2.collector.snapshot import RawSnapshot
+
+        raw = RawSnapshot(
+            game_id=str(snapshot.get("game_id", "")),
+            timestamp=str(snapshot.get("timestamp", "")),
+            home_team=str(snapshot.get("home_team", "") or ""),
+            away_team=str(snapshot.get("away_team", "") or ""),
+            league=str(snapshot.get("league", "") or "Cyber 2K26"),
+            status=str(snapshot.get("status", "") or "live"),
+            quarter=int(snapshot.get("quarter") or 0),
+            clock=str(snapshot.get("clock", "") or ""),
+            home_score=snapshot.get("home_score") or 0,
+            away_score=snapshot.get("away_score") or 0,
+            total_line=snapshot.get("total_line"),
+            spread=snapshot.get("spread"),
+        )
+        return await self.enrich(raw)
