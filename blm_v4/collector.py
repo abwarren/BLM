@@ -439,8 +439,10 @@ class PokerBetCollector:
                 else:
                     self._store_list_snapshot(game, row, cls)
 
-        # 3. Round-robin full event-view capture for tracked games
-        self._capture_next_market(page)
+        # 3. Round-robin full event-view capture for tracked games.
+        #    It may rotate the browser (event-view failure storm) — the
+        #    returned page is the live one; never reuse the closed page.
+        page = self._capture_next_market(page)
 
         # 4. Mark unseen games ended
         self._mark_ended(seen_keys)
@@ -990,7 +992,7 @@ class PokerBetCollector:
             return vals[index]
         return None
 
-    def _capture_next_market(self, page: Page) -> None:
+    def _capture_next_market(self, page: Page) -> Page:
         """Visit the next tracked game's event view (round-robin).
 
         Navigation is by CLICKING the game's panel row — the SPA's own
@@ -1002,15 +1004,18 @@ class PokerBetCollector:
         TEAMS match the tracked game; lobby text and foreign events are
         skipped — never stored, never split.
 
-        Market data is FIRST-CLASS: capture a BATCH of games per tick
-        (MARKET_BATCH) so every tracked game's live PokerBet total is
-        observed at least once per MARKET_REFRESH window, not only on the
-        single round-robin pass (~1 game/tick ≈ 33 min/game with 100 live
-        games).  A game captured within the refresh window is skipped to
-        leave room for the next one in the queue.
+        Market data is FIRST-CLASS: capture ONE event view per tick
+        (MARKET_BATCH) with per-game freshness tracking — every tracked
+        game's live PokerBet total is observed at least once per
+        MARKET_REFRESH window (~7 min for 21 games at a 20s tick, vs
+        ~33 min before).  A game captured within the refresh window is
+        skipped to leave room for the next one in the queue.
+
+        Returns the live page — a browser rotation (event-view failure
+        storm) returns the NEW page; callers must never reuse the old.
         """
         if not self._market_queue:
-            return
+            return page
         now = utcnow_iso()
         captured = 0
         # scan up to the whole queue for games due for a market refresh
@@ -1023,7 +1028,7 @@ class PokerBetCollector:
                 logger.warning(
                     "event-view failures %d — rotating browser",
                     self._event_view_failures)
-                self._relaunch("event-view failure storm")
+                page = self._relaunch("event-view failure storm")
                 self._event_view_failures = 0
                 break
             gid = self._market_queue.pop(0)
@@ -1112,6 +1117,7 @@ class PokerBetCollector:
                 self._goto(page, competition_url(cls, self.comp_ids))
                 self._wait_panel(page)
                 page.wait_for_timeout(1500)
+        return page
 
     def _click_tracked_row(self, page: Page, game: PokerBetGame) -> bool:
         """Open ``game``'s event view by clicking its panel row.
