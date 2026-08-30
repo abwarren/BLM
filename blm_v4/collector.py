@@ -58,6 +58,7 @@ from blm_v4.models import (
 )
 from blm_v4.reconcile import reconcile_event
 from blm_v4.storage import PokerBetStore
+from blm_v4.ws_market import normalize_observations, parse_market_frame
 
 logger = logging.getLogger("blm_v4.collector")
 
@@ -90,6 +91,10 @@ ENDED_GRACE_TICKS = 3
 # per-game freshness tracking.
 MARKET_BATCH = 1
 MARKET_REFRESH_S = 480
+# eu-swarm market observations: dedupe identical (game, line) frames within
+# this window — the feed pushes every price change, so movements still land,
+# but a game that stays flat is not spammed into the DB every second.
+WS_MARKET_DEDUP_S = 30.0
 
 # Resilience: the BetConstruct SPA slowly degrades in long-lived sessions
 # (the live-panel tree stops hydrating even though a fresh browser renders
@@ -183,6 +188,7 @@ class PokerBetCollector:
         self._pw: Any = None                  # active sync_playwright scope
         self._empty_ticks = 0                 # consecutive empty-parses
         self._event_view_failures = 0         # consecutive unverified event views
+        self._ws_market_last: dict[tuple[str, Optional[float]], str] = {}
         self._browser_started_at = 0.0
         self._started_at_iso = utcnow_iso()
         self._last_success_iso = ""
@@ -215,9 +221,57 @@ class PokerBetCollector:
         page = context.new_page()
         self._browser = browser
         self._browser_started_at = time.monotonic()
+        self._attach_ws_market_hook(page)
         self._ensure_discovery_page(page)
         logger.info("new browser session started (age=%ds)", 0)
         return page
+
+    def _attach_ws_market_hook(self, page: Page) -> None:
+        """Capture the eu-swarm market feed — the independent market path.
+
+        The BetConstruct SPA pushes the full live market tree (O/U total +
+        Over/Under prices) over ``wss://eu-swarm-newm.pokerbet.co.za/`` for
+        every game in the current competition.  This works WITHOUT the
+        event-view DOM (no clicks, no hydration) — it is the fallback the
+        market pipeline needs when the event-view route is broken.  Frames
+        are parsed and persisted as market_observations rows.
+        """
+        def on_ws(ws):
+            if "swarm" not in ws.url:
+                return
+            def on_frame(payload):
+                try:
+                    text = payload if isinstance(payload, str) else ""
+                    if not text or "swarm" not in ws.url:
+                        return
+                    payloads = parse_market_frame(text)
+                    if not payloads:
+                        return
+                    captured = utcnow_iso()
+                    for obs in normalize_observations(payloads, captured):
+                        if obs["market_type"] != "MatchTotal":
+                            continue
+                        gid = obs["source_game_id"]
+                        last = self._ws_market_last.get((gid, obs["line_value"]))
+                        if last and _ts_age_s(last) < WS_MARKET_DEDUP_S:
+                            continue
+                        self._ws_market_last[(gid, obs["line_value"])] = captured
+                        game = self._find_tracked(gid)
+                        if game is None:
+                            continue
+                        obs["game_id"] = self._game_db_id(game)
+                        try:
+                            self.store.upsert_market_observation(obs)
+                        except Exception:
+                            logger.error(
+                                "market observation persist failed:\n%s",
+                                traceback.format_exc())
+                except Exception:
+                    # a malformed frame must never kill the collector
+                    logger.debug("ws market frame error: %s",
+                                 traceback.format_exc())
+            ws.on("framereceived", on_frame)
+        page.on("websocket", on_ws)
 
     def _fresh_context(self, reason: str) -> Page:
         """New context/page in the same browser (SPA state is per-context)."""

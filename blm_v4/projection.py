@@ -99,12 +99,17 @@ def market_snapshot(rows: list[dict]) -> Optional[dict]:
     return None
 
 
-def project(rows: list[dict]) -> dict[str, Any]:
+def project(rows: list[dict], market_override: Optional[float] = None) -> dict[str, Any]:
     """Full projection for a game from its snapshots (ascending).
 
     Returns pace, expected_total, expected_margin, home_projection,
     away_projection, elapsed_minutes, progress (0..1).  Any of the
     projections may be None when the input is too sparse.
+
+    ``market_override`` pins the observed O/U line used by the model
+    (e.g. a fresher eu-swarm WS observation than the last event-view
+    snapshot).  Defaults to the last snapshot-carried line; the model
+    NEVER fabricates a line — override is always observed PokerBet data.
     """
     rows = list(rows)
     scored = [r for r in rows if r.get("home_score") is not None
@@ -112,8 +117,11 @@ def project(rows: list[dict]) -> dict[str, Any]:
     latest = scored[-1] if scored else None
     home_score = _i(latest["home_score"]) if latest else None
     away_score = _i(latest["away_score"]) if latest else None
-    mkt = market_snapshot(rows)
-    total_line = _f(mkt["total_line"]) if mkt else None
+    if market_override is not None:
+        total_line = market_override
+    else:
+        mkt = market_snapshot(rows)
+        total_line = _f(mkt["total_line"]) if mkt else None
 
     pace = pace_from_snapshots(rows)
     if pace is None:

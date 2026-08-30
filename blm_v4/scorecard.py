@@ -410,9 +410,25 @@ class Scorecard:
             seen.add(cp)
             # FREEZE the market: the last PokerBet-observed total line at or
             # before this snapshot — never a later line, never model-derived.
+            # Snapshot lines (event-view) are primary; when the event-view
+            # route is down, the eu-swarm WS feed's MatchTotal observation
+            # at-or-before this snapshot is the frozen line.
             if r.get("total_line") is not None:
                 last_line = float(r["total_line"])
-            proj = project(rows[: i + 1])
+            elif last_line is None:
+                ws_obs = conn.execute(
+                    """SELECT line_value FROM market_observations
+                       WHERE source_game_id=? AND market_type='MatchTotal'
+                         AND captured_at <= ?
+                       ORDER BY captured_at DESC LIMIT 1""",
+                    (g["source_game_id"], r["captured_at"]),
+                ).fetchone()
+                if ws_obs and ws_obs["line_value"] is not None:
+                    last_line = float(ws_obs["line_value"])
+            # Pin the frozen line into the projection (same value as the
+            # snapshot-derived line when both exist — the override only
+            # matters when the WS feed supplied the market).
+            proj = project(rows[: i + 1], last_line)
             if proj["home_projection"] is None or proj["away_projection"] is None:
                 continue
             combined = (proj["home_score"] or 0) + (proj["away_score"] or 0) \
@@ -513,16 +529,27 @@ class Scorecard:
                 continue
             idx = best[1]
             r = rows[idx]
-            proj = project(rows[: idx + 1])
-            if proj["home_projection"] is None or proj["away_projection"] is None:
-                stats["skipped_no_snapshot"] += 1
-                continue
             # FREEZE the market: last PokerBet-observed line at/before this
-            # checkpoint snapshot — never a later line, never model-derived.
+            # checkpoint snapshot — snapshot lines primary, eu-swarm WS
+            # MatchTotal fallback when the event-view route is down.
             line = None
             for rr in rows[: idx + 1]:
                 if rr.get("total_line") is not None:
                     line = float(rr["total_line"])
+            if line is None:
+                ws_obs = conn.execute(
+                    """SELECT line_value FROM market_observations
+                       WHERE source_game_id=? AND market_type='MatchTotal'
+                         AND captured_at <= ?
+                       ORDER BY captured_at DESC LIMIT 1""",
+                    (g["source_game_id"], r["captured_at"]),
+                ).fetchone()
+                if ws_obs and ws_obs["line_value"] is not None:
+                    line = float(ws_obs["line_value"])
+            proj = project(rows[: idx + 1], line)
+            if proj["home_projection"] is None or proj["away_projection"] is None:
+                stats["skipped_no_snapshot"] += 1
+                continue
             combined = ((proj["home_score"] or 0) + (proj["away_score"] or 0)
                         if proj["home_score"] is not None else None)
             cur = conn.execute(

@@ -367,7 +367,7 @@ function divergenceHTML(g) {
     <div class="divergence">
       <div class="divergence-title">Market vs Model</div>
       <div class="div-row">
-        <div><div class="lab">Mkt Total</div><div class="val">${num(mkt, 1)}${m.total_line_age_s != null ? `<span class="muted" style="font-size:10px"> ${m.total_line_age_s > 300 ? "· stale" : "· live"}</span>` : ""}</div></div>
+        <div><div class="lab">Mkt Total</div><div class="val">${num(mkt, 1)}${m.total_line_age_s != null ? `<span class="muted" style="font-size:10px"> ${m.total_line_age_s > 300 ? "· stale" : "· live"}</span>` : ""}${m.market_source === "ws" ? `<span class="muted" style="font-size:10px"> · ws</span>` : ""}</div></div>
         <div><div class="lab">Model Total</div><div class="val">${num(mod, 1)}</div></div>
         <div><div class="lab">Edge</div><div class="edge ${edgeCls(tEdge)}">${edgeSym(tEdge)}</div></div>
       </div>
@@ -625,7 +625,7 @@ function renderModal(g) {
     <div class="m-panels">
       ${modalPanel("Market vs Model", `
         <div class="m-rows">
-          <div class="m-row"><span class="k">Market total</span><span class="v">${num(mkt.total_line, 1)}</span></div>
+          <div class="m-row"><span class="k">Market total</span><span class="v">${num(mkt.total_line, 1)}${mkt.market_source === "ws" ? ` <span class="muted" style="font-size:10px">(ws)</span>` : ""}</span></div>
           <div class="m-row"><span class="k">Model total</span><span class="v">${num(mdl.expected_total, 1)}</span></div>
           <div class="m-row"><span class="k">Total edge</span><span class="v ${tEdge > 0 ? "pos" : tEdge < 0 ? "neg" : ""}">${tEdge != null ? (tEdge > 0 ? "+" : "") + tEdge : "–"}</span></div>
           <div class="m-row"><span class="k">Market spread</span><span class="v">${num(mkt.spread, 1)}</span></div>

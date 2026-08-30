@@ -373,7 +373,8 @@ def _series(rows: list[dict]) -> list[dict]:
     return out
 
 
-def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
+def _analyze_game(game: dict, rows: list[dict], now: datetime,
+                  conn: Optional[sqlite3.Connection] = None) -> dict:
     """Build the full dashboard payload for one game from its snapshots."""
     scored = [r for r in rows if r.get("home_score") is not None
               and r.get("away_score") is not None]
@@ -388,17 +389,40 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
     # carries a market payload.  List-level (panel) snapshots are written
     # every tick without markets; the bookmaker line persists between
     # event-view captures, so the last non-null line is the current state.
+    # When the event-view route is down, the eu-swarm WebSocket feed is the
+    # independent fallback: its MatchTotal observations carry the same
+    # bookmaker O/U line.  The freshest observed line (snapshot OR ws) is
+    # what the model sees — never a fabricated value.
     mlatest = _market_snapshot(rows)
     total_line = _f(mlatest["total_line"]) if mlatest else None
     spread = _f(mlatest["spread"]) if mlatest else None
     home_total_line = _f(mlatest["home_total_line"]) if mlatest else None
     away_total_line = _f(mlatest["away_total_line"]) if mlatest else None
     w1 = _f(mlatest["w1_odds"]) if mlatest else None
+
+    mkt_src: Optional[str] = "event-view" if mlatest else None
+    ws_obs: Optional[dict] = None
+    if conn is not None:
+        r = conn.execute(
+            """SELECT * FROM market_observations
+               WHERE source_game_id=? AND market_type='MatchTotal'
+               ORDER BY captured_at DESC LIMIT 1""",
+            (game["source_game_id"],),
+        ).fetchone()
+        ws_obs = dict(r) if r else None
+    ws_line = _f(ws_obs["line_value"]) if ws_obs else None
+    if ws_line is not None and (total_line is None
+                                or (ws_obs and mlatest
+                                    and ws_obs["captured_at"] > mlatest["captured_at"])):
+        total_line = ws_line
+        mkt_src = "ws"
     w2 = _f(mlatest["w2_odds"]) if mlatest else None
 
     # Projection comes from ONE authoritative implementation
     # (blm_v4.projection.project) — never re-implemented in the API layer.
-    proj = project(rows)
+    # When the WS feed supplied the effective line, pin it as the model's
+    # observed market input (same pure function, same blend).
+    proj = project(rows, total_line if mkt_src == "ws" else None)
     pace = proj["pace"]
     market_total = proj["market_total"]
     expected_total = proj["expected_total"]
@@ -457,11 +481,19 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
         "source_url": game.get("source_url"),
         "market": {
             "total_line": market_total,
-            "total_line_at": (mlatest["captured_at"] if mlatest else None),
+            "total_line_at": (
+                ws_obs["captured_at"] if mkt_src == "ws" and ws_obs
+                else (mlatest["captured_at"] if mlatest else None)),
             "total_line_age_s": (
-                _age_s(mlatest["captured_at"], now) if mlatest else None),
-            "over_odds": _f(latest["total_over_odds"]) if latest else None,
-            "under_odds": _f(latest["total_under_odds"]) if latest else None,
+                _age_s(ws_obs["captured_at"], now) if mkt_src == "ws" and ws_obs
+                else (_age_s(mlatest["captured_at"], now) if mlatest else None)),
+            "market_source": mkt_src,
+            "over_odds": (
+                _f(ws_obs["over_price"]) if mkt_src == "ws" and ws_obs
+                else _f(latest["total_over_odds"]) if latest else None),
+            "under_odds": (
+                _f(ws_obs["under_price"]) if mkt_src == "ws" and ws_obs
+                else _f(latest["total_under_odds"]) if latest else None),
             "spread": spread,
             "spread_indicator": (latest.get("spread_indicator") if latest else None),
             "home_total_line": home_total_line,
@@ -616,9 +648,9 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
             rows = _load_snapshots(conn, g["source_game_id"])
             if not rows:
                 # games table entry with no snapshots yet — still show it
-                out.append(_analyze_game(g, [], now))
+                out.append(_analyze_game(g, [], now, conn))
             else:
-                out.append(_analyze_game(g, rows, now))
+                out.append(_analyze_game(g, rows, now, conn))
     finally:
         conn.close()
     out.sort(key=lambda g: (not g["live"], -(g["age_s"] or 0)))
@@ -737,9 +769,9 @@ def v4_game_detail(game_id: str) -> dict:
         if not game:
             raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found")
         rows = _load_snapshots(conn, game_id, 1000)
+        detail = _analyze_game(dict(game), rows, datetime.now(timezone.utc), conn)
+        detail["timeline"] = _timeline_events(rows, game["classification"])
+        detail["raw"] = rows[-1] if rows else None
     finally:
         conn.close()
-    detail = _analyze_game(dict(game), rows, datetime.now(timezone.utc))
-    detail["timeline"] = _timeline_events(rows, game["classification"])
-    detail["raw"] = rows[-1] if rows else None
     return detail

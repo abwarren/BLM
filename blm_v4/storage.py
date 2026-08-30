@@ -120,6 +120,36 @@ CREATE TABLE IF NOT EXISTS instance_splits (
     new_clock    TEXT,
     new_at       TEXT
 );
+
+-- Live market observations captured from the PokerBet eu-swarm WebSocket
+-- feed (independent of the event-view DOM).  The bookmaker O/U line for
+-- every live game is pushed here with its Over/Under prices; each row is
+-- one market observation at one moment — the historical series that
+-- market momentum / closing-line / model-vs-market analysis consumes.
+-- The event-view snapshot path (snapshots.total_line) remains the OTHER
+-- market source; both are observed PokerBet data, never model output.
+CREATE TABLE IF NOT EXISTS market_observations (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id        INTEGER REFERENCES games(id),
+    source_game_id TEXT NOT NULL,
+    captured_at    TEXT NOT NULL,
+    market_type    TEXT NOT NULL,        -- MatchTotal | MatchHomeTeamTotal2 | ...
+    market_name    TEXT NOT NULL,        -- Total Points | Team 1 Total Points | ...
+    line_value     REAL,                 -- the O/U line (base)
+    over_price     REAL,
+    under_price    REAL,
+    home_score     INTEGER,
+    away_score     INTEGER,
+    period_label   TEXT,
+    clock          TEXT,
+    raw_json       TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_game_id, market_type, line_value, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_market_obs_game_time
+    ON market_observations(source_game_id, captured_at);
+CREATE INDEX IF NOT EXISTS idx_market_obs_type
+    ON market_observations(source_game_id, market_type, captured_at);
+
 """
 
 
@@ -380,6 +410,67 @@ class PokerBetStore:
                     (limit,),
                 ).fetchall()
                 return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    # ── Market observations (eu-swarm WS feed) ──────────────────
+
+    def upsert_market_observation(self, obs: dict) -> None:
+        """Persist one WS market observation (deduped on game+type+line+ts)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO market_observations (
+                        game_id, source_game_id, captured_at, market_type,
+                        market_name, line_value, over_price, under_price,
+                        home_score, away_score, period_label, clock, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_game_id, market_type, line_value, captured_at)
+                    DO NOTHING
+                """, (
+                    obs.get("game_id"), obs["source_game_id"], obs["captured_at"],
+                    obs["market_type"], obs["market_name"], obs.get("line_value"),
+                    obs.get("over_price"), obs.get("under_price"),
+                    obs.get("home_score"), obs.get("away_score"),
+                    obs.get("period_label"), obs.get("clock"),
+                    json.dumps(obs.get("raw", {}), default=str),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def latest_market_observation(
+        self, source_game_id: str, market_type: str = "MatchTotal",
+    ) -> Optional[dict]:
+        """Most recent WS market observation for a game (line + prices)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                r = conn.execute("""
+                    SELECT * FROM market_observations
+                    WHERE source_game_id=? AND market_type=?
+                    ORDER BY captured_at DESC LIMIT 1
+                """, (source_game_id, market_type)).fetchone()
+                return dict(r) if r else None
+            finally:
+                conn.close()
+
+    def market_observations_before(
+        self, source_game_id: str, at_ts: str, market_type: str = "MatchTotal",
+    ) -> Optional[dict]:
+        """Most recent WS market observation at-or-before a timestamp —
+        used to FREEZE the market total into predictions (never a later line)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                r = conn.execute("""
+                    SELECT * FROM market_observations
+                    WHERE source_game_id=? AND market_type=?
+                      AND captured_at <= ?
+                    ORDER BY captured_at DESC LIMIT 1
+                """, (source_game_id, market_type, at_ts)).fetchone()
+                return dict(r) if r else None
             finally:
                 conn.close()
 
