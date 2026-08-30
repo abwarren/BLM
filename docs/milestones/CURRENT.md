@@ -15,7 +15,7 @@ M006 — First-class live PokerBet market data (capture frequency + prediction f
 - af3e4c2 (DEPLOYED): scorecard REBASE — recomputes checkpoints from current model. 174 tests.
 - 7eed84a (DEPLOYED): quality-gate >50pt jump rule wall-clock-gap aware. 175 tests.
 - 7d1bb8e (DEPLOYED): dashboard distinguishes RECORDED/COMPLETED/VALID/EXCLUDED.
-- c598be5 + 5062a37 + 024c571 (DEPLOYED): first-class market data —
+- c598be5 + 5062a37 + 024c571 + f2b8584 (DEPLOYED): first-class market data —
   * collector captures event views with per-game freshness tracking
     (MARKET_BATCH=1, MARKET_REFRESH_S=480 → every game's line refreshed
     ~7 min vs ~33 min before; batch>1 broke the SPA, reverted).
@@ -24,6 +24,9 @@ M006 — First-class live PokerBet market data (capture frequency + prediction f
   * API exposes total_line_at + total_line_age_s (freshness).
   * dashboard Mkt Total shows live/stale by age.
   * event-view failure storm → browser rotation (self-healing).
+  * f2b8584: fixed rotation page-propagation bug (rotation closed the old
+    browser but _tick kept using it → TargetClosedError → infinite
+    relaunch loop).  _capture_next_market now returns the live page.
   Tests: 177 pass (2 new freeze tests).
 
 ## CURRENT STATE — market data
