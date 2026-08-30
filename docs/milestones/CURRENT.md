@@ -56,24 +56,28 @@ NEXT: M007-M2 — connect the existing game-detail pane to these API values.
   working (90 snaps/10min) but carries NO market.  So the market is NOT
   lost in the pipeline — it is NOT CAPTURED because the event-view route
   is a hard single dependency that PokerBet-side SPA changes broke.
-- **PROOF the pipeline is correct when the SPA works**: 30740053 has 104
-  market observations with REAL live movement (171.5→183.5→184.5 every
-  ~20s); 30739886 shows the user's exact 164.5→162.5→172.5 series; 30739890
-  has 66 obs.  The 183.5 one-liners on 8 games are each at DISTINCT
-  timestamps (per-game discovery captures, NOT contamination).
+- **RESOLVED — eu-swarm WebSocket feed (7748193 + 42a7c61, DEPLOYED)**:
+  the BetConstruct SPA pushes the FULL live market tree (game total +
+  team/half/quarter totals + O/U lines + Over/Under prices) over
+  `wss://eu-swarm-newm.pokerbet.co.za/` with NO event-view DOM dependency
+  (proven by live frame capture: MatchTotal base=204.5, O 1.94/U 1.87).
+  BLM now captures it: ws_market.py parser → market_observations table →
+  API fallback (market_source='ws') → scorecard freeze fallback →
+  dashboard '· ws' marker.  The event-view path is UNCHANGED (primary
+  when it works); the model never fabricates a line.
+- **LIVE VERIFICATION (2026-08-31)**: game 30741613 — 3 lines captured
+  (148.5/150.5/152.5), API total_line=148.5, market_source='ws',
+  age 0.66s; model expected_total 160.5.  Game 30741576 — 8 timestamped
+  line batches over 3 min (204.5→205.5→209.5→204.5→203.5→202.5→201.5),
+  70 observations across 13 games, zero collector errors.  Movement
+  history preserved; predictions freeze the line at-or-before checkpoint
+  (market_observations_before, tested).
 - **User's named games (Panathinaikos 70-92, Maccabi 101-88)**: both
   correctly INVALID (score regression) — their snapshot series contain
   foreign snaps (81-89 Q1 then 60-77 Q4; 76-87 Q4 then 69-59 Q3, then an
   81-89 spike mid-game).  0 scored predictions.  The 198.4/76.9 projections
   are the model operating on contaminated series — the dashboard showing
   them as "completed games" is presentation, not a model bug.
-- **Fix (deployed)**: per-game freshness tracking + API freshness fields
-  + prediction market freeze + event-view failure rotation (self-healing).
-  The freeze is PROVEN by tests (190.0 at Q1 never rewritten by 195.0).
-- **LIVE BLOCKER (external)**: PokerBet event-view SPA route not hydrating.
-  Collector rotates gracefully (verified stable), cycles games, but cannot
-  capture new market lines until the route recovers.  Manual browser check
-  confirms row click does not navigate (SPA change on PokerBet side).
 
 ## M004 (previous milestone) — audit answers retained
 
