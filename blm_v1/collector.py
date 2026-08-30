@@ -161,10 +161,17 @@ def extract_game_state(body_text: str) -> Optional[dict[str, Any]]:
             quarter = q
             break
 
-    # Clock
-    cm = re.search(r'\b(\d{1,2}:\d{2})\b', body_text)
-    if cm:
-        clock = cm.group(1)
+    # Clock — the game clock trails the compact score line
+    # ("100 : 73, (32:22), ..., (7:6) 09:46").  The first MM:SS is a
+    # quarter score and the last MM:SS is the start time ("15:45"), so
+    # neither naive first/last works — parse the trailing clock from the
+    # compact score line itself.
+    compact = re.search(
+        r'\b\d{1,3}\s*:\s*\d{1,3}\s*,.*?(\d{1,2}:\d{2})\s*$',
+        body_text, re.MULTILINE,
+    )
+    if compact:
+        clock = compact.group(1)
 
     # Total line — look for "Total Points" section with valid over/under
     # Must match X.X or XXX format, not the match-winner-and-total combo markets

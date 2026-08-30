@@ -249,49 +249,72 @@ class HistoricalEngine:
             leagues = [r["league"] for r in rows2 if r["league"]]
         return leagues or ["Unknown"]
 
+    @staticmethod
+    def _league_where(league: str) -> tuple[str, tuple]:
+        """SQL fragment scoping a query to one league.
+
+        League is stored in ``data_json`` at ``$.league`` (or
+        ``$.metadata.league``).  Returns (sql_fragment, params) where the
+        fragment is ``... = ?`` style usable after a WHERE/AND.
+
+        CRITICAL: every league-scoped aggregation MUST include this —
+        otherwise statistics leak across leagues (the exact
+        cross-contamination the BLM constitution forbids).
+        """
+        return (
+            "(json_extract(data_json, '$.league') = ? "
+            "OR json_extract(data_json, '$.metadata.league') = ?)",
+            (league, league),
+        )
+
     def _compute_profile(self, conn: sqlite3.Connection, league: str) -> LeagueProfile:
-        """Compute one LeagueProfile from SQL aggregation."""
+        """Compute one LeagueProfile from SQL aggregation.
+
+        Every aggregation is scoped to ``league`` via ``_league_where`` —
+        no global statistics may leak between leagues.
+        """
+        lw, lparams = self._league_where(league)
         total_snapshots = conn.execute(
-            "SELECT COUNT(*) AS cnt FROM snapshots_v2"
+            f"SELECT COUNT(*) AS cnt FROM snapshots_v2 WHERE {lw}",
+            lparams,
         ).fetchone()["cnt"]
 
         total_games = conn.execute(
-            "SELECT COUNT(DISTINCT game_id) AS cnt FROM snapshots_v2"
+            f"SELECT COUNT(DISTINCT game_id) AS cnt FROM snapshots_v2 WHERE {lw}",
+            lparams,
         ).fetchone()["cnt"]
 
         # ── OLV distribution: first line per game ────────────────
-        olv_rows = conn.execute("""
+        olv_rows = conn.execute(f"""
             WITH first_line AS (
                 SELECT game_id, total_line, ROW_NUMBER() OVER (
                     PARTITION BY game_id ORDER BY timestamp ASC
                 ) AS rn
                 FROM snapshots_v2
-                WHERE total_line IS NOT NULL
+                WHERE total_line IS NOT NULL AND {lw}
             )
-            SELECT
-                AVG(total_line) AS mean,
-                total_line AS val
+            SELECT total_line AS val
             FROM first_line WHERE rn = 1
-        """).fetchall()
+        """, lparams).fetchall()
 
-        olv_values = [r["total_line"] for r in olv_rows if r["total_line"] is not None]
+        olv_values = [r["val"] for r in olv_rows if r["val"] is not None]
         olv_mean = float(_avg(olv_values))
         olv_median = float(_percentile(sorted(olv_values), 50)) if olv_values else 0.0
         olv_std = float(_stddev(olv_values, olv_mean)) if len(olv_values) > 1 else 0.0
 
         # ── Excursion distribution: peak line - OLV per game ────
-        exc_rows = conn.execute("""
+        exc_rows = conn.execute(f"""
             WITH first_line AS (
                 SELECT game_id, total_line, ROW_NUMBER() OVER (
                     PARTITION BY game_id ORDER BY timestamp ASC
                 ) AS rn
                 FROM snapshots_v2
-                WHERE total_line IS NOT NULL
+                WHERE total_line IS NOT NULL AND {lw}
             ),
             peak_line AS (
                 SELECT game_id, MAX(total_line) AS peak
                 FROM snapshots_v2
-                WHERE total_line IS NOT NULL
+                WHERE total_line IS NOT NULL AND {lw}
                 GROUP BY game_id
             )
             SELECT
@@ -300,7 +323,7 @@ class HistoricalEngine:
             FROM first_line fl
             JOIN peak_line pl ON fl.game_id = pl.game_id
             WHERE fl.rn = 1
-        """).fetchall()
+        """, lparams * 2).fetchall()
 
         excursions = [r["excursion"] for r in exc_rows if r["excursion"] is not None]
         exc_mean = float(_avg(excursions)) if excursions else 0.0
@@ -316,13 +339,13 @@ class HistoricalEngine:
         total_divergence_checks = max(total_snapshots - total_games, 1)
 
         # Count lines that changed upward (line inflation events)
-        line_change_rows = conn.execute("""
+        line_change_rows = conn.execute(f"""
             SELECT total_line, LAG(total_line) OVER (
                 PARTITION BY game_id ORDER BY timestamp
             ) AS prev_line
             FROM snapshots_v2
-            WHERE total_line IS NOT NULL
-        """).fetchall()
+            WHERE total_line IS NOT NULL AND {lw}
+        """, lparams).fetchall()
 
         for r in line_change_rows:
             prev = r["prev_line"]
@@ -332,19 +355,19 @@ class HistoricalEngine:
                     burst_count += 1
 
         # Count freezes: consecutive same-line entries for a game
-        freeze_rows = conn.execute("""
+        freeze_rows = conn.execute(f"""
             WITH line_changes AS (
                 SELECT game_id, timestamp, total_line,
                     CASE WHEN LAG(total_line) OVER (
                         PARTITION BY game_id ORDER BY timestamp
                     ) = total_line THEN 0 ELSE 1 END AS changed
                 FROM snapshots_v2
-                WHERE total_line IS NOT NULL
+                WHERE total_line IS NOT NULL AND {lw}
             )
             SELECT COUNT(*) AS freeze_events
             FROM line_changes
             WHERE changed = 0
-        """).fetchone()
+        """, lparams).fetchone()
         freeze_events = freeze_rows["freeze_events"] if freeze_rows else 0
 
         # ── Post-burst regression: did line go down after going up? ─
@@ -354,20 +377,20 @@ class HistoricalEngine:
         post_burst_under = 0
 
         # Scan per game: compare first line vs last line (simple regression check)
-        game_rows = conn.execute("""
+        game_rows = conn.execute(f"""
             WITH first_line AS (
                 SELECT game_id, total_line, ROW_NUMBER() OVER (
                     PARTITION BY game_id ORDER BY timestamp ASC
                 ) AS rn
                 FROM snapshots_v2
-                WHERE total_line IS NOT NULL
+                WHERE total_line IS NOT NULL AND {lw}
             ),
             last_line AS (
                 SELECT game_id, total_line, ROW_NUMBER() OVER (
                     PARTITION BY game_id ORDER BY timestamp DESC
                 ) AS rn
                 FROM snapshots_v2
-                WHERE total_line IS NOT NULL
+                WHERE total_line IS NOT NULL AND {lw}
             )
             SELECT
                 f.game_id,
@@ -376,7 +399,7 @@ class HistoricalEngine:
             FROM first_line f
             JOIN last_line l ON f.game_id = l.game_id
             WHERE f.rn = 1 AND l.rn = 1
-        """).fetchall()
+        """, lparams * 2).fetchall()
 
         for r in game_rows:
             olv_g = r["open_line"]
@@ -386,12 +409,12 @@ class HistoricalEngine:
                     regression_count += 1
                 # Check if total < OLV → likely UNDER
                 # (approximate — final score from last snapshot)
-                score_rows = conn.execute("""
+                score_rows = conn.execute(f"""
                     SELECT (home_score + away_score) AS total_points
                     FROM snapshots_v2
-                    WHERE game_id = ? AND total_line IS NOT NULL
+                    WHERE game_id = ? AND total_line IS NOT NULL AND {lw}
                     ORDER BY timestamp DESC LIMIT 1
-                """, (r["game_id"],)).fetchone()
+                """, (r["game_id"], *lparams)).fetchone()
                 if score_rows and score_rows["total_points"] is not None:
                     if score_rows["total_points"] < olv_g:
                         under_count += 1

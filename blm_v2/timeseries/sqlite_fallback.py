@@ -82,6 +82,44 @@ CREATE INDEX IF NOT EXISTS idx_la_game_id
 # ── Helpers ───────────────────────────────────────────────────────
 
 
+def _scalar(value: Any, key: Optional[str] = None) -> Any:
+    """Coerce a possibly-nested value to a scalar for SQLite binding.
+
+    BLM engine snapshots carry nested dicts (pace, betting_market,
+    team_totals).  SQLite cannot bind dicts — extract the scalar:
+      - dict with the requested key → that value
+      - dict without it → None
+      - anything else → as-is
+    """
+    if isinstance(value, dict):
+        return value.get(key) if key else None
+    return value
+
+
+def _resolve(snapshot: dict, top_key: str, *nested: tuple) -> Any:
+    """Resolve a field from a snapshot, trying top-level then nested paths.
+
+    Engine snapshots put identity in ``metadata`` and state in
+    ``game_state``/``betting_market``/``team_totals`` — e.g. game_id lives
+    at ``metadata.game_id``.  ``_resolve(snap, "game_id", ("metadata", "game_id"))``
+    tries ``snap["game_id"]`` first, then the nested path.
+    """
+    if top_key in snapshot and snapshot[top_key] is not None:
+        return snapshot[top_key]
+    for path in nested:
+        node: Any = snapshot
+        ok = True
+        for key in path:
+            if isinstance(node, dict) and key in node:
+                node = node[key]
+            else:
+                ok = False
+                break
+        if ok:
+            return node
+    return None
+
+
 def _get_data_dir() -> Path:
     """Return the directory where the TS DB file should live."""
     return _DEFAULT_DB_PATH.parent
@@ -160,18 +198,36 @@ class SQLiteTimeSeries(TimeSeriesDB):
         """
         self._ensure_initialized()
 
-        game_id = snapshot.get("game_id", "unknown")
-        ts = snapshot.get("timestamp", "")
-        quarter = snapshot.get("quarter", 1)
-        clock = snapshot.get("clock")
-        home_score = snapshot.get("home_score", 0)
-        away_score = snapshot.get("away_score", 0)
-        total_line = snapshot.get("total_line")
-        spread = snapshot.get("spread")
-        home_proj = snapshot.get("home_projection")
-        away_proj = snapshot.get("away_projection")
-        pace = snapshot.get("pace")
-        possessions = snapshot.get("possessions")
+        game_id = _resolve(
+            snapshot, "game_id", ("metadata", "game_id"),
+        ) or "unknown"
+        ts = _resolve(snapshot, "timestamp", ("metadata", "timestamp")) or ""
+        quarter = _resolve(snapshot, "quarter", ("metadata", "quarter")) or 1
+        clock = _resolve(snapshot, "clock", ("metadata", "clock"))
+        home_score = _resolve(
+            snapshot, "home_score", ("game_state", "home_score"), ("metadata", "home_score"),
+        ) or 0
+        away_score = _resolve(
+            snapshot, "away_score", ("game_state", "away_score"), ("metadata", "away_score"),
+        ) or 0
+        total_line = _scalar(_resolve(
+            snapshot, "total_line", ("betting_market", "total"),
+        ))
+        spread = _scalar(_resolve(
+            snapshot, "spread", ("betting_market", "spread"),
+        ))
+        home_proj = _scalar(_resolve(
+            snapshot, "home_projection", ("team_totals", "home_projection"),
+        ))
+        away_proj = _scalar(_resolve(
+            snapshot, "away_projection", ("team_totals", "away_projection"),
+        ))
+        pace = _scalar(_resolve(
+            snapshot, "pace", ("pace", "real_pace"),
+        ), "real_pace")
+        possessions = _scalar(_resolve(
+            snapshot, "possessions", ("pace", "possessions"),
+        ))
         data_json_str = json.dumps(snapshot, default=str)
 
         def _write() -> None:
