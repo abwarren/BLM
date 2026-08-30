@@ -543,7 +543,12 @@ async function loadModalDetail(gameId) {
 /* ── Debug mode (?debug=1) — raw drawer, hidden in production ── */
 
 function wireDebug() {
-  if (!DEBUG) return;
+  if (!DEBUG) {
+    // production: remove debug UI from the DOM entirely
+    $("rawToggle")?.remove();
+    $("rawDrawer")?.remove();
+    return;
+  }
   $("rawToggle").hidden = false;
   const setRaw = (on) => {
     $("rawDrawer").hidden = !on;
