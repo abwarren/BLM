@@ -1191,6 +1191,27 @@ def test_opening_snapshot_returns_first_line():
     assert opening_snapshot([{"total_line": None}]) is None  # stubs ≠ market
 
 
+def test_closing_snapshot_only_when_ended():
+    """closing_snapshot = None while live (latest live line is NOT closing);
+    once ended = LAST verified line, immutable.  No lines → None."""
+    from blm_v4.projection import closing_snapshot
+    rows = [
+        {"total_line": 190.0, "captured_at": "2026-08-30T20:00:00Z"},
+        {"total_line": None,  "captured_at": "2026-08-30T20:00:20Z"},
+        {"total_line": 195.0, "captured_at": "2026-08-30T20:00:40Z"},
+        {"total_line": 193.0, "captured_at": "2026-08-30T20:01:00Z"},
+    ]
+    # still live → latest line is NOT closing
+    assert closing_snapshot(rows, ended=False) is None
+    # ended → last verified line is closing (immutable)
+    cl = closing_snapshot(rows, ended=True)
+    assert cl is not None and cl["total_line"] == 193.0
+    assert cl["captured_at"] == "2026-08-30T20:01:00Z"
+    # no verified lines → honest None even when ended
+    assert closing_snapshot([{"total_line": None}], ended=True) is None
+    assert closing_snapshot([], ended=True) is None
+
+
 def test_prediction_freezes_market_at_checkpoint(tmp_path):
     """A prediction's market_total must be the last observed PokerBet line
     AT that checkpoint — a later line movement must NEVER rewrite it.

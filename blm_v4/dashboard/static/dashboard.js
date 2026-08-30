@@ -379,6 +379,8 @@ function divergenceHTML(g) {
   const liveMeta = m.total_line_age_s != null
     ? `${m.total_line_age_s > 300 ? "· stale" : "· live"}${m.market_source ? ` · ${m.market_source}` : ""}`
     : "";
+  const closing = m.closing_line;
+  const closingMeta = m.closing_line_at ? `@ ${(m.closing_line_at || "").slice(11, 19)}Z` : "";
   return `
     <div class="divergence">
       <div class="divergence-title">Market vs Model</div>
@@ -387,6 +389,7 @@ function divergenceHTML(g) {
         ${lineRow("Opening Line", opening, openingMeta)}
         ${lineRow("Current Live Line", live, liveMeta)}
         ${lineRow("Live BLM Prediction", mod, m.total_line_age_s != null ? (m.total_line_age_s > 300 ? "· stale mkt" : "· live mkt") : "")}
+        ${lineRow("Closing Line", closing, closingMeta)}
       </div>
       <div class="div-row">
         <div><div class="lab">Mkt Total</div><div class="val">${num(mkt, 1)}${m.total_line_age_s != null ? `<span class="muted" style="font-size:10px"> ${m.total_line_age_s > 300 ? "· stale" : "· live"}</span>` : ""}${m.market_source === "ws" ? `<span class="muted" style="font-size:10px"> · ws</span>` : ""}</div></div>

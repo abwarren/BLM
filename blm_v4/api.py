@@ -33,7 +33,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from blm_v4.projection import opening_snapshot, project
+from blm_v4.projection import closing_snapshot, opening_snapshot, project
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -398,6 +398,10 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     oline = opening_snapshot(rows)
     opening_line = _f(oline["total_line"]) if oline else None
     opening_line_at = oline["captured_at"] if oline else None
+    ended = (game.get("status") or "live") == "ended"
+    cline = closing_snapshot(rows, ended)
+    closing_line = _f(cline["total_line"]) if cline else None
+    closing_line_at = cline["captured_at"] if cline else None
     spread = _f(mlatest["spread"]) if mlatest else None
     home_total_line = _f(mlatest["home_total_line"]) if mlatest else None
     away_total_line = _f(mlatest["away_total_line"]) if mlatest else None
@@ -488,6 +492,8 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "market": {
             "opening_line": opening_line,
             "opening_line_at": opening_line_at,
+            "closing_line": closing_line,
+            "closing_line_at": closing_line_at,
             "total_line": market_total,
             "total_line_at": (
                 ws_obs["captured_at"] if mkt_src == "ws" and ws_obs

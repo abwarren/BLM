@@ -113,6 +113,25 @@ def opening_snapshot(rows: list[dict]) -> Optional[dict]:
     return None
 
 
+def closing_snapshot(rows: list[dict], ended: bool = False) -> Optional[dict]:
+    """LAST verified market total at-or-before the game's terminal state.
+
+    The closing line only exists once the market/game has CLOSED (game
+    ended).  For a still-live game this is None — the latest live line is
+    NOT the closing line, regardless of how recent it is.  Once the game
+    ends, the last verified observation (captured before close) becomes
+    the immutable closing line; ended games receive no further snapshots,
+    so it can never change.
+    """
+    if not ended:
+        return None
+    last = None
+    for r in rows:
+        if r.get("total_line") is not None:
+            last = r
+    return last
+
+
 def project(rows: list[dict], market_override: Optional[float] = None) -> dict[str, Any]:
     """Full projection for a game from its snapshots (ascending).
 
