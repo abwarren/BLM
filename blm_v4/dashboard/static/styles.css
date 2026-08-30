@@ -149,9 +149,10 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 /* win probability */
 .winprob { padding: 0 14px 10px; }
 .winprob-label { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
-.winprob-bar { display: flex; height: 16px; border-radius: 4px; overflow: hidden; background: var(--panel2); border: 1px solid var(--border); }
-.winprob-bar .home { background: linear-gradient(90deg, #0e7490, var(--cyan)); }
-.winprob-bar .away { background: linear-gradient(90deg, var(--amber), #b45309); }
+.winprob-bar { display: flex; height: 20px; border-radius: 4px; overflow: hidden; background: var(--panel2); border: 1px solid var(--border); }
+.winprob-bar .home { background: linear-gradient(90deg, #0e7490, var(--cyan)); display: flex; align-items: center; justify-content: flex-start; min-width: 22px; }
+.winprob-bar .away { background: linear-gradient(90deg, var(--amber), #b45309); display: flex; align-items: center; justify-content: flex-end; min-width: 22px; }
+.winprob-bar span { font-family: var(--mono); font-size: 10px; font-weight: 800; color: #04121a; padding: 0 4px; text-shadow: 0 0 3px rgba(255,255,255,.35); }
 .winprob-legend { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; margin-top: 3px; color: var(--muted); }
 .winprob-legend b { color: var(--text); }
 
@@ -189,6 +190,14 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .mom-arrow.up { color: var(--green); }
 .mom-arrow.down { color: var(--red); }
 .mom-arrow.flat { color: var(--muted); }
+.mom-value { display: flex; align-items: center; gap: 8px; }
+.mom-value.up { color: var(--green); }
+.mom-value.down { color: var(--red); }
+.mom-value.flat { color: var(--muted); }
+.mom-word { font-size: 13px; font-weight: 800; letter-spacing: 1.5px; }
+.big.up { color: var(--green); }
+.big.down { color: var(--red); }
+.big.flat { color: var(--muted); }
 .bar-track { height: 6px; background: #0a0f17; border-radius: 3px; margin-top: 6px; border: 1px solid var(--border); }
 .bar-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, #0e7490, var(--cyan)); transition: width .4s; }
 .bar-fill.amber { background: linear-gradient(90deg, #92400e, var(--amber)); }
@@ -196,7 +205,8 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .bar-fill.red { background: linear-gradient(90deg, #7f1d1d, var(--red)); }
 
 /* signals */
-.signals { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 14px 10px; }
+.signals { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 14px 10px; min-height: 20px; }
+.sig-none { font-family: var(--mono); font-size: 10px; letter-spacing: .5px; color: var(--dim); padding: 2px 0; }
 .sig {
   font-family: var(--mono); font-size: 10px; letter-spacing: .5px;
   padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border2);
@@ -216,6 +226,19 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .proj-row .ptrack { flex: 1; height: 8px; background: #0a0f17; border-radius: 4px; border: 1px solid var(--border); overflow: hidden; }
 .proj-row .pfill { height: 100%; border-radius: 4px; }
 .proj-row .pval { width: 44px; text-align: right; color: var(--text); }
+.proj-total {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-top: 7px; padding-top: 6px; border-top: 1px dashed var(--border);
+  font-family: var(--mono); font-size: 11px;
+}
+.proj-total span { color: var(--muted); letter-spacing: 1px; }
+.proj-total b { color: var(--text); font-size: 13px; }
+
+/* technical/raw collapsible (detail view only) */
+.tech-raw { margin-top: 14px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+.tech-raw summary { cursor: pointer; font-family: var(--mono); font-size: 11px; letter-spacing: 1px; color: var(--dim); user-select: none; }
+.tech-raw summary:hover { color: var(--amber); }
+.tech-raw pre { margin-top: 8px; max-height: 320px; overflow: auto; font-family: var(--mono); font-size: 10px; line-height: 1.5; color: #9fb3cf; white-space: pre; }
 
 .card-foot {
   border-top: 1px solid var(--border); padding: 6px 14px;

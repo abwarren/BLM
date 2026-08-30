@@ -1,14 +1,15 @@
 /* ═══════════════════════════════════════════════════════════════
    BLM LIVE ANALYTICS — operator dashboard
    Polls /api/v4/live every 5s; renders game cards + detail charts.
-   No manual refresh required.
+   No manual refresh required.  Analytics first — raw JSON only in
+   debug mode (?debug=1) or behind "Technical / Raw Data" in detail.
    ═══════════════════════════════════════════════════════════════ */
 "use strict";
 
 const POLL_MS = 5000;
 const API_LIVE = "/api/v4/live";
-const API_STATUS = "/api/v4/status";
 const API_GAME = (id) => `/api/v4/game/${encodeURIComponent(id)}`;
+const DEBUG = new URLSearchParams(location.search).has("debug");
 
 const state = {
   filter: "",
@@ -16,9 +17,6 @@ const state = {
   cards: new Map(),        // game_id -> {el, spark}
   modalGameId: null,
   modalCharts: {},
-  rawOn: false,
-  lastPayload: null,
-  conn: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -35,10 +33,13 @@ const fmtAge = (s) => {
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
   return `${Math.round(s / 3600)}h ago`;
 };
-const num = (v, d = 1) => (v == null ? "--" : Number(v).toFixed(d));
+const num = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
+const pct = (v, d = 0) => (v == null ? "–" : `${(v * 100).toFixed(d)}%`);
 const hasChart = () => typeof Chart !== "undefined";
 const ChartColor = {
   home: "rgba(34,211,238,1)", away: "rgba(251,191,36,1)",
+  model: "rgba(96,165,250,1)", market: "rgba(251,191,36,1)",
+  momentum: "rgba(52,211,153,1)", confidence: "rgba(96,165,250,1)",
   grid: "rgba(30,42,58,.6)", tick: "#6b7a90",
 };
 
@@ -80,12 +81,13 @@ function renderStatus(payload) {
 function renderSummary(payload) {
   const games = payload.games || [];
   const per = { CYBER_2K26: { n: 0, live: 0 }, BETUAL_NBA: { n: 0, live: 0 } };
-  let snaps = 0;
+  let snaps = 0, live = 0;
   for (const g of games) {
     if (per[g.classification]) {
       per[g.classification].n++;
       if (g.live) per[g.classification].live++;
     }
+    if (g.live) live++;
     snaps += g.snapshot_count || 0;
   }
   $("sumCyber").textContent = per.CYBER_2K26.n || 0;
@@ -94,9 +96,8 @@ function renderSummary(payload) {
   $("sumBetual").textContent = per.BETUAL_NBA.n || 0;
   $("sumBetual").className = "sum-value betual";
   $("sumBetualSub").textContent = `${per.BETUAL_NBA.live} live`;
+  $("sumLive").textContent = live;
   $("sumSnaps").textContent = snaps;
-  const db = payload.collector ? null : null;
-  // age of freshest snapshot across games
   let newest = null;
   for (const g of games) {
     const t = g.last_update ? new Date(g.last_update).getTime() : 0;
@@ -113,10 +114,9 @@ function winprobHTML(g) {
   const h = Math.round(wp * 100), a = 100 - h;
   return `
     <div class="winprob">
-      <div class="winprob-label">Win Probability</div>
       <div class="winprob-bar">
-        <div class="home" style="width:${h}%"></div>
-        <div class="away" style="width:${a}%"></div>
+        <div class="home" style="width:${h}%"><span>${h}%</span></div>
+        <div class="away" style="width:${a}%"><span>${a}%</span></div>
       </div>
       <div class="winprob-legend">
         <span>${esc(g.home_team)} <b>${h}%</b></span>
@@ -154,23 +154,21 @@ function divergenceHTML(g) {
 function momentumHTML(g) {
   const m = g.momentum || {};
   const dir = m.direction || "flat";
-  const arrow = dir === "up" ? "▲" : dir === "down" ? "▼" : "◆";
+  const word = dir === "up" ? "RISING" : dir === "down" ? "FALLING" : "FLAT";
+  const arrow = dir === "up" ? "↗" : dir === "down" ? "↘" : "→";
   const conf = g.model ? Math.round((g.model.confidence || 0) * 100) : 0;
   return `
     <div class="gauges">
       <div class="gauge">
         <div class="gauge-label">Momentum</div>
-        <div class="gauge-value">${num(m.score, 0)}
-          <span class="mom-arrow ${dir}">${arrow}</span>
-          <span style="font-size:11px;color:var(--muted)">${esc(m.strength_label || "")}</span>
-        </div>
-        <div class="gauge-sub">${num(m.velocity, 1)} pts/min · acc ${num(m.acceleration, 1)}</div>
+        <div class="gauge-value mom-value ${dir}">${arrow}<span class="mom-word">${word}</span></div>
+        <div class="gauge-sub">${esc(m.strength_label || "—")} · ${num(m.velocity, 1)} pts/min · acc ${num(m.acceleration, 1)}</div>
         <div class="bar-track"><div class="bar-fill ${dir === "up" ? "green" : dir === "down" ? "red" : ""}"
           style="width:${Math.min(100, Math.abs(m.score - 50) * 2 + 5)}%"></div></div>
       </div>
       <div class="gauge">
         <div class="gauge-label">Model Confidence</div>
-        <div class="gauge-value" style="font-size:20px">${conf}%</div>
+        <div class="gauge-value" style="font-size:22px">${conf}%</div>
         <div class="gauge-sub">pace ${num(g.model ? g.model.pace : null, 1)} · exp total ${num(g.model ? g.model.expected_total : null, 1)}</div>
         <div class="bar-track"><div class="bar-fill ${conf >= 70 ? "green" : conf >= 50 ? "amber" : "red"}"
           style="width:${conf}%"></div></div>
@@ -185,16 +183,19 @@ function signalsHTML(g) {
     ["dead_market", "Dead"], ["false_momentum", "False Mom"], ["late_trap", "Late"],
     ["sharp_trap", "Sharp"],
   ];
+  const anyActive = (s.active || []).length;
+  if (!anyActive) return `<div class="signals"><span class="sig-none">No active signals</span></div>`;
   return `<div class="signals">${names.map(([k, label]) => {
     const v = s[k] || {};
-    const on = v.active;
-    return `<span class="sig ${on ? "active" : ""}" title="${esc(label)} trap${on ? ` · conf ${Math.round((v.confidence || 0) * 100)}%` : ""}">${on ? "●" : "○"} ${label}${on ? ` ${Math.round((v.confidence || 0) * 100)}%` : ""}</span>`;
+    if (!v.active) return "";
+    return `<span class="sig active" title="${esc(label)} trap · conf ${Math.round((v.confidence || 0) * 100)}%">● ${label} ${Math.round((v.confidence || 0) * 100)}%</span>`;
   }).join("")}</div>`;
 }
 
 function projHTML(g) {
   const mdl = g.model || {};
   const hp = mdl.home_projection, ap = mdl.away_projection;
+  const total = (hp != null && ap != null) ? +(hp + ap).toFixed(1) : null;
   const max = Math.max(hp || 0, ap || 0, 1);
   return `
     <div class="projs">
@@ -205,6 +206,7 @@ function projHTML(g) {
       <div class="proj-row"><span class="pname">${esc(g.away_team)}</span>
         <span class="ptrack"><span class="pfill" style="width:${Math.round((ap || 0) / max * 100)}%;background:var(--amber)"></span></span>
         <span class="pval">${num(ap, 1)}</span></div>
+      ${total != null ? `<div class="proj-total"><span>PROJECTED TOTAL</span><b>${num(total, 1)}</b></div>` : ""}
     </div>`;
 }
 
@@ -217,7 +219,6 @@ function cardHTML(g) {
       <span class="cat-badge ${esc(g.classification)}">${esc(g.classification)}</span>
       <span class="comp-name">${esc(g.competition)}</span>
       <span class="${liveCls}">${liveTxt}</span>
-      <button class="expand-btn" data-expand="${esc(g.game_id)}">⤢</button>
     </div>
     <div class="scoreboard">
       <div class="team"><div class="team-name">${esc(g.home_team)}</div>
@@ -304,11 +305,10 @@ function renderCards(payload) {
       card.el.classList.add("flash");
     }
     card.lastScore = nowScore;
-    // rebuild card body (charts survive: chart canvas is re-attached below)
     card.el.innerHTML = cardHTML(g);
     if (card.spark) {
       const holder = card.el.querySelector(".spark");
-      holder.innerHTML = ""; // drop the template canvas
+      holder.innerHTML = "";
       holder.appendChild(card.spark.canvas);
       updateSpark(card.spark, g);
     } else {
@@ -316,7 +316,6 @@ function renderCards(payload) {
       card.spark = makeSpark(canvas, g);
     }
   }
-  // remove cards whose games vanished from payload
   for (const [gid, card] of state.cards) {
     if (!seen.has(gid)) {
       card.el.remove();
@@ -324,20 +323,21 @@ function renderCards(payload) {
       state.cards.delete(gid);
     }
   }
-  if (!games.length) {
-    $("empty").style.display = "block";
-  } else {
-    $("empty").style.display = "none";
-  }
+  $("empty").style.display = games.length ? "none" : "block";
 }
 
 /* ── Detail modal ────────────────────────────────────────── */
 
 function openModal(gameId) {
+  if (!$("modalBackdrop").hidden) return; // already open — keep current view
   state.modalGameId = gameId;
   $("modalBackdrop").hidden = false;
   document.body.style.overflow = "hidden";
-  loadModal(gameId);
+  // render immediately from the live payload (never an empty overlay)
+  const live = state.games.find((g) => g.game_id === gameId);
+  if (live) renderModal(live);
+  else $("modalBody").innerHTML = `<div class="empty">Loading…</div>`;
+  loadModalDetail(gameId);
 }
 
 function closeModal() {
@@ -354,11 +354,9 @@ function modalPanel(title, inner) {
   return `<div class="m-panel"><h4>${title}</h4>${inner}</div>`;
 }
 
-function renderModal(d) {
-  const g = d;
+function renderModal(g) {
   const mdl = g.model || {}, mkt = g.market || {}, mom = g.momentum || {},
         sig = g.signals || {};
-  const body = $("modalBody");
   const confPct = Math.round((mdl.confidence || 0) * 100);
   const wpPct = Math.round((mdl.win_probability || 0) * 100);
   const tEdge = mkt.total_line != null && mdl.expected_total != null
@@ -367,11 +365,16 @@ function renderModal(d) {
     ? (mdl.expected_margin - mkt.spread).toFixed(1) : null;
   const activeSigs = (sig.active || []).map((k) =>
     `<span class="sig active">● ${esc(k)} ${Math.round((sig[k]?.confidence || 0) * 100)}%</span>`).join("");
-  const tl = (d.timeline || []).map((e) =>
+  const tl = (g.timeline || []).map((e) =>
     `<div class="tl-item"><span class="tl-time">${fmtTime(e.t)}</span><span class="tl-label ${esc(e.type)}">${esc(e.label)}</span></div>`
   ).join("") || '<div class="tl-item"><span class="muted">No events yet</span></div>';
+  const rawJson = g.raw || g.latest_snapshot || null;
 
-  body.innerHTML = `
+  $("mCat").textContent = g.classification || "–";
+  $("mCat").className = `cat-badge ${esc(g.classification)}`;
+  $("mTitle").textContent = `${g.home_team || "–"} vs ${g.away_team || "–"}`;
+
+  $("modalBody").innerHTML = `
     <div class="m-hero">
       <div class="m-score">
         <div><div class="team-name">${esc(g.home_team)}</div>
@@ -381,15 +384,15 @@ function renderModal(d) {
           <div class="team-score away">${g.away_score ?? "–"}</div></div>
       </div>
       <div style="text-align:right">
-        <div><span class="cat-badge ${esc(g.classification)}">${esc(g.classification)}</span></div>
-        <div class="muted" style="margin-top:6px">${esc(g.period_label || "")} ${esc(g.clock || "")}</div>
-        <div class="muted">${g.snapshot_count} snapshots · last ${fmtAge(g.age_s)}</div>
+        <div class="period" style="font-family:var(--mono)">${esc(g.period_label || "")} ${esc(g.clock || "")}</div>
+        <div class="muted" style="margin-top:4px">${g.snapshot_count || 0} snapshots · last ${fmtAge(g.age_s)}</div>
       </div>
     </div>
     <div class="m-charts">
-      <div class="m-chart"><h4>Score Progression (stored snapshots)</h4><canvas id="mcScore"></canvas></div>
-      <div class="m-chart"><h4>Actual vs Market vs Projected Total</h4><canvas id="mcTotal"></canvas></div>
-      <div class="m-chart full"><h4>Market &amp; Pace History</h4><canvas id="mcLine"></canvas></div>
+      <div class="m-chart"><h4>Score Progression</h4><canvas id="mcScore"></canvas></div>
+      <div class="m-chart"><h4>Actual vs Market vs Model Total</h4><canvas id="mcTotal"></canvas></div>
+      <div class="m-chart"><h4>Model History — Win Probability &amp; Confidence</h4><canvas id="mcModel"></canvas></div>
+      <div class="m-chart"><h4>Momentum History</h4><canvas id="mcMomentum"></canvas></div>
     </div>
     <div class="m-panels">
       ${modalPanel("Market vs Model", `
@@ -405,7 +408,7 @@ function renderModal(d) {
         </div>`)}
       ${modalPanel("Model", `
         <div class="m-row"><span class="k">Win probability (home)</span><span class="v">${wpPct}%</span></div>
-        <div class="winprob-bar" style="margin:6px 0"><div class="home" style="width:${wpPct}%"></div><div class="away" style="width:${100 - wpPct}%"></div></div>
+        <div class="winprob-bar" style="margin:6px 0"><div class="home" style="width:${wpPct}%"><span>${wpPct}%</span></div><div class="away" style="width:${100 - wpPct}%"><span>${100 - wpPct}%</span></div></div>
         <div class="m-row"><span class="k">Confidence</span><span class="v">${confPct}%</span></div>
         <div class="bar-track"><div class="bar-fill ${confPct >= 70 ? "green" : confPct >= 50 ? "amber" : "red"}" style="width:${confPct}%"></div></div>
         <div class="m-row" style="margin-top:8px"><span class="k">Home projection</span><span class="v">${num(mdl.home_projection, 1)}</span></div>
@@ -414,19 +417,19 @@ function renderModal(d) {
         <div class="m-row"><span class="k">Expected total</span><span class="v">${num(mdl.expected_total, 1)}</span></div>
       `)}
       ${modalPanel("Momentum", `
-        <div class="big">${num(mom.score, 0)} <span class="mom-arrow ${esc(mom.direction)}">${mom.direction === "up" ? "▲" : mom.direction === "down" ? "▼" : "◆"}</span></div>
+        <div class="big ${esc(mom.direction)}">${mom.direction === "up" ? "↗" : mom.direction === "down" ? "↘" : "→"} ${esc((mom.direction || "flat").toUpperCase())}</div>
         <div class="m-rows" style="margin-top:8px">
-          <div class="m-row"><span class="k">Direction</span><span class="v">${esc(mom.direction)}</span></div>
+          <div class="m-row"><span class="k">Score</span><span class="v">${num(mom.score, 0)} / 100</span></div>
           <div class="m-row"><span class="k">Strength</span><span class="v">${esc(mom.strength_label)}</span></div>
           <div class="m-row"><span class="k">Velocity</span><span class="v ${mom.velocity >= 0 ? "pos" : "neg"}">${mom.velocity >= 0 ? "+" : ""}${num(mom.velocity, 2)} pts/min</span></div>
           <div class="m-row"><span class="k">Acceleration</span><span class="v ${mom.acceleration >= 0 ? "pos" : "neg"}">${mom.acceleration >= 0 ? "+" : ""}${num(mom.acceleration, 2)}</span></div>
         </div>
-        <div class="bar-track" style="margin-top:10px"><div class="bar-fill ${mom.direction === "up" ? "green" : mom.direction === "down" ? "red" : ""}" style="width:${Math.min(100, Math.abs(mom.score - 50) * 2 + 5)}%"></div></div>
+        <div class="bar-track" style="margin-top:10px"><div class="bar-fill ${mom.direction === "up" ? "green" : mom.direction === "down" ? "red" : ""}" style="width:${Math.min(100, Math.abs((mom.score || 50) - 50) * 2 + 5)}%"></div></div>
       `)}
       ${modalPanel("Signals / Traps", `
         <div class="m-row"><span class="k">Trap meter</span><span class="v">${num(sig.trap_meter, 1)} / 100 (${esc(sig.trap_meter_level)})</span></div>
         <div class="bar-track"><div class="bar-fill ${sig.trap_meter >= 60 ? "red" : sig.trap_meter >= 30 ? "amber" : "green"}" style="width:${Math.min(100, sig.trap_meter || 0)}%"></div></div>
-        <div class="signals" style="margin-top:8px">${activeSigs || '<span class="sig">○ no active signals</span>'}</div>
+        <div class="signals" style="margin-top:8px">${activeSigs || '<span class="sig-none">No active signals</span>'}</div>
         ${["bull_trap", "bear_trap", "reverse_bull_trap", "dead_market", "false_momentum", "late_trap", "sharp_trap"]
           .map((k) => `<div class="m-row" style="margin-top:4px"><span class="k">${esc(k)}</span><span class="v">${sig[k]?.active ? "ACTIVE" : "no"} · conf ${Math.round((sig[k]?.confidence || 0) * 100)}%</span></div>`).join("")}
       `)}
@@ -441,62 +444,10 @@ function renderModal(d) {
         <div class="m-row"><span class="k">Source</span><span class="v">${esc(g.source)}</span></div>
       `)}
     </div>
-    <div class="timeline"><h4>Live Timeline (from stored snapshots)</h4>${tl}</div>`;
+    <div class="timeline"><h4>Live Timeline (from stored snapshots)</h4>${tl}</div>
+    ${rawJson ? `<details class="tech-raw"><summary>Technical / Raw Data</summary><pre>${esc(typeof rawJson === "string" ? rawJson : JSON.stringify(rawJson, null, 2))}</pre></details>` : ""}`;
 
-  // ── charts ──
-  const h = g.history || [];
-  if (hasChart()) {
-    const mk = (id) => document.getElementById(id);
-    if (state.modalCharts.score) state.modalCharts.score.destroy();
-    if (state.modalCharts.total) state.modalCharts.total.destroy();
-    if (state.modalCharts.line) state.modalCharts.line.destroy();
-
-    state.modalCharts.score = new Chart(mk("mcScore"), {
-      type: "line",
-      data: {
-        labels: h.map((s) => fmtTime(s.t)),
-        datasets: [
-          { label: g.home_team, data: h.map((s) => s.home), borderColor: ChartColor.home, backgroundColor: "rgba(34,211,238,.08)", fill: true, pointRadius: 0, tension: .25 },
-          { label: g.away_team, data: h.map((s) => s.away), borderColor: ChartColor.away, backgroundColor: "rgba(251,191,36,.08)", fill: true, pointRadius: 0, tension: .25 },
-        ],
-      },
-      options: baseChartOpts("Points"),
-    });
-
-    const combined = h.map((s) => (s.home != null && s.away != null ? s.home + s.away : null));
-    const mktLine = h.map((s) => s.total_line);
-    const projLine = h.map(() => mdl.expected_total);
-    state.modalCharts.total = new Chart(mk("mcTotal"), {
-      type: "line",
-      data: {
-        labels: h.map((s) => fmtTime(s.t)),
-        datasets: [
-          { label: "Actual (combined)", data: combined, borderColor: "#eaf2ff", pointRadius: 0, tension: .25 },
-          { label: "Market total", data: mktLine, borderColor: ChartColor.amber, borderDash: [6, 4], pointRadius: 0 },
-          { label: "Projected total", data: projLine, borderColor: ChartColor.cyan, borderDash: [2, 3], pointRadius: 0 },
-        ],
-      },
-      options: baseChartOpts("Points"),
-    });
-
-    const lineVals = h.map((s) => s.total_line);
-    state.modalCharts.line = new Chart(mk("mcLine"), {
-      type: "line",
-      data: {
-        labels: h.map((s) => fmtTime(s.t)),
-        datasets: [
-          { label: "Total line", data: lineVals, borderColor: ChartColor.amber, pointRadius: 0, tension: .25 },
-          { label: "Spread", data: h.map((s) => s.spread), borderColor: ChartColor.cyan, pointRadius: 0, tension: .25 },
-        ],
-      },
-      options: baseChartOpts("Line value"),
-    });
-  } else {
-    document.querySelectorAll(".m-chart canvas").forEach((c) => {
-      c.replaceWith(Object.assign(document.createElement("div"), { textContent: "Chart.js unavailable — CDN blocked" }));
-    });
-  }
-  if ($("mRawToggle").classList.contains("on")) toggleModalRaw(true, d);
+  renderModalCharts(g);
 }
 
 function baseChartOpts(yLabel) {
@@ -518,43 +469,91 @@ function baseChartOpts(yLabel) {
   };
 }
 
-async function loadModal(gameId) {
+function renderModalCharts(g) {
+  if (!hasChart()) {
+    document.querySelectorAll(".m-chart canvas").forEach((c) => {
+      c.replaceWith(Object.assign(document.createElement("div"),
+        { textContent: "Chart.js unavailable — CDN blocked" }));
+    });
+    return;
+  }
+  const h = g.history || [];
+  const labels = h.map((s) => fmtTime(s.t));
+  const mk = (id) => document.getElementById(id);
+  for (const k in state.modalCharts) {
+    if (state.modalCharts[k]) state.modalCharts[k].destroy();
+  }
+  state.modalCharts = {};
+
+  state.modalCharts.score = new Chart(mk("mcScore"), {
+    type: "line",
+    data: { labels, datasets: [
+      { label: g.home_team, data: h.map((s) => s.home), borderColor: ChartColor.home,
+        backgroundColor: "rgba(34,211,238,.08)", fill: true, pointRadius: 0, tension: .25 },
+      { label: g.away_team, data: h.map((s) => s.away), borderColor: ChartColor.away,
+        backgroundColor: "rgba(251,191,36,.08)", fill: true, pointRadius: 0, tension: .25 },
+    ]},
+    options: baseChartOpts("Points"),
+  });
+
+  state.modalCharts.total = new Chart(mk("mcTotal"), {
+    type: "line",
+    data: { labels, datasets: [
+      { label: "Actual (combined)", data: h.map((s) => s.combined), borderColor: "#eaf2ff", pointRadius: 0, tension: .25 },
+      { label: "Market total", data: h.map((s) => s.total_line), borderColor: ChartColor.market, borderDash: [6, 4], pointRadius: 0 },
+      { label: "Model total", data: h.map((s) => s.expected_total), borderColor: ChartColor.model, borderDash: [2, 3], pointRadius: 0 },
+    ]},
+    options: baseChartOpts("Points"),
+  });
+
+  state.modalCharts.model = new Chart(mk("mcModel"), {
+    type: "line",
+    data: { labels, datasets: [
+      { label: "Win prob %", data: h.map((s) => (s.win_prob ?? null) != null ? s.win_prob * 100 : null), borderColor: ChartColor.home, pointRadius: 0, tension: .25 },
+      { label: "Confidence %", data: h.map((s) => (s.confidence ?? null) != null ? s.confidence * 100 : null), borderColor: ChartColor.confidence, borderDash: [4, 3], pointRadius: 0, tension: .25 },
+    ]},
+    options: baseChartOpts("%"),
+  });
+
+  state.modalCharts.momentum = new Chart(mk("mcMomentum"), {
+    type: "line",
+    data: { labels, datasets: [
+      { label: "Momentum", data: h.map((s) => s.momentum_score), borderColor: ChartColor.momentum,
+        backgroundColor: "rgba(52,211,153,.08)", fill: true, pointRadius: 0, tension: .25 },
+    ]},
+    options: baseChartOpts("Score 0–100"),
+  });
+}
+
+async function loadModalDetail(gameId) {
   try {
     const resp = await fetch(API_GAME(gameId));
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const d = await resp.json();
-    $("mCat").textContent = d.classification || "–";
-    $("mCat").className = `cat-badge ${esc(d.classification)}`;
-    $("mTitle").textContent = `${d.home_team} vs ${d.away_team}`;
+    if (state.modalGameId !== gameId || $("modalBackdrop").hidden) return;
     renderModal(d);
-    $("mRawToggle").dataset.gameId = gameId;
   } catch (err) {
-    $("modalBody").innerHTML = `<div class="empty">Failed to load game: ${esc(err.message)}</div>`;
+    // keep the cached live render — never show an empty overlay
+    const box = $("modalBody").querySelector(".tech-raw");
+    if (!box) $("modalBody").insertAdjacentHTML("beforeend",
+      `<details class="tech-raw"><summary>Technical / Raw Data</summary><pre>${esc("Detail fetch failed: " + err.message)}</pre></details>`);
   }
 }
 
-/* ── Raw drawer ──────────────────────────────────────────── */
+/* ── Debug mode (?debug=1) — raw drawer, hidden in production ── */
 
-function setRaw(on) {
-  state.rawOn = on;
-  $("rawDrawer").hidden = !on;
-  $("rawToggle").classList.toggle("on", on);
-  if (on && state.lastPayload) {
-    $("rawJson").textContent = JSON.stringify(state.lastPayload, null, 2);
-  }
-}
-
-function toggleModalRaw(on, d) {
-  $("mRawToggle").classList.toggle("on", on);
-  if (on) {
-    const raw = d ? JSON.stringify(d, null, 2)
-      : state.lastPayload?.games?.find((g) => g.game_id === state.modalGameId);
-    $("modalBody").insertAdjacentHTML("beforeend",
-      `<details class="m-panel" id="mRawBox" style="margin-top:14px"><summary style="cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--amber)">RAW JSON</summary>
-       <pre class="raw-json" style="max-height:360px">${esc(typeof raw === "string" ? raw : JSON.stringify(raw, null, 2))}</pre></details>`);
-  } else {
-    document.getElementById("mRawBox")?.remove();
-  }
+function wireDebug() {
+  if (!DEBUG) return;
+  $("rawToggle").hidden = false;
+  const setRaw = (on) => {
+    $("rawDrawer").hidden = !on;
+    $("rawToggle").classList.toggle("on", on);
+    if (on && state.lastPayload) {
+      $("rawJson").textContent = JSON.stringify(state.lastPayload, null, 2);
+    }
+  };
+  $("rawToggle").addEventListener("click", () => setRaw($("rawDrawer").hidden));
+  $("rawClose").addEventListener("click", () => setRaw(false));
 }
 
 /* ── Polling ─────────────────────────────────────────────── */
@@ -569,8 +568,15 @@ async function refresh() {
     renderStatus(payload);
     renderSummary(payload);
     renderCards(payload);
-    if (state.rawOn) $("rawJson").textContent = JSON.stringify(payload, null, 2);
-    if (state.modalGameId && !$("modalBackdrop").hidden) loadModal(state.modalGameId);
+    // game vanished while its detail was open → close cleanly
+    if (state.modalGameId && !state.games.some((g) => g.game_id === state.modalGameId)) {
+      closeModal();
+    } else if (state.modalGameId && !$("modalBackdrop").hidden) {
+      loadModalDetail(state.modalGameId);
+    }
+    if (DEBUG && !$("rawDrawer").hidden && state.lastPayload) {
+      $("rawJson").textContent = JSON.stringify(state.lastPayload, null, 2);
+    }
   } catch (err) {
     const livePill = $("livePill");
     livePill.className = "pill live-pill bad";
@@ -591,23 +597,15 @@ $("filters").addEventListener("click", (ev) => {
   renderCards(state.lastPayload || { games: state.games });
 });
 
-$("rawToggle").addEventListener("click", () => setRaw(!state.rawOn));
-$("rawClose").addEventListener("click", () => setRaw(false));
 $("modalClose").addEventListener("click", closeModal);
 $("modalBackdrop").addEventListener("click", (ev) => {
   if (ev.target === $("modalBackdrop")) closeModal();
 });
-$("mRawToggle").addEventListener("click", (ev) => {
-  const on = !ev.target.classList.contains("on");
-  toggleModalRaw(on, null);
-});
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") {
-    if (!$("rawDrawer").hidden) setRaw(false);
-    else if (!$("modalBackdrop").hidden) closeModal();
-  }
+  if (ev.key === "Escape" && !$("modalBackdrop").hidden) closeModal();
 });
 
+wireDebug();
 refresh();
 setInterval(refresh, POLL_MS);

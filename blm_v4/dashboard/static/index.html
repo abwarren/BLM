@@ -25,7 +25,6 @@
       <button class="filter active" data-filter="">ALL</button>
       <button class="filter" data-filter="CYBER_2K26">CYBER 2K26</button>
       <button class="filter" data-filter="BETUAL_NBA">BETUAL NBA</button>
-      <button class="raw-toggle" id="rawToggle" title="Show raw JSON debug panel">RAW / DEBUG</button>
     </div>
   </header>
 
@@ -33,8 +32,8 @@
   <section class="summary" id="summary">
     <div class="sum-card"><div class="sum-label">CYBER 2K26</div><div class="sum-value" id="sumCyber">–</div><div class="sum-sub" id="sumCyberSub">–</div></div>
     <div class="sum-card"><div class="sum-label">BETUAL NBA</div><div class="sum-value" id="sumBetual">–</div><div class="sum-sub" id="sumBetualSub">–</div></div>
+    <div class="sum-card"><div class="sum-label">LIVE GAMES</div><div class="sum-value" id="sumLive">–</div><div class="sum-sub">monitored</div></div>
     <div class="sum-card"><div class="sum-label">SNAPSHOTS</div><div class="sum-value" id="sumSnaps">–</div><div class="sum-sub">stored</div></div>
-    <div class="sum-card"><div class="sum-label">RECONCILED</div><div class="sum-value" id="sumRecon">–</div><div class="sum-sub" id="sumReconSub">–</div></div>
     <div class="sum-card"><div class="sum-label">LAST SNAPSHOT</div><div class="sum-value" id="sumAge">–</div><div class="sum-sub" id="sumAgeSub">–</div></div>
   </section>
 
@@ -52,15 +51,15 @@
           <span class="modal-title" id="mTitle">–</span>
         </div>
         <div class="modal-actions">
-          <button class="raw-toggle" id="mRawToggle">RAW</button>
-          <button class="close" id="modalClose">✕</button>
+          <button class="close" id="modalClose" title="Close">✕</button>
         </div>
       </div>
       <div class="modal-body" id="modalBody"></div>
     </div>
   </div>
 
-  <!-- ═══════════ RAW DEBUG DRAWER ═══════════ -->
+  <!-- ═══════════ DEBUG MODE ONLY (?debug=1) ═══════════ -->
+  <button class="raw-toggle" id="rawToggle" hidden>RAW / DEBUG</button>
   <div class="raw-drawer" id="rawDrawer" hidden>
     <div class="raw-head">
       <span>RAW / DEBUG — /api/v4/live</span>

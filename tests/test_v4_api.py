@@ -153,10 +153,23 @@ def test_dashboard_served_at_root(client):
     assert "dashboard.js" in resp.text
 
 
+def test_dashboard_production_ui_has_no_raw_debug(client):
+    """Production dashboard must not surface RAW/DEBUG UI by default."""
+    html = client.get("/").text
+    # raw toggle present but hidden unless ?debug=1
+    assert 'id="rawToggle" hidden' in html
+    # no RAW button inside the detail modal header
+    assert "mRawToggle" not in html
+    # filters present
+    assert 'data-filter="CYBER_2K26"' in html
+    assert 'data-filter="BETUAL_NBA"' in html
+    assert 'data-filter=""' in html
+
+
 def test_dashboard_static_assets(client):
     resp = client.get("/static/dashboard.js")
     assert resp.status_code == 200
-    assert "BLM LIVE ANALYTICS" in resp.text or "api/v4" in resp.text
+    assert "api/v4" in resp.text
     resp = client.get("/static/styles.css")
     assert resp.status_code == 200
 
@@ -219,6 +232,14 @@ def test_live_model_fields(client):
     assert len(cyber["history"]) == 4  # actual stored snapshots, no fabrication
     # history contains only real snapshots
     assert all("t" in h and "home" in h for h in cyber["history"])
+    # derived series present for model-history charts (additive keys)
+    last = cyber["history"][-1]
+    for key in ("combined", "win_prob", "momentum_score", "momentum_direction",
+                "confidence", "expected_total"):
+        assert key in last, f"missing history.{key}"
+    assert 0 <= last["win_prob"] <= 1
+    assert 0 <= last["confidence"] <= 1
+    assert 0 <= last["momentum_score"] <= 100
 
 
 def test_live_filter_by_classification(client):

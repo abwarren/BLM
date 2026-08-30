@@ -368,6 +368,58 @@ def _timeline_events(rows: list[dict], classification: str) -> list[dict]:
     return out[-50:]
 
 
+def _series(rows: list[dict]) -> list[dict]:
+    """Per-snapshot derived series for model-history charts.
+
+    Additive keys on top of the raw snapshot values: combined, win_prob,
+    momentum_score, momentum_direction, confidence, pace, expected_total.
+    Pure function of stored snapshots — no fabrication.
+    """
+    scored_prev: Optional[tuple] = None  # (ts, combined) of previous scored row
+    out: list[dict] = []
+    n = len(rows)
+    for i, r in enumerate(rows):
+        h, a = _i(r["home_score"]), _i(r["away_score"])
+        combined = (h + a) if (h is not None and a is not None) else None
+        line = _f(r["total_line"])
+        w1, w2 = _f(r["w1_odds"]), _f(r["w2_odds"])
+        ts = _parse_ts(r["captured_at"])
+        entry: dict[str, Any] = {
+            "t": r["captured_at"],
+            "home": h, "away": a, "combined": combined,
+            "total_line": line, "spread": _f(r["spread"]),
+            "quarter": _i(r["quarter"]), "period": r.get("period_label") or "",
+            "win_prob": _implied_win(w1, w2),
+        }
+        window = rows[max(0, i - 2):i + 1]
+        mom = _momentum(window)
+        entry["momentum_score"] = mom["score"]
+        entry["momentum_direction"] = mom["direction"]
+        entry["confidence"] = _confidence(
+            i + 1, line is not None, _f(r["spread"]) is not None,
+            w1 is not None and w2 is not None, i == n - 1,
+        )
+        # rolling pace (wall-clock vs previous scored snapshot)
+        pace: Optional[float] = None
+        if combined is not None and scored_prev and ts:
+            t0, c0 = scored_prev
+            if t0 and ts > t0:
+                dt_min = (ts - t0).total_seconds() / 60.0
+                if dt_min >= 0.1:
+                    p = (combined - c0) / dt_min * FULL_GAME_MINUTES
+                    if 20 <= p <= 400:
+                        pace = round(p, 1)
+        entry["pace"] = pace or line
+        if pace and line:
+            entry["expected_total"] = round(0.7 * pace + 0.3 * line, 1)
+        else:
+            entry["expected_total"] = pace or line
+        if combined is not None and ts:
+            scored_prev = (ts, combined)
+        out.append(entry)
+    return out
+
+
 def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
     """Build the full dashboard payload for one game from its snapshots."""
     scored = [r for r in rows if r.get("home_score") is not None
@@ -433,19 +485,11 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
     if len(lines) >= 3 and lines[-1] is not None and lines[-2] is not None:
         market_momentum = round(lines[-1] - lines[-2], 2)
 
-    # chart series (score + market + pace over time) — actual stored data
-    history: list[dict] = []
-    step = max(1, len(rows) // 80)
-    for r in rows[::step]:
-        history.append({
-            "t": r["captured_at"],
-            "home": _i(r["home_score"]),
-            "away": _i(r["away_score"]),
-            "total_line": _f(r["total_line"]),
-            "spread": _f(r["spread"]),
-            "quarter": _i(r["quarter"]),
-            "period": r.get("period_label") or "",
-        })
+    # chart series (score + market + model over time) — actual stored data
+    history = _series(rows)
+    step = max(1, len(history) // 80)
+    if step > 1:
+        history = history[::step]
 
     return {
         "game_id": game["source_game_id"],
