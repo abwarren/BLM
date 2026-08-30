@@ -125,6 +125,20 @@ def main() -> None:
         logger.info("scheduler_starting")
         task = asyncio.create_task(scheduler.run())
         app.state._scheduler_task = task
+
+        # ── Projection accuracy scorecard (persisted, quality-gated) ──
+        async def _scorecard_loop():
+            from blm_v4.scorecard import Scorecard
+            sc = Scorecard(root / "blm_pokerbet.db")
+            while True:
+                try:
+                    stats = sc.run()
+                    logger.info("scorecard_run", **stats)
+                except Exception:
+                    logger.exception("scorecard_run_failed")
+                await asyncio.sleep(60)
+
+        app.state._scorecard_task = asyncio.create_task(_scorecard_loop())
         logger.info("pipeline_started")
 
     @app.on_event("shutdown")
@@ -133,6 +147,11 @@ def main() -> None:
         if task and not task.done():
             task.cancel()
             try: await task
+            except asyncio.CancelledError: pass
+        sct = getattr(app.state, "_scorecard_task", None)
+        if sct and not sct.done():
+            sct.cancel()
+            try: await sct
             except asyncio.CancelledError: pass
         collector.stop()
         logger.info("pipeline_stopped")

@@ -106,6 +106,116 @@ function renderSummary(payload) {
   $("sumAgeSub").textContent = newest ? fmtTime(new Date(newest).toISOString()) : "--";
 }
 
+/* ── Model scorecard (projection accuracy) ─────────────────── */
+
+const API_SCORECARD = "/api/v4/scorecard";
+let scorecardTimer = null;
+
+function renderScorecard(d) {
+  const grid = $("scorecardGrid");
+  if (!grid) return;
+  const versions = (d.summary && d.summary.versions) || {};
+  const ver = versions["v4-pace-1"] || {};
+  const q = versions._quality || {};
+  const fx = d.fixed_checkpoints || [];
+  const mc = d.market_compare || {};
+  const recent = d.recent || [];
+  const html = [];
+  // current model performance
+  const v = ver;
+  html.push(`<div class="sc-block">
+    <h4>MODEL ${esc(v.model_version || "?")}</h4>
+    <table class="sc-table">
+      <tr><td>Predictions</td><td class="sc-num">${v.predictions ?? "–"}</td></tr>
+      <tr><td>Completed games</td><td class="sc-num">${v.completed_games ?? "–"}</td></tr>
+      <tr><td>MAE (total)</td><td class="sc-num">${v.mae ?? "–"}</td></tr>
+      <tr><td>RMSE</td><td class="sc-num">${v.rmse ?? "–"}</td></tr>
+      <tr><td>Median abs err</td><td class="sc-num">${v.median_abs_error ?? "–"}</td></tr>
+      <tr><td>Bias (signed)</td><td class="sc-num">${v.bias ?? "–"}</td></tr>
+      <tr><td>Home MAE</td><td class="sc-num">${v.home_mae ?? "–"}</td></tr>
+      <tr><td>Away MAE</td><td class="sc-num">${v.away_mae ?? "–"}</td></tr>
+      <tr><td>MAPE</td><td class="sc-num">${v.mape ?? "–"}</td></tr>
+    </table>
+  </div>`);
+  // accuracy by fixed checkpoint
+  html.push(`<div class="sc-block">
+    <h4>ACCURACY BY GAME PROGRESS</h4>
+    <table class="sc-table">
+      <tr><th>Checkpoint</th><th>N</th><th>MAE</th><th>Median</th></tr>
+      ${fx.map((c) => `<tr><td>${c.percent}%</td><td class="sc-num">${c.n}</td><td class="sc-num">${c.mae ?? "–"}</td><td class="sc-num">${c.median ?? "–"}</td></tr>`).join("")}
+    </table>
+  </div>`);
+  // model vs market
+  html.push(`<div class="sc-block">
+    <h4>MODEL VS MARKET</h4>
+    <table class="sc-table">
+      <tr><td>Comparisons (market existed)</td><td class="sc-num">${mc.n ?? 0}</td></tr>
+      <tr><td>Model MAE</td><td class="sc-num">${mc.model_mae ?? "–"}</td></tr>
+      <tr><td>Market MAE</td><td class="sc-num">${mc.market_mae ?? "–"}</td></tr>
+      <tr><td>Model beat market</td><td class="sc-num">${mc.model_beat_market_rate != null ? (mc.model_beat_market_rate * 100).toFixed(1) + "%" : "–"}</td></tr>
+      <tr><td>O/U hit rate</td><td class="sc-num">${mc.ou_hit_rate != null ? (mc.ou_hit_rate * 100).toFixed(1) + "%" : "–"}</td></tr>
+      <tr><td>Over / Under / Push</td><td class="sc-num">${mc.over ?? 0} / ${mc.under ?? 0} / ${mc.push ?? 0}</td></tr>
+    </table>
+  </div>`);
+  // data quality
+  html.push(`<div class="sc-block">
+    <h4>DATA QUALITY</h4>
+    <table class="sc-table">
+      <tr><td>Valid scored games</td><td class="sc-num">${q.valid ?? "–"}</td></tr>
+      <tr><td>Invalid / excluded</td><td class="sc-num">${q.invalid ?? "–"}</td></tr>
+      <tr><td>Excluded games total</td><td class="sc-num">${q.excluded_games ?? "–"}</td></tr>
+      <tr><td>Reasons</td><td>${Object.entries(q.excluded_reasons || {}).map(([k, n]) => `${esc(k)}: ${n}`).join(", ") || "–"}</td></tr>
+    </table>
+  </div>`);
+  // recent predictions
+  if (recent.length) {
+    html.push(`<div class="sc-block sc-wide">
+      <h4>RECENT PREDICTIONS</h4>
+      <table class="sc-table">
+        <tr><th>Game</th><th>Check</th><th>Pred</th><th>Actual</th><th>Err</th><th>Time</th></tr>
+        ${recent.map((r) => `<tr>
+          <td>${esc(r.home_team || r.source_game_id)} vs ${esc(r.away_team || "")}</td>
+          <td>${r.checkpoint_percent != null ? (r.checkpoint_percent * 100).toFixed(0) + "%" : esc(r.checkpoint || "")}</td>
+          <td class="sc-num">${r.model_total ?? "–"}</td>
+          <td class="sc-num">${r.actual_total ?? "–"}</td>
+          <td class="sc-num">${r.total_error ?? "–"}</td>
+          <td>${fmtTime(r.scored_at)}</td>
+        </tr>`).join("")}
+      </table>
+    </div>`);
+  }
+  grid.innerHTML = html.join("");
+  $("scorecardSub").textContent =
+    `${v.predictions ?? 0} predictions · ${v.completed_games ?? 0} games · MAE ${v.mae ?? "–"}`;
+}
+
+async function refreshScorecard() {
+  try {
+    const resp = await fetch(API_SCORECARD);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const d = await resp.json();
+    renderScorecard(d);
+  } catch (err) {
+    const grid = $("scorecardGrid");
+    if (grid) grid.innerHTML = `<div class="empty">Scorecard unavailable: ${esc(err.message)}</div>`;
+  }
+}
+
+$("scorecardToggle").addEventListener("click", () => {
+  const body = $("scorecardBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("scorecardToggle").setAttribute("aria-expanded", String(open));
+  $("scorecardToggle").classList.toggle("open", open);
+  if (open) {
+    refreshScorecard();
+    if (!scorecardTimer) scorecardTimer = setInterval(refreshScorecard, 30000);
+  } else if (scorecardTimer) {
+    clearInterval(scorecardTimer);
+    scorecardTimer = null;
+  }
+});
+
 /* ── Game cards ──────────────────────────────────────────── */
 
 function winprobHTML(g) {

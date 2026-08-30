@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import time
 import traceback
 from datetime import datetime, timezone
@@ -155,6 +156,7 @@ class PokerBetCollector:
             cls.value: {} for cls in (Classification.CYBER_2K26, Classification.BETUAL_NBA)
         }
         self._market_queue: list[str] = []   # round-robin of source_game_ids
+        self._instances: dict[str, str] = {}  # base game_id -> current instance id
         self._running = False
         self._browser: Optional[Browser] = None
         self._pw: Any = None                  # active sync_playwright scope
@@ -166,6 +168,7 @@ class PokerBetCollector:
         self.stats = {
             "ticks": 0, "games_seen": 0, "snapshots": 0,
             "games_resolved": 0, "reconciliations": 0, "errors": 0,
+            "instances_split": 0,
         }
 
     # ── Lifecycle ────────────────────────────────────────────────
@@ -486,7 +489,12 @@ class PokerBetCollector:
 
             # Dedup by durable identity (source_game_id): the same event may be
             # re-discovered from a refreshed row — update, don't duplicate.
+            # Virtual replays: the URL base id maps to the current instance id.
             existing = self._find_tracked(tax["game_id"])
+            if existing is None:
+                cur = self._instances.get(tax["game_id"])
+                if cur:
+                    existing = self._find_tracked(cur)
             if existing is not None:
                 cls_val = existing.classification
                 old_key = f"{existing.home_team}|{existing.away_team}"
@@ -577,8 +585,83 @@ class PokerBetCollector:
 
     # ── Snapshot capture ─────────────────────────────────────────
 
+    @staticmethod
+    def _base_id(gid: str) -> str:
+        """Strip the virtual-instance suffix from a source_game_id."""
+        return re.sub(r"#i\d+$", "", gid or "")
+
+    def _detect_instance_reset(self, game: PokerBetGame, row: RowGame) -> bool:
+        """True when the panel row shows a NEW virtual replay of the same
+        fixture (Betual/Cyber games replay every ~5 min under the SAME
+        BetConstruct event URL).  A reset is a large score drop vs the
+        game's last stored snapshot."""
+        if row.home_score is None or row.away_score is None:
+            return False
+        return self._detect_event_reset(game, row.home_score, row.away_score)
+
+    def _detect_event_reset(self, game: PokerBetGame, home: int, away: int) -> bool:
+        """True when an observed score (panel row OR event view) is a NEW
+        virtual replay: a large drop vs the game's last stored snapshot."""
+        last = self.store.get_snapshots(game.source_game_id, limit=1)
+        if not last:
+            return False
+        lh = last[0].get("home_score")
+        la = last[0].get("away_score")
+        if lh is None or la is None:
+            return False
+        cur = home + away
+        prev = lh + la
+        return prev >= 30 and cur < prev * 0.5
+
+    def _split_instance(self, game: PokerBetGame, row: RowGame, cls) -> PokerBetGame:
+        """Mark the current game ended and start a fresh instance record
+        with a distinct identity (base#iN) so replay snapshots never mix
+        into the finished game's history."""
+        base = self._base_id(game.source_game_id)
+        m = re.search(r"#i(\d+)$", game.source_game_id)
+        n = int(m.group(1)) if m else 0
+        new_id = f"{base}#i{n + 1}"
+        self._instances[base] = new_id
+
+        # end the old game
+        if game.status != "ended":
+            game.status = "ended"
+            self.store.upsert_game(game)
+        cls_val = cls.value
+        key = f"{game.home_team}|{game.away_team}"
+        self._tracked[cls_val].pop(key, None)
+        self._unseen_ticks[cls_val].pop(key, None)
+        if game.source_game_id in self._market_queue:
+            self._market_queue.remove(game.source_game_id)
+
+        # fresh instance record (same fixture, new identity)
+        new_game = game.model_copy(update={
+            "source_game_id": new_id,
+            "status": "live",
+            "first_seen_at": utcnow_iso(),
+            "last_seen_at": utcnow_iso(),
+        })
+        self.store.upsert_game(new_game)
+        self._tracked[cls_val][key] = new_game
+        self._unseen_ticks[cls_val][key] = 0
+        self._market_queue.append(new_id)
+        self.stats["instances_split"] += 1
+        logger.info(
+            "virtual replay split: %s -> %s (new instance %s-%s)",
+            base, new_id, row.home_score, row.away_score,
+        )
+        return new_game
+
     def _store_list_snapshot(self, game: PokerBetGame, row: RowGame, comp) -> None:
-        """Persist the list-level observation for a known game."""
+        """Persist the list-level observation for a known game.
+
+        Detects virtual-replay score resets: when the panel row shows a
+        fresh instance of the same fixture, the finished game is ended
+        and the snapshot is recorded under a NEW instance record so the
+        two games never share a history.
+        """
+        if self._detect_instance_reset(game, row):
+            game = self._split_instance(game, row, comp.classification)
         obs = MarketObservation(
             source=SOURCE_POKERBET,
             source_game_id=game.source_game_id,
@@ -694,19 +777,34 @@ class PokerBetCollector:
         try:
             text = page.inner_text("body", timeout=10000)
             parsed = parse_event_view(text)
-            # refresh identity from the URL taxonomy (URL changes handled)
+            # Virtual replay protection: the event URL now serves a NEW
+            # instance of the same fixture.  Detect the score reset BEFORE
+            # writing and split the instance, so this event-view snapshot
+            # lands in the fresh game's history — never the finished one's.
+            eh, ea = parsed.get("home_score"), parsed.get("away_score")
+            if eh is not None and ea is not None \
+                    and self._detect_event_reset(game, int(eh), int(ea)):
+                row = RowGame(home_score=int(eh), away_score=int(ea))
+                game = self._split_instance(game, row,
+                                            Classification(game.classification))
+            # refresh identity from the URL taxonomy (URL changes handled);
+            # keep any virtual-instance suffix (base#iN) — the suffix is
+            # the instance identity, the URL base is just the fixture.
             tax = parse_event_url(page.url)
             if tax:
-                game.source_game_id = tax["game_id"]
-                game.competition_id = tax["competition_id"]
-                game.competition_slug = tax["competition_slug"]
-                game.game_slug = tax["game_slug"]
-                game.source_url = page.url
-                cls = classify_event_url(page.url)
-                if cls != Classification.UNKNOWN:
-                    game.classification = cls.value
-                    game.game_family = cls.game_family.value
-                self.store.upsert_game(game)
+                base = self._base_id(game.source_game_id)
+                suffix = game.source_game_id[len(base):]
+                if tax["game_id"] != base:
+                    game.source_game_id = tax["game_id"] + suffix
+                    game.competition_id = tax["competition_id"]
+                    game.competition_slug = tax["competition_slug"]
+                    game.game_slug = tax["game_slug"]
+                    game.source_url = page.url
+                    cls = classify_event_url(page.url)
+                    if cls != Classification.UNKNOWN:
+                        game.classification = cls.value
+                        game.game_family = cls.game_family.value
+                    self.store.upsert_game(game)
             self._capture_event_state(page, Classification(game.classification), game, text)
         except Exception:
             logger.error("market capture failed:\n%s", traceback.format_exc())

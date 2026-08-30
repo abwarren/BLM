@@ -80,6 +80,19 @@ def _f(v: Any) -> Optional[float]:
     return None if v is None else float(v)
 
 
+def _market_snapshot(rows: list[dict]) -> Optional[dict]:
+    """Most recent snapshot carrying a market total (bookmaker O/U line).
+
+    Panel/list snapshots are written every tick without a market payload;
+    the line persists between event-view captures, so the last non-null
+    line is the current market state — never treat a stub as "no market".
+    """
+    for r in reversed(list(rows)):
+        if r.get("total_line") is not None:
+            return r
+    return None
+
+
 def _i(v: Any) -> Optional[int]:
     return None if v is None else int(v)
 
@@ -431,12 +444,17 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
     home_score = _i(latest["home_score"]) if latest else None
     away_score = _i(latest["away_score"]) if latest else None
 
-    total_line = _f(latest["total_line"]) if latest else None
-    spread = _f(latest["spread"]) if latest else None
-    home_total_line = _f(latest["home_total_line"]) if latest else None
-    away_total_line = _f(latest["away_total_line"]) if latest else None
-    w1 = _f(latest["w1_odds"]) if latest else None
-    w2 = _f(latest["w2_odds"]) if latest else None
+    # Market state comes from the most recent snapshot that actually
+    # carries a market payload.  List-level (panel) snapshots are written
+    # every tick without markets; the bookmaker line persists between
+    # event-view captures, so the last non-null line is the current state.
+    mlatest = _market_snapshot(rows)
+    total_line = _f(mlatest["total_line"]) if mlatest else None
+    spread = _f(mlatest["spread"]) if mlatest else None
+    home_total_line = _f(mlatest["home_total_line"]) if mlatest else None
+    away_total_line = _f(mlatest["away_total_line"]) if mlatest else None
+    w1 = _f(mlatest["w1_odds"]) if mlatest else None
+    w2 = _f(mlatest["w2_odds"]) if mlatest else None
 
     pace = _pace_from_snapshots(rows)
     market_total = total_line
@@ -481,8 +499,9 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime) -> dict:
             1 - min(abs(combined - market_total) / market_total, 1), 4)
 
     market_momentum = 0.0
-    lines = [_f(r["total_line"]) for r in rows]
-    if len(lines) >= 3 and lines[-1] is not None and lines[-2] is not None:
+    mrows = [r for r in rows if r.get("total_line") is not None]
+    lines = [_f(r["total_line"]) for r in mrows]
+    if len(lines) >= 2 and lines[-1] is not None and lines[-2] is not None:
         market_momentum = round(lines[-1] - lines[-2], 2)
 
     # chart series (score + market + model over time) — actual stored data
@@ -714,6 +733,23 @@ def v4_games(classification: Optional[str] = Query(None), limit: int = Query(200
     finally:
         conn.close()
     return {"total": len(items), "games": items}
+
+
+@router.get("/scorecard")
+def v4_scorecard() -> dict:
+    """Projection-accuracy scorecard (persisted, quality-gated)."""
+    from blm_v4.scorecard import Scorecard
+    db = _db_path()
+    sc = Scorecard(db)
+    return {
+        "model_version": sc.summary()["versions"].get(
+            "v4-pace-1", {}).get("model_version"),
+        "summary": sc.summary(),
+        "fixed_checkpoints": sc.fixed_checkpoints(),
+        "by_progress": sc.by_progress(),
+        "market_compare": sc.market_compare(),
+        "recent": sc.recent(25),
+    }
 
 
 @router.get("/history/{game_id}")
