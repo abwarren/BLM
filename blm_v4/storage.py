@@ -443,15 +443,23 @@ class PokerBetStore:
     def latest_market_observation(
         self, source_game_id: str, market_type: str = "MatchTotal",
     ) -> Optional[dict]:
-        """Most recent WS market observation for a game (line + prices)."""
+        """Most recent WS market observation for a game (line + prices).
+
+        The book offers a RANGE of O/U lines per game (204.5/206.5/208.5
+        at one timestamp); the event-view parser takes the FIRST (lowest)
+        line — parity here: lowest line of the latest observation batch.
+        """
         with self._lock:
             conn = self._connect()
             try:
                 r = conn.execute("""
                     SELECT * FROM market_observations
                     WHERE source_game_id=? AND market_type=?
-                    ORDER BY captured_at DESC LIMIT 1
-                """, (source_game_id, market_type)).fetchone()
+                      AND captured_at = (
+                          SELECT MAX(captured_at) FROM market_observations
+                          WHERE source_game_id=? AND market_type=?)
+                    ORDER BY line_value ASC LIMIT 1
+                """, (source_game_id, market_type, source_game_id, market_type)).fetchone()
                 return dict(r) if r else None
             finally:
                 conn.close()
@@ -460,16 +468,21 @@ class PokerBetStore:
         self, source_game_id: str, at_ts: str, market_type: str = "MatchTotal",
     ) -> Optional[dict]:
         """Most recent WS market observation at-or-before a timestamp —
-        used to FREEZE the market total into predictions (never a later line)."""
+        used to FREEZE the market total into predictions (never a later
+        line).  Lowest line of the latest batch <= cutoff (event-view parity).
+        """
         with self._lock:
             conn = self._connect()
             try:
                 r = conn.execute("""
                     SELECT * FROM market_observations
                     WHERE source_game_id=? AND market_type=?
-                      AND captured_at <= ?
-                    ORDER BY captured_at DESC LIMIT 1
-                """, (source_game_id, market_type, at_ts)).fetchone()
+                      AND captured_at = (
+                          SELECT MAX(captured_at) FROM market_observations
+                          WHERE source_game_id=? AND market_type=?
+                            AND captured_at <= ?)
+                    ORDER BY line_value ASC LIMIT 1
+                """, (source_game_id, market_type, source_game_id, market_type, at_ts)).fetchone()
                 return dict(r) if r else None
             finally:
                 conn.close()

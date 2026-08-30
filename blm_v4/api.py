@@ -409,8 +409,11 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         r = conn.execute(
             """SELECT * FROM market_observations
                WHERE source_game_id=? AND market_type='MatchTotal'
-               ORDER BY captured_at DESC LIMIT 1""",
-            (game["source_game_id"],),
+                 AND captured_at = (
+                     SELECT MAX(captured_at) FROM market_observations
+                     WHERE source_game_id=? AND market_type='MatchTotal')
+               ORDER BY line_value ASC LIMIT 1""",
+            (game["source_game_id"], game["source_game_id"]),
         ).fetchone()
         ws_obs = dict(r) if r else None
     ws_line = _f(ws_obs["line_value"]) if ws_obs else None
