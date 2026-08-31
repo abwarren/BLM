@@ -122,10 +122,65 @@ function renderScorecard(d) {
   const mc = d.market_compare || {};
   const recent = d.recent || [];
   const html = [];
+  // ── MARKET VS FAIR — PRIMARY (M009-M2 refined) ────────────────
+  const mvF = d.market_vs_fair || {};
+  const mvc = mvF.checkpoints || [];
+  const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
+  if (mvc.length) {
+    html.push(`<div class="sc-block sc-wide">
+      <h4>MARKET VS FAIR VALUE <span class="muted">· PRIMARY · Market − Fair, signed · clean completed games only</span></h4>
+      <table class="sc-table">
+        <tr><th>Checkpoint</th><th>N</th><th>Avg Market</th><th>Avg Fair</th><th>Avg M-F</th><th>Med M-F</th><th>Under Value %</th><th>Over Value %</th></tr>
+        ${mvc.map((c) => `<tr>
+          <td>${c.checkpoint_pct}%</td>
+          <td class="sc-num">${c.n}</td>
+          <td class="sc-num">${c.avg_market ?? "–"}</td>
+          <td class="sc-num">${c.avg_fair ?? "–"}</td>
+          <td class="sc-num">${sig(c.avg_mf)}</td>
+          <td class="sc-num">${sig(c.median_mf)}</td>
+          <td class="sc-num">${c.under_value_n} / ${c.n}${c.under_value_pct != null ? " (" + (c.under_value_pct * 100).toFixed(0) + "%)" : ""}</td>
+          <td class="sc-num">${c.over_value_n} / ${c.n}${c.over_value_pct != null ? " (" + (c.over_value_pct * 100).toFixed(0) + "%)" : ""}</td>
+        </tr>`).join("")}
+      </table>
+      <table class="sc-table" style="margin-top:8px">
+        <tr><th>Checkpoint</th><th>OVER WIN</th><th>OVER LOSS</th><th>UNDER WIN</th><th>UNDER LOSS</th><th>PUSH</th><th>Posn win rate</th><th>Avg OLV→CLV</th><th>→BLM</th><th>←BLM</th></tr>
+        ${mvc.map((c) => `<tr>
+          <td>${c.checkpoint_pct}%</td>
+          <td class="sc-num">${c.over_win}</td><td class="sc-num">${c.over_loss}</td>
+          <td class="sc-num">${c.under_win}</td><td class="sc-num">${c.under_loss}</td>
+          <td class="sc-num">${c.push_outcome}</td>
+          <td class="sc-num">${c.position_win_rate != null ? (c.position_win_rate * 100).toFixed(0) + "%" : "–"}</td>
+          <td class="sc-num">${c.avg_olv_to_clv ?? "–"}</td>
+          <td class="sc-num">${c.move_toward}</td><td class="sc-num">${c.move_away}</td>
+        </tr>`).join("")}
+      </table>
+    </div>`);
+    const games = mvF.games || [];
+    if (games.length) {
+      html.push(`<div class="sc-block sc-wide">
+        <h4>GAME-LEVEL SCORECARD <span class="muted">· progressive Market vs Fair per clean completed game</span></h4>
+        ${games.map((g) => `<details class="mvf-game" style="margin:4px 0">
+          <summary>${esc(g.home_team || "")} vs ${esc(g.away_team || "")} · OLV ${g.olv ?? "–"} · CLV ${g.clv ?? "–"} · Final ${g.final_total ?? "–"} · vs OLV ${g.outcome_olv ?? "–"} · vs CLV ${g.outcome_clv ?? "–"}</summary>
+          <table class="sc-table">
+            <tr><th>%</th><th>Market</th><th>BLM Fair</th><th>M-F</th><th>Signal</th><th>Actual</th><th>Outcome</th></tr>
+            ${(g.rows || []).map((r) => `<tr>
+              <td>${r.checkpoint_pct}%</td>
+              <td class="sc-num">${r.market ?? "–"}</td>
+              <td class="sc-num">${r.fair ?? "–"}</td>
+              <td class="sc-num">${sig(r.mf)}</td>
+              <td>${r.signal ? esc(r.signal) : "–"}</td>
+              <td class="sc-num">${r.actual ?? "–"}</td>
+              <td>${r.outcome ? esc(r.outcome) : "–"}</td>
+            </tr>`).join("")}
+          </table>
+        </details>`).join("")}
+      </div>`);
+    }
+  }
   // current model performance
   const v = { model_version: d.model_version || "v4-pace-1", ...ver };
   html.push(`<div class="sc-block">
-    <h4>MODEL ${esc(v.model_version || "?")}</h4>
+    <h4>MODEL ${esc(v.model_version || "?")} <span class="muted">· DIAGNOSTIC — prediction-vs-actual accuracy (population: prediction_scores fragment=0)</span></h4>
     <table class="sc-table">
       <tr><td>Predictions</td><td class="sc-num">${v.predictions ?? "–"}</td></tr>
       <tr><td>Completed games</td><td class="sc-num">${v.completed_games ?? "–"}</td></tr>
@@ -148,7 +203,7 @@ function renderScorecard(d) {
   </div>`);
   // MODEL vs MARKET (forensic, M008-SCORE-M1)
   html.push(`<div class="sc-block">
-    <h4>MODEL vs MARKET <span class="muted">(line: ${mc.line_type || "checkpoint"})</span></h4>
+    <h4>MODEL vs MARKET — DIAGNOSTIC <span class="muted">(line: ${mc.line_type || "checkpoint_market"}; population: prediction_scores fragment=0)</span></h4>
     <table class="sc-table">
       <tr><td>Valid comparisons</td><td class="sc-num">${mc.n ?? 0}</td></tr>
       <tr><td>BLM MAE</td><td class="sc-num">${mc.model_mae ?? "–"}</td></tr>
@@ -162,7 +217,7 @@ function renderScorecard(d) {
   </div>`);
   // O/U — names the line type (BLM vs checkpoint market)
   html.push(`<div class="sc-block">
-    <h4>O/U PERFORMANCE <span class="muted">(${mc.ou_line_type || "checkpoint market"})</span></h4>
+    <h4>O/U PERFORMANCE — DIAGNOSTIC <span class="muted">(${mc.ou_line_type || "checkpoint market"}; population: prediction_scores fragment=0)</span></h4>
     <table class="sc-table">
       <tr><td>BLM Over</td><td class="sc-num">${mc.ou_over ?? 0}</td></tr>
       <tr><td>BLM Under</td><td class="sc-num">${mc.ou_under ?? 0}</td></tr>

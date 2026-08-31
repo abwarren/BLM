@@ -825,6 +825,7 @@ def v4_scorecard() -> dict:
         "fixed_checkpoints": sc.fixed_checkpoints(),
         "by_progress": sc.by_progress(),
         "market_compare": sc.market_compare(),
+        "market_vs_fair": sc.market_vs_fair(),
         "recent": sc.recent(25),
     }
 

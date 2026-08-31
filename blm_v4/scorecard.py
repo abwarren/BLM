@@ -1232,6 +1232,15 @@ class Scorecard:
         finally:
             conn.close()
 
+    def market_vs_fair(self) -> dict[str, Any]:
+        """M009-M2 (REFINED): the PRIMARY scorecard section — MARKET VS
+        FAIR aggregation over the immutable checkpoint_market rows."""
+        conn = self._connect()
+        try:
+            return _market_vs_fair_sql(conn)
+        finally:
+            conn.close()
+
     def recent(self, limit: int = 25) -> list[dict[str, Any]]:
         conn = self._connect()
         try:
@@ -1346,6 +1355,131 @@ def _market_history_sql(conn) -> list[dict]:
            ORDER BY source_game_id"""
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _market_vs_fair_sql(conn) -> dict[str, Any]:
+    """M009-M2 (REFINED) — MARKET VS FAIR: the PRIMARY scorecard section.
+
+    Aggregates the immutable checkpoint_market rows (clean completed
+    games only, by table construction) per checkpoint 10..100%.
+
+    Per checkpoint:
+      n, avg_market, avg_fair, avg_mf (SIGNED mean of market-fair),
+      median_mf (signed), abs_mf (mean |M-F|), over/under/push value
+      counts + pct (of market-bearing rows), over_win/over_loss/
+      under_win/under_loss/push_outcome, position_win_rate (pushes
+      excluded from the denominator), avg_olv_to_clv, move_toward/
+      move_away/move_unchanged.
+
+    Game-level scorecard (games[]): per game — id, teams, OLV, CLV,
+    final total, outcome vs OLV and vs CLV, and the progressive
+    table rows[] (checkpoint_pct, market, fair, mf, signal, actual,
+    outcome).
+
+    Honest N: a row with NULL market is excluded from every
+    market-linked stat (n, avg_market, avg_mf, signals, outcomes,
+    movement) but still counts toward avg_fair.  Never fabricated.
+    """
+    has = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint_market'"
+    ).fetchone()
+    if not has:
+        return {"checkpoints": [], "games": []}
+    rows = [dict(r) for r in conn.execute(
+        """SELECT cm.*, g.home_team, g.away_team
+           FROM checkpoint_market cm
+           JOIN games g ON g.source_game_id = cm.source_game_id
+           ORDER BY cm.source_game_id, cm.checkpoint_pct""")]
+    if not rows:
+        return {"checkpoints": [], "games": []}
+
+    def _round2(x):
+        return round(x, 2) if x is not None else None
+
+    # ── per-checkpoint aggregation ────────────────────────────────
+    checkpoints: list[dict[str, Any]] = []
+    for pct in range(10, 101, 10):
+        crows = [r for r in rows if r["checkpoint_pct"] == pct]
+        mrows = [r for r in crows if r["live_market_line"] is not None]
+        n = len(mrows)
+        mfs = [r["market_vs_fair"] for r in mrows]
+        sigs = [r["signal"] for r in mrows if r["signal"] is not None]
+        outs = [r["outcome"] for r in mrows if r["outcome"] is not None]
+        owin = outs.count("OVER_WIN")
+        oloss = outs.count("OVER_LOSS")
+        uwin = outs.count("UNDER_WIN")
+        uloss = outs.count("UNDER_LOSS")
+        push = outs.count("PUSH")
+        pos_denom = owin + oloss + uwin + uloss
+        moves = [r["market_move_toward_blm"] for r in mrows
+                 if r["market_move_toward_blm"] is not None]
+        olvclv = [r["olv_to_clv"] for r in crows if r["olv_to_clv"] is not None]
+        checkpoints.append({
+            "checkpoint_pct": pct,
+            "n": n,
+            "n_fair": len(crows),
+            "avg_market": _round2(sum(r["live_market_line"] for r in mrows) / n)
+                          if n else None,
+            "avg_fair": _round2(sum(r["blm_fair_value"] for r in crows) / len(crows))
+                        if crows else None,
+            "avg_mf": _round2(sum(mfs) / n) if n else None,     # SIGNED
+            "median_mf": _round2(statistics.median(mfs)) if mfs else None,
+            "abs_mf": _round2(sum(abs(m) for m in mfs) / n) if n else None,
+            "over_value_n": sigs.count("OVER_VALUE"),
+            "under_value_n": sigs.count("UNDER_VALUE"),
+            "push_n": sigs.count("PUSH"),
+            "over_value_pct": _round2(sigs.count("OVER_VALUE") / len(sigs))
+                              if sigs else None,
+            "under_value_pct": _round2(sigs.count("UNDER_VALUE") / len(sigs))
+                               if sigs else None,
+            "push_pct": _round2(sigs.count("PUSH") / len(sigs)) if sigs else None,
+            "over_win": owin,
+            "over_loss": oloss,
+            "under_win": uwin,
+            "under_loss": uloss,
+            "push_outcome": push,
+            "position_win_rate": _round2((owin + uwin) / pos_denom)
+                                 if pos_denom else None,
+            "avg_olv_to_clv": _round2(sum(olvclv) / len(olvclv)) if olvclv else None,
+            "move_toward": moves.count("TOWARD"),
+            "move_away": moves.count("AWAY"),
+            "move_unchanged": moves.count("UNCHANGED"),
+        })
+
+    # ── game-level scorecard ───────────────────────────────────────
+    games: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        g = games.setdefault(r["source_game_id"], {
+            "source_game_id": r["source_game_id"],
+            "classification": r["classification"],
+            "home_team": r["home_team"],
+            "away_team": r["away_team"],
+            "olv": None, "clv": None, "final_total": None,
+            "outcome_olv": None, "outcome_clv": None,
+            "rows": [],
+        })
+        if r["opening_line"] is not None:
+            g["olv"] = r["opening_line"]
+        if r["closing_line"] is not None:
+            g["clv"] = r["closing_line"]
+        if r["actual_final_total"] is not None:
+            g["final_total"] = r["actual_final_total"]
+        g["rows"].append({
+            "checkpoint_pct": r["checkpoint_pct"],
+            "market": r["live_market_line"],
+            "fair": r["blm_fair_value"],
+            "mf": r["market_vs_fair"],
+            "signal": r["signal"],
+            "actual": r["actual_final_total"],
+            "outcome": r["outcome"],
+        })
+    for g in games.values():
+        g["outcome_olv"] = _outcome_vs_line(g["final_total"], g["olv"])
+        g["outcome_clv"] = _outcome_vs_line(g["final_total"], g["clv"])
+    return {
+        "checkpoints": checkpoints,
+        "games": sorted(games.values(), key=lambda x: x["source_game_id"]),
+    }
 
 
 def _summary_sql(conn) -> dict[str, Any]:
