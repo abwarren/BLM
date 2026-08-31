@@ -438,6 +438,32 @@ def _series(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _game_checkpoint_market(conn: sqlite3.Connection,
+                            source_game_id: str) -> list[dict]:
+    """Immutable per-checkpoint Market-vs-Fair rows (M009) for the
+    game-detail payload.  Sourced from checkpoint_market (frozen at
+    first write, never rebased).  Empty list when the table has no rows
+    for this game — never fabricated.  NULLs preserved (missing market
+    -> signal/outcome/market_vs_fair NULL)."""
+    has = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint_market'"
+    ).fetchone()
+    if not has:
+        return []
+    rows = conn.execute(
+        """SELECT checkpoint_pct, checkpoint_timestamp, quarter,
+                  opening_line, live_market_line, blm_fair_value,
+                  closing_line, actual_final_total, market_vs_fair,
+                  signal, blm_vs_olv, blm_vs_clv, olv_to_clv,
+                  market_move_toward_blm, outcome
+           FROM checkpoint_market
+           WHERE source_game_id = ?
+           ORDER BY checkpoint_pct ASC""",
+        (source_game_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _analyze_game(game: dict, rows: list[dict], now: datetime,
                   conn: Optional[sqlite3.Connection] = None,
                   with_checkpoints: bool = False) -> dict:
@@ -445,8 +471,9 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
 
     Everything comes from stored, timestamped observations — never
     fabricated.  ``with_checkpoints`` additionally attaches the historical
-    checkpoint table (M007-M4); only the single-game detail route requests
-    it so the /live and /games lists stay lean.
+    checkpoint table (M007-M4) AND the immutable Market-vs-Fair history
+    (M009); only the single-game detail route requests it so the /live
+    and /games lists stay lean.
     """
     scored = [r for r in rows if r.get("home_score") is not None
               and r.get("away_score") is not None]
@@ -615,6 +642,8 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     }
     if with_checkpoints and conn is not None:
         detail["checkpoints"] = _game_checkpoints(conn, game["source_game_id"])
+        detail["market_vs_fair"] = _game_checkpoint_market(
+            conn, game["source_game_id"])
     return detail
 
 
