@@ -383,7 +383,10 @@ class Scorecard:
                             WHERE g.source_game_id = prediction_scores.source_game_id
                               AND (SELECT COUNT(*) FROM snapshots s
                                    WHERE s.game_id = g.id) >= 15
-                              AND {_STARTS_Q1_SQL})
+                              AND {_STARTS_Q1_SQL}
+                              AND NOT EXISTS (SELECT 1 FROM game_quality q
+                                              WHERE q.source_game_id = g.source_game_id
+                                                AND q.status = 'INVALID'))
                         THEN 0 ELSE 1 END""")
                 conn.commit()
             finally:
@@ -630,7 +633,11 @@ class Scorecard:
                         "SELECT final_result_status FROM game_results WHERE source_game_id=?",
                         (g["source_game_id"],),
                     ).fetchone()
-                    if has and has["final_result_status"] != "UNKNOWN":
+                    # M007-M8: re-verify OK + UNKNOWN results against the
+                    # CURRENT quality gate every run — an OK recorded under an
+                    # older, laxer gate must not survive a now-failing history.
+                    # INVALID is final and never rescored (idempotent).
+                    if has and has["final_result_status"] == "INVALID":
                         continue
                     # UNKNOWN rows are re-verified: they may have been recorded
                     # under an older, stricter gate (e.g. quarter=NULL list
@@ -741,16 +748,20 @@ class Scorecard:
             conn = self._connect()
             try:
                 # per-game history completeness: fragment = < 15 snaps OR the
-                # game wasn't captured from its 1st quarter.  Fragments are
-                # scored for diagnostics but EXCLUDED from headline metrics.
+                # game wasn't captured from its 1st quarter OR its tracking
+                # history fails the current quality gate (INVALID).  Fragments
+                # are scored for diagnostics but EXCLUDED from headline metrics.
                 comp = {}
                 for r in conn.execute(
                         f"""SELECT g.source_game_id,
                                   (SELECT COUNT(*) FROM snapshots s
                                    WHERE s.game_id = g.id) AS n,
-                                  {_STARTS_Q1_SQL} AS starts_q1
+                                  {_STARTS_Q1_SQL} AS starts_q1,
+                                  EXISTS (SELECT 1 FROM game_quality q
+                                          WHERE q.source_game_id = g.source_game_id
+                                            AND q.status = 'INVALID') AS bad_quality
                            FROM games g"""):
-                    comp[r["source_game_id"]] = (r["n"], r["starts_q1"])
+                    comp[r["source_game_id"]] = (r["n"], r["starts_q1"], r["bad_quality"])
                 rows = conn.execute(
                     """SELECT p.id AS pid, p.source_game_id, p.classification,
                               p.model_version, p.projected_home, p.projected_away,
@@ -764,8 +775,8 @@ class Scorecard:
                     if r["source_snapshot_at"] >= r["result_at"]:
                         stats["rejected"] += 1
                         continue
-                    n, starts_q1 = comp.get(r["source_game_id"], (0, 0))
-                    fragment = 0 if (n >= 15 and starts_q1) else 1
+                    n, starts_q1, bad_quality = comp.get(r["source_game_id"], (0, 0, 1))
+                    fragment = 0 if (n >= 15 and starts_q1 and not bad_quality) else 1
                     conn.execute(
                         """INSERT INTO prediction_scores (
                             prediction_id, source_game_id, classification, model_version,
@@ -951,7 +962,9 @@ class Scorecard:
     def summary(self) -> dict[str, Any]:
         conn = self._connect()
         try:
-            return _summary_sql(conn)
+            out = _summary_sql(conn)
+            out["eligible_games"] = self._eligible_games_sql(conn)
+            return out
         finally:
             conn.close()
 
@@ -996,6 +1009,48 @@ class Scorecard:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    def eligible_games(self, limit: int = 200) -> list[dict[str, Any]]:
+        """M007-M8 auditability: per-game eligibility trace.
+
+        For every completed-or-flagged game:
+          game_id -> quality status -> result status -> final score ->
+          eligible/ineligible -> predictions used (headline) -> contribution.
+        """
+        conn = self._connect()
+        try:
+            return self._eligible_games_sql(conn, limit)
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _eligible_games_sql(conn, limit: int = 200) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """SELECT g.source_game_id, g.home_team, g.away_team,
+                      COALESCE(q.status, '-') AS quality_status,
+                      r.final_result_status AS result_status,
+                      r.final_home, r.final_away, r.final_total,
+                      (SELECT COUNT(*) FROM snapshots s
+                       WHERE s.game_id = g.id) AS snapshots,
+                      (SELECT COUNT(*) FROM prediction_scores s
+                       WHERE s.source_game_id = g.source_game_id) AS scored_predictions,
+                      (SELECT COUNT(*) FROM prediction_scores s
+                       WHERE s.source_game_id = g.source_game_id AND s.fragment = 0) AS predictions_used,
+                      (SELECT ROUND(AVG(abs_total_error), 2) FROM prediction_scores s
+                       WHERE s.source_game_id = g.source_game_id AND s.fragment = 0) AS contribution_mae,
+                      CASE WHEN r.final_result_status = 'OK'
+                            AND NOT EXISTS (SELECT 1 FROM game_quality q2
+                                            WHERE q2.source_game_id = g.source_game_id
+                                              AND q2.status = 'INVALID')
+                      THEN 1 ELSE 0 END AS eligible
+               FROM games g
+               LEFT JOIN game_results r ON r.source_game_id = g.source_game_id
+               LEFT JOIN game_quality q ON q.source_game_id = g.source_game_id
+               WHERE r.source_game_id IS NOT NULL OR q.source_game_id IS NOT NULL
+               ORDER BY g.source_game_id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # ── SQL aggregations (shared by Scorecard + /api/v4/scorecard) ─────
@@ -1082,13 +1137,21 @@ def _summary_sql(conn) -> dict[str, Any]:
     total["_quality"] = {
         "recorded_predictions": conn.execute(
             "SELECT COUNT(*) c FROM predictions").fetchone()["c"],
+        "headline_predictions": conn.execute(
+            "SELECT COUNT(*) c FROM prediction_scores "
+            "WHERE fragment = 0").fetchone()["c"],
         "completed_games": conn.execute(
             "SELECT COUNT(*) c FROM game_results "
             "WHERE final_result_status='OK'").fetchone()["c"],
         "valid_scored_games": conn.execute(
             "SELECT COUNT(DISTINCT source_game_id) c FROM prediction_scores "
             "WHERE fragment = 0").fetchone()["c"],
-        "valid": conn.execute("SELECT COUNT(*) c FROM game_quality WHERE status='OK'").fetchone()["c"],
+        "valid": conn.execute(
+            "SELECT COUNT(*) c FROM game_results r "
+            "WHERE r.final_result_status='OK' AND NOT EXISTS ("
+            "  SELECT 1 FROM game_quality q "
+            "  WHERE q.source_game_id = r.source_game_id AND q.status='INVALID')"
+        ).fetchone()["c"],
         "invalid": conn.execute("SELECT COUNT(*) c FROM game_quality WHERE status='INVALID'").fetchone()["c"],
         "excluded_games": conn.execute("SELECT COUNT(*) c FROM game_results WHERE final_result_status!='OK'").fetchone()["c"],
         "excluded_reasons": {r["reason"]: r["c"] for r in conn.execute(

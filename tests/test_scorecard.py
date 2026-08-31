@@ -457,6 +457,70 @@ def test_quality_gate_cross_event(tmp_path):
     assert status == "INVALID" and "contamination" in reason
 
 
+# ═══════════ M007-M8: eligibility gate on headline metrics ═══════════
+
+def test_legacy_ok_contaminated_game_zero_headline(tmp_path):
+    """A game with an OK result recorded under an OLDER, laxer gate but
+    whose tracking history FAILS the CURRENT quality rules must contribute
+    ZERO to headline scorecard metrics (MAE/RMSE/etc.).
+
+    Unit of validity = game + complete valid tracking history, not
+    'prediction rows exist' nor 'a final score exists'.
+    """
+    st = _make_store(tmp_path)
+    gid_db = _add_game(st, "9302", "BETUAL_NBA", "Home Virtual", "Away Virtual",
+                       status="ended")
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=20)
+    # 15 snaps from Q1 (fragment=0 by count/Q1) but with an impossible
+    # jump at index 9->10 (+64 home pts in a 72s gap) = contamination.
+    snaps = [
+        (0, 0, 1, "09:00"), (8, 6, 1, "06:00"), (16, 12, 1, "03:00"),
+        (24, 20, 1, "00:00"), (30, 26, 2, "09:00"), (40, 34, 2, "06:00"),
+        (52, 42, 2, "03:00"), (60, 50, 2, "00:00"), (66, 58, 3, "09:00"),
+        (76, 66, 3, "06:00"), (140, 130, 3, "03:00"), (86, 78, 3, "00:00"),
+        (88, 80, 4, "09:00"), (92, 84, 4, "06:00"), (96, 88, 4, "00:00"),
+    ]
+    for i, (hs, as_, q, clock) in enumerate(snaps):
+        _snap(st, gid_db, "9302", "BETUAL_NBA", t0 + timedelta(minutes=i * 1.2),
+              hs, as_, q, clock, 190.0 if i % 3 == 0 else None)
+    sc = Scorecard(tmp_path / "blm.db")
+    # simulate an OK result recorded BEFORE the current quality gate existed
+    conn = sc._connect()
+    conn.execute(
+        "INSERT INTO game_results (source_game_id, classification, final_home,"
+        " final_away, final_total, result_at, final_result_status)"
+        " VALUES ('9302','BETUAL_NBA',96,88,184,?,'OK')",
+        (_iso(t0 + timedelta(minutes=15 * 1.2)),))
+    conn.commit()
+    conn.close()
+    sc.run()
+    conn = sc._connect()
+    try:
+        q = conn.execute(
+            "SELECT status, reason FROM game_quality WHERE source_game_id='9302'"
+        ).fetchone()
+        scored = conn.execute(
+            "SELECT COUNT(*) c FROM prediction_scores WHERE source_game_id='9302'"
+        ).fetchone()["c"]
+        head = conn.execute(
+            "SELECT COUNT(*) c FROM prediction_scores"
+            " WHERE source_game_id='9302' AND fragment=0"
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+    assert q is not None and q["status"] == "INVALID", \
+        f"quality gate must flag the contaminated history, got {q}"
+    assert scored == 0, "an invalid-history game must never be scored"
+    assert head == 0, "an invalid-history game must contribute ZERO headline"
+    summ = sc.summary()
+    qb = summ["versions"]["_quality"]
+    assert qb["invalid"] >= 1
+    # per-game audit trace exposes eligibility
+    audit = {g["source_game_id"]: g for g in summ.get("eligible_games", [])}
+    assert audit["9302"]["eligible"] == 0
+    assert audit["9302"]["predictions_used"] == 0
+
+
 def test_quality_gate_jump_is_gap_aware():
     """A >50pt hop in under 90s is physically impossible (foreign state)
     and rejects; the same hop across a multi-minute capture gap is a

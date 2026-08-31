@@ -163,6 +163,7 @@ function renderScorecard(d) {
     <h4>DATA QUALITY</h4>
     <table class="sc-table">
       <tr><td>Recorded predictions</td><td class="sc-num">${q.recorded_predictions ?? "–"}</td></tr>
+      <tr><td>Headline predictions (valid games)</td><td class="sc-num">${q.headline_predictions ?? "–"}</td></tr>
       <tr><td>Completed games (OK result)</td><td class="sc-num">${q.completed_games ?? "–"}</td></tr>
       <tr><td>Valid scored games</td><td class="sc-num">${q.valid_scored_games ?? "–"}</td></tr>
       <tr><td>Invalid / excluded</td><td class="sc-num">${q.invalid ?? "–"}</td></tr>
@@ -170,6 +171,27 @@ function renderScorecard(d) {
       <tr><td>Reasons</td><td>${Object.entries(q.excluded_reasons || {}).map(([k, n]) => `${esc(k)}: ${n}`).join(", ") || "–"}</td></tr>
     </table>
   </div>`);
+  // M007-M8: per-game eligibility audit — every headline metric is
+  // traceable to game_id -> quality -> result -> eligible -> contribution.
+  const audit = d.summary && d.summary.eligible_games || [];
+  if (audit.length) {
+    html.push(`<div class="sc-block">
+    <h4>GAME ELIGIBILITY (audit)</h4>
+    <table class="sc-table">
+      <tr><th>Game</th><th>Teams</th><th>Result</th><th>Final</th><th>Qual</th><th>Preds</th><th>Contrib MAE</th><th>✓</th></tr>
+      ${audit.map((g) => `<tr>
+        <td class="sc-num">${esc(g.source_game_id)}</td>
+        <td>${esc((g.home_team || "").slice(0, 14))} vs ${esc((g.away_team || "").slice(0, 14))}</td>
+        <td class="sc-num">${esc(g.result_status || "–")}</td>
+        <td class="sc-num">${g.final_home != null ? `${g.final_home}-${g.final_away}` : "–"}</td>
+        <td class="sc-num">${esc(g.quality_status || "–")}</td>
+        <td class="sc-num">${g.predictions_used ?? 0}</td>
+        <td class="sc-num">${g.contribution_mae != null ? g.contribution_mae : "–"}</td>
+        <td class="sc-num">${g.eligible ? "✓" : "✗"}</td>
+      </tr>`).join("")}
+    </table>
+  </div>`);
+  }
   // recent predictions
   if (recent.length) {
     html.push(`<div class="sc-block sc-wide">
