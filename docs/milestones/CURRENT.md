@@ -101,9 +101,47 @@ stale); HIDE = 31 live, 0 ended/stale, count "showing 31 live · hidden
 69"; ended Karsiyaka 30741194 hidden while live 30741844 visible; toggle
 restore = 100 cards back.  197 tests (1 new).
 
-NEXT: M007-M5 — model vs market accuracy by game progress (scorecard
-analytics; market_compare n=0 is honest data state until the first
-WS-fed game completes).
+## M007-M7 (COMPLETE, deployed 599e2d7 + df7998b) — non-live market presentation
+
+Frontend-only.  A non-live game's historical market line is NEVER
+presented as the current live line and NEVER produces a live edge.
+
+- Card (divergenceHTML): six distinct concepts — opening / CURRENT LIVE
+  LINE (only when live AND <= 300s fresh) / LAST OBSERVED (with timestamp
+  + ENDED|STALE) / BLM (historical) / closing.  liveEdge only vs the
+  current live line; ended/stale cards show Edge —.
+- Modal (renderModal): same guard — "Last observed @ ts · ENDED|STALE",
+  "Model total (historical)", "Total edge —" when not live+fresh.
+- No backend/API/storage/model/quality-gate change.  Historical
+  checkpoints and observations immutable.
+
+ROOT CAUSE (proven in audit): the "157.5 vs 186.5" report conflated two
+fixtures — 30741194 (Karsiyaka vs DENIZLI, ENDED, single frozen line
+157.5, model 157.0) and 30741844 (Karsiyaka vs KORFEZ, WS lines incl.
+186.5).  No capture failure: 186.5 was captured 3x for 30741844.  The
+defect was presentation: an ended card rendered "Mkt Total: 157.5 ·
+stale / Edge: -0.5", implying a current market.  Now it shows
+"Last observed 157.5 @ 21:25:21Z · ENDED / BLM (historical) 157.0 /
+Edge —".  30741194 verified unchanged: opening 157.5, closing 157.5,
+model 157.0, live false, age 12958s.
+
+LIVE VERIFIED (browser): ended card 30741376 → Last observed —, BLM
+(historical) 179.6, Edge —; its modal → "Last observed –", "Model total
+(historical) 179.6", "Total edge –", Status ended.  Live card 30742006 →
+Current Live Line 220.5 · ws, Edge -38.1 (sign preserved); its modal →
+"Market total 220.5 (ws)", "Model total 182.4", "Total edge -38.1",
+Status live.  Just-ended-in-window game 30741757 → market shown as
+"Last observed 239.5 @ 00:47:12Z · ENDED" with edge suppressed (handles
+ENDED+FRESH-snapshot edge case).  199 tests (3 new: card + modal
+regressions, RED confirmed each).
+
+OBSERVATION (not fixed, out of scope): 30741757 had NO WS market
+observations after 00:47:12Z while snapshots continued to 02:48Z —
+market-capture refresh gap for that game.  Candidate for a future
+milestone (collector market-refresh coverage audit).
+
+NEXT: M007-M8 — collector market-refresh coverage audit (games with
+snapshots but no recent market observations).
 
 ## COMPLETED
 - 79c4c0d: projection live-score floor at source + single-source api.py +
