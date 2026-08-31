@@ -1,4 +1,4 @@
-# BLM MILESTONE CHECKPOINT — M004 (2026-08-30)
+# BLM MILESTONE CHECKPOINT — M007-M4 (2026-08-31)
 
 ## PROJECT
 BLM v4 (Betting Line Model) — PokerBet virtual-basketball live-score pace
@@ -43,7 +43,36 @@ M007-M3 (COMPLETE, deployed 0960cbe): closing line.
   30741613 (live, line 145.5) closing=None — latest live line NOT closing.
 - opening_line untouched; historical checkpoints untouched; no provider
   substitution.  186 tests green (new test_closing_snapshot_only_when_ended).
-NEXT: M007-M4 — historical checkpoint market values in the detail table.
+M007-M4 (COMPLETE, deployed 8ed6164): historical checkpoint market values
+in the game-detail table.
+- API /api/v4/game/{id} now exposes `checkpoints[]`: per checkpoint —
+  check/label, checkpoint_percent, quarter, predicted_at,
+  source_snapshot_at, blm_prediction (projected_total), market_at_checkpoint
+  (stored frozen predictions.market_total), edge (blm - market), actual_final
+  (game_results, only when verified), error (blm - actual).  Missing market
+  or result = NULL, never fabricated.  /live and /games lists stay lean
+  (checkpoints only on the detail route).
+- Detail modal renders a CHECKPOINTS table (Check/BLM Pred/Market @CP/Edge/
+  Actual/Error) with prediction timestamps + a frozen-semantics footnote.
+- FIXED a real freeze bug the new tests exposed: _record_game only updated
+  its frozen line on checkpoint snapshots (lines observed on non-checkpoint
+  snapshots were invisible) and the WS fallback froze the FIRST observed
+  line forever.  Both quarter and fixed-% paths now share one at-or-before
+  scan `_frozen_market_line`: last snapshot total_line at-or-before T,
+  else LOWEST line of the latest WS MatchTotal batch at-or-before T
+  (event-view parity, same rule as storage.market_observations_before).
+  Later observations never rewrite a checkpoint.
+- Verified live: 30741197 (ended) 11 checkpoints all market=161.5 frozen,
+  actual=182, errors -9.0..-51.9; 30741613 (live) 14 checkpoints, 8 with
+  WS frozen markets that match the raw market_observations batches
+  timestamp-for-timestamp (148.5/146.5/147.5/146.5/142.5/145.5), 6 honest
+  NULL (feed started after those checkpoints), actual/error NULL while live.
+- Tests: 196 pass (10 new: shaped/ordered checkpoints, snapshot-line freeze,
+  WS freeze at-or-before, multi-line batch lowest-line tie-break, rebase
+  immutability, ended actual+error, live nulls, empty game, lean /live,
+  modal markup).
+NEXT: M007-M5 — NOT STARTED, scope to be defined (candidate: checkpoint
+market source/freshness badge in the table, or prematch collector slice).
 
 ## COMPLETED
 - 79c4c0d: projection live-score floor at source + single-source api.py +
