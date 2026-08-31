@@ -1,4 +1,4 @@
-# BLM MILESTONE CHECKPOINT — M009-M1 (2026-08-31)
+# BLM MILESTONE CHECKPOINT — M009-M2 (2026-08-31)
 
 ## M009 — SCORECARD REDESIGN: MARKET VS FAIR VALUE
 
@@ -7,7 +7,45 @@ theme — OLV/CLV/checkpoint disparity — at higher fidelity: per-checkpoint
 Market-vs-Fair as the PRIMARY metric, not a generic model-vs-market
 block).  The M008-SCORE-M2 declaration below is retained as context.
 
-## M009-M1b (COMPLETE, NOT DEPLOYED) — Market-vs-Fair exposed through game detail API
+CURRENT STATE: M009-M1 + M009-M1b COMPLETE, DEPLOYED, LIVE VERIFIED
+(checkpoint_market immutable history + /api/v4/game/{id} market_vs_fair;
+full suite 221 pass; evidence trail docs/milestones/M009-EVIDENCE.md).
+NEXT: M009-M2 — scorecard aggregation (see below).
+
+## M009-M2 (NOT STARTED) — scorecard aggregation
+
+MILESTONE: M009-M2 — scorecard aggregation (directive sections 6-7).
+
+OBJECTIVE: replace the vague MODEL vs MARKET block with the per-checkpoint
+MARKET VS FAIR VALUE table: | Checkpoint | N | Avg Market | Avg Fair |
+Avg M-F | Under Value % | Over Value % | over rows 10..100%.  Avg M-F =
+average(LIVE_MARKET_LINE - BLM_FAIR_VALUE), sign retained.  Plus the
+actual-outcome table per checkpoint (Market | Fair | M-F | Direction |
+Actual | Outcome) answering "when BLM sees +X M-F at P%, how often does
+Under win?"  Honest N per checkpoint (missing market/result excluded,
+never fabricated).  Source: checkpoint_market (clean completed games
+only).
+
+CURRENT STATE: checkpoint_market table populated (deployed), no
+aggregation endpoint/block yet.
+
+GAP: no per-checkpoint avg table, no Under/Over value %, no outcome
+analysis.
+
+ACCEPTANCE: /api/v4/scorecard returns per-checkpoint market-vs-fair
+aggregation with honest N; dashboard renders the table.
+
+TRACER BULLET: one aggregate from real checkpoint_market rows -> API ->
+frontend table, browser-verified.
+
+RED TEST (planned): synthetic rows with known avgs -> aggregation
+function returns exact per-checkpoint stats (sign retained, honest N,
+missing excluded).
+
+NEXT SINGLE ACTION: (authorized) write RED tests for the aggregation
+function, then implement.
+
+## M009-M1b (COMPLETE, DEPLOYED, LIVE VERIFIED) — Market-vs-Fair exposed through game detail API
 
 MILESTONE: M009-M1b — smallest vertical slice completion: the immutable
 per-checkpoint Market-vs-Fair history is now observable end-to-end
@@ -46,7 +84,7 @@ NEXT MILESTONE: M009-M2 — scorecard aggregation (per-checkpoint Avg
 Market / Avg Fair / Avg M-F table + Under/Over value % + outcome
 analysis, honest N per checkpoint).
 
-## M009-M1 (COMPLETE, NOT DEPLOYED) — immutable per-checkpoint Market-vs-Fair history
+## M009-M1 (COMPLETE, DEPLOYED, LIVE VERIFIED) — immutable per-checkpoint Market-vs-Fair history
 
 MILESTONE: M009-M1 — data schema + checkpoint Market-vs-Fair
 calculations.
