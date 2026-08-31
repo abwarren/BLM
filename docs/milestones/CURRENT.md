@@ -7,6 +7,36 @@ theme — OLV/CLV/checkpoint disparity — at higher fidelity: per-checkpoint
 Market-vs-Fair as the PRIMARY metric, not a generic model-vs-market
 block).  The M008-SCORE-M2 declaration below is retained as context.
 
+## M009-M1b (COMPLETE, NOT DEPLOYED) — Market-vs-Fair exposed through game detail API
+
+MILESTONE: M009-M1b — smallest vertical slice completion: the immutable
+per-checkpoint Market-vs-Fair history is now observable end-to-end
+(STORAGE -> API) through the existing game-detail route.
+
+WHAT CHANGED:
+- `blm_v4/api.py`: `_game_checkpoint_market(conn, source_game_id)` reads
+  checkpoint_market rows (ordered by checkpoint_pct); `/api/v4/game/{id}`
+  now returns `market_vs_fair[]` alongside `checkpoints[]` (only on the
+  detail route — /live and /games stay lean).  Each row: checkpoint_pct,
+  checkpoint_timestamp, quarter, opening_line, live_market_line,
+  blm_fair_value, closing_line, actual_final_total, market_vs_fair
+  (signed), signal, blm_vs_olv, blm_vs_clv, olv_to_clv,
+  market_move_toward_blm, outcome.  Empty list when no rows; NULLs
+  preserved (never fabricated).
+- `tests/test_m009_mvf_api.py` (4 tests, RED confirmed): detail exposes
+  rows + both disparity directions / honest NULLs on no-market / live
+  game -> empty / lean payload without table.
+
+TESTS: full suite 221 passed, 0 failed (was 217).
+
+COMMIT: b8df068 (api.py + test).  Pushed with a2fdb38..61929bb earlier.
+
+DEPLOYED: NO — requires blm-server restart; production DB untouched.
+
+NEXT MILESTONE: M009-M2 — scorecard aggregation (per-checkpoint Avg
+Market / Avg Fair / Avg M-F table + Under/Over value % + outcome
+analysis, honest N per checkpoint).
+
 ## M009-M1 (COMPLETE, NOT DEPLOYED) — immutable per-checkpoint Market-vs-Fair history
 
 MILESTONE: M009-M1 — data schema + checkpoint Market-vs-Fair
