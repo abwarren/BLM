@@ -621,6 +621,14 @@ function renderModal(g) {
   const tl = (g.timeline || []).map((e) =>
     `<div class="tl-item"><span class="tl-time">${fmtTime(e.t)}</span><span class="tl-label ${esc(e.type)}">${esc(e.label)}</span></div>`
   ).join("") || '<div class="tl-item"><span class="muted">No events yet</span></div>';
+  const cps = (g.checkpoints || []).map((c) => `<tr>
+    <td><b>${esc(c.label)}</b><div class="muted" style="font-size:9px">${fmtTime(c.predicted_at)}</div></td>
+    <td class="sc-num">${num(c.blm_prediction, 1)}</td>
+    <td class="sc-num">${num(c.market_at_checkpoint, 1)}</td>
+    <td class="sc-num ${c.edge > 0 ? "pos" : c.edge < 0 ? "neg" : ""}">${c.edge != null ? (c.edge > 0 ? "+" : "") + c.edge.toFixed(1) : "–"}</td>
+    <td class="sc-num">${num(c.actual_final, 1)}</td>
+    <td class="sc-num ${c.error != null && c.error < 0 ? "neg" : ""}">${num(c.error, 1)}</td>
+  </tr>`).join("");
   const rawJson = g.raw || g.latest_snapshot || null;
 
   $("mCat").textContent = g.classification || "–";
@@ -697,6 +705,14 @@ function renderModal(g) {
         <div class="m-row"><span class="k">Source</span><span class="v">${esc(g.source)}</span></div>
       `)}
     </div>
+    ${cps.length ? `<div class="m-panel m-wide">
+      <h4>CHECKPOINTS — frozen market at each checkpoint</h4>
+      <table class="sc-table">
+        <tr><th>Check</th><th>BLM Pred</th><th>Market @CP</th><th>Edge</th><th>Actual</th><th>Error</th></tr>
+        ${cps}
+      </table>
+      <div class="muted" style="font-size:10px;margin-top:6px">Market frozen at-or-before each checkpoint — later movement never rewrites historical rows; missing market shown as –.</div>
+    </div>` : ""}
     <div class="timeline"><h4>Live Timeline (from stored snapshots)</h4>${tl}</div>
     ${rawJson ? `<details class="tech-raw"><summary>Technical / Raw Data</summary><pre>${esc(typeof rawJson === "string" ? rawJson : JSON.stringify(rawJson, null, 2))}</pre></details>` : ""}`;
 

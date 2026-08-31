@@ -97,6 +97,71 @@ def _i(v: Any) -> Optional[int]:
     return None if v is None else int(v)
 
 
+def _checkpoint_label(cp: Optional[str], pct: Optional[float]) -> str:
+    """Human label for a stored checkpoint key (q1..q4, final, pctNN)."""
+    if cp and cp.startswith("pct") and cp[3:].isdigit():
+        return f"{int(cp[3:])}%"
+    if cp == "final":
+        return "Final"
+    if cp and cp.startswith("q") and cp[1:].isdigit():
+        return f"Q{cp[1:]}"
+    if pct is not None:
+        return f"{round(pct * 100)}%"
+    return cp or "–"
+
+
+def _game_checkpoints(conn: sqlite3.Connection,
+                      source_game_id: str) -> list[dict]:
+    """Historical checkpoint rows for the game-detail table.
+
+    Each row carries the market line FROZEN at capture time (stored
+    ``predictions.market_total`` — the last verified observation at-or-before
+    the checkpoint's snapshot, never a later line, never the closing line,
+    never reconstructed).  Missing markets stay NULL.  The final result and
+    the per-checkpoint error are attached only when a verified result
+    exists — no result, no error.
+    """
+    # A DB the scorecard has never touched has no checkpoint rows yet.
+    has = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='predictions'"
+    ).fetchone()
+    if not has:
+        return []
+    rows = conn.execute(
+        """SELECT checkpoint, checkpoint_percent, quarter, predicted_at,
+                  source_snapshot_at, projected_total, market_total
+           FROM predictions
+           WHERE source_game_id = ?
+           ORDER BY source_snapshot_at ASC, checkpoint ASC""",
+        (source_game_id,),
+    ).fetchall()
+    res = conn.execute(
+        "SELECT final_total FROM game_results WHERE source_game_id = ?",
+        (source_game_id,),
+    ).fetchone()
+    actual = _f(res["final_total"]) if res else None
+    out: list[dict] = []
+    for r in rows:
+        blm = _f(r["projected_total"])
+        mkt = _f(r["market_total"])
+        out.append({
+            "check": r["checkpoint"],
+            "checkpoint_percent": r["checkpoint_percent"],
+            "label": _checkpoint_label(r["checkpoint"], r["checkpoint_percent"]),
+            "quarter": r["quarter"],
+            "predicted_at": r["predicted_at"],
+            "source_snapshot_at": r["source_snapshot_at"],
+            "blm_prediction": blm,
+            "market_at_checkpoint": mkt,
+            "edge": (round(blm - mkt, 2)
+                     if blm is not None and mkt is not None else None),
+            "actual_final": actual,
+            "error": (round(blm - actual, 2)
+                      if blm is not None and actual is not None else None),
+        })
+    return out
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Analytics (pure functions of snapshot lists)
 # ────────────────────────────────────────────────────────────────────────
@@ -374,8 +439,15 @@ def _series(rows: list[dict]) -> list[dict]:
 
 
 def _analyze_game(game: dict, rows: list[dict], now: datetime,
-                  conn: Optional[sqlite3.Connection] = None) -> dict:
-    """Build the full dashboard payload for one game from its snapshots."""
+                  conn: Optional[sqlite3.Connection] = None,
+                  with_checkpoints: bool = False) -> dict:
+    """Derive the live analytics view for ONE game.
+
+    Everything comes from stored, timestamped observations — never
+    fabricated.  ``with_checkpoints`` additionally attaches the historical
+    checkpoint table (M007-M4); only the single-game detail route requests
+    it so the /live and /games lists stay lean.
+    """
     scored = [r for r in rows if r.get("home_score") is not None
               and r.get("away_score") is not None]
     latest = scored[-1] if scored else (rows[-1] if rows else None)
@@ -468,7 +540,7 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     if step > 1:
         history = history[::step]
 
-    return {
+    detail = {
         "game_id": game["source_game_id"],
         "game_db_id": game["id"],
         "source": game["source"],
@@ -541,6 +613,9 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "foul_correlation": None,
         "history": history,
     }
+    if with_checkpoints and conn is not None:
+        detail["checkpoints"] = _game_checkpoints(conn, game["source_game_id"])
+    return detail
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -783,7 +858,8 @@ def v4_game_detail(game_id: str) -> dict:
         if not game:
             raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found")
         rows = _load_snapshots(conn, game_id, 1000)
-        detail = _analyze_game(dict(game), rows, datetime.now(timezone.utc), conn)
+        detail = _analyze_game(dict(game), rows, datetime.now(timezone.utc),
+                               conn, with_checkpoints=True)
         detail["timeline"] = _timeline_events(rows, game["classification"])
         detail["raw"] = rows[-1] if rows else None
     finally:

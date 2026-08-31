@@ -205,6 +205,42 @@ def _checkpoint_for(quarter: Optional[int], clock: Optional[str],
     return f"q{q}"
 
 
+def _frozen_market_line(conn, source_game_id: str, rows: list[dict],
+                        idx: int) -> Optional[float]:
+    """Latest verified market total AT-OR-BEFORE rows[idx] (inclusive).
+
+    Snapshot (event-view) lines are primary: the last line observed on ANY
+    snapshot up to and including the checkpoint — line moves recorded on
+    non-checkpoint snapshots count.  When NO snapshot line was ever
+    observed (event-view route down), the eu-swarm WS MatchTotal
+    observation at-or-before the checkpoint is the frozen line.
+
+    Never a later observation, never the closing line, never reconstructed
+    from later data, never model-derived.  The WS fallback mirrors
+    storage.market_observations_before: the LOWEST line of the latest
+    batch at-or-before (event-view parity — the feed carries 3 O/U
+    variants per capture; the lowest is the main line).
+    """
+    line: Optional[float] = None
+    for rr in rows[: idx + 1]:
+        if rr.get("total_line") is not None:
+            line = float(rr["total_line"])
+    if line is None:
+        ws = conn.execute(
+            """SELECT line_value FROM market_observations
+               WHERE source_game_id=? AND market_type='MatchTotal'
+                 AND captured_at = (
+                     SELECT MAX(captured_at) FROM market_observations
+                     WHERE source_game_id=? AND market_type='MatchTotal'
+                       AND captured_at <= ?)
+               ORDER BY line_value ASC LIMIT 1""",
+            (source_game_id, source_game_id, rows[idx]["captured_at"]),
+        ).fetchone()
+        if ws and ws["line_value"] is not None:
+            line = float(ws["line_value"])
+    return line
+
+
 def _period_quarter(period_label: Optional[str]) -> Optional[int]:
     """Derive quarter number from a period label ("3rd Quarter" -> 3)."""
     p = (period_label or "").lower()
@@ -401,30 +437,20 @@ class Scorecard:
         n = 0
         rb = 0
         seen: set[str] = set()
-        last_line: Optional[float] = None  # frozen market total at/before this snapshot
         for i, r in enumerate(rows):
             cp = _checkpoint_for(r.get("quarter"), r.get("clock"),
                                  r.get("period_label"))
             if cp is None or cp in seen:
                 continue
             seen.add(cp)
-            # FREEZE the market: the last PokerBet-observed total line at or
-            # before this snapshot — never a later line, never model-derived.
-            # Snapshot lines (event-view) are primary; when the event-view
-            # route is down, the eu-swarm WS feed's MatchTotal observation
-            # at-or-before this snapshot is the frozen line.
-            if r.get("total_line") is not None:
-                last_line = float(r["total_line"])
-            elif last_line is None:
-                ws_obs = conn.execute(
-                    """SELECT line_value FROM market_observations
-                       WHERE source_game_id=? AND market_type='MatchTotal'
-                         AND captured_at <= ?
-                       ORDER BY captured_at DESC LIMIT 1""",
-                    (g["source_game_id"], r["captured_at"]),
-                ).fetchone()
-                if ws_obs and ws_obs["line_value"] is not None:
-                    last_line = float(ws_obs["line_value"])
+            # FREEZE the market: the last PokerBet-observed total line at
+            # or before THIS checkpoint snapshot — never a later line,
+            # never model-derived.  Snapshot lines (event-view) are
+            # primary and may arrive on any snapshot, not only checkpoint
+            # rows; when the event-view route is down, the eu-swarm WS
+            # feed's MatchTotal observation at-or-before is the frozen
+            # line (re-evaluated per checkpoint, so moves are captured).
+            last_line = _frozen_market_line(conn, g["source_game_id"], rows, i)
             # Pin the frozen line into the projection (same value as the
             # snapshot-derived line when both exist — the override only
             # matters when the WS feed supplied the market).
@@ -530,22 +556,9 @@ class Scorecard:
             idx = best[1]
             r = rows[idx]
             # FREEZE the market: last PokerBet-observed line at/before this
-            # checkpoint snapshot — snapshot lines primary, eu-swarm WS
-            # MatchTotal fallback when the event-view route is down.
-            line = None
-            for rr in rows[: idx + 1]:
-                if rr.get("total_line") is not None:
-                    line = float(rr["total_line"])
-            if line is None:
-                ws_obs = conn.execute(
-                    """SELECT line_value FROM market_observations
-                       WHERE source_game_id=? AND market_type='MatchTotal'
-                         AND captured_at <= ?
-                       ORDER BY captured_at DESC LIMIT 1""",
-                    (g["source_game_id"], r["captured_at"]),
-                ).fetchone()
-                if ws_obs and ws_obs["line_value"] is not None:
-                    line = float(ws_obs["line_value"])
+            # checkpoint snapshot — same at-or-before rule as the quarter
+            # checkpoints (snapshot lines primary, eu-swarm WS fallback).
+            line = _frozen_market_line(conn, g["source_game_id"], rows, idx)
             proj = project(rows[: idx + 1], line)
             if proj["home_projection"] is None or proj["away_projection"] is None:
                 stats["skipped_no_snapshot"] += 1
