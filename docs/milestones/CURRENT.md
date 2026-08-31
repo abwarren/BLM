@@ -1,4 +1,4 @@
-# BLM MILESTONE CHECKPOINT — M009-M2 (2026-08-31)
+# BLM MILESTONE CHECKPOINT — M009-M1 (2026-08-31)
 
 ## M009 — SCORECARD REDESIGN: MARKET VS FAIR VALUE
 
@@ -10,40 +10,36 @@ block).  The M008-SCORE-M2 declaration below is retained as context.
 CURRENT STATE: M009-M1 + M009-M1b COMPLETE, DEPLOYED, LIVE VERIFIED
 (checkpoint_market immutable history + /api/v4/game/{id} market_vs_fair;
 full suite 221 pass; evidence trail docs/milestones/M009-EVIDENCE.md).
-NEXT: M009-M2 — scorecard aggregation (see below).
 
-## M009-M2 (NOT STARTED) — scorecard aggregation
+NEXT: **M009-M2 is ON HOLD — user directive (2026-08-31): "Do not
+implement M009-M2".  Do NOT start M2 without explicit authorization.**
+Open follow-ups pending direction: (a) M009-M2 scorecard aggregation
+(sections 6-7); (b) M009 §18 fixture-integrity regression test — the
+Karsiyaka/Denizli vs Karsiyaka/Korfez conflation (30741194 vs 30741844)
+is NOT yet encoded as an automated test (currently only in docs/comments).
 
-MILESTONE: M009-M2 — scorecard aggregation (directive sections 6-7).
+## M009-M2 (HOLD — user directive, do not implement) — scorecard aggregation
 
-OBJECTIVE: replace the vague MODEL vs MARKET block with the per-checkpoint
-MARKET VS FAIR VALUE table: | Checkpoint | N | Avg Market | Avg Fair |
-Avg M-F | Under Value % | Over Value % | over rows 10..100%.  Avg M-F =
-average(LIVE_MARKET_LINE - BLM_FAIR_VALUE), sign retained.  Plus the
-actual-outcome table per checkpoint (Market | Fair | M-F | Direction |
-Actual | Outcome) answering "when BLM sees +X M-F at P%, how often does
-Under win?"  Honest N per checkpoint (missing market/result excluded,
-never fabricated).  Source: checkpoint_market (clean completed games
-only).
+CANCELLED/HOLD 2026-08-31 by user: "Do not implement M009-M2".  Kept
+here as the declared plan so it is not lost; DO NOT begin without
+explicit go.
 
-CURRENT STATE: checkpoint_market table populated (deployed), no
-aggregation endpoint/block yet.
-
-GAP: no per-checkpoint avg table, no Under/Over value %, no outcome
-analysis.
-
-ACCEPTANCE: /api/v4/scorecard returns per-checkpoint market-vs-fair
-aggregation with honest N; dashboard renders the table.
-
-TRACER BULLET: one aggregate from real checkpoint_market rows -> API ->
-frontend table, browser-verified.
-
-RED TEST (planned): synthetic rows with known avgs -> aggregation
-function returns exact per-checkpoint stats (sign retained, honest N,
-missing excluded).
-
-NEXT SINGLE ACTION: (authorized) write RED tests for the aggregation
-function, then implement.
+MILESTONE (declared, NOT STARTED): M009-M2 — scorecard aggregation
+(directive sections 6-7).  OBJECTIVE: replace the vague MODEL vs MARKET
+block with the per-checkpoint MARKET VS FAIR VALUE table: | Checkpoint |
+N | Avg Market | Avg Fair | Avg M-F | Under Value % | Over Value % |
+over rows 10..100%.  Avg M-F = average(LIVE_MARKET_LINE - BLM_FAIR_VALUE),
+sign retained.  Plus actual-outcome table per checkpoint (Market | Fair |
+M-F | Direction | Actual | Outcome) answering "when BLM sees +X M-F at
+P%, how often does Under win?"  Honest N per checkpoint.  Source:
+checkpoint_market (clean completed games only).  GAP: no per-checkpoint
+avg table / Under-Over value % / outcome analysis.  ACCEPTANCE:
+/api/v4/scorecard returns per-checkpoint market-vs-fair aggregation with
+honest N; dashboard renders the table.  TRACER BULLET: one aggregate
+from real checkpoint_market rows -> API -> frontend table, browser-
+verified.  RED TEST (planned): synthetic rows with known avgs ->
+aggregation function returns exact per-checkpoint stats (sign retained,
+honest N, missing excluded).
 
 ## M009-M1b (COMPLETE, DEPLOYED, LIVE VERIFIED) — Market-vs-Fair exposed through game detail API
 
