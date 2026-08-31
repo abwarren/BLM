@@ -1,4 +1,4 @@
-# BLM MILESTONE CHECKPOINT — M009-M2 (REFINED) (2026-08-31)
+# BLM MILESTONE CHECKPOINT — M009-M3 (2026-08-31)
 
 ## M009 — SCORECARD REDESIGN: MARKET VS FAIR VALUE
 
@@ -7,60 +7,63 @@ theme — OLV/CLV/checkpoint disparity — at higher fidelity: per-checkpoint
 Market-vs-Fair as the PRIMARY metric, not a generic model-vs-market
 block).  The M008-SCORE-M2 declaration below is retained as context.
 
-CURRENT STATE: M009-M1 + M009-M1b + M009-M2 (REFINED) COMPLETE, DEPLOYED,
-LIVE VERIFIED.  checkpoint_market immutable history; /api/v4/game/{id}
-market_vs_fair; /api/v4/scorecard market_vs_fair aggregation (per-
-checkpoint avg/median signed M-F, value %, outcomes, position win rate,
-OLV->CLV, market movement) + game-level scorecard; dashboard MARKET VS
-FAIR VALUE primary (Model MAE demoted to labelled DIAGNOSTIC).  §18
-fixture-integrity regression in place.  Full suite 233 pass.  Evidence
-trail docs/milestones/M009-EVIDENCE.md.
+CURRENT STATE: M009-M1 + M1b + M2 (REFINED) + M3 COMPLETE, DEPLOYED,
+LIVE VERIFIED.  checkpoint_market immutable history with market
+timestamps; LIVE/STALE/MISSING classification (300s threshold,
+configurable); STALE DIFFERENTIAL never a live edge; per-checkpoint
+aggregation + game-level scorecard + market_freshness section; dashboard
+MARKET VS FAIR primary.  §18 fixture-integrity regression in place.
+Full suite 239 pass.  Evidence docs/milestones/M009-EVIDENCE.md.
 
-NEXT: **M009-M3 — OLV/CLV relationship analysis / market-convergence
-stats.  Do NOT start without explicit authorization.**
+NEXT: **M009-M4 — frontend consumption: dashboard MARKET FRESHNESS /
+LIVE EDGE STATUS (directive sections 17, 20).  Do NOT start without
+explicit authorization.**
 
-## M009-M2 (REFINED) (COMPLETE, DEPLOYED, LIVE VERIFIED) — MARKET VS FAIR PRIMARY SCORECARD
+## M009-M3 (COMPLETE, DEPLOYED, LIVE VERIFIED) — MARKET FRESHNESS LAYER
 
-MILESTONE: M009-M2 (REFINED) — the refinement directive ("Market vs Fair
-is the primary scorecard") IS the M2 spec; it superseded the earlier M2
-hold.  Commit b6798f2 + docs commit.
+MILESTONE: M009-M3 — market freshness (directive sections 2-5, 22, 24).
+Commit d656680 + docs commit.
 
-OBJECTIVE: per-checkpoint (10..100%) aggregation over checkpoint_market:
-N, avg/median signed M-F (sign retained), abs M-F, OVER/UNDER/PUSH value
-% (with N), OVER/UNDER WIN/LOSS, position win rate (pushes excluded),
-avg OLV->CLV, market moved TOWARD/AWAY/UNCHANGED.  Game-level scorecard:
-per clean game OLV/CLV/final + outcome vs OLV/CLV + progressive table.
-Headline redesign: MARKET VS FAIR primary; Model MAE / Market MAE /
-model-beat-market demoted to labelled DIAGNOSTIC (population:
-prediction_scores fragment=0; line: checkpoint_market).
+OBJECTIVE: persist the frozen live line's market_timestamp; compute
+market_age_seconds; classify LIVE/STALE/MISSING (threshold = existing
+system definition 300s, configurable via BLM_MARKET_STALE_SECONDS);
+freshness buckets; STALE DIFFERENTIAL never counted as LIVE EDGE;
+blm_market_diff = BLM - market (positive = BLM higher).
 
-WHAT WAS TRACED: real checkpoint_market rows -> _market_vs_fair_sql ->
-/api/v4/scorecard market_vs_fair -> dashboard MARKET VS FAIR VALUE block.
+WHAT WAS TRACED: synthetic fresh + stale + no-market games ->
+record_checkpoint_market -> market_timestamp/age/status -> API game
+detail + scorecard aggregation (n_live/n_stale/n_missing,
+market_freshness) -> verified LIVE_EDGE vs STALE_DIFFERENTIAL.
 
-WHAT CHANGED: scorecard.py (_market_vs_fair_sql + market_vs_fair()),
-api.py (route), dashboard.js (primary block + game-level + DIAGNOSTIC
-relabels), tests/test_m009_mvf_aggregation.py (6), tests/
-test_m009_mvf_frontend.py (2).
+WHAT CHANGED: scorecard.py (schema column + _ensure_cm_market_timestamp
+migration + _frozen_market_obs (line,ts) refactor + freshness helpers +
+aggregation splits + market_freshness section), api.py (game detail
+freshness fields), tests/test_m009_market_freshness.py (6).
 
-TESTS: RED confirmed each (6 + 2); one RED finding was my test
-expectation (fair depends on market via 70/30 blend) — aggregation was
-correct, tests rewritten against raw rows + invariants.  Full suite 233
-passed, 0 failed (225 + 8).
+TESTS: RED confirmed (6 collection errors).  One real finding: initial
+_frozen_market_obs refactor returned FIRST line at-or-before (bug);
+fixed to LAST (original semantic).  Boundary ==300s = LIVE (existing
+dashboard definition).  MUTATION-PROVEN: staleness guard neutered ->
+2 tests fail; restored (note: git checkout reverted uncommitted M3
+patches too — re-applied, verified).  Full suite 239 passed, 0 failed
+(233 + 6).
 
-LIVE VERIFIED (real production data, /api/v4/scorecard): pct50 — n=440,
-avg_market 191.13, avg_fair 183.2, avg_mf +8.62 (signed), median 7.5,
-under_value 293/440 = 67%, under_win 171 / under_loss 122, over_win 75 /
-over_loss 72, position_win_rate 56%, avg_olv_to_clv +3.09, move_toward
-223 / move_away 195.  4615 checkpoint rows served.  Served dashboard.js
-carries MARKET VS FAIR VALUE / GAME-LEVEL SCORECARD / MODEL vs MARKET —
-DIAGNOSTIC markers.
+LIVE VERIFIED (real production data): /api/v4/game/30749637 all 10 rows
+market_status=MISSING (pre-M3 frozen rows — honest, never fabricated);
+/api/v4/scorecard pct50 n=445 n_live=0 n_stale=0 n_missing=467;
+market_freshness buckets present.  New-game LIVE/STALE rows populate as
+the 60s loop records future completions.  Ad-hoc hermes-verify-m3.py
+(deleted): G-MIX LIVE age 0 LIVE_EDGE; G-STALE STALE age 690s
+STALE_DIFFERENTIAL — NOT the L5 basis.
 
-COMMIT: b6798f2 (code + tests) + docs commit (this).  Pushed.
+COMMIT: d656680 (code + tests) + docs commit (this).  Pushed.
 
-KNOWN LIMITATION: position win rate excludes pushes by design (reported
-separately); value % denominators = market-bearing rows only (honest N).
+KNOWN LIMITATION: pre-M3 rows are honestly MISSING (no timestamp
+recorded at freeze time); LIVE/STALE stats accrue only for games
+recorded after this deploy.  market_freshness age-bucket section has
+real data only once new completions land.
 
-NEXT MILESTONE: M009-M3 — OLV/CLV relationship analysis / convergence
+NEXT MILESTONE: M009-M4 — dashboard MARKET FRESHNESS / LIVE EDGE STATUS
 (awaiting explicit go).
 
 ## M009-M1b (COMPLETE, DEPLOYED, LIVE VERIFIED) — Market-vs-Fair exposed through game detail API

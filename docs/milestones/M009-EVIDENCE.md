@@ -38,6 +38,60 @@ VERIFICATION:
 
 ---
 
+## M009-M3 — MARKET FRESHNESS LAYER (COMPLETE, d656680)
+
+Directive sections 2-5, 22, 24.  Every frozen market line now carries
+its OBSERVATION TIMESTAMP so the system distinguishes LIVE / STALE /
+MISSING and NEVER treats a stale differential as a live edge.
+
+WHAT CHANGED:
+- checkpoint_market gains `market_timestamp` (frozen line's observation
+  time — last carrying snapshot's captured_at, or WS captured_at).
+  Idempotent ALTER migration (_ensure_cm_market_timestamp); old rows
+  keep NULL = honest missing, never fabricated.
+- Helpers: `_frozen_market_obs` (line, ts) refactor (preserves frozen-
+  line semantics — M1 regression suite green), MARKET_STALE_SECONDS =
+  existing dashboard definition (300s, configurable via
+  BLM_MARKET_STALE_SECONDS), `_market_age_seconds` (checkpoint_ts -
+  market_ts, clamped >=0), `_market_status` (LIVE <= 300s | STALE |
+  MISSING), `_freshness_bucket` (0-10/10-30/30-60/60-120/120-300/300+s),
+  `_edge_class` (LIVE_EDGE only when LIVE; STALE -> STALE_DIFFERENTIAL).
+- `blm_market_diff` = BLM - market (positive = BLM higher; the exact
+  negation of M009's market_vs_fair — both exposed, never merged).
+- Aggregation: per-checkpoint n_live/n_stale/n_missing, live vs stale
+  outcome counts, avg_market_age; `market_freshness` age-bucket x
+  outcome section.
+- API game detail: rows carry market_age_seconds / market_status /
+  freshness_bucket / edge_class / blm_market_diff (lazy import, guarded
+  on the new column for pre-migration DBs).
+
+VERIFICATION:
+- RED: 6 tests failed on collection (imports missing) — RED confirmed.
+- One real finding: my first _frozen_market_obs returned the FIRST line
+  at-or-before (refactor bug); fixed to LAST (the original semantic).
+  Boundary: ==300s is LIVE (matches the existing `age <= 300`
+  dashboard definition).
+- MUTATION-PROVEN: neutering the staleness guard (`LIVE if True`)
+  fails 2 tests (stale counted as live).  Restored (note: git checkout
+  reverted the uncommitted M3 patches too — re-applied, verified).
+- Full suite: 239 passed, 0 failed (233 + 6).
+- Ad-hoc hermes-verify-m3.py (deleted): G-MIX pct10 LIVE age 0
+  LIVE_EDGE diff +10.4 (BLM higher); G-STALE pct20 STALE age 690s
+  300s+ STALE_DIFFERENTIAL; scorecard pct50 n=2 live=1 stale=1
+  missing=1.  NOT the L5 basis.
+- DEPLOYED: blm-server + blm-collector restarted; LIVE VERIFIED on
+  real production data: /api/v4/game/30749637 all 10 rows
+  market_status=MISSING (pre-M3 frozen rows — honest, never
+  fabricated); /api/v4/scorecard pct50 n=445 n_live=0 n_stale=0
+  n_missing=467; market_freshness buckets present.  New-game LIVE/
+  STALE rows populate as the 60s loop records future completions.
+- Commits: d656680 (code+tests) + docs commit (this).  Pushed.
+
+NEXT: M009-M4 — frontend consumption (dashboard MARKET FRESHNESS /
+LIVE EDGE STATUS per §17, §20) — after explicit go.
+
+---
+
 ## M009-M2 (REFINED) — MARKET VS FAIR PRIMARY SCORECARD (COMPLETE, b6798f2)
 
 The refinement directive ("Market vs Fair is the primary scorecard")
@@ -180,12 +234,13 @@ populates checkpoint_market automatically.  No manual DB writes.
 - M009-M1  : COMPLETE, DEPLOYED, LIVE VERIFIED  (commits a891104..ffa5f87)
 - M009-M1b : COMPLETE, DEPLOYED, LIVE VERIFIED  (commit b8df068)
 - M009-M2 (REFINED): COMPLETE, DEPLOYED, LIVE VERIFIED  (commit b6798f2)
-- Full suite 233 passed, 0 failed at L3 (fresh).
+- M009-M3  : COMPLETE, DEPLOYED, LIVE VERIFIED  (commit d656680)
+- Full suite 239 passed, 0 failed at L3 (fresh).
 - Ad-hoc synthetic verifications (hermes-verify-* scripts, /tmp,
   deleted after run) used during development; NOT the evidence basis
   for L4/L5 — those are the running service + real DB.
 
 ## NEXT
 
-M009-M3 — OLV/CLV relationship analysis / market-convergence stats
-(after explicit go).  M009-M2 was the refinement directive's scope.
+M009-M4 — frontend consumption: dashboard MARKET FRESHNESS / LIVE EDGE
+STATUS (sections 17, 20).  After explicit go.
