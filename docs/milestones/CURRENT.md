@@ -74,6 +74,37 @@ in the game-detail table.
 NEXT: M007-M5 — NOT STARTED, scope to be defined (candidate: checkpoint
 market source/freshness badge in the table, or prematch collector slice).
 
+## M007-M6 (COMPLETE, deployed 74adfdf) — stale/ended visibility filter
+
+Presentation-only dashboard control: [SHOW ALL] / [SHOWING LIVE] toggle in
+the header filters.  Default SHOW ALL; toggling hides games with
+status='ended' OR not live (existing API freshness: live = latest
+snapshot <= 15 min) — rendered from the same /api/v4/live payload;
+nothing is deleted/mutated/excluded in the backend; hidden cards restore
+on toggle.  Counts derived from the rendered dataset (showing X live ·
+hidden Y).  Session-local state.
+
+CONTEXT — market-integrity investigation (PROVEN): the visible "157.5
+stale market" was NOT a capture failure.  30741194 (Karsiyaka vs Denizli,
+previous cycle) is ENDED with its single line 157.5 frozen as
+opening/current/closing — an honest ended card.  The CURRENT Karsiyaka
+game is 30741844 (vs Korfez), live, whose WS batches contain
+182.5/184.5/186.5 etc.; API serves 182.5 (lowest of latest batch, M006
+convention) @ age < 3 min, model 180.5, edge -2.0.  The directive's
+"157.0 - 186.5 = -29.5" conflated two different fixtures.  The grid mixed
+the ended card in with live games, making it read as stale "current
+market".  This filter makes ended/stale cards hideable; the API was
+already honest.
+
+VERIFIED LIVE (browser): SHOW ALL = 100 cards (33 live/27 ended/40
+stale); HIDE = 31 live, 0 ended/stale, count "showing 31 live · hidden
+69"; ended Karsiyaka 30741194 hidden while live 30741844 visible; toggle
+restore = 100 cards back.  197 tests (1 new).
+
+NEXT: M007-M5 — model vs market accuracy by game progress (scorecard
+analytics; market_compare n=0 is honest data state until the first
+WS-fed game completes).
+
 ## COMPLETED
 - 79c4c0d: projection live-score floor at source + single-source api.py +
   collector honesty (no explosion-split, identity guard, audit table). 167 tests.
