@@ -357,8 +357,6 @@ function winprobHTML(g) {
 function divergenceHTML(g) {
   const m = g.market || {}, mdl = g.model || {};
   const mkt = m.total_line, mod = mdl.expected_total;
-  const hasT = mkt != null && mod != null;
-  const tEdge = hasT ? +(mod - mkt).toFixed(1) : null;
   const mSpr = m.spread, modSpr = mdl.expected_margin;
   const hasS = mSpr != null && modSpr != null;
   const sEdge = hasS ? +(modSpr - mSpr).toFixed(1) : null;
@@ -368,34 +366,48 @@ function divergenceHTML(g) {
     <div class="line-cell"><div class="lab">${lab}</div>
       <div class="val">${num(v, 1)}${meta ? `<span class="muted" style="font-size:10px"> ${meta}</span>` : ""}</div>
     </div>`;
-  // Five distinct concepts — never conflated:
-  //   PREMATCH BLM (not stored → "–", never fabricated)
-  //   OPENING LINE  (first verified PokerBet total — immutable)
-  //   CURRENT LIVE LINE (latest verified PokerBet total)
-  //   LIVE BLM PREDICTION (model.expected_total, live)
+  // M007-M7 — six distinct concepts, never conflated:
+  //   PREMATCH BLM   (not stored → "–", never fabricated)
+  //   OPENING LINE   (first verified PokerBet total — immutable)
+  //   CURRENT LIVE LINE (latest verified PokerBet total — ONLY when the
+  //                      game is live AND the observation is fresh)
+  //   LAST OBSERVED  (historical line w/ timestamp + ENDED/STALE — shown
+  //                   for ended/stale games, never presented as current)
+  //   BLM PREDICTION (model.expected_total; "historical" when not live)
+  //   CLOSING LINE   (frozen at end)
+  // liveEdge is ONLY ever computed against the CURRENT live line — an
+  // ended/stale game shows no live trading signal.
+  const isLive = g.live === true;
+  const age = m.total_line_age_s;
+  const fresh = age != null && age <= 300;        // existing freshness threshold
+  const liveLine = isLive && fresh ? mkt : null;
+  const lastObs = liveLine == null && mkt != null ? mkt : null;
+  const statusWord = g.status === "ended" ? "ENDED" : "STALE";
   const prematch = "–";
   const opening = m.opening_line;
   const openingMeta = m.opening_line_at ? `@ ${(m.opening_line_at || "").slice(11, 19)}Z` : "";
-  const live = mkt;
-  const liveMeta = m.total_line_age_s != null
-    ? `${m.total_line_age_s > 300 ? "· stale" : "· live"}${m.market_source ? ` · ${m.market_source}` : ""}`
+  const liveMeta = m.market_source ? ` · ${m.market_source}` : "";
+  const lastObsMeta = lastObs != null
+    ? `${m.total_line_at ? `@ ${(m.total_line_at || "").slice(11, 19)}Z` : ""} · ${statusWord}`
     : "";
   const closing = m.closing_line;
   const closingMeta = m.closing_line_at ? `@ ${(m.closing_line_at || "").slice(11, 19)}Z` : "";
+  const liveEdge = liveLine != null && mod != null ? +(mod - liveLine).toFixed(1) : null;
   return `
     <div class="divergence">
       <div class="divergence-title">Market vs Model</div>
       <div class="line-grid">
         ${lineRow("Prematch BLM", null, prematch)}
         ${lineRow("Opening Line", opening, openingMeta)}
-        ${lineRow("Current Live Line", live, liveMeta)}
-        ${lineRow("Live BLM Prediction", mod, m.total_line_age_s != null ? (m.total_line_age_s > 300 ? "· stale mkt" : "· live mkt") : "")}
+        ${lineRow("Current Live Line", liveLine, liveLine != null ? liveMeta : "")}
+        ${lineRow("Last observed", lastObs, lastObsMeta)}
+        ${lineRow(isLive ? "Live BLM Prediction" : "BLM (historical)", mod, liveEdge != null ? "· live mkt" : "")}
         ${lineRow("Closing Line", closing, closingMeta)}
       </div>
       <div class="div-row">
-        <div><div class="lab">Mkt Total</div><div class="val">${num(mkt, 1)}${m.total_line_age_s != null ? `<span class="muted" style="font-size:10px"> ${m.total_line_age_s > 300 ? "· stale" : "· live"}</span>` : ""}${m.market_source === "ws" ? `<span class="muted" style="font-size:10px"> · ws</span>` : ""}</div></div>
+        <div><div class="lab">${isLive ? "Mkt Total" : "Last observed"}</div><div class="val">${num(mkt, 1)}${lastObs != null ? `<span class="muted" style="font-size:10px"> · ${statusWord}</span>` : ""}${liveLine != null && m.market_source === "ws" ? `<span class="muted" style="font-size:10px"> · ws</span>` : ""}</div></div>
         <div><div class="lab">Model Total</div><div class="val">${num(mod, 1)}</div></div>
-        <div><div class="lab">Edge</div><div class="edge ${edgeCls(tEdge)}">${edgeSym(tEdge)}</div></div>
+        <div><div class="lab">Edge</div>${liveEdge != null ? `<div class="edge ${edgeCls(liveEdge)}">${edgeSym(liveEdge)}</div>` : `<div class="edge flat">–</div>`}</div>
       </div>
       ${hasS ? `<div class="div-row" style="margin-top:6px">
         <div><div class="lab">Mkt Spread</div><div class="val">${num(mSpr, 1)}</div></div>

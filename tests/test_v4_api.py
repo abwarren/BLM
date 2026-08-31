@@ -164,6 +164,23 @@ def test_dashboard_live_only_toggle_present(client):
     assert "g.status !== \"ended\"" in js
 
 
+def test_dashboard_nonlive_market_not_presented_as_current(client):
+    """M007-M7: an ended/stale game's historical market line must NEVER be
+    presented as the current live line with a live trading edge.
+
+    Requirement (for !live or stale):
+      Current Live Line: —
+      Last observed: 157.5 @ HH:MM:SSZ · ENDED
+      BLM (historical): 157.0
+      Edge: —  (suppressed — no live signal against a non-current line)
+    """
+    js = client.get("/static/dashboard.js").text
+    assert "Last observed" in js          # historical line explicitly labeled
+    assert "BLM (historical)" in js       # no "live prediction" claim when ended
+    assert "liveLine" in js               # current line only when live + fresh
+    assert "liveEdge" in js               # edge only ever vs the current live line
+
+
 def test_dashboard_production_ui_has_no_raw_debug(client):
     """Production dashboard must not surface RAW/DEBUG UI at all."""
     html = client.get("/").text
