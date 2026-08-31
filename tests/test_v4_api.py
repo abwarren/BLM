@@ -153,6 +153,17 @@ def test_dashboard_served_at_root(client):
     assert "dashboard.js" in resp.text
 
 
+def test_dashboard_live_only_toggle_present(client):
+    """M007-M6: the dashboard must offer a SHOW ALL / SHOWING LIVE
+    toggle (presentation-only filter for stale/ended games)."""
+    html = client.get("/").text
+    assert 'id="liveToggle"' in html
+    js = client.get("/static/dashboard.js").text
+    assert "hideNonLive" in js
+    assert "SHOWING LIVE" in js
+    assert "g.status !== \"ended\"" in js
+
+
 def test_dashboard_production_ui_has_no_raw_debug(client):
     """Production dashboard must not surface RAW/DEBUG UI at all."""
     html = client.get("/").text

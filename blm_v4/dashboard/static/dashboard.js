@@ -16,6 +16,7 @@ const state = {
   cards: new Map(),        // game_id -> {el, spark}
   modalGameId: null,
   modalCharts: {},
+  hideNonLive: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -535,8 +536,15 @@ function renderCards(payload) {
   const games = (payload.games || []).filter(
     (g) => !state.filter || g.classification === state.filter,
   );
+  // M007-M6: presentation-only filter — hide ended/stale games without
+  // touching the backend dataset.  "Hide stale and ended" = status ended
+  // OR not live (existing API freshness: live = latest snapshot <= 15 min).
+  const visible = state.hideNonLive
+    ? games.filter((g) => g.live === true && g.status !== "ended")
+    : games;
+  syncLiveToggle(games.length, visible.length);
   const seen = new Set();
-  for (const g of games) {
+  for (const g of visible) {
     seen.add(g.game_id);
     let card = state.cards.get(g.game_id);
     if (!card) {
@@ -838,9 +846,26 @@ async function refresh() {
 
 /* ── Wiring ──────────────────────────────────────────────── */
 
+function syncLiveToggle(total, visible) {
+  const btn = $("liveToggle");
+  if (!btn) return;
+  const on = state.hideNonLive;
+  btn.textContent = on ? "SHOWING LIVE" : "SHOW ALL";
+  btn.classList.toggle("active", on);
+  btn.dataset.livefilter = on ? "live" : "all";
+  const cnt = $("liveCount");
+  if (cnt) cnt.textContent = on ? `showing ${visible} live · hidden ${total - visible}` : "";
+}
+
 $("filters").addEventListener("click", (ev) => {
   const btn = ev.target.closest(".filter");
   if (!btn) return;
+  // M007-M6 live/stale toggle (independent of classification filter)
+  if (btn.dataset.livefilter !== undefined) {
+    state.hideNonLive = !state.hideNonLive;
+    renderCards(state.lastPayload || { games: state.games });
+    return;
+  }
   document.querySelectorAll(".filter").forEach((f) => f.classList.remove("active"));
   btn.classList.add("active");
   state.filter = btn.dataset.filter || "";

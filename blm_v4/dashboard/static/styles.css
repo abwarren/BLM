@@ -60,6 +60,7 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
 .filters { display: flex; gap: 6px; align-items: center; }
+.filter-sep { width: 1px; height: 18px; background: var(--border2); margin: 0 4px; opacity: .6; }
 .filter {
   font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
   padding: 5px 12px; border-radius: 6px; cursor: pointer;
