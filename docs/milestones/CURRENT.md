@@ -61,7 +61,7 @@ LIVE EVIDENCE: NONE YET — user denied DB access this session (read-only
 diagnostics and copy-tracer both blocked).  No production writes
 happened; the running blm-server does not have this code.
 
-COMMIT: <pending>
+COMMIT: a891104 (scorecard.py + tests + this record)
 
 DEPLOYED: NO — requires blm-server restart + a scorecard run.  Until
 then no checkpoint_market rows exist in production.
