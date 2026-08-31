@@ -64,6 +64,49 @@
     </div>
   </section>
 
+  <!-- ═══════════ EVENT DATASET (M009-M5, inspection) ═══════════ -->
+  <section class="scorecard" id="eventsSection">
+    <button class="scorecard-toggle" id="eventsToggle" aria-expanded="false">
+      <span class="scorecard-title">EVENT DATASET</span>
+      <span class="scorecard-sub" id="eventsSub">scorecard events · inspection only</span>
+      <span class="scorecard-chev">▾</span>
+    </button>
+    <div class="scorecard-body" id="eventsBody" hidden>
+      <div class="ev-bar" id="eventsFilters">
+        <select class="evctl" id="evDir" title="Direction">
+          <option value="">DIR: ALL</option>
+          <option value="BLM_OVER">BLM_OVER</option>
+          <option value="BLM_UNDER">BLM_UNDER</option>
+        </select>
+        <select class="evctl" id="evFresh" title="Market freshness">
+          <option value="">FRESH: ALL</option>
+          <option value="LIVE">LIVE</option>
+          <option value="STALE">STALE</option>
+          <option value="MISSING">MISSING</option>
+        </select>
+        <select class="evctl" id="evCp" title="Checkpoint">
+          <option value="">CP: ALL</option>
+          <option value="25">25%</option>
+          <option value="50">50%</option>
+          <option value="75">75%</option>
+          <option value="100">100%</option>
+        </select>
+        <input class="evctl" id="evMinDiff" type="number" step="0.5" placeholder="min |diff|" title="Minimum absolute diff">
+        <input class="evctl" id="evGame" type="text" placeholder="game / team…" title="Filter by game or team">
+        <select class="evctl" id="evLimit" title="Row limit">
+          <option value="200" selected>200 rows</option>
+          <option value="100">100 rows</option>
+          <option value="500">500 rows</option>
+        </select>
+        <button class="filter" id="evApply">APPLY</button>
+        <button class="filter" id="evLarge" title="Inspection preset — large apparent edges, NOT a profitability claim">LARGE EDGES ≥10</button>
+        <button class="filter" id="evReset">RESET</button>
+        <span class="muted ev-note">inspection dataset — observed rows, never a strategy claim</span>
+      </div>
+      <div class="scorecard-grid" id="eventsGrid"><div class="empty">Events loading…</div></div>
+    </div>
+  </section>
+
   <!-- ═══════════ GAME CARDS GRID ═══════════ -->
   <main class="grid" id="grid">
     <div class="empty" id="empty">Waiting for live data…</div>

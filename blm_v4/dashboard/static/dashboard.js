@@ -35,6 +35,7 @@ const fmtAge = (s) => {
 };
 const num = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
 const pct = (v, d = 0) => (v == null ? "–" : `${(v * 100).toFixed(d)}%`);
+const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
 const hasChart = () => typeof Chart !== "undefined";
 const ChartColor = {
   home: "rgba(34,211,238,1)", away: "rgba(251,191,36,1)",
@@ -125,7 +126,6 @@ function renderScorecard(d) {
   // ── MARKET VS FAIR — PRIMARY (M009-M2 refined) ────────────────
   const mvF = d.market_vs_fair || {};
   const mvc = mvF.checkpoints || [];
-  const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
   if (mvc.length) {
     html.push(`<div class="sc-block sc-wide">
       <h4>MARKET VS FAIR VALUE <span class="muted">· PRIMARY · Market − Fair, signed · clean completed games only</span></h4>
@@ -176,6 +176,69 @@ function renderScorecard(d) {
         </details>`).join("")}
       </div>`);
     }
+  }
+  // ── DISPARITY BANDS (M009-M5) — |fair − market| magnitude × direction ──
+  // Magnitude and direction stay separate.  Rates are observed with N —
+  // never a strategy claim; small samples (reliable=false) are flagged.
+  const ebs = mvF.edge_buckets || [];
+  if (ebs.length) {
+    const dirLabel = (d) => d === "BLM_OVER" ? "BLM_OVER · fair above market"
+      : d === "BLM_UNDER" ? "BLM_UNDER · fair below market" : d;
+    const bandRate = (e) => {
+      const base = `N=${e.n} | BLM win rate ${pct(e.win_rate)}`;
+      return e.reliable === false ? `${base} · SMALL SAMPLE` : base;
+    };
+    html.push(`<div class="sc-block sc-wide">
+      <h4>DISPARITY BANDS <span class="muted">· |BLM fair − market| magnitude × direction · observed rates with N, never a strategy claim${mvF.edge_bucket_min_sample != null ? ` · min sample ${mvF.edge_bucket_min_sample}` : ""}</span></h4>
+      ${["BLM_OVER", "BLM_UNDER"].map((dir) => {
+        const rows = ebs.filter((e) => e.direction === dir);
+        if (!rows.length) return "";
+        return `<div class="band-dir">${dirLabel(dir)}</div>
+        <table class="sc-table">
+          <tr><th>Bucket</th><th>Dir</th><th>N</th><th>Over/Under/Push</th><th>BLM win rate</th><th>Market win rate</th><th>Avg Δ (signed)</th><th>Fresh/Stale N</th><th>Fresh/Stale WR</th><th>Avg age</th></tr>
+          ${rows.map((e) => `<tr>
+            <td>${esc(e.bucket)}</td>
+            <td>${esc(e.direction)}</td>
+            <td class="sc-num">${e.n ?? "–"}</td>
+            <td class="sc-num">${[e.over_n, e.under_n, e.push_n].map((v) => v ?? "–").join(" / ")}</td>
+            <td class="sc-num">${bandRate(e)}</td>
+            <td class="sc-num">${pct(e.market_win_rate)}</td>
+            <td class="sc-num">${sig(e.avg_diff)}</td>
+            <td class="sc-num">${[e.fresh_n, e.stale_n].map((v) => v ?? "–").join(" / ")}</td>
+            <td class="sc-num">${[e.fresh_win_rate, e.stale_win_rate].map((v) => pct(v)).join(" / ")}</td>
+            <td class="sc-num">${e.avg_age != null ? e.avg_age.toFixed(0) + "s" : "–"}</td>
+          </tr>`).join("")}
+        </table>`;
+      }).join("")}
+    </div>`);
+  }
+  // ── TIME-OF-DAY (M009-M5) — start hour x outcome, observed only ─────
+  const tod = mvF.time_of_day;
+  if (tod && (tod.hours || []).length) {
+    const todRow = (r, lab) => `<tr>
+      <td>${lab}</td>
+      <td class="sc-num">${r.n ?? "–"}</td>
+      <td class="sc-num">${r.over_n ?? "–"}</td>
+      <td class="sc-num">${r.under_n ?? "–"}</td>
+      <td class="sc-num">${pct(r.blm_win_rate)}</td>
+      <td class="sc-num">${pct(r.market_win_rate)}</td>
+      <td class="sc-num">${sig(r.avg_diff)}</td>
+    </tr>`;
+    const todHours = tod.hours.filter((h) => (h.n || 0) > 0)
+      .map((h) => todRow(h, `${String(h.hour).padStart(2, "0")}:00`)).join("");
+    const todBands = (tod.bands || []).filter((b) => (b.n || 0) > 0)
+      .map((b) => todRow(b, esc(b.band))).join("");
+    html.push(`<div class="sc-block sc-wide">
+      <h4>TIME-OF-DAY <span class="muted">· start hour, local${tod.band_def ? ` · bands: ${esc(tod.band_def)}` : ""}</span></h4>
+      <table class="sc-table">
+        <tr><th>Hour</th><th>N</th><th>Over</th><th>Under</th><th>BLM win rate</th><th>Market win rate</th><th>Avg Δ</th></tr>
+        ${todHours || `<tr><td colspan="7" class="sc-num">no rows yet</td></tr>`}
+      </table>
+      ${todBands ? `<table class="sc-table" style="margin-top:8px">
+        <tr><th>Band</th><th>N</th><th>Over</th><th>Under</th><th>BLM win rate</th><th>Market win rate</th><th>Avg Δ</th></tr>
+        ${todBands}
+      </table>` : ""}
+    </div>`);
   }
   // current model performance
   const v = { model_version: d.model_version || "v4-pace-1", ...ver };
@@ -424,6 +487,120 @@ $("trendsToggle").addEventListener("click", () => {
     trendsTimer = null;
   }
 });
+
+/* ── Event dataset (M009-M5, inspection) ────────────────── */
+
+const API_EVENTS = "/api/v4/scorecard/events";
+let eventsTimer = null;
+const eventsState = {
+  direction: "", freshness: "", checkpoint: "",
+  minDiff: "", maxDiff: "", game: "", limit: 200,
+};
+
+function eventsURL() {
+  const p = new URLSearchParams();
+  if (eventsState.direction) p.set("direction", eventsState.direction);
+  if (eventsState.freshness) p.set("freshness", eventsState.freshness);
+  if (eventsState.checkpoint) p.set("checkpoint", eventsState.checkpoint);
+  if (eventsState.minDiff) p.set("min_diff", eventsState.minDiff);
+  if (eventsState.maxDiff) p.set("max_diff", eventsState.maxDiff);
+  if (eventsState.game) p.set("game", eventsState.game);
+  p.set("limit", String(eventsState.limit));
+  return `${API_EVENTS}?${p.toString()}`;
+}
+
+const evStatusCls = (s) => s === "LIVE" ? "st-live"
+  : s === "STALE" ? "st-stale" : s === "MISSING" ? "st-missing" : "";
+
+function renderEvents(d) {
+  const grid = $("eventsGrid");
+  if (!grid) return;
+  const rows = d.rows || [];
+  const total = d.total ?? rows.length;
+  const rowsHtml = rows.map((r) => `<tr>
+    <td>${esc(r.home_team || r.game || "–")} vs ${esc(r.away_team || "")}<div class="muted" style="font-size:9px">${esc(r.game || "")}</div></td>
+    <td>${r.checkpoint_pct != null ? r.checkpoint_pct + "%" : "–"}<div class="muted" style="font-size:9px">${fmtTime(r.checkpoint_ts)}</div></td>
+    <td class="sc-num">${num(r.market_line, 1)}</td>
+    <td class="sc-num">${num(r.blm_fair, 1)}</td>
+    <td class="sc-num ${r.diff > 0 ? "pos" : r.diff < 0 ? "neg" : ""}">${sig(r.diff)}</td>
+    <td>${esc(r.direction || "–")}</td>
+    <td>${r.market_status == null ? "–" : `<span class="st ${evStatusCls(r.market_status)}">${esc(r.market_status)}</span>`}</td>
+    <td class="sc-num">${r.market_age_seconds != null ? num(r.market_age_seconds, 0) + "s" : "–"}</td>
+    <td>${esc(r.momentum_state || "–")}${r.momentum_strength != null ? ` · ${num(r.momentum_strength, 1)}` : ""}</td>
+    <td class="sc-num">${r.false_momentum == null ? "–" : r.false_momentum ? "1" : "0"}</td>
+    <td>${esc(r.blm_side || "–")}</td>
+    <td class="sc-num">${num(r.actual, 1)}</td>
+    <td>${esc(r.outcome || "–")}</td>
+    <td class="sc-num">${r.blm_won == null ? "–" : r.blm_won ? "✓" : "✗"}</td>
+  </tr>`).join("");
+  grid.innerHTML = `<div class="sc-block sc-wide">
+    <h4>SCORECARD EVENTS <span class="muted">· inspection dataset — observed rows, never a strategy claim</span></h4>
+    <table class="sc-table">
+      <tr><th>Game</th><th>CP</th><th>Market line</th><th>BLM fair</th><th>Diff</th><th>Direction</th><th>Market status</th><th>Market age s</th><th>Momentum</th><th>False mom</th><th>BLM side</th><th>Actual</th><th>Outcome</th><th>BLM won</th></tr>
+      ${rowsHtml || `<tr><td colspan="14" class="sc-num">no events match filters</td></tr>`}
+    </table>
+    <div class="muted" style="margin-top:6px">Total ${total} · showing ${rows.length} of ${total}${rows.length < total ? " — narrow filters or raise limit" : ""}</div>
+  </div>`;
+  $("eventsSub").textContent = `total ${total} · showing ${rows.length}`;
+}
+
+async function refreshEvents() {
+  try {
+    const resp = await fetch(eventsURL());
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const d = await resp.json();
+    renderEvents(d);
+  } catch (err) {
+    const grid = $("eventsGrid");
+    if (grid) grid.innerHTML = `<div class="empty">Events unavailable: ${esc(err.message)}</div>`;
+  }
+}
+
+function syncEventsControls() {
+  eventsState.direction = $("evDir").value;
+  eventsState.freshness = $("evFresh").value;
+  eventsState.checkpoint = $("evCp").value;
+  eventsState.minDiff = $("evMinDiff").value;
+  eventsState.game = $("evGame").value.trim();
+  eventsState.limit = Number($("evLimit").value) || 200;
+}
+
+function bindEventsControls() {
+  $("evApply").addEventListener("click", () => { syncEventsControls(); refreshEvents(); });
+  // large-edges preset — INSPECTION ONLY, never a profitability claim
+  $("evLarge").addEventListener("click", () => {
+    syncEventsControls();
+    eventsState.minDiff = "10";
+    eventsState.maxDiff = "";
+    $("evMinDiff").value = "10";
+    refreshEvents();
+  });
+  $("evReset").addEventListener("click", () => {
+    eventsState.direction = eventsState.freshness = eventsState.checkpoint = "";
+    eventsState.minDiff = eventsState.maxDiff = eventsState.game = "";
+    eventsState.limit = 200;
+    $("evDir").value = $("evFresh").value = $("evCp").value = "";
+    $("evMinDiff").value = $("evGame").value = "";
+    $("evLimit").value = "200";
+    refreshEvents();
+  });
+}
+
+$("eventsToggle").addEventListener("click", () => {
+  const body = $("eventsBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("eventsToggle").setAttribute("aria-expanded", String(open));
+  $("eventsToggle").classList.toggle("open", open);
+  if (open) {
+    refreshEvents();
+    if (!eventsTimer) eventsTimer = setInterval(refreshEvents, 60000);
+  } else if (eventsTimer) {
+    clearInterval(eventsTimer);
+    eventsTimer = null;
+  }
+});
+bindEventsControls();
 
 /* ── Game cards ──────────────────────────────────────────── */
 
