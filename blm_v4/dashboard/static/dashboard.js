@@ -632,8 +632,14 @@ function renderModal(g) {
         sig = g.signals || {};
   const confPct = Math.round((mdl.confidence || 0) * 100);
   const wpPct = Math.round((mdl.win_probability || 0) * 100);
-  const tEdge = mkt.total_line != null && mdl.expected_total != null
-    ? (mdl.expected_total - mkt.total_line).toFixed(1) : null;
+  const isLive = g.live === true;
+  const age = mkt.total_line_age_s;
+  const fresh = age != null && age <= 300;               // existing freshness threshold
+  const liveLine = isLive && fresh ? mkt.total_line : null;
+  const lastObs = liveLine == null && mkt.total_line != null ? mkt.total_line : null;
+  const statusWord = g.status === "ended" ? "ENDED" : "STALE";
+  const tEdge = liveLine != null && mdl.expected_total != null
+    ? +(mdl.expected_total - liveLine).toFixed(1) : null;
   const sEdge = mkt.spread != null && mdl.expected_margin != null
     ? (mdl.expected_margin - mkt.spread).toFixed(1) : null;
   const activeSigs = (sig.active || []).map((k) =>
@@ -678,8 +684,8 @@ function renderModal(g) {
     <div class="m-panels">
       ${modalPanel("Market vs Model", `
         <div class="m-rows">
-          <div class="m-row"><span class="k">Market total</span><span class="v">${num(mkt.total_line, 1)}${mkt.market_source === "ws" ? ` <span class="muted" style="font-size:10px">(ws)</span>` : ""}</span></div>
-          <div class="m-row"><span class="k">Model total</span><span class="v">${num(mdl.expected_total, 1)}</span></div>
+          <div class="m-row"><span class="k">${isLive ? "Market total" : "Last observed"}</span><span class="v">${num(mkt.total_line, 1)}${lastObs != null ? ` <span class="muted" style="font-size:10px">@ ${(mkt.total_line_at || "").slice(11, 19)}Z · ${statusWord}</span>` : ""}${liveLine != null && mkt.market_source === "ws" ? ` <span class="muted" style="font-size:10px">(ws)</span>` : ""}</span></div>
+          <div class="m-row"><span class="k">Model total${isLive ? "" : " (historical)"}</span><span class="v">${num(mdl.expected_total, 1)}</span></div>
           <div class="m-row"><span class="k">Total edge</span><span class="v ${tEdge > 0 ? "pos" : tEdge < 0 ? "neg" : ""}">${tEdge != null ? (tEdge > 0 ? "+" : "") + tEdge : "–"}</span></div>
           <div class="m-row"><span class="k">Market spread</span><span class="v">${num(mkt.spread, 1)}</span></div>
           <div class="m-row"><span class="k">Model margin</span><span class="v">${num(mdl.expected_margin, 1)}</span></div>

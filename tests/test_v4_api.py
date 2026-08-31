@@ -181,6 +181,15 @@ def test_dashboard_nonlive_market_not_presented_as_current(client):
     assert "liveEdge" in js               # edge only ever vs the current live line
 
 
+def test_dashboard_modal_does_not_show_live_edge_for_nonlive(client):
+    """M007-M7: the detail MODAL must also suppress the live edge for
+    ended/stale games — same defect class as the card.  The old unguarded
+    modal edge computed against total_line regardless of live status."""
+    js = client.get("/static/dashboard.js").text
+    assert "tEdge = mkt.total_line != null && mdl.expected_total != null" not in js
+    assert "Last observed" in js  # modal labels non-live market as historical
+
+
 def test_dashboard_production_ui_has_no_raw_debug(client):
     """Production dashboard must not surface RAW/DEBUG UI at all."""
     html = client.get("/").text
