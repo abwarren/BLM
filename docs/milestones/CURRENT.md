@@ -1,4 +1,4 @@
-# BLM MILESTONE CHECKPOINT — M009-M3 (2026-08-31)
+# BLM MILESTONE CHECKPOINT — M009-M4 (2026-08-31)
 
 ## M009 — SCORECARD REDESIGN: MARKET VS FAIR VALUE
 
@@ -7,64 +7,61 @@ theme — OLV/CLV/checkpoint disparity — at higher fidelity: per-checkpoint
 Market-vs-Fair as the PRIMARY metric, not a generic model-vs-market
 block).  The M008-SCORE-M2 declaration below is retained as context.
 
-CURRENT STATE: M009-M1 + M1b + M2 (REFINED) + M3 COMPLETE, DEPLOYED,
-LIVE VERIFIED.  checkpoint_market immutable history with market
-timestamps; LIVE/STALE/MISSING classification (300s threshold,
+CURRENT STATE: M009-M1 + M1b + M2 (REFINED) + M3 + M4 COMPLETE,
+DEPLOYED, LIVE VERIFIED.  checkpoint_market immutable history with
+market timestamps + momentum capture; LIVE/STALE/MISSING (300s,
 configurable); STALE DIFFERENTIAL never a live edge; per-checkpoint
-aggregation + game-level scorecard + market_freshness section; dashboard
-MARKET VS FAIR primary.  §18 fixture-integrity regression in place.
-Full suite 239 pass.  Evidence docs/milestones/M009-EVIDENCE.md.
+aggregation + game-level scorecard + market_freshness + time_of_day +
+edge_buckets; dashboard MARKET VS FAIR primary.  §18 fixture-integrity
+regression in place.  Full suite 246 pass.
+Evidence docs/milestones/M009-EVIDENCE.md.
 
-NEXT: **M009-M4 — frontend consumption: dashboard MARKET FRESHNESS /
-LIVE EDGE STATUS (directive sections 17, 20).  Do NOT start without
+NEXT: **M009-M5 — disparity bands + O/U outcome analysis / frontend
+consumption (directive sections 9, 13, 20).  Do NOT start without
 explicit authorization.**
 
-## M009-M3 (COMPLETE, DEPLOYED, LIVE VERIFIED) — MARKET FRESHNESS LAYER
+## M009-M4 (COMPLETE, DEPLOYED, LIVE VERIFIED) — CHECKPOINT MARKET-LINE ANALYTICS
 
-MILESTONE: M009-M3 — market freshness (directive sections 2-5, 22, 24).
-Commit d656680 + docs commit.
+MILESTONE: M009-M4 — momentum + time-of-day + edge-bucket analytics.
+Commit c0106a3 + docs commit.
 
-OBJECTIVE: persist the frozen live line's market_timestamp; compute
-market_age_seconds; classify LIVE/STALE/MISSING (threshold = existing
-system definition 300s, configurable via BLM_MARKET_STALE_SECONDS);
-freshness buckets; STALE DIFFERENTIAL never counted as LIVE EDGE;
-blm_market_diff = BLM - market (positive = BLM higher).
+OBJECTIVE: per-checkpoint momentum/false-momentum capture (no look-
+ahead, single signal definition via blm_v4.api import); time-of-day
+segmentation (hour + configurable bands, hypotheses measured);
+edge buckets |BLM-market| x direction with freshness visibility
+(large-edge investigation); duplicate protection; contamination
+exclusion.
 
-WHAT WAS TRACED: synthetic fresh + stale + no-market games ->
-record_checkpoint_market -> market_timestamp/age/status -> API game
-detail + scorecard aggregation (n_live/n_stale/n_missing,
-market_freshness) -> verified LIVE_EDGE vs STALE_DIFFERENTIAL.
+WHAT WAS TRACED: synthetic games (fresh/stale/momentum/TOD starts) ->
+record_checkpoint_market -> momentum columns + time_of_day +
+edge_buckets -> /api/v4/scorecard -> verified live.
 
-WHAT CHANGED: scorecard.py (schema column + _ensure_cm_market_timestamp
-migration + _frozen_market_obs (line,ts) refactor + freshness helpers +
-aggregation splits + market_freshness section), api.py (game detail
-freshness fields), tests/test_m009_market_freshness.py (6).
+WHAT CHANGED: scorecard.py (schema momentum columns + _ensure_cm_columns
+migration + capture in _write_checkpoint_row + _local_hour/_tod_bands +
+TOD + edge_buckets aggregation; game start = MIN(snapshot.captured_at)),
+api.py (game-detail momentum fields, column-guarded),
+tests/test_m009_m4_analytics.py (7), _build start= param.
 
-TESTS: RED confirmed (6 collection errors).  One real finding: initial
-_frozen_market_obs refactor returned FIRST line at-or-before (bug);
-fixed to LAST (original semantic).  Boundary ==300s = LIVE (existing
-dashboard definition).  MUTATION-PROVEN: staleness guard neutered ->
-2 tests fail; restored (note: git checkout reverted uncommitted M3
-patches too — re-applied, verified).  Full suite 239 passed, 0 failed
-(233 + 6).
+TESTS: RED confirmed (5/7 failed pre-implementation).  Findings:
+upsert_game hardcodes first_seen_at -> game start = MIN snapshot;
+20+/BLM_UNDER bucket mixes fresh + stale rows — avg_age revealing that
+mix IS the investigation.  Full suite 246 passed, 0 failed (239 + 7);
+M3 regression green.
 
-LIVE VERIFIED (real production data): /api/v4/game/30749637 all 10 rows
-market_status=MISSING (pre-M3 frozen rows — honest, never fabricated);
-/api/v4/scorecard pct50 n=445 n_live=0 n_stale=0 n_missing=467;
-market_freshness buckets present.  New-game LIVE/STALE rows populate as
-the 60s loop records future completions.  Ad-hoc hermes-verify-m3.py
-(deleted): G-MIX LIVE age 0 LIVE_EDGE; G-STALE STALE age 690s
-STALE_DIFFERENTIAL — NOT the L5 basis.
+LIVE VERIFIED (real production data): time_of_day hour 2 n=443,
+over 133/under 263, blm_win_rate 0.69, avg_diff -11.65; bands 0-6
+66% / 6-12 58% / 12-18 56% / 18-24 57% (measured); edge_buckets 0-2
+BLM_UNDER 75% win vs BLM_OVER 36%; 20+ BLM_UNDER n=834 vs BLM_OVER
+n=184.  Game detail serves momentum fields (NULL for pre-M4 frozen
+rows — honest).
 
-COMMIT: d656680 (code + tests) + docs commit (this).  Pushed.
+COMMIT: c0106a3 (code + tests) + docs commit (this).  Pushed.
 
-KNOWN LIMITATION: pre-M3 rows are honestly MISSING (no timestamp
-recorded at freeze time); LIVE/STALE stats accrue only for games
-recorded after this deploy.  market_freshness age-bucket section has
-real data only once new completions land.
+KNOWN LIMITATION: momentum columns NULL for pre-M4 rows (frozen without
+them); new completions populate.  avg_age in edge_buckets NULL until
+freshness timestamps exist (pre-M3 rows).
 
-NEXT MILESTONE: M009-M4 — dashboard MARKET FRESHNESS / LIVE EDGE STATUS
-(awaiting explicit go).
+NEXT MILESTONE: M009-M5 — disparity bands + frontend (awaiting explicit go).
 
 ## M009-M1b (COMPLETE, DEPLOYED, LIVE VERIFIED) — Market-vs-Fair exposed through game detail API
 

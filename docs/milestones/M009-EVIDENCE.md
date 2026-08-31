@@ -38,6 +38,59 @@ VERIFICATION:
 
 ---
 
+## M009-M4 — CHECKPOINT MARKET-LINE ANALYTICS: MOMENTUM + TIME-OF-DAY + EDGE BUCKETS (COMPLETE, c0106a3)
+
+Directive: strengthen market-line analytics; preserve M3 freshness
+semantics; time-of-day segmentation; false-momentum analytics; large-
+edge investigation; duplicate protection; contamination exclusion.
+
+WHAT CHANGED:
+- checkpoint_market gains momentum_state / momentum_strength /
+  false_momentum / false_momentum_confidence — captured at record time
+  from snapshots AT-OR-BEFORE the checkpoint (no look-ahead), using the
+  API's single signal definition (scorecard imports _momentum /
+  _detect_signals from blm_v4.api — no duplicated logic, no api.py
+  behavior change).
+- time_of_day aggregation (in market_vs_fair): per hour-of-day (24) +
+  configurable bands (env BLM_TOD_BANDS, default 0-6,6-12,12-18,18-24)
+  with N, over/under/push counts, BLM win rate, market win rate (the
+  market's side of the line = BLM losses), avg BLM-market differential.
+  Game start = earliest snapshot timestamp (first_seen_at is the
+  collector's tracking time, not fixture start — found via debug).
+- edge_buckets aggregation: |BLM-market| magnitude buckets (0-2 / 2-5 /
+  5-10 / 10-15 / 15-20 / 20+) split by direction (BLM_OVER = fair >
+  market, BLM_UNDER = fair < market), each with n / win / loss / push /
+  win_rate / avg_age — large apparent edges stay attributable to
+  freshness.
+- api.py game detail: momentum fields exposed (column-guarded).
+- tests/test_m009_m4_analytics.py (7); _build helper gains start=.
+
+VERIFICATION:
+- RED: 5 of 7 failed pre-implementation (momentum columns + tod +
+  edge_buckets missing); duplicate + contamination tests passed (existing
+  behavior).
+- Findings: (1) upsert_game hardcodes first_seen_at = now → game start
+  proxy = MIN(snapshot.captured_at) (deterministic, honors start=);
+  (2) the 20+/BLM_UNDER bucket legitimately mixes fresh + stale rows —
+  avg_age revealing that mix IS the large-edge investigation (test
+  rewritten to assert it).
+- Full suite: 246 passed, 0 failed (239 + 7).  M3 freshness suite green
+  (regression confirmed).
+- DEPLOYED: blm-server + blm-collector restarted.  LIVE VERIFIED (real
+  production data): /api/v4/scorecard time_of_day hour 2 — n=443,
+  over 133 / under 263, blm_win_rate 0.69, market 0.31, avg_diff -11.65;
+  bands 0-6 BLM win 66% / 6-12 58% / 12-18 56% / 18-24 57% (measured,
+  not hard-coded); edge_buckets 0-2 BLM_UNDER win 208/278 = 75% vs
+  BLM_OVER 97/272 = 36%; 20+ BLM_UNDER n=834 vs BLM_OVER n=184.
+  Game detail 30749637 serves momentum fields (NULL — pre-M4 frozen
+  rows, honest; new completions populate).
+- Commits: c0106a3 (code+tests) + docs commit (this).  Pushed.
+
+NEXT: M009-M5 — disparity bands + O/U outcome analysis / frontend
+consumption of the new sections — after explicit go.
+
+---
+
 ## M009-M3 — MARKET FRESHNESS LAYER (COMPLETE, d656680)
 
 Directive sections 2-5, 22, 24.  Every frozen market line now carries
@@ -235,12 +288,13 @@ populates checkpoint_market automatically.  No manual DB writes.
 - M009-M1b : COMPLETE, DEPLOYED, LIVE VERIFIED  (commit b8df068)
 - M009-M2 (REFINED): COMPLETE, DEPLOYED, LIVE VERIFIED  (commit b6798f2)
 - M009-M3  : COMPLETE, DEPLOYED, LIVE VERIFIED  (commit d656680)
-- Full suite 239 passed, 0 failed at L3 (fresh).
+- M009-M4  : COMPLETE, DEPLOYED, LIVE VERIFIED  (commit c0106a3)
+- Full suite 246 passed, 0 failed at L3 (fresh).
 - Ad-hoc synthetic verifications (hermes-verify-* scripts, /tmp,
   deleted after run) used during development; NOT the evidence basis
   for L4/L5 — those are the running service + real DB.
 
 ## NEXT
 
-M009-M4 — frontend consumption: dashboard MARKET FRESHNESS / LIVE EDGE
-STATUS (sections 17, 20).  After explicit go.
+M009-M5 — disparity bands + O/U outcome analysis / frontend
+consumption (sections 9, 13, 20 of the directives).  After explicit go.
