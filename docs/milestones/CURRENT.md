@@ -574,3 +574,38 @@ pattern analysis, per-game forensic records in the frontend.
 
 NEXT: M008-SCORE-M2 — BLM vs OLV and BLM vs CLV scorecard sections
 (needs OLV/CLV timestamp columns in market_history).
+
+---
+
+## FORENSIC AUDIT (2026-08-31, docs commit) — MARKET SNAPSHOT QUALITY
+
+Full report: docs/milestones/M009-FORENSIC-MARKET-SNAPSHOT.md (audit
+deliverable; NO code touched, M5 untouched, freshness definitions
+unchanged).  Findings (read-only temp-DB copy + running API):
+
+- TIMING: captured_at 100% parseable, 0 regressions, 0 duplicates;
+  same-game cadence median 86s.  SOUND.
+- FRESHNESS: 100% of 4,654 checkpoint_market rows carry market_timestamp
+  NULL (frozen 17:47-18:30Z pre-M3, immutable) -> production classifies
+  everything MISSING; TRUE reconstructed freshness = 70.9% LIVE /
+  14.4% STALE / 14.8% MISSING (reconstruction exact: 0/4,654 mismatches).
+  Layer inert-but-correct: next clean completion populates it.
+- EXTREME EDGES (+43.5/+33.6/+31.6/-38.1/-29.5/-27.7): all traced to
+  predictions/checkpoint rows; every market was 48-259s old (LIVE by
+  300s); the BLM side was the outlier (burst or collapsed pace at
+  early/mid checkpoints), the market was close to actual (err 1.5-22.5
+  where known).  NOT stale-market artifacts.  Mechanism reproduced with
+  project(): 30745166 16/20 pre-tip 0-0 rows -> pace 41.6 -> fair 97.4
+  vs fresh 227.5; 30746509 Q1 burst prefix -> pace 283 -> fair 254.6.
+- EDGE vs AGE INVERTED: median age DECREASES with |edge| (193s -> 135s);
+  88% of |edge|>=20 rows had LIVE markets; freshest bucket has largest
+  mean |edge| (44.1).  Stale data does NOT explain large edges.
+- SUSPICIOUS: 1,255 >=5pt/30s line moves (7x-speed consistent, none
+  impossible); 5 held-line runs >=10 min (all genuine, feed alive);
+  WS batches grew 3 -> 5-6 variants (lowest-line convention still
+  internally consistent; re-validate vs SPA); 14.8% missing lines.
+- SAFEGUARDS (optional, explicit-go): backfill market_timestamp from
+  raw data (proven exact; activates M3 machinery on the corpus),
+  model-instability flag on large edges (collapsed/burst fair), SPA
+  re-validation of lowest-line convention, 7x-speed age caveat,
+  close the 30741757-class WS coverage gap.
