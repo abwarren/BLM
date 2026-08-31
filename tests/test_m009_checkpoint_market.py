@@ -231,11 +231,6 @@ def test_cm_market_move_toward_blm(sc):
     sc.record_checkpoint_market()
     rows = _rows(sc, "G-MIX")
     for r in rows:
-        d_olv = abs(r["closing_line"] - r["blm_fair_value"])
-        d_clv = abs(r["opening_line"] - r["blm_fair_value"])
-        # NOTE: correct definition is |CLV - fair| vs |OLV - fair|;
-        # the test compares against the row's own stored value for the
-        # classification contract.
         assert r["market_move_toward_blm"] in ("TOWARD", "AWAY", "UNCHANGED")
     # OLV 170, CLV 189, fair ~148 at pct50: |189-148|=41 vs |170-148|=22
     # -> closing is FARTHER from fair than opening -> AWAY
