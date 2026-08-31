@@ -146,16 +146,28 @@ function renderScorecard(d) {
       ${fx.map((c) => `<tr><td>${c.percent}%</td><td class="sc-num">${c.n}</td><td class="sc-num">${c.mae ?? "–"}</td><td class="sc-num">${c.median ?? "–"}</td></tr>`).join("")}
     </table>
   </div>`);
-  // model vs market
+  // MODEL vs MARKET (forensic, M008-SCORE-M1)
   html.push(`<div class="sc-block">
-    <h4>MODEL VS MARKET</h4>
+    <h4>MODEL vs MARKET <span class="muted">(line: ${mc.line_type || "checkpoint"})</span></h4>
     <table class="sc-table">
-      <tr><td>Comparisons (market existed)</td><td class="sc-num">${mc.n ?? 0}</td></tr>
-      <tr><td>Model MAE</td><td class="sc-num">${mc.model_mae ?? "–"}</td></tr>
+      <tr><td>Valid comparisons</td><td class="sc-num">${mc.n ?? 0}</td></tr>
+      <tr><td>BLM MAE</td><td class="sc-num">${mc.model_mae ?? "–"}</td></tr>
+      <tr><td>BLM Bias</td><td class="sc-num">${mc.model_bias ?? "–"}</td></tr>
       <tr><td>Market MAE</td><td class="sc-num">${mc.market_mae ?? "–"}</td></tr>
-      <tr><td>Model beat market</td><td class="sc-num">${mc.model_beat_market_rate != null ? (mc.model_beat_market_rate * 100).toFixed(1) + "%" : "–"}</td></tr>
-      <tr><td>O/U hit rate</td><td class="sc-num">${mc.ou_hit_rate != null ? (mc.ou_hit_rate * 100).toFixed(1) + "%" : "–"}</td></tr>
-      <tr><td>Over / Under / Push</td><td class="sc-num">${mc.over ?? 0} / ${mc.under ?? 0} / ${mc.push ?? 0}</td></tr>
+      <tr><td>Market Bias</td><td class="sc-num">${mc.market_bias ?? "–"}</td></tr>
+      <tr><td>BLM beat market</td><td class="sc-num">${mc.model_beat_market_n ?? 0} / ${mc.model_beat_market_d ?? mc.n ?? 0} = ${(mc.model_beat_market_rate ?? 0) * 100}%</td></tr>
+      <tr><td>Market beat BLM</td><td class="sc-num">${mc.market_beat_blm_n ?? 0} / ${mc.n ?? 0}</td></tr>
+      <tr><td>Ties</td><td class="sc-num">${mc.ties_n ?? 0} / ${mc.n ?? 0}</td></tr>
+    </table>
+  </div>`);
+  // O/U — names the line type (BLM vs checkpoint market)
+  html.push(`<div class="sc-block">
+    <h4>O/U PERFORMANCE <span class="muted">(${mc.ou_line_type || "checkpoint market"})</span></h4>
+    <table class="sc-table">
+      <tr><td>BLM Over</td><td class="sc-num">${mc.ou_over ?? 0}</td></tr>
+      <tr><td>BLM Under</td><td class="sc-num">${mc.ou_under ?? 0}</td></tr>
+      <tr><td>Push</td><td class="sc-num">${mc.ou_push ?? 0}</td></tr>
+      <tr><td>Hit rate</td><td class="sc-num">${mc.ou_hit_n ?? 0} / ${mc.ou_hit_d ?? 0} = ${((mc.ou_hit_rate ?? 0) * 100).toFixed(1)}%</td></tr>
     </table>
   </div>`);
   // data quality — RECORDED vs COMPLETED vs VALID vs EXCLUDED (never conflated)

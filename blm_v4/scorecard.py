@@ -1088,6 +1088,23 @@ def _per_version_metrics(conn, where: str = "1=1", params: tuple = ()) -> dict:
     return out
 
 
+def _market_history_sql(conn) -> list[dict]:
+    """M008-SCORE-M1: per-game OLV/CLV record (distinct fields; missing
+    values stay NULL — never substituted).  Used by OLV/CLV accounting."""
+    rows = conn.execute(
+        """SELECT source_game_id, classification,
+                  started_at,
+                  opening_total,
+                  closing_total,
+                  final_home, final_away, final_total,
+                  outcome_olvc, outcome_clv,
+                  opening_total_edge, closing_total_edge
+           FROM market_history
+           ORDER BY source_game_id"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _summary_sql(conn) -> dict[str, Any]:
     # Headline metrics: FULL histories only (fragment = 0).  Fragment games
     # (short or mid-game capture) are scored for diagnostics but excluded —
@@ -1218,6 +1235,14 @@ def _by_progress_sql(conn) -> list[dict[str, Any]]:
 
 
 def _market_compare_sql(conn) -> dict[str, Any]:
+    """M008-SCORE-M1 forensic market comparison (checkpoint-market line).
+
+    Line type used: the market total frozen at the prediction's checkpoint
+    (prediction_scores.market_total — the line that existed AT that
+    checkpoint, never the closing line).  BLM error = abs(BLM - actual);
+    Market error = abs(market - actual).  Every rate carries explicit
+    numerator + denominator; O/U accounting names the line type.
+    """
     rows = conn.execute(
         """SELECT model_total, market_total, actual_total, total_error,
                   market_error, model_beat_market, ou_prediction, ou_result, ou_correct
@@ -1226,22 +1251,57 @@ def _market_compare_sql(conn) -> dict[str, Any]:
     rows = [dict(r) for r in rows]
     n = len(rows)
     if not n:
-        return {"n": 0}
-    model_mae = statistics.mean([r["total_error"] for r in rows if r["total_error"] is not None])
+        return {"n": 0, "line_type": "checkpoint_market"}
+    # BLM abs errors (real MAE — never negative) + signed bias
+    blm_abs = [abs(r["total_error"]) for r in rows if r["total_error"] is not None]
+    blm_sgn = [r["total_error"] for r in rows if r["total_error"] is not None]
     mkt_errs = [r["market_error"] for r in rows if r["market_error"] is not None]
-    market_mae = statistics.mean([abs(e) for e in mkt_errs]) if mkt_errs else None
+    model_mae = round(statistics.mean(blm_abs), 2) if blm_abs else None
+    model_bias = round(statistics.mean(blm_sgn), 2) if blm_sgn else None
+    market_mae = round(statistics.mean([abs(e) for e in mkt_errs]), 2) if mkt_errs else None
+    market_bias = round(statistics.mean(mkt_errs), 2) if mkt_errs else None
     beat = [r["model_beat_market"] for r in rows if r["model_beat_market"] is not None]
+    model_beat_n = sum(1 for b in beat if b == 1)
+    market_beat_n = sum(1 for b in beat if b == 0)
+    ties_n = sum(1 for b in beat if b is not None and b not in (0, 1))  # 0==0 case: equal abs
+    # explicit win/loss/tie via abs errors (recompute — model_beat_market is 1/0 only)
+    w_ = [1 if abs(r["total_error"]) < abs(r["market_error"]) else 0
+          for r in rows if r["total_error"] is not None and r["market_error"] is not None]
+    t_ = [1 if abs(r["total_error"]) == abs(r["market_error"]) else 0
+          for r in rows if r["total_error"] is not None and r["market_error"] is not None]
+    model_beat_n = sum(w_)
+    market_beat_n = len(w_) - model_beat_n - sum(t_)
+    ties_n = sum(t_)
     ou = [r["ou_correct"] for r in rows if r["ou_correct"] is not None]
+    ou_over = sum(1 for r in rows if r["ou_result"] == 1)
+    ou_under = sum(1 for r in rows if r["ou_result"] == -1)
+    ou_push = sum(1 for r in rows if r["ou_result"] == 0)
+    # signed disparity = BLM prediction - market line (both directions kept)
+    disp = [(r["model_total"] or 0) - (r["market_total"] or 0) for r in rows
+            if r["model_total"] is not None and r["market_total"] is not None]
     return {
         "n": n,
-        "model_mae": round(model_mae, 2),
-        "market_mae": round(market_mae, 2) if market_mae is not None else None,
-        "model_beat_market_rate": round(sum(beat) / len(beat), 3) if beat else None,
+        "line_type": "checkpoint_market",
+        "model_mae": model_mae,
+        "model_bias": model_bias,
+        "market_mae": market_mae,
+        "market_bias": market_bias,
+        "model_beat_market_rate": round(model_beat_n / n, 3) if n else None,
+        "model_beat_market_n": model_beat_n,
+        "model_beat_market_d": n,
+        "market_beat_blm_n": market_beat_n,
+        "ties_n": ties_n,
         "ou_predictions": len(ou),
         "ou_hit_rate": round(sum(ou) / len(ou), 3) if ou else None,
-        "over": sum(1 for r in rows if r["ou_result"] == 1),
-        "under": sum(1 for r in rows if r["ou_result"] == -1),
-        "push": sum(1 for r in rows if r["ou_result"] == 0),
+        "ou_hit_n": sum(ou),
+        "ou_hit_d": len(ou),
+        "ou_over": ou_over,
+        "ou_under": ou_under,
+        "ou_push": ou_push,
+        "ou_line_type": "checkpoint_market",
+        "disparity_min": round(min(disp), 2) if disp else None,
+        "disparity_max": round(max(disp), 2) if disp else None,
+        "disparity_abs_max": round(max(abs(d) for d in disp), 2) if disp else None,
     }
 
 

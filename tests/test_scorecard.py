@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -38,6 +39,8 @@ from blm_v4.scorecard import (
     FIXED_CHECKPOINT_PCTS,
     Scorecard,
     _checkpoint_for,
+    _market_history_sql,
+    _per_version_metrics,
     _progress_of,
     _snapshot_history_quality,
 )
@@ -196,7 +199,7 @@ def test_market_compare_and_over_under(tmp_path):
     assert mc["market_mae"] is not None
     assert mc["ou_predictions"] > 0
     assert mc["ou_hit_rate"] is not None and 0 <= mc["ou_hit_rate"] <= 1
-    assert mc["over"] + mc["under"] + mc["push"] == mc["ou_predictions"]
+    assert mc["ou_over"] + mc["ou_under"] + mc["ou_push"] == mc["ou_predictions"]
 
 
 def test_missing_market_handled(tmp_path):
@@ -457,7 +460,159 @@ def test_quality_gate_cross_event(tmp_path):
     assert status == "INVALID" and "contamination" in reason
 
 
-# ═══════════ M007-M8: eligibility gate on headline metrics ═══════════
+# ═══════════ M008-SCORE-M1: forensic metric accounting ═══════════
+
+def _sample_scores_conn(tmp_path):
+    """DB with 2 valid games, each with a scored prediction:
+    game 9001: BLM 180 vs actual 184 (signed -4), market line 190 (market
+               err +6) -> BLM wins (4<6), O/U UNDER for both.
+    game 9002: BLM 170 vs actual 172 (signed -2), market line 180 (market
+               err +8) -> BLM wins (2<8), O/U UNDER for both.
+    """
+    import sqlite3
+    from blm_v4.scorecard import SCORECARD_SCHEMA
+    db = tmp_path / "sc.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCORECARD_SCHEMA)
+    conn.executescript("""
+        INSERT INTO predictions (id, source_game_id, classification, model_version,
+            checkpoint, predicted_at, source_snapshot_at, projected_home,
+            projected_away, projected_total, market_total, valid)
+        VALUES
+          (1,'9001','BETUAL_NBA','v4-pace-1','q1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z', 90,90,180,190,1),
+          (2,'9002','BETUAL_NBA','v4-pace-1','q1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z', 85,85,170,180,1);
+        INSERT INTO prediction_scores (prediction_id, source_game_id, classification,
+            model_version, home_error, away_error, total_error,
+            abs_home_error, abs_away_error, abs_total_error, total_pct_error,
+            model_total, market_total, actual_total, market_error,
+            model_beat_market, ou_prediction, ou_result, ou_correct, scored_at, fragment)
+        VALUES
+          (1,'9001','BETUAL_NBA','v4-pace-1', -4,-4,-4, 4,4,4, 2.17, 180,190,184, 6, 1, -1,-1,1, '2026-01-01T00:00:00Z', 0),
+          (2,'9002','BETUAL_NBA','v4-pace-1', -2,-2,-2, 2,2,2, 1.16, 170,180,172, 8, 1, -1,-1,1, '2026-01-01T00:00:00Z', 0);
+    """)
+    conn.commit()
+    return conn
+
+
+def test_m008_mae_never_negative(tmp_path):
+    """MAE = mean(|prediction - actual|) >= 0.  A 'MAE' of -8.37 is a
+    mislabeled bias — the aggregate must NEVER emit a negative MAE."""
+    import blm_v4.scorecard as sc
+    conn = _sample_scores_conn(Path(tmp_path))
+    try:
+        m = sc._per_version_metrics(conn, "fragment = 0", ())
+        assert m["v4-pace-1"]["mae"] == 3.0, "MAE must be mean of ABS errors"
+        assert m["v4-pace-1"]["mae"] >= 0
+        assert m["v4-pace-1"]["bias"] == -3.0, "signed bias separate from MAE"
+    finally:
+        conn.close()
+
+
+def test_m008_market_compare_mae_and_denominator(tmp_path):
+    """model_mae in market_compare must be a REAL MAE (>=0) computed from
+    absolute errors, and every rate must expose numerator + denominator."""
+    import blm_v4.scorecard as sc
+    conn = _sample_scores_conn(Path(tmp_path))
+    try:
+        out = sc._market_compare_sql(conn)
+        assert out["model_mae"] == 3.0, "model MAE must be mean(abs BLM error)"
+        assert out["model_mae"] >= 0
+        assert out["market_mae"] == 7.0
+        assert out["n"] == 2
+        assert out["model_beat_market_rate"] == 1.0
+        # numerator + denominator
+        assert out["model_beat_market_n"] == 2
+        assert out["model_beat_market_d"] == 2
+        assert out["market_beat_blm_n"] == 0
+        assert out["ties_n"] == 0
+        # O/U accounting identifies the line: checkpoint market (this slice)
+        assert out["ou_over"] == 0 and out["ou_under"] == 2 and out["ou_push"] == 0
+    finally:
+        conn.close()
+
+
+def test_m008_olv_clv_separate(tmp_path):
+    """OLV and CLV are distinct fields; missing OLV/CLV is NULL, never
+    substituted; a checkpoint market is never the closing line."""
+    import sqlite3
+    from blm_v4.scorecard import SCORECARD_SCHEMA, _market_history_sql
+    db = tmp_path / "sc.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCORECARD_SCHEMA)
+    # game 9003 has OLV=180 and CLV=190 (distinct); 9004 has no market
+    conn.executescript("""
+        INSERT INTO market_history (source_game_id, classification, started_at,
+            analytics_tz, opening_total, closing_total, final_home, final_away,
+            final_total, recorded_at)
+        VALUES
+          ('9003','BETUAL_NBA','2026-01-01T00:00:00Z','UTC',180,190, 90,92,182,'2026-01-01T00:11:00Z'),
+          ('9004','BETUAL_NBA','2026-01-01T00:00:00Z','UTC',NULL,NULL, 80,80,160,'2026-01-01T00:11:00Z');
+    """)
+    conn.commit()
+    rows = _market_history_sql(conn)
+    d = {r["source_game_id"]: r for r in rows}
+    assert d["9003"]["opening_total"] == 180 and d["9003"]["closing_total"] == 190
+    assert d["9003"]["opening_total"] != d["9003"]["closing_total"]
+    assert d["9004"]["opening_total"] is None and d["9004"]["closing_total"] is None
+    conn.close()
+
+
+def test_m008_every_percentage_has_denominator(tmp_path):
+    """No bare percentage — every rate carries numerator/denominator."""
+    import blm_v4.scorecard as sc
+    conn = _sample_scores_conn(Path(tmp_path))
+    try:
+        out = sc._market_compare_sql(conn)
+        # beat + lost + ties reconcile exactly to n
+        assert (out["model_beat_market_n"] + out["market_beat_blm_n"] + out["ties_n"]) == out["n"]
+        assert "model_beat_market_d" in out and out["model_beat_market_d"] == out["n"]
+    finally:
+        conn.close()
+
+
+def test_m008_invalid_game_zero_headline(tmp_path):
+    """An INVALID game contributes nothing to headline metrics."""
+    import sqlite3
+    from blm_v4.scorecard import SCORECARD_SCHEMA, _per_version_metrics
+    db = tmp_path / "sc.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCORECARD_SCHEMA)
+    conn.executescript("""
+        INSERT INTO game_quality (source_game_id, classification, status, reason, checked_at)
+        VALUES ('9999','BETUAL_NBA','INVALID','contamination','2026-01-01T00:00:00Z');
+        INSERT INTO predictions (id, source_game_id, classification, model_version,
+            checkpoint, predicted_at, source_snapshot_at, projected_home,
+            projected_away, projected_total, market_total, valid)
+        VALUES (3,'9999','BETUAL_NBA','v4-pace-1','q1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z', 100,100,200,195,1);
+        INSERT INTO prediction_scores (prediction_id, source_game_id, classification,
+            model_version, home_error, away_error, total_error,
+            abs_home_error, abs_away_error, abs_total_error, total_pct_error,
+            model_total, market_total, actual_total, market_error,
+            model_beat_market, ou_prediction, ou_result, ou_correct, scored_at, fragment)
+        VALUES (3,'9999','BETUAL_NBA','v4-pace-1', 10,10,20, 10,10,20, 10.0, 200,195,180, 15, 1, 1,1,1, '2026-01-01T00:00:00Z', 1);
+    """)
+    conn.commit()
+    m = _per_version_metrics(conn, "fragment = 0", ())
+    assert m.get("v4-pace-1", {}).get("games", 0) == 0
+    conn.close()
+
+
+def test_m008_negative_disparity_retained(tmp_path):
+    """disparity = BLM prediction - market line keeps its sign (negative
+    matters for UNDER); the scorecard must expose signed disparity."""
+    import blm_v4.scorecard as sc
+    conn = _sample_scores_conn(Path(tmp_path))
+    try:
+        out = sc._market_compare_sql(conn)
+        # both sample games: BLM 180 vs market 190 -> disparity -10; 170 vs 180 -> -10
+        assert out.get("disparity_min") == -10.0
+        assert out.get("disparity_max") == -10.0
+        assert out.get("disparity_abs_max") == 10.0
+    finally:
+        conn.close()
 
 def test_legacy_ok_contaminated_game_zero_headline(tmp_path):
     """A game with an OK result recorded under an OLDER, laxer gate but
