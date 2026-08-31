@@ -315,3 +315,37 @@ confirm: predictions scored with fragment=0, market_history row recorded,
 4. Explosion-split removed; verified final ends the game.
 5. market_history: OLVC never overwritten by CLV; only OK + non-fragment.
 6. Headline accuracy = fragment=0 only; no hard-coded time-of-day rules.
+
+## M008-SCORE-M1 (COMPLETE, deployed 46adb70) — forensic metric accounting
+
+ROOT CAUSE: _market_compare_sql computed model_mae as mean(SIGNED
+total_error) = -8.37 — that is BIAS mislabeled MAE. O/U 227/365/0 mixed
+BLM vs an unnamed checkpoint line; beat-market was a bare rate without
+denominator or market-beats-BLM / ties.
+
+FIX (smallest slice, data untouched):
+- model_mae = mean(abs) >= 0; model_bias = signed mean (separate).
+- market_mae (abs) + market_bias (signed) explicit.
+- BLM beat / Market beat / Ties from abs errors; counts + denominator,
+  reconcile to n (688 = 220 + 467 + 1).
+- O/U names line type (checkpoint_market); over/under/push + hits with
+  visible denominator (450 / 688).
+- signed disparity (BLM - market line) min/max/absmax retained
+  (-97.2 .. +53.1, abs 97.2).
+- OLV/CLV already separate (market_history opening_total/closing_total);
+  _market_history_sql exposes them; missing = NULL.
+- Frontend: MODEL vs MARKET + O/U PERFORMANCE blocks now show
+  MAE/Bias/beat/ties with numerators and denominators.
+
+LIVE VERIFIED (browser): "MODEL vs MARKET (line: checkpoint_market) |
+Valid comparisons 688 | BLM MAE 14.34 | BLM Bias -5.95 | Market MAE
+7.76 | Market Bias 2.33 | BLM beat 220/688 = 32% | Market beat 467/688 |
+Ties 1/688" + "O/U PERFORMANCE (checkpoint_market) | BLM Over 254 |
+Under 434 | Push 0 | Hit rate 450/688 = 65.4%".  206 tests (6 new).
+
+REMAINING (later milestones): BLM vs OLV / BLM vs CLV sections,
+checkpoint-by-checkpoint market performance (10-90%), disparity
+pattern analysis, per-game forensic records in the frontend.
+
+NEXT: M008-SCORE-M2 — BLM vs OLV and BLM vs CLV scorecard sections
+(needs OLV/CLV timestamp columns in market_history).
