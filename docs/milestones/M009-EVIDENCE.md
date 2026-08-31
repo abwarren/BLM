@@ -10,6 +10,34 @@ L4 DEPLOYED -> L5 LIVE VERIFIED.
 
 ---
 
+## M009 SECTION 18 — FIXTURE-INTEGRITY REGRESSION TEST (COMPLETE, 1b23253)
+
+The Karsiyaka/Denizli-vs-Karsiyaka/Korfez incident is now a PERMANENT
+regression test (`tests/test_fixture_integrity.py`, 4 tests).  It
+encodes, with the incident's real game ids and incident-era values:
+
+- 30741194 (ended, Pinar Karsiyaka vs DENIZLI) carries ONLY 157.5
+- 30741844 (live, Pinar Karsiyaka vs KORFEZ) carries ONLY its own WS
+  batch; the main line is the LOWEST (182.5, never 186.5)
+- line helpers are scoped per source_game_id; _frozen_market_line honors
+  at-or-before (an observation after the checkpoint is honestly None)
+- the API detail serves each game's own line only
+
+VERIFICATION:
+- GREEN: 4/4 (one initial RED finding — my first expectation asserted
+  frozen=157.5 at t=0; the code correctly returned None because the WS
+  observation lands at +6min: honest at-or-before semantics.  Test
+  fixed to encode the correct expectation.)
+- MUTATION-PROVEN: neutering the per-fixture filter in the two line
+  helpers (`source_game_id=?` -> tautology) makes 2 tests FAIL —
+  the test genuinely catches the conflation class.  Restored.
+- Full suite: 225 passed, 0 failed (221 + 4).
+- Live anchor: the real pair still isolates in production (verified via
+  /api/v4/game/30741194 = 157.5 ended; /api/v4/game/30741844 = own WS
+  line, now 191.5 as the market moved — isolation holds).
+
+---
+
 ## L1 CODE — implementation exists
 
 Commits (all pushed to github.com:abwarren/BLM, SSH):

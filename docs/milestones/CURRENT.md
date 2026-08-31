@@ -14,9 +14,10 @@ full suite 221 pass; evidence trail docs/milestones/M009-EVIDENCE.md).
 NEXT: **M009-M2 is ON HOLD — user directive (2026-08-31): "Do not
 implement M009-M2".  Do NOT start M2 without explicit authorization.**
 Open follow-ups pending direction: (a) M009-M2 scorecard aggregation
-(sections 6-7); (b) M009 §18 fixture-integrity regression test — the
-Karsiyaka/Denizli vs Karsiyaka/Korfez conflation (30741194 vs 30741844)
-is NOT yet encoded as an automated test (currently only in docs/comments).
+(sections 6-7).  (b) RESOLVED 2026-08-31 — M009 §18 fixture-integrity
+regression test now IN PLACE (tests/test_fixture_integrity.py, commit
+1b23253): the Karsiyaka/Denizli vs Karsiyaka/Korfez incident is a
+permanent, mutation-proven regression test (4 tests, 225 pass).
 
 ## M009-M2 (HOLD — user directive, do not implement) — scorecard aggregation
 
