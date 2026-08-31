@@ -35,6 +35,7 @@ Methodology
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import statistics
@@ -176,6 +177,9 @@ CREATE TABLE IF NOT EXISTS checkpoint_market (
     elapsed_minutes       REAL,
     opening_line          REAL,               -- OLV: first verified line (snap or WS)
     live_market_line      REAL,               -- frozen at-or-before checkpoint
+    market_timestamp      TEXT,               -- when the frozen line was observed
+                                              -- (snapshot captured_at or WS captured_at);
+                                              -- M009-M3 freshness: NULL = never observed
     blm_fair_value        REAL,               -- project() recompute, frozen at first write
     closing_line          REAL,               -- CLV: last verified line (snap or WS)
     actual_final_total    INTEGER,
@@ -196,6 +200,15 @@ CREATE INDEX IF NOT EXISTS idx_cm_pct      ON checkpoint_market(checkpoint_pct);
 """
 
 _CHECKPOINTS = ("q1", "q2", "q3", "q4", "final")
+
+
+def _ensure_cm_market_timestamp(conn) -> None:
+    """Idempotent migration: existing checkpoint_market tables (created
+    before M009-M3) lack market_timestamp.  ALTER once; old rows keep
+    NULL (honest missing), new recordings populate it."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkpoint_market)")}
+    if "market_timestamp" not in cols:
+        conn.execute("ALTER TABLE checkpoint_market ADD COLUMN market_timestamp TEXT")
 
 # A game is a FRAGMENT (diagnostics only, never headline) unless captured
 # with >= 15 snapshots starting in its 1st quarter — a short or mid-game
@@ -256,24 +269,111 @@ def _frozen_market_line(conn, source_game_id: str, rows: list[dict],
     batch at-or-before (event-view parity — the feed carries 3 O/U
     variants per capture; the lowest is the main line).
     """
+    return _frozen_market_obs(conn, source_game_id, rows, idx)[0]
+
+
+def _frozen_market_obs(conn, source_game_id: str, rows: list[dict],
+                       idx: int) -> tuple[Optional[float], Optional[str]]:
+    """(line, observation_timestamp) of the frozen market line at-or-
+    before rows[idx] — same selection as _frozen_market_line, plus the
+    timestamp needed for freshness (M009-M3).  Snapshot-carried lines
+    get the LAST carrying snapshot's captured_at (the line can move
+    between snapshots); WS fallback gets the observation's captured_at.
+    (None, None) when no line exists at-or-before."""
     line: Optional[float] = None
+    ts: Optional[str] = None
     for rr in rows[: idx + 1]:
         if rr.get("total_line") is not None:
             line = float(rr["total_line"])
-    if line is None:
-        ws = conn.execute(
-            """SELECT line_value FROM market_observations
-               WHERE source_game_id=? AND market_type='MatchTotal'
-                 AND captured_at = (
-                     SELECT MAX(captured_at) FROM market_observations
-                     WHERE source_game_id=? AND market_type='MatchTotal'
-                       AND captured_at <= ?)
-               ORDER BY line_value ASC LIMIT 1""",
-            (source_game_id, source_game_id, rows[idx]["captured_at"]),
-        ).fetchone()
-        if ws and ws["line_value"] is not None:
-            line = float(ws["line_value"])
-    return line
+            ts = rr.get("captured_at")
+    if line is not None:
+        return line, ts
+    ws = conn.execute(
+        """SELECT line_value, captured_at FROM market_observations
+           WHERE source_game_id=? AND market_type='MatchTotal'
+             AND captured_at = (
+                 SELECT MAX(captured_at) FROM market_observations
+                 WHERE source_game_id=? AND market_type='MatchTotal'
+                   AND captured_at <= ?)
+           ORDER BY line_value ASC LIMIT 1""",
+        (source_game_id, source_game_id, rows[idx]["captured_at"]),
+    ).fetchone()
+    if ws and ws["line_value"] is not None:
+        return float(ws["line_value"]), ws["captured_at"]
+    return None, None
+
+
+# M009-M3: market freshness (directive sections 3, 5).  The stale
+# threshold is the EXISTING system definition — the dashboard treats a
+# market as fresh when its age <= 300s (dashboard.js `age <= 300`) —
+# made configurable via env rather than hard-coded.
+MARKET_STALE_SECONDS = int(os.environ.get("BLM_MARKET_STALE_SECONDS", "300"))
+
+
+def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _market_age_seconds(market_ts: Optional[str],
+                        checkpoint_ts: Optional[str]) -> Optional[float]:
+    """snapshot_timestamp - market_timestamp (directive section 3).  A
+    negative age (clock skew) clamps to 0 — a line is never fresher
+    than the checkpoint that froze it."""
+    mt, ct = _parse_ts(market_ts), _parse_ts(checkpoint_ts)
+    if mt is None or ct is None:
+        return None
+    return max(0.0, (ct - mt).total_seconds())
+
+
+def _market_status(market_ts: Optional[str], checkpoint_ts: Optional[str],
+                   stale_seconds: int = MARKET_STALE_SECONDS) -> Optional[str]:
+    """LIVE | STALE | MISSING.  LIVE when a fresh market line exists at
+    the checkpoint; STALE when the frozen line is older than the
+    threshold; MISSING when no line was ever observed."""
+    if market_ts is None:
+        return "MISSING"
+    age = _market_age_seconds(market_ts, checkpoint_ts)
+    if age is None:
+        return None
+    return "LIVE" if age <= stale_seconds else "STALE"
+
+
+def _freshness_bucket(age: Optional[float]) -> Optional[str]:
+    """Freshness buckets (directive section 3): 0-10s / 10-30s / 30-60s /
+    60-120s / 120-300s / 300s+.  Boundary values fall into the named
+    range (age 10 -> \"10-30s\", age 300 -> \"300s+\" — matching the
+    bucket NAMES; the LIVE/STALE status boundary stays at 300 exactly)."""
+    if age is None:
+        return None
+    if age < 10:
+        return "0-10s"
+    if age < 30:
+        return "10-30s"
+    if age < 60:
+        return "30-60s"
+    if age < 120:
+        return "60-120s"
+    if age < 300:
+        return "120-300s"
+    return "300s+"
+
+
+def _edge_class(status: Optional[str],
+                blm_market_diff: Optional[float]) -> Optional[str]:
+    """LIVE_EDGE only for a FRESH market (directive section 5).  A stale
+    differential is retained for research but is NEVER a live edge."""
+    if status is None or blm_market_diff is None:
+        return None
+    if status == "LIVE":
+        return "LIVE_EDGE"
+    if status == "STALE":
+        return "STALE_DIFFERENTIAL"
+    return None
 
 
 def _period_quarter(period_label: Optional[str]) -> Optional[int]:
@@ -1092,6 +1192,7 @@ class Scorecard:
         with self._lock:
             conn = self._connect()
             try:
+                _ensure_cm_market_timestamp(conn)
                 games = conn.execute(
                     f"""SELECT g.id, g.source_game_id, g.classification,
                                (SELECT COUNT(*) FROM snapshots s
@@ -1157,7 +1258,7 @@ class Scorecard:
                               clv: Optional[float], actual: Optional[int]) -> int:
         """Compute and freeze ONE checkpoint row (insert-once semantics)."""
         r = rows[idx]
-        live = _frozen_market_line(conn, g["source_game_id"], rows, idx)
+        live, market_ts = _frozen_market_obs(conn, g["source_game_id"], rows, idx)
         proj = project(rows[: idx + 1], live)
         fair = proj["expected_total"]
         if fair is None:
@@ -1167,16 +1268,17 @@ class Scorecard:
             """INSERT OR IGNORE INTO checkpoint_market (
                 source_game_id, classification, checkpoint_pct,
                 checkpoint_timestamp, quarter, progress, elapsed_minutes,
-                opening_line, live_market_line, blm_fair_value, closing_line,
+                opening_line, live_market_line, market_timestamp, blm_fair_value,
+                closing_line,
                 actual_final_total, market_vs_fair, signal,
                 blm_vs_olv, blm_vs_clv, olv_to_clv, market_move_toward_blm,
                 outcome, model_version, recorded_at, frozen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
             (
                 g["source_game_id"], g["classification"], pct,
                 r["captured_at"], r.get("quarter"), proj["progress"],
                 proj["elapsed_minutes"],
-                olv, live, fair, clv, actual, mvf,
+                olv, live, market_ts, fair, clv, actual, mvf,
                 _market_vs_fair_signal(live, fair),
                 round(fair - olv, 2) if fair is not None and olv is not None else None,
                 round(fair - clv, 2) if fair is not None and clv is not None else None,
@@ -1414,10 +1516,45 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
         moves = [r["market_move_toward_blm"] for r in mrows
                  if r["market_move_toward_blm"] is not None]
         olvclv = [r["olv_to_clv"] for r in crows if r["olv_to_clv"] is not None]
+        statuses = [_market_status(r.get("market_timestamp"),
+                                   r.get("checkpoint_timestamp")) for r in crows]
+        ages = [a for a in (_market_age_seconds(r.get("market_timestamp"),
+                                                r.get("checkpoint_timestamp"))
+                            for r in crows) if a is not None]
+        n_live = statuses.count("LIVE")
+        n_stale = statuses.count("STALE")
         checkpoints.append({
             "checkpoint_pct": pct,
             "n": n,
             "n_fair": len(crows),
+            "n_live": n_live,                    # M009-M3: freshness split
+            "n_stale": n_stale,
+            "n_missing": len(crows) - n_live - n_stale,
+            "avg_market_age": _round2(sum(ages) / len(ages)) if ages else None,
+            "live_under_win": sum(1 for r in mrows
+                                  if _market_status(r.get("market_timestamp"),
+                                                    r.get("checkpoint_timestamp")) == "LIVE"
+                                  and r["outcome"] == "UNDER_WIN"),
+            "live_under_loss": sum(1 for r in mrows
+                                   if _market_status(r.get("market_timestamp"),
+                                                     r.get("checkpoint_timestamp")) == "LIVE"
+                                   and r["outcome"] == "UNDER_LOSS"),
+            "live_over_win": sum(1 for r in mrows
+                                 if _market_status(r.get("market_timestamp"),
+                                                   r.get("checkpoint_timestamp")) == "LIVE"
+                                 and r["outcome"] == "OVER_WIN"),
+            "live_over_loss": sum(1 for r in mrows
+                                  if _market_status(r.get("market_timestamp"),
+                                                    r.get("checkpoint_timestamp")) == "LIVE"
+                                  and r["outcome"] == "OVER_LOSS"),
+            "stale_under_win": sum(1 for r in mrows
+                                   if _market_status(r.get("market_timestamp"),
+                                                     r.get("checkpoint_timestamp")) == "STALE"
+                                   and r["outcome"] == "UNDER_WIN"),
+            "stale_under_loss": sum(1 for r in mrows
+                                    if _market_status(r.get("market_timestamp"),
+                                                      r.get("checkpoint_timestamp")) == "STALE"
+                                    and r["outcome"] == "UNDER_LOSS"),
             "avg_market": _round2(sum(r["live_market_line"] for r in mrows) / n)
                           if n else None,
             "avg_fair": _round2(sum(r["blm_fair_value"] for r in crows) / len(crows))
@@ -1476,9 +1613,43 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
     for g in games.values():
         g["outcome_olv"] = _outcome_vs_line(g["final_total"], g["olv"])
         g["outcome_clv"] = _outcome_vs_line(g["final_total"], g["clv"])
+
+    # ── market freshness x outcome (M009-M3, directive section 10) ──
+    buckets = ["0-10s", "10-30s", "30-60s", "60-120s", "120-300s", "300s+"]
+    fresh: dict[str, dict[str, Any]] = {
+        b: {"bucket": b, "n": 0, "n_live": 0, "n_stale": 0,
+            "under_win": 0, "over_win": 0, "avg_abs_mf": [], "avg_age": []}
+        for b in buckets}
+    for r in rows:
+        st = _market_status(r.get("market_timestamp"),
+                            r.get("checkpoint_timestamp"))
+        if st is None or st == "MISSING":
+            continue
+        age = _market_age_seconds(r.get("market_timestamp"),
+                                  r.get("checkpoint_timestamp"))
+        f = fresh[_freshness_bucket(age) or "300s+"]
+        f["n"] += 1
+        f["n_live" if st == "LIVE" else "n_stale"] += 1
+        if r["outcome"] == "UNDER_WIN":
+            f["under_win"] += 1
+        elif r["outcome"] == "OVER_WIN":
+            f["over_win"] += 1
+        if r["market_vs_fair"] is not None:
+            f["avg_abs_mf"].append(abs(r["market_vs_fair"]))
+        if age is not None:
+            f["avg_age"].append(age)
+    market_freshness = []
+    for f in fresh.values():
+        f["avg_abs_mf"] = _round2(sum(f["avg_abs_mf"]) / len(f["avg_abs_mf"])) \
+                          if f["avg_abs_mf"] else None
+        f["avg_age"] = _round2(sum(f["avg_age"]) / len(f["avg_age"])) \
+                       if f["avg_age"] else None
+        market_freshness.append(f)
+
     return {
         "checkpoints": checkpoints,
         "games": sorted(games.values(), key=lambda x: x["source_game_id"]),
+        "market_freshness": market_freshness,
     }
 
 

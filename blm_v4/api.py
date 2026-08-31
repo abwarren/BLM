@@ -450,18 +450,35 @@ def _game_checkpoint_market(conn: sqlite3.Connection,
     ).fetchone()
     if not has:
         return []
+    from blm_v4.scorecard import (_edge_class, _freshness_bucket,
+                                  _market_age_seconds, _market_status)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkpoint_market)")}
+    ts_sel = ", market_timestamp" if "market_timestamp" in cols else ""
     rows = conn.execute(
-        """SELECT checkpoint_pct, checkpoint_timestamp, quarter,
+        f"""SELECT checkpoint_pct, checkpoint_timestamp, quarter,
                   opening_line, live_market_line, blm_fair_value,
                   closing_line, actual_final_total, market_vs_fair,
                   signal, blm_vs_olv, blm_vs_clv, olv_to_clv,
-                  market_move_toward_blm, outcome
+                  market_move_toward_blm, outcome{ts_sel}
            FROM checkpoint_market
            WHERE source_game_id = ?
            ORDER BY checkpoint_pct ASC""",
         (source_game_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["market_age_seconds"] = _market_age_seconds(
+            d.get("market_timestamp"), d.get("checkpoint_timestamp"))
+        d["market_status"] = _market_status(
+            d.get("market_timestamp"), d.get("checkpoint_timestamp"))
+        d["freshness_bucket"] = _freshness_bucket(d["market_age_seconds"])
+        fair, live = d.get("blm_fair_value"), d.get("live_market_line")
+        d["blm_market_diff"] = round(fair - live, 2) \
+            if fair is not None and live is not None else None
+        d["edge_class"] = _edge_class(d["market_status"], d["blm_market_diff"])
+        out.append(d)
+    return out
 
 
 def _analyze_game(game: dict, rows: list[dict], now: datetime,
