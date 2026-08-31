@@ -1,4 +1,4 @@
-# BLM MILESTONE CHECKPOINT — M009-M1 (2026-08-31)
+# BLM MILESTONE CHECKPOINT — M009-M2 (REFINED) (2026-08-31)
 
 ## M009 — SCORECARD REDESIGN: MARKET VS FAIR VALUE
 
@@ -7,40 +7,61 @@ theme — OLV/CLV/checkpoint disparity — at higher fidelity: per-checkpoint
 Market-vs-Fair as the PRIMARY metric, not a generic model-vs-market
 block).  The M008-SCORE-M2 declaration below is retained as context.
 
-CURRENT STATE: M009-M1 + M009-M1b COMPLETE, DEPLOYED, LIVE VERIFIED
-(checkpoint_market immutable history + /api/v4/game/{id} market_vs_fair;
-full suite 221 pass; evidence trail docs/milestones/M009-EVIDENCE.md).
+CURRENT STATE: M009-M1 + M009-M1b + M009-M2 (REFINED) COMPLETE, DEPLOYED,
+LIVE VERIFIED.  checkpoint_market immutable history; /api/v4/game/{id}
+market_vs_fair; /api/v4/scorecard market_vs_fair aggregation (per-
+checkpoint avg/median signed M-F, value %, outcomes, position win rate,
+OLV->CLV, market movement) + game-level scorecard; dashboard MARKET VS
+FAIR VALUE primary (Model MAE demoted to labelled DIAGNOSTIC).  §18
+fixture-integrity regression in place.  Full suite 233 pass.  Evidence
+trail docs/milestones/M009-EVIDENCE.md.
 
-NEXT: **M009-M2 is ON HOLD — user directive (2026-08-31): "Do not
-implement M009-M2".  Do NOT start M2 without explicit authorization.**
-Open follow-ups pending direction: (a) M009-M2 scorecard aggregation
-(sections 6-7).  (b) RESOLVED 2026-08-31 — M009 §18 fixture-integrity
-regression test now IN PLACE (tests/test_fixture_integrity.py, commit
-1b23253): the Karsiyaka/Denizli vs Karsiyaka/Korfez incident is a
-permanent, mutation-proven regression test (4 tests, 225 pass).
+NEXT: **M009-M3 — OLV/CLV relationship analysis / market-convergence
+stats.  Do NOT start without explicit authorization.**
 
-## M009-M2 (HOLD — user directive, do not implement) — scorecard aggregation
+## M009-M2 (REFINED) (COMPLETE, DEPLOYED, LIVE VERIFIED) — MARKET VS FAIR PRIMARY SCORECARD
 
-CANCELLED/HOLD 2026-08-31 by user: "Do not implement M009-M2".  Kept
-here as the declared plan so it is not lost; DO NOT begin without
-explicit go.
+MILESTONE: M009-M2 (REFINED) — the refinement directive ("Market vs Fair
+is the primary scorecard") IS the M2 spec; it superseded the earlier M2
+hold.  Commit b6798f2 + docs commit.
 
-MILESTONE (declared, NOT STARTED): M009-M2 — scorecard aggregation
-(directive sections 6-7).  OBJECTIVE: replace the vague MODEL vs MARKET
-block with the per-checkpoint MARKET VS FAIR VALUE table: | Checkpoint |
-N | Avg Market | Avg Fair | Avg M-F | Under Value % | Over Value % |
-over rows 10..100%.  Avg M-F = average(LIVE_MARKET_LINE - BLM_FAIR_VALUE),
-sign retained.  Plus actual-outcome table per checkpoint (Market | Fair |
-M-F | Direction | Actual | Outcome) answering "when BLM sees +X M-F at
-P%, how often does Under win?"  Honest N per checkpoint.  Source:
-checkpoint_market (clean completed games only).  GAP: no per-checkpoint
-avg table / Under-Over value % / outcome analysis.  ACCEPTANCE:
-/api/v4/scorecard returns per-checkpoint market-vs-fair aggregation with
-honest N; dashboard renders the table.  TRACER BULLET: one aggregate
-from real checkpoint_market rows -> API -> frontend table, browser-
-verified.  RED TEST (planned): synthetic rows with known avgs ->
-aggregation function returns exact per-checkpoint stats (sign retained,
-honest N, missing excluded).
+OBJECTIVE: per-checkpoint (10..100%) aggregation over checkpoint_market:
+N, avg/median signed M-F (sign retained), abs M-F, OVER/UNDER/PUSH value
+% (with N), OVER/UNDER WIN/LOSS, position win rate (pushes excluded),
+avg OLV->CLV, market moved TOWARD/AWAY/UNCHANGED.  Game-level scorecard:
+per clean game OLV/CLV/final + outcome vs OLV/CLV + progressive table.
+Headline redesign: MARKET VS FAIR primary; Model MAE / Market MAE /
+model-beat-market demoted to labelled DIAGNOSTIC (population:
+prediction_scores fragment=0; line: checkpoint_market).
+
+WHAT WAS TRACED: real checkpoint_market rows -> _market_vs_fair_sql ->
+/api/v4/scorecard market_vs_fair -> dashboard MARKET VS FAIR VALUE block.
+
+WHAT CHANGED: scorecard.py (_market_vs_fair_sql + market_vs_fair()),
+api.py (route), dashboard.js (primary block + game-level + DIAGNOSTIC
+relabels), tests/test_m009_mvf_aggregation.py (6), tests/
+test_m009_mvf_frontend.py (2).
+
+TESTS: RED confirmed each (6 + 2); one RED finding was my test
+expectation (fair depends on market via 70/30 blend) — aggregation was
+correct, tests rewritten against raw rows + invariants.  Full suite 233
+passed, 0 failed (225 + 8).
+
+LIVE VERIFIED (real production data, /api/v4/scorecard): pct50 — n=440,
+avg_market 191.13, avg_fair 183.2, avg_mf +8.62 (signed), median 7.5,
+under_value 293/440 = 67%, under_win 171 / under_loss 122, over_win 75 /
+over_loss 72, position_win_rate 56%, avg_olv_to_clv +3.09, move_toward
+223 / move_away 195.  4615 checkpoint rows served.  Served dashboard.js
+carries MARKET VS FAIR VALUE / GAME-LEVEL SCORECARD / MODEL vs MARKET —
+DIAGNOSTIC markers.
+
+COMMIT: b6798f2 (code + tests) + docs commit (this).  Pushed.
+
+KNOWN LIMITATION: position win rate excludes pushes by design (reported
+separately); value % denominators = market-bearing rows only (honest N).
+
+NEXT MILESTONE: M009-M3 — OLV/CLV relationship analysis / convergence
+(awaiting explicit go).
 
 ## M009-M1b (COMPLETE, DEPLOYED, LIVE VERIFIED) — Market-vs-Fair exposed through game detail API
 

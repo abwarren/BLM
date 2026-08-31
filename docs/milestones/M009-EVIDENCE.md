@@ -38,6 +38,61 @@ VERIFICATION:
 
 ---
 
+## M009-M2 (REFINED) — MARKET VS FAIR PRIMARY SCORECARD (COMPLETE, b6798f2)
+
+The refinement directive ("Market vs Fair is the primary scorecard")
+IS the M2 spec; it superseded the earlier M2 hold.  Built on the
+immutable checkpoint_market rows (M1).
+
+WHAT CHANGED:
+- scorecard.py: `_market_vs_fair_sql(conn)` + `Scorecard.market_vs_fair()`.
+  Per-checkpoint (10..100%): n (games with BOTH market+fair), n_fair,
+  avg_market, avg_fair, avg_mf (SIGNED mean market-fair), median_mf,
+  abs_mf, over/under/push value counts + pct (of market-bearing rows),
+  over_win/over_loss/under_win/under_loss/push_outcome, position_win_rate
+  (pushes excluded from denominator), avg_olv_to_clv, move_toward/
+  move_away/move_unchanged.  games[]: per clean game — id, teams, OLV,
+  CLV, final, outcome vs OLV, outcome vs CLV, progressive rows[]
+  (checkpoint_pct, market, fair, mf, signal, actual, outcome).
+- api.py: /api/v4/scorecard gains `market_vs_fair`.
+- dashboard.js: MARKET VS FAIR VALUE is now the FIRST/PRIMARY block
+  (per-checkpoint table with signed Avg M-F + Under/Over Value %;
+  position-outcome table; market-movement table; GAME-LEVEL SCORECARD
+  with <details> progressive tables).  Model MAE / Market MAE /
+  model-beat-market demoted to labelled DIAGNOSTIC (population:
+  prediction_scores fragment=0; line: checkpoint_market).
+- tests: test_m009_mvf_aggregation.py (6, RED confirmed), 
+  test_m009_mvf_frontend.py (2, RED confirmed).
+
+RED findings: (1) my hand-computed fair values were wrong — fair
+depends on the market via the 0.7*pace+0.3*line blend (G-PUSH market
+143 -> fair 137.3, not 148.4); the aggregation was correct; tests
+rewritten to compute expected stats from the raw checkpoint_market
+rows + model-independent invariants (signs, counts, pushes, moves).
+(2) frontend test asserted runtime-interpolated text; fixed to
+source-level markers.
+
+FULL SUITE: 233 passed, 0 failed (225 + 8).
+
+DEPLOYED + LIVE VERIFIED (2026-08-31):
+- /api/v4/scorecard market_vs_fair pct50 (real production data):
+  n=440, avg_market 191.13, avg_fair 183.2, avg_mf +8.62 (signed),
+  median_mf 7.5, abs_mf 14.32, over_value 147 (33%), under_value 293
+  (67%), over_win 75 / over_loss 72, under_win 171 / under_loss 122,
+  position_win_rate 56%, avg_olv_to_clv +3.09, move_toward 223 /
+  move_away 195.  4615 checkpoint rows served.
+- Served dashboard.js carries: MARKET VS FAIR VALUE (1), GAME-LEVEL
+  SCORECARD (1), MODEL vs MARKET — DIAGNOSTIC (1).
+
+The scorecard now answers the primary question from real data: at 50%
+BLM fair averaged 183.2 vs bookmaker 191.13 (avg +8.6 UNDER value),
+Under value flagged 67% of the time, and the UNDER position won 171/293
+(58%) — the market moved TOWARD BLM 223 vs AWAY 195.
+
+NEXT: M009-M3 — OLV/CLV relationship analysis / convergence (explicit go only).
+
+---
+
 ## L1 CODE — implementation exists
 
 Commits (all pushed to github.com:abwarren/BLM, SSH):
@@ -124,13 +179,13 @@ populates checkpoint_market automatically.  No manual DB writes.
 
 - M009-M1  : COMPLETE, DEPLOYED, LIVE VERIFIED  (commits a891104..ffa5f87)
 - M009-M1b : COMPLETE, DEPLOYED, LIVE VERIFIED  (commit b8df068)
-- Full suite 221 passed, 0 failed at L3 (fresh).
+- M009-M2 (REFINED): COMPLETE, DEPLOYED, LIVE VERIFIED  (commit b6798f2)
+- Full suite 233 passed, 0 failed at L3 (fresh).
 - Ad-hoc synthetic verifications (hermes-verify-* scripts, /tmp,
   deleted after run) used during development; NOT the evidence basis
   for L4/L5 — those are the running service + real DB.
 
 ## NEXT
 
-M009-M2 — scorecard aggregation: per-checkpoint Avg Market / Avg Fair /
-Avg M-F table + Under/Over value % + outcome analysis, honest N per
-checkpoint (sections 6-7 of the directive).
+M009-M3 — OLV/CLV relationship analysis / market-convergence stats
+(after explicit go).  M009-M2 was the refinement directive's scope.
