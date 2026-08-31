@@ -1780,8 +1780,9 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
             "over_n": 0, "under_n": 0, "push_n": 0,
             "fresh_n": 0, "stale_n": 0, "missing_n": 0,
             "fresh_win": 0, "stale_win": 0, "fresh_denom": 0, "stale_denom": 0,
-            "ages": []})
+            "ages": [], "diffs": []})
         e["n"] += 1
+        e["diffs"].append(diff)
         oc = r.get("outcome")
         if oc == "PUSH":
             e["push"] += 1
@@ -1823,8 +1824,10 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
         e["stale_win_rate"] = _round2(e["stale_win"] / e["stale_denom"]) \
                               if e["stale_denom"] else None
         e["avg_age"] = _round2(sum(e["ages"]) / len(e["ages"])) if e["ages"] else None
+        e["avg_diff"] = _round2(sum(e["diffs"]) / len(e["diffs"])) if e["diffs"] else None
         e["reliable"] = e["n"] >= MIN_BAND_SAMPLE
-        for k in ("fresh_win", "stale_win", "fresh_denom", "stale_denom", "ages"):
+        for k in ("fresh_win", "stale_win", "fresh_denom", "stale_denom",
+                  "ages", "diffs"):
             del e[k]
         edge_buckets.append(e)
 

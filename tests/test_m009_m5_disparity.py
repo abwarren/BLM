@@ -89,7 +89,7 @@ def test_edge_buckets_additive_m4_keys_preserved(sc):
     agg = sc.market_vs_fair()
     b = _band(agg, "10-15", "BLM_OVER")
     for key in ("bucket", "direction", "n", "win", "loss", "push",
-                "win_rate", "avg_age"):
+                "win_rate", "avg_age", "avg_diff"):
         assert key in b, f"M4 key missing: {key}"
     for key in ("over_n", "under_n", "push_n", "market_win_rate",
                 "fresh_n", "stale_n", "missing_n", "fresh_win_rate",
