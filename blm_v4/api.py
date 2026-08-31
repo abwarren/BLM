@@ -832,6 +832,96 @@ def v4_games(classification: Optional[str] = Query(None), limit: int = Query(200
     return {"total": len(items), "games": items}
 
 
+@router.get("/scorecard/events")
+def v4_scorecard_events(
+    direction: Optional[str] = Query(None, pattern="^(BLM_OVER|BLM_UNDER)$"),
+    freshness: Optional[str] = Query(None, pattern="^(LIVE|STALE|MISSING)$"),
+    checkpoint: Optional[int] = Query(None, ge=0, le=100),
+    min_diff: Optional[float] = Query(None, ge=0),
+    max_diff: Optional[float] = Query(None, ge=0),
+    game: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict:
+    """M009-M5 — the underlying event dataset behind the disparity bands.
+
+    One row per (game, checkpoint): observed market line, BLM fair,
+    signed differential, direction (BLM_OVER/BLM_UNDER), market_status
+    (LIVE/STALE/MISSING — never substituted), market age, momentum,
+    BLM's side, actual, settlement.  Filters are applied in Python;
+    min_diff/max_diff are on MAGNITUDE (direction separates sign).
+    Contaminated games are excluded at the source (checkpoint_market)."""
+    from blm_v4.scorecard import _market_age_seconds, _market_status
+    conn = _connect()
+    try:
+        has = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='checkpoint_market'").fetchone()
+        if not has:
+            return {"total": 0, "rows": []}
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkpoint_market)")}
+        extra = [c for c in ("market_timestamp", "momentum_state",
+                             "momentum_strength", "false_momentum",
+                             "false_momentum_confidence") if c in cols]
+        sel = ", ".join(extra) + "," if extra else ""
+        rows = conn.execute(
+            f"""SELECT cm.source_game_id, cm.checkpoint_pct, cm.checkpoint_timestamp,
+                      cm.live_market_line, cm.blm_fair_value, cm.actual_final_total,
+                      cm.outcome, {sel} g.home_team, g.away_team
+               FROM checkpoint_market cm
+               JOIN games g ON g.source_game_id = cm.source_game_id
+               ORDER BY cm.source_game_id, cm.checkpoint_pct""").fetchall()
+    finally:
+        conn.close()
+
+    events = []
+    for r in rows:
+        d = dict(r)
+        line, fair, actual = d["live_market_line"], d["blm_fair_value"], d["actual_final_total"]
+        diff = round(fair - line, 2) if fair is not None and line is not None else None
+        dirn = ("BLM_OVER" if diff and diff > 0 else
+                "BLM_UNDER" if diff and diff < 0 else None)
+        status = _market_status(d.get("market_timestamp"), d["checkpoint_timestamp"])
+        blm_side = ("OVER" if fair is not None and line is not None and fair > line else
+                    "UNDER" if fair is not None and line is not None and fair < line else None)
+        oc = d["outcome"]
+        blm_won = (True if oc in ("OVER_WIN", "UNDER_WIN") else
+                   False if oc in ("OVER_LOSS", "UNDER_LOSS") else None)
+        events.append({
+            "game": d["source_game_id"],
+            "home_team": d["home_team"], "away_team": d["away_team"],
+            "checkpoint_pct": d["checkpoint_pct"],
+            "checkpoint_ts": d["checkpoint_timestamp"],
+            "market_line": line, "blm_fair": fair, "diff": diff,
+            "direction": dirn,
+            "market_status": status,
+            "market_age_seconds": _market_age_seconds(
+                d.get("market_timestamp"), d["checkpoint_timestamp"]),
+            "momentum_state": d.get("momentum_state"),
+            "momentum_strength": d.get("momentum_strength"),
+            "false_momentum": d.get("false_momentum"),
+            "blm_side": blm_side,
+            "actual": actual, "outcome": oc, "blm_won": blm_won,
+        })
+
+    if direction:
+        events = [e for e in events if e["direction"] == direction]
+    if freshness:
+        events = [e for e in events if e["market_status"] == freshness]
+    if checkpoint is not None:
+        events = [e for e in events if e["checkpoint_pct"] == checkpoint]
+    if min_diff is not None:
+        events = [e for e in events
+                  if e["diff"] is not None and abs(e["diff"]) >= min_diff]
+    if max_diff is not None:
+        events = [e for e in events
+                  if e["diff"] is not None and abs(e["diff"]) <= max_diff]
+    if game:
+        needle = game.lower()
+        events = [e for e in events if needle in e["game"].lower()]
+    total = len(events)
+    return {"total": total, "rows": events[:limit]}
+
+
 @router.get("/scorecard")
 def v4_scorecard() -> dict:
     """Projection-accuracy scorecard (persisted, quality-gated)."""

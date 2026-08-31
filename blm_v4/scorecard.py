@@ -1751,13 +1751,17 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
         agg["avg_diff"] = _round2(sum(diffs) / len(diffs)) if diffs else None
         bands.append(agg)
 
-    # ── edge buckets x direction (M009-M4, large-edge investigation) ─
+    # ── edge buckets x direction (M009-M4/M5, large-edge investigation) ─
     # |BLM - market| magnitude buckets, split by direction (BLM_OVER =
-    # fair > market, BLM_UNDER = fair < market).  avg_age keeps large
-    # apparent edges attributable to freshness (a big STALE differential
-    # is visible as such, never presented as a live edge).
+    # fair > market, BLM_UNDER = fair < market).  M5 adds the actual-vs-
+    # line O/U counts, market win rate, fresh/stale split, and a small-
+    # sample reliability flag (n < min_sample -> reliable=False; the
+    # rate is shown but never treated as a conclusion).  avg_age keeps
+    # large apparent edges attributable to freshness (a big STALE
+    # differential is visible as such, never presented as a live edge).
     EB = [("0-2", 0, 2), ("2-5", 2, 5), ("5-10", 5, 10),
           ("10-15", 10, 15), ("15-20", 15, 20), ("20+", 20, None)]
+    MIN_BAND_SAMPLE = int(os.environ.get("BLM_MIN_BAND_SAMPLE", "30"))
     edges: dict[tuple[str, str], dict[str, Any]] = {}
     for r in rows:
         line, fair = r.get("live_market_line"), r.get("blm_fair_value")
@@ -1772,7 +1776,11 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
                      if (hi is None and ad >= lo) or (hi is not None and lo <= ad < hi))
         e = edges.setdefault((label, direction), {
             "bucket": label, "direction": direction, "n": 0,
-            "win": 0, "loss": 0, "push": 0, "ages": []})
+            "win": 0, "loss": 0, "push": 0,
+            "over_n": 0, "under_n": 0, "push_n": 0,
+            "fresh_n": 0, "stale_n": 0, "missing_n": 0,
+            "fresh_win": 0, "stale_win": 0, "fresh_denom": 0, "stale_denom": 0,
+            "ages": []})
         e["n"] += 1
         oc = r.get("outcome")
         if oc == "PUSH":
@@ -1781,6 +1789,26 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
             e["win"] += 1
         elif oc in ("OVER_LOSS", "UNDER_LOSS"):
             e["loss"] += 1
+        actual = r.get("actual_final_total")
+        if actual is not None:
+            if actual > line:
+                e["over_n"] += 1
+            elif actual < line:
+                e["under_n"] += 1
+            else:
+                e["push_n"] += 1
+        status = _market_status(r.get("market_timestamp"),
+                                r.get("checkpoint_timestamp"))
+        if status == "LIVE":
+            e["fresh_n"] += 1
+            e["fresh_denom"] += 1
+            e["fresh_win"] += 1 if oc in ("OVER_WIN", "UNDER_WIN") else 0
+        elif status == "STALE":
+            e["stale_n"] += 1
+            e["stale_denom"] += 1
+            e["stale_win"] += 1 if oc in ("OVER_WIN", "UNDER_WIN") else 0
+        else:
+            e["missing_n"] += 1
         age = _market_age_seconds(r.get("market_timestamp"),
                                   r.get("checkpoint_timestamp"))
         if age is not None:
@@ -1789,8 +1817,15 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
     for e in sorted(edges.values(), key=lambda x: (x["bucket"], x["direction"])):
         denom = e["win"] + e["loss"]
         e["win_rate"] = _round2(e["win"] / denom) if denom else None
+        e["market_win_rate"] = _round2(e["loss"] / denom) if denom else None
+        e["fresh_win_rate"] = _round2(e["fresh_win"] / e["fresh_denom"]) \
+                              if e["fresh_denom"] else None
+        e["stale_win_rate"] = _round2(e["stale_win"] / e["stale_denom"]) \
+                              if e["stale_denom"] else None
         e["avg_age"] = _round2(sum(e["ages"]) / len(e["ages"])) if e["ages"] else None
-        del e["ages"]
+        e["reliable"] = e["n"] >= MIN_BAND_SAMPLE
+        for k in ("fresh_win", "stale_win", "fresh_denom", "stale_denom", "ages"):
+            del e[k]
         edge_buckets.append(e)
 
     return {
@@ -1800,6 +1835,7 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
         "time_of_day": {"hours": hours_out, "bands": bands,
                         "band_def": TOD_BANDS_DEF},
         "edge_buckets": edge_buckets,
+        "edge_bucket_min_sample": MIN_BAND_SAMPLE,
     }
 
 
