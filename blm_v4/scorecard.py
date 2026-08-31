@@ -1509,6 +1509,21 @@ def _tod_bands() -> list[tuple[int, int, str]]:
     return out
 
 
+# M009 contamination integrity: headline readers of checkpoint_market
+# must apply the SAME eligibility rule as the writer
+# (record_checkpoint_market).  A game re-verified INVALID (game_quality)
+# or whose result is no longer OK (game_results) is EXCLUDED from
+# headline analytics while its historical rows stay intact for audit —
+# logical exclusion, never row destruction.  Freshness classification
+# (LIVE/STALE/MISSING) is untouched: game quality is a separate
+# dimension from market-observation freshness.
+_CM_ELIGIBLE_SQL = """JOIN game_results r ON r.source_game_id = cm.source_game_id
+WHERE r.final_result_status = 'OK'
+  AND NOT EXISTS (SELECT 1 FROM game_quality q
+                  WHERE q.source_game_id = cm.source_game_id
+                    AND q.status = 'INVALID')"""
+
+
 def _market_vs_fair_sql(conn) -> dict[str, Any]:
     """M009-M2 (REFINED) — MARKET VS FAIR: the PRIMARY scorecard section.
 
@@ -1539,14 +1554,17 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
         return {"checkpoints": [], "games": []}
     _ensure_cm_columns(conn)
     rows = [dict(r) for r in conn.execute(
-        """SELECT cm.*, g.home_team, g.away_team, g.first_seen_at,
-                  (SELECT MIN(s.captured_at) FROM snapshots s
-                   WHERE s.game_id = g.id) AS game_start
-           FROM checkpoint_market cm
-           JOIN games g ON g.source_game_id = cm.source_game_id
-           ORDER BY cm.source_game_id, cm.checkpoint_pct""")]
-    if not rows:
-        return {"checkpoints": [], "games": []}
+        f"""SELECT cm.*, g.home_team, g.away_team, g.first_seen_at,
+                   (SELECT MIN(s.captured_at) FROM snapshots s
+                    WHERE s.game_id = g.id) AS game_start
+            FROM checkpoint_market cm
+            JOIN games g ON g.source_game_id = cm.source_game_id
+            {_CM_ELIGIBLE_SQL}
+            ORDER BY cm.source_game_id, cm.checkpoint_pct""")]
+    # NOTE: no early return on an empty `rows` — when the table has rows
+    # but NONE are eligible (logical exclusion), the per-checkpoint
+    # skeleton (10..100%) must still be returned with honest N=0 rather
+    # than vanish.  The missing-table case is handled by `has` above.
 
     def _round2(x):
         return round(x, 2) if x is not None else None

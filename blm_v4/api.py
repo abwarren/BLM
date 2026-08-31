@@ -407,7 +407,9 @@ def _series(rows: list[dict]) -> list[dict]:
             "home": h, "away": a, "combined": combined,
             "total_line": line, "spread": _f(r["spread"]),
             "quarter": _i(r["quarter"]), "period": r.get("period_label") or "",
-            "win_prob": _implied_win(w1, w2),
+            "win_prob": _implied_win(w1, w2)
+                       if (w1 is not None and w2 is not None
+                           and w1 > 1 and w2 > 1) else None,
         }
         window = rows[max(0, i - 2):i + 1]
         mom = _momentum(window)
@@ -486,7 +488,8 @@ def _game_checkpoint_market(conn: sqlite3.Connection,
 
 def _analyze_game(game: dict, rows: list[dict], now: datetime,
                   conn: Optional[sqlite3.Connection] = None,
-                  with_checkpoints: bool = False) -> dict:
+                  with_checkpoints: bool = False,
+                  quality: Optional[dict] = None) -> dict:
     """Derive the live analytics view for ONE game.
 
     Everything comes from stored, timestamped observations — never
@@ -597,6 +600,8 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "sport": game.get("sport") or "basketball",
         "status": game.get("status") or "live",
         "live": bool(age is not None and age <= LIVE_AGE_S),
+        "quality_status": (quality or {}).get("status") or "OK",
+        "quality_reason": (quality or {}).get("reason") or None,
         "home_team": game["home_team"],
         "away_team": game["away_team"],
         "home_score": home_score,
@@ -670,6 +675,35 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
 # ────────────────────────────────────────────────────────────────────────
 # DB reads
 # ────────────────────────────────────────────────────────────────────────
+
+def _quality_map(conn: sqlite3.Connection,
+                 source_game_ids: list[str]) -> dict[str, dict]:
+    """Authoritative game_quality state for a set of games (M009-M5
+    frontend integrity).
+
+    game_quality is written ONLY by the scorecard quality gate, and only
+    ever with status='INVALID' + reason.  A game absent from the map is
+    therefore analytically valid.  Frontend eligibility MUST read this
+    map — never re-derive validity from snapshot heuristics in the
+    browser (the backend gate is the single source of truth).
+    """
+    if not source_game_ids:
+        return {}
+    has = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='game_quality'").fetchone()
+    if not has:
+        # scorecard tables absent (bare pipeline DB) — nothing flagged
+        # INVALID, everything eligible.
+        return {}
+    qmarks = ",".join("?" * len(source_game_ids))
+    return {
+        r["source_game_id"]: {"status": r["status"], "reason": r["reason"]}
+        for r in conn.execute(
+            f"SELECT source_game_id, status, reason FROM game_quality "
+            f"WHERE source_game_id IN ({qmarks})", source_game_ids)
+    }
+
 
 def _load_games(conn: sqlite3.Connection, classification: Optional[str] = None,
                 limit: int = 100) -> list[dict]:
@@ -781,14 +815,17 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
     conn = _connect()
     try:
         games = _load_games(conn, classification)
+        qm = _quality_map(conn, [g["source_game_id"] for g in games])
         out = []
         for g in games:
             rows = _load_snapshots(conn, g["source_game_id"])
             if not rows:
                 # games table entry with no snapshots yet — still show it
-                out.append(_analyze_game(g, [], now, conn))
+                out.append(_analyze_game(g, [], now, conn,
+                                         quality=qm.get(g["source_game_id"])))
             else:
-                out.append(_analyze_game(g, rows, now, conn))
+                out.append(_analyze_game(g, rows, now, conn,
+                                         quality=qm.get(g["source_game_id"])))
     finally:
         conn.close()
     out.sort(key=lambda g: (not g["live"], -(g["age_s"] or 0)))
@@ -850,7 +887,8 @@ def v4_scorecard_events(
     BLM's side, actual, settlement.  Filters are applied in Python;
     min_diff/max_diff are on MAGNITUDE (direction separates sign).
     Contaminated games are excluded at the source (checkpoint_market)."""
-    from blm_v4.scorecard import _market_age_seconds, _market_status
+    from blm_v4.scorecard import (_CM_ELIGIBLE_SQL, _market_age_seconds,
+                                  _market_status)
     conn = _connect()
     try:
         has = conn.execute(
@@ -863,12 +901,18 @@ def v4_scorecard_events(
                              "momentum_strength", "false_momentum",
                              "false_momentum_confidence") if c in cols]
         sel = ", ".join(extra) + "," if extra else ""
+        # Headline dataset: apply the SAME logical-exclusion eligibility as
+        # market_vs_fair (single definition — _CM_ELIGIBLE_SQL) so a game
+        # re-verified INVALID after its rows were frozen can never reappear
+        # through the events dataset.  Frozen rows stay in checkpoint_market
+        # for audit (game detail still serves them).
         rows = conn.execute(
             f"""SELECT cm.source_game_id, cm.checkpoint_pct, cm.checkpoint_timestamp,
                       cm.live_market_line, cm.blm_fair_value, cm.actual_final_total,
                       cm.outcome, {sel} g.home_team, g.away_team
                FROM checkpoint_market cm
                JOIN games g ON g.source_game_id = cm.source_game_id
+               {_CM_ELIGIBLE_SQL}
                ORDER BY cm.source_game_id, cm.checkpoint_pct""").fetchall()
     finally:
         conn.close()
@@ -998,8 +1042,10 @@ def v4_game_detail(game_id: str) -> dict:
         if not game:
             raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found")
         rows = _load_snapshots(conn, game_id, 1000)
+        qm = _quality_map(conn, [game_id])
         detail = _analyze_game(dict(game), rows, datetime.now(timezone.utc),
-                               conn, with_checkpoints=True)
+                               conn, with_checkpoints=True,
+                               quality=qm.get(game_id))
         detail["timeline"] = _timeline_events(rows, game["classification"])
         detail["raw"] = rows[-1] if rows else None
     finally:

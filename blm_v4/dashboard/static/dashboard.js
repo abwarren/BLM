@@ -33,6 +33,22 @@ const fmtAge = (s) => {
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
   return `${Math.round(s / 3600)}h ago`;
 };
+// exact age for market freshness (M009-M5 integrity): "18s", "4m 21s",
+// "1h 05m" — never fabricated; null renders the en dash.
+const fmtAgeExact = (s) => {
+  if (s == null) return "—";
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${Math.round(s % 60)}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+};
+// market freshness status at the 300s M3 threshold — LIVE/STALE/MISSING,
+// exactly the backend classification; never re-derived differently.
+const mktStatusWord = (age, hasLine) => {
+  if (!hasLine) return "MISSING";
+  if (age == null) return null;
+  return age <= 300 ? "LIVE" : "STALE";
+};
 const num = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
 const pct = (v, d = 0) => (v == null ? "–" : `${(v * 100).toFixed(d)}%`);
 const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
@@ -185,7 +201,7 @@ function renderScorecard(d) {
     const dirLabel = (d) => d === "BLM_OVER" ? "BLM_OVER · fair above market"
       : d === "BLM_UNDER" ? "BLM_UNDER · fair below market" : d;
     const bandRate = (e) => {
-      const base = `N=${e.n} | BLM win rate ${pct(e.win_rate)}`;
+      const base = `N=${e.n} | BLM position win rate ${pct(e.win_rate)}`;
       return e.reliable === false ? `${base} · SMALL SAMPLE` : base;
     };
     html.push(`<div class="sc-block sc-wide">
@@ -195,7 +211,7 @@ function renderScorecard(d) {
         if (!rows.length) return "";
         return `<div class="band-dir">${dirLabel(dir)}</div>
         <table class="sc-table">
-          <tr><th>Bucket</th><th>Dir</th><th>N</th><th>Over/Under/Push</th><th>BLM win rate</th><th>Market win rate</th><th>Avg Δ (signed)</th><th>Fresh/Stale N</th><th>Fresh/Stale WR</th><th>Avg age</th></tr>
+          <tr><th>Bucket</th><th>Dir</th><th>N</th><th>Over/Under/Push</th><th>BLM position win rate</th><th>Market win rate</th><th>Avg Δ (signed)</th><th>Fresh/Stale N</th><th>Fresh/Stale WR</th><th>Avg age</th></tr>
           ${rows.map((e) => `<tr>
             <td>${esc(e.bucket)}</td>
             <td>${esc(e.direction)}</td>
@@ -229,9 +245,9 @@ function renderScorecard(d) {
     const todBands = (tod.bands || []).filter((b) => (b.n || 0) > 0)
       .map((b) => todRow(b, esc(b.band))).join("");
     html.push(`<div class="sc-block sc-wide">
-      <h4>TIME-OF-DAY <span class="muted">· start hour, local${tod.band_def ? ` · bands: ${esc(tod.band_def)}` : ""}</span></h4>
+      <h4>TIME-OF-DAY <span class="muted">· first-observed hour, local${tod.band_def ? ` · bands: ${esc(tod.band_def)}` : ""}</span></h4>
       <table class="sc-table">
-        <tr><th>Hour</th><th>N</th><th>Over</th><th>Under</th><th>BLM win rate</th><th>Market win rate</th><th>Avg Δ</th></tr>
+        <tr><th>Hour</th><th>N</th><th>Over</th><th>Under</th><th>BLM position win rate</th><th>Market win rate</th><th>Avg Δ</th></tr>
         ${todHours || `<tr><td colspan="7" class="sc-num">no rows yet</td></tr>`}
       </table>
       ${todBands ? `<table class="sc-table" style="margin-top:8px">
@@ -417,7 +433,7 @@ function renderTrends(d) {
       <td class="sc-num">${b.mae_clv ?? "–"}</td>
     </tr>`).join("");
   html.push(`<div class="sc-block sc-wide">
-    <h4>TIME-OF-DAY (start hour, local)</h4>
+    <h4>TIME-OF-DAY (first-observed hour, local)</h4>
     <table class="sc-table">
       <tr><th>Period</th><th>Games</th><th>CLV N</th><th>CLV OVER</th>
         <th>CLV UNDER</th><th>Avg ΔCLV</th><th>MAE CLV</th></tr>
@@ -605,10 +621,22 @@ bindEventsControls();
 /* ── Game cards ──────────────────────────────────────────── */
 
 function winprobHTML(g) {
+  const m = g.market || {};
+  const w1 = m.w1_odds, w2 = m.w2_odds;
+  const hasOdds = w1 != null && w2 != null && w1 > 1 && w2 > 1;
+  // Missing odds: never render the 0.5 fallback as a genuine 50/50
+  // assessment — the bar is the MARKET's implied probability.
+  if (!hasOdds) {
+    return `<div class="winprob">
+      <div class="winprob-label">WIN PROBABILITY · MARKET-IMPLIED</div>
+      <div class="muted" style="font-size:11px">unavailable — no odds captured</div>
+    </div>`;
+  }
   const wp = g.model ? g.model.win_probability : 0.5;
   const h = Math.round(wp * 100), a = 100 - h;
   return `
     <div class="winprob">
+      <div class="winprob-label">WIN PROBABILITY · MARKET-IMPLIED</div>
       <div class="winprob-bar">
         <div class="home" style="width:${h}%"><span>${h}%</span></div>
         <div class="away" style="width:${a}%"><span>${a}%</span></div>
@@ -625,7 +653,8 @@ function divergenceHTML(g) {
   const mkt = m.total_line, mod = mdl.expected_total;
   const mSpr = m.spread, modSpr = mdl.expected_margin;
   const hasS = mSpr != null && modSpr != null;
-  const sEdge = hasS ? +(modSpr - mSpr).toFixed(1) : null;
+  const invalid = g.quality_status === "INVALID";
+  const sEdge = !invalid && hasS ? +(modSpr - mSpr).toFixed(1) : null;
   const edgeCls = (v) => (v == null ? "flat" : v > 0.05 ? "pos" : v < -0.05 ? "neg" : "flat");
   const edgeSym = (v) => (v == null ? "–" : (v > 0 ? "+" : "") + v);
   const lineRow = (lab, v, meta) => `
@@ -649,6 +678,10 @@ function divergenceHTML(g) {
   const liveLine = isLive && fresh ? mkt : null;
   const lastObs = liveLine == null && mkt != null ? mkt : null;
   const statusWord = g.status === "ended" ? "ENDED" : "STALE";
+  const mstatus = mktStatusWord(age, mkt != null);
+  // exact market age (M009-M5 integrity): LIVE · 18s / STALE · 4m 21s /
+  // MISSING · — ; never fabricated, absent age renders unavailable.
+  const ageMeta = mstatus == null ? "" : ` · ${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}`;
   const prematch = "–";
   const opening = m.opening_line;
   const openingMeta = m.opening_line_at ? `@ ${(m.opening_line_at || "").slice(11, 19)}Z` : "";
@@ -658,7 +691,11 @@ function divergenceHTML(g) {
     : "";
   const closing = m.closing_line;
   const closingMeta = m.closing_line_at ? `@ ${(m.closing_line_at || "").slice(11, 19)}Z` : "";
-  const liveEdge = liveLine != null && mod != null ? +(mod - liveLine).toFixed(1) : null;
+  // model-derived values are GATED for analytically invalid games — the
+  // game is excluded from headline analytics; lines stay as diagnostics.
+  const liveEdge = !invalid && liveLine != null && mod != null ? +(mod - liveLine).toFixed(1) : null;
+  const modVal = invalid ? null : mod;
+  const modMeta = invalid ? "excluded from analytics" : (liveEdge != null ? "· live mkt" : "");
   return `
     <div class="divergence">
       <div class="divergence-title">Market vs Model</div>
@@ -667,18 +704,18 @@ function divergenceHTML(g) {
         ${lineRow("Opening Line", opening, openingMeta)}
         ${lineRow("Current Live Line", liveLine, liveLine != null ? liveMeta : "")}
         ${lineRow("Last observed", lastObs, lastObsMeta)}
-        ${lineRow(isLive ? "Live BLM Prediction" : "BLM (historical)", mod, liveEdge != null ? "· live mkt" : "")}
+        ${lineRow(isLive ? "Live BLM Prediction" : "BLM (historical)", modVal, modMeta)}
         ${lineRow("Closing Line", closing, closingMeta)}
       </div>
       <div class="div-row">
-        <div><div class="lab">${isLive ? "Mkt Total" : "Last observed"}</div><div class="val">${num(mkt, 1)}${lastObs != null ? `<span class="muted" style="font-size:10px"> · ${statusWord}</span>` : ""}${liveLine != null && m.market_source === "ws" ? `<span class="muted" style="font-size:10px"> · ws</span>` : ""}</div></div>
-        <div><div class="lab">Model Total</div><div class="val">${num(mod, 1)}</div></div>
+        <div><div class="lab">${isLive ? "Mkt Total" : "Last observed"}</div><div class="val">${num(mkt, 1)}${mkt != null ? `${lastObs != null ? `<span class="muted" style="font-size:10px"> · ${statusWord}</span>` : ""}${ageMeta}${liveLine != null && m.market_source === "ws" ? `<span class="muted" style="font-size:10px"> · ws</span>` : ""}` : ""}</div></div>
+        <div><div class="lab">Model Total</div><div class="val">${num(modVal, 1)}</div></div>
         <div><div class="lab">Edge</div>${liveEdge != null ? `<div class="edge ${edgeCls(liveEdge)}">${edgeSym(liveEdge)}</div>` : `<div class="edge flat">–</div>`}</div>
       </div>
       ${hasS ? `<div class="div-row" style="margin-top:6px">
         <div><div class="lab">Mkt Spread</div><div class="val">${num(mSpr, 1)}</div></div>
-        <div><div class="lab">Model Margin</div><div class="val">${num(modSpr, 1)}</div></div>
-        <div><div class="lab">Edge</div><div class="edge ${edgeCls(sEdge)}">${edgeSym(sEdge)}</div></div>
+        <div><div class="lab">Model Margin</div><div class="val">${invalid ? "—" : num(modSpr, 1)}</div></div>
+        <div><div class="lab">Edge</div><div class="edge ${sEdge != null ? edgeCls(sEdge) : "flat"}">${sEdge != null ? edgeSym(sEdge) : "–"}</div></div>
       </div>` : ""}
     </div>`;
 }
@@ -699,7 +736,7 @@ function momentumHTML(g) {
           style="width:${Math.min(100, Math.abs(m.score - 50) * 2 + 5)}%"></div></div>
       </div>
       <div class="gauge">
-        <div class="gauge-label">Model Confidence</div>
+        <div class="gauge-label">Model data confidence</div>
         <div class="gauge-value" style="font-size:22px">${conf}%</div>
         <div class="gauge-sub">pace ${num(g.model ? g.model.pace : null, 1)} · exp total ${num(g.model ? g.model.expected_total : null, 1)}</div>
         <div class="bar-track"><div class="bar-fill ${conf >= 70 ? "green" : conf >= 50 ? "amber" : "red"}"
@@ -712,7 +749,7 @@ function signalsHTML(g) {
   const s = g.signals || {};
   const names = [
     ["bull_trap", "Bull"], ["bear_trap", "Bear"], ["reverse_bull_trap", "Rev Bull"],
-    ["dead_market", "Dead"], ["false_momentum", "False Mom"], ["late_trap", "Late"],
+    ["dead_market", "Dead"], ["false_momentum", "False Mom (live)"], ["late_trap", "Late"],
     ["sharp_trap", "Sharp"],
   ];
   const anyActive = (s.active || []).length;
@@ -720,8 +757,21 @@ function signalsHTML(g) {
   return `<div class="signals">${names.map(([k, label]) => {
     const v = s[k] || {};
     if (!v.active) return "";
-    return `<span class="sig active" title="${esc(label)} trap · conf ${Math.round((v.confidence || 0) * 100)}%">● ${label} ${Math.round((v.confidence || 0) * 100)}%</span>`;
+    const tip = k === "false_momentum"
+      ? "live-window heuristic — distinct from the frozen per-checkpoint false_momentum record"
+      : `${label} trap · conf ${Math.round((v.confidence || 0) * 100)}%`;
+    return `<span class="sig active" title="${esc(tip)}">● ${label} ${Math.round((v.confidence || 0) * 100)}%</span>`;
   }).join("")}</div>`;
+}
+
+// Analytically INVALID games: the backend quality gate excluded them from
+// every headline metric.  The card marks them EXCLUDED and gates the
+// model-derived panel while keeping historical diagnostics (lines,
+// scoreboard, raw history) visible.
+function gatedNoteHTML(g) {
+  const reason = g.quality_reason || "quality gate failed";
+  return `<div class="gated-note">INVALID — EXCLUDED FROM ANALYTICS
+    <span class="muted">· ${esc(reason)} · historical rows retained for diagnostics</span></div>`;
 }
 
 function projHTML(g) {
@@ -743,8 +793,10 @@ function projHTML(g) {
 }
 
 function cardHTML(g) {
-  const liveCls = g.live ? "chip-live" : (g.status === "ended" ? "chip-ended" : "chip-stale");
-  const liveTxt = g.live ? "LIVE" : g.status === "ended" ? "ENDED" : "STALE";
+  const invalid = g.quality_status === "INVALID";
+  const liveCls = invalid ? "chip-excluded"
+    : (g.live ? "chip-live" : (g.status === "ended" ? "chip-ended" : "chip-stale"));
+  const liveTxt = invalid ? "EXCLUDED" : (g.live ? "LIVE" : g.status === "ended" ? "ENDED" : "STALE");
   const score = (v) => (v == null ? "–" : v);
   return `
     <div class="card-head">
@@ -766,13 +818,11 @@ function cardHTML(g) {
     </div>
     ${winprobHTML(g)}
     ${divergenceHTML(g)}
-    ${momentumHTML(g)}
-    ${signalsHTML(g)}
-    ${projHTML(g)}
+    ${invalid ? gatedNoteHTML(g) : `${momentumHTML(g)}${signalsHTML(g)}${projHTML(g)}`}
     <div class="spark"><canvas></canvas></div>
     <div class="card-foot">
       <span>${fmtTime(g.last_update)}</span>
-      <span>eff ${num(g.market_efficiency, 3)}</span>
+      <span title="1 − |score total − market line| ÷ market line">mkt proximity ${num(g.market_efficiency, 3)}</span>
       <span>id ${esc(g.game_id)}</span>
     </div>`;
 }
@@ -895,21 +945,26 @@ function modalPanel(title, inner) {
 
 function renderModal(g) {
   const mdl = g.model || {}, mkt = g.market || {}, mom = g.momentum || {},
-        sig = g.signals || {};
+        sgn = g.signals || {};
+  const invalid = g.quality_status === "INVALID";
   const confPct = Math.round((mdl.confidence || 0) * 100);
   const wpPct = Math.round((mdl.win_probability || 0) * 100);
+  const hasOdds = mkt.w1_odds != null && mkt.w2_odds != null
+    && mkt.w1_odds > 1 && mkt.w2_odds > 1;
   const isLive = g.live === true;
   const age = mkt.total_line_age_s;
   const fresh = age != null && age <= 300;               // existing freshness threshold
   const liveLine = isLive && fresh ? mkt.total_line : null;
   const lastObs = liveLine == null && mkt.total_line != null ? mkt.total_line : null;
   const statusWord = g.status === "ended" ? "ENDED" : "STALE";
-  const tEdge = liveLine != null && mdl.expected_total != null
+  const mstatus = mktStatusWord(age, mkt.total_line != null);
+  const ageMeta = mstatus == null ? "" : ` · ${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}`;
+  const tEdge = !invalid && liveLine != null && mdl.expected_total != null
     ? +(mdl.expected_total - liveLine).toFixed(1) : null;
-  const sEdge = mkt.spread != null && mdl.expected_margin != null
+  const sEdge = !invalid && mkt.spread != null && mdl.expected_margin != null
     ? (mdl.expected_margin - mkt.spread).toFixed(1) : null;
-  const activeSigs = (sig.active || []).map((k) =>
-    `<span class="sig active">● ${esc(k)} ${Math.round((sig[k]?.confidence || 0) * 100)}%</span>`).join("");
+  const activeSigs = (sgn.active || []).map((k) =>
+    `<span class="sig active" title="${k === "false_momentum" ? esc("live-window heuristic — not the frozen per-checkpoint record") : ""}">● ${esc(k)} ${Math.round((sgn[k]?.confidence || 0) * 100)}%</span>`).join("");
   const tl = (g.timeline || []).map((e) =>
     `<div class="tl-item"><span class="tl-time">${fmtTime(e.t)}</span><span class="tl-label ${esc(e.type)}">${esc(e.label)}</span></div>`
   ).join("") || '<div class="tl-item"><span class="muted">No events yet</span></div>';
@@ -920,6 +975,19 @@ function renderModal(g) {
     <td class="sc-num ${c.edge > 0 ? "pos" : c.edge < 0 ? "neg" : ""}">${c.edge != null ? (c.edge > 0 ? "+" : "") + c.edge.toFixed(1) : "–"}</td>
     <td class="sc-num">${num(c.actual_final, 1)}</td>
     <td class="sc-num ${c.error != null && c.error < 0 ? "neg" : ""}">${num(c.error, 1)}</td>
+  </tr>`).join("");
+  // M009-M5 integrity: frozen per-checkpoint Market-vs-Fair rows expose
+  // the RECORDED false-momentum (distinct from the live-window heuristic
+  // chip) — momentum fields frozen at record time, no look-ahead.
+  const mvf = (g.market_vs_fair || []).map((r) => `<tr>
+    <td>${r.checkpoint_pct}%</td>
+    <td class="sc-num">${num(r.live_market_line, 1)}</td>
+    <td class="sc-num">${num(r.blm_fair_value, 1)}</td>
+    <td class="sc-num ${(r.market_vs_fair ?? 0) > 0 ? "pos" : (r.market_vs_fair ?? 0) < 0 ? "neg" : ""}">${r.market_vs_fair != null ? (r.market_vs_fair > 0 ? "+" : "") + r.market_vs_fair : "–"}</td>
+    <td>${esc(r.signal || "–")}</td>
+    <td>${esc(r.outcome || "–")}</td>
+    <td>${esc(r.momentum_state || "–")}${r.momentum_strength != null ? " · " + num(r.momentum_strength, 1) : ""}</td>
+    <td>${r.false_momentum == null ? "–" : r.false_momentum ? "1" : "0"}</td>
   </tr>`).join("");
   const rawJson = g.raw || g.latest_snapshot || null;
 
@@ -941,35 +1009,40 @@ function renderModal(g) {
         <div class="muted" style="margin-top:4px">${g.snapshot_count || 0} snapshots · last ${fmtAge(g.age_s)}</div>
       </div>
     </div>
-    <div class="m-charts">
+    ${invalid ? gatedNoteHTML(g) : ""}
+    ${invalid ? "" : `<div class="m-charts">
       <div class="m-chart"><h4>Score Progression</h4><canvas id="mcScore"></canvas></div>
       <div class="m-chart"><h4>Actual vs Market vs Model Total</h4><canvas id="mcTotal"></canvas></div>
       <div class="m-chart"><h4>Model History — Win Probability &amp; Confidence</h4><canvas id="mcModel"></canvas></div>
       <div class="m-chart"><h4>Momentum History</h4><canvas id="mcMomentum"></canvas></div>
-    </div>
+    </div>`}
     <div class="m-panels">
       ${modalPanel("Market vs Model", `
         <div class="m-rows">
-          <div class="m-row"><span class="k">${isLive ? "Market total" : "Last observed"}</span><span class="v">${num(mkt.total_line, 1)}${lastObs != null ? ` <span class="muted" style="font-size:10px">@ ${(mkt.total_line_at || "").slice(11, 19)}Z · ${statusWord}</span>` : ""}${liveLine != null && mkt.market_source === "ws" ? ` <span class="muted" style="font-size:10px">(ws)</span>` : ""}</span></div>
-          <div class="m-row"><span class="k">Model total${isLive ? "" : " (historical)"}</span><span class="v">${num(mdl.expected_total, 1)}</span></div>
+          <div class="m-row"><span class="k">${isLive ? "Market total" : "Last observed"}</span><span class="v">${num(mkt.total_line, 1)}${lastObs != null ? ` <span class="muted" style="font-size:10px">@ ${(mkt.total_line_at || "").slice(11, 19)}Z · ${statusWord}</span>` : ""}${liveLine != null && mkt.market_source === "ws" ? ` <span class="muted" style="font-size:10px">(ws)</span>` : ""}${mstatus != null ? ` <span class="muted" style="font-size:10px">· ${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}</span>` : ""}</span></div>
+          <div class="m-row"><span class="k">Model total${isLive ? "" : " (historical)"}</span><span class="v">${invalid ? "— (excluded from analytics)" : num(mdl.expected_total, 1)}</span></div>
           <div class="m-row"><span class="k">Total edge</span><span class="v ${tEdge > 0 ? "pos" : tEdge < 0 ? "neg" : ""}">${tEdge != null ? (tEdge > 0 ? "+" : "") + tEdge : "–"}</span></div>
           <div class="m-row"><span class="k">Market spread</span><span class="v">${num(mkt.spread, 1)}</span></div>
-          <div class="m-row"><span class="k">Model margin</span><span class="v">${num(mdl.expected_margin, 1)}</span></div>
+          <div class="m-row"><span class="k">Model margin</span><span class="v">${invalid ? "— (excluded)" : num(mdl.expected_margin, 1)}</span></div>
           <div class="m-row"><span class="k">Spread edge</span><span class="v ${sEdge > 0 ? "pos" : sEdge < 0 ? "neg" : ""}">${sEdge != null ? (sEdge > 0 ? "+" : "") + sEdge : "–"}</span></div>
           <div class="m-row"><span class="k">Market efficiency</span><span class="v">${num(g.market_efficiency, 3)}</span></div>
           <div class="m-row"><span class="k">Market momentum</span><span class="v">${num(g.market_momentum, 2)}</span></div>
         </div>`)}
-      ${modalPanel("Model", `
-        <div class="m-row"><span class="k">Win probability (home)</span><span class="v">${wpPct}%</span></div>
-        <div class="winprob-bar" style="margin:6px 0"><div class="home" style="width:${wpPct}%"><span>${wpPct}%</span></div><div class="away" style="width:${100 - wpPct}%"><span>${100 - wpPct}%</span></div></div>
-        <div class="m-row"><span class="k">Confidence</span><span class="v">${confPct}%</span></div>
+      ${invalid
+        ? modalPanel("Model", `<div class="muted">model panel unavailable — game excluded from analytics</div>`)
+        : modalPanel("Model", `
+        <div class="m-row"><span class="k">Market-implied win prob (home)</span><span class="v">${hasOdds ? wpPct + "%" : "— (no odds captured)"}</span></div>
+        ${hasOdds ? `<div class="winprob-bar" style="margin:6px 0"><div class="home" style="width:${wpPct}%"><span>${wpPct}%</span></div><div class="away" style="width:${100 - wpPct}%"><span>${100 - wpPct}%</span></div></div>` : ""}
+        <div class="m-row"><span class="k">Model data confidence</span><span class="v">${confPct}%</span></div>
         <div class="bar-track"><div class="bar-fill ${confPct >= 70 ? "green" : confPct >= 50 ? "amber" : "red"}" style="width:${confPct}%"></div></div>
         <div class="m-row" style="margin-top:8px"><span class="k">Home projection</span><span class="v">${num(mdl.home_projection, 1)}</span></div>
         <div class="m-row"><span class="k">Away projection</span><span class="v">${num(mdl.away_projection, 1)}</span></div>
         <div class="m-row"><span class="k">Pace</span><span class="v">${num(mdl.pace, 1)}</span></div>
         <div class="m-row"><span class="k">Expected total</span><span class="v">${num(mdl.expected_total, 1)}</span></div>
       `)}
-      ${modalPanel("Momentum", `
+      ${invalid
+        ? modalPanel("Momentum", `<div class="muted">momentum unavailable — game excluded from analytics</div>`)
+        : modalPanel("Momentum", `
         <div class="big ${esc(mom.direction)}">${mom.direction === "up" ? "↗" : mom.direction === "down" ? "↘" : "→"} ${esc((mom.direction || "flat").toUpperCase())}</div>
         <div class="m-rows" style="margin-top:8px">
           <div class="m-row"><span class="k">Score</span><span class="v">${num(mom.score, 0)} / 100</span></div>
@@ -980,11 +1053,12 @@ function renderModal(g) {
         <div class="bar-track" style="margin-top:10px"><div class="bar-fill ${mom.direction === "up" ? "green" : mom.direction === "down" ? "red" : ""}" style="width:${Math.min(100, Math.abs((mom.score || 50) - 50) * 2 + 5)}%"></div></div>
       `)}
       ${modalPanel("Signals / Traps", `
-        <div class="m-row"><span class="k">Trap meter</span><span class="v">${num(sig.trap_meter, 1)} / 100 (${esc(sig.trap_meter_level)})</span></div>
-        <div class="bar-track"><div class="bar-fill ${sig.trap_meter >= 60 ? "red" : sig.trap_meter >= 30 ? "amber" : "green"}" style="width:${Math.min(100, sig.trap_meter || 0)}%"></div></div>
+        <div class="m-row"><span class="k">Trap meter</span><span class="v">${num(sgn.trap_meter, 1)} / 100 (${esc(sgn.trap_meter_level)})</span></div>
+        <div class="bar-track"><div class="bar-fill ${sgn.trap_meter >= 60 ? "red" : sgn.trap_meter >= 30 ? "amber" : "green"}" style="width:${Math.min(100, sgn.trap_meter || 0)}%"></div></div>
         <div class="signals" style="margin-top:8px">${activeSigs || '<span class="sig-none">No active signals</span>'}</div>
         ${["bull_trap", "bear_trap", "reverse_bull_trap", "dead_market", "false_momentum", "late_trap", "sharp_trap"]
-          .map((k) => `<div class="m-row" style="margin-top:4px"><span class="k">${esc(k)}</span><span class="v">${sig[k]?.active ? "ACTIVE" : "no"} · conf ${Math.round((sig[k]?.confidence || 0) * 100)}%</span></div>`).join("")}
+          .map((k) => `<div class="m-row" style="margin-top:4px"><span class="k">${esc(k)}</span><span class="v">${sgn[k]?.active ? "ACTIVE" : "no"} · conf ${Math.round((sgn[k]?.confidence || 0) * 100)}%</span></div>`).join("")}
+        <div class="muted" style="font-size:10px;margin-top:6px">Signal chips are live-window heuristics — the frozen per-checkpoint false-momentum record lives in the MARKET VS FAIR table below.</div>
       `)}
       ${modalPanel("Game Info", `
         <div class="m-row"><span class="k">Classification</span><span class="v">${esc(g.classification)}</span></div>
@@ -992,6 +1066,7 @@ function renderModal(g) {
         <div class="m-row"><span class="k">Event ID</span><span class="v">${esc(g.game_id)}</span></div>
         <div class="m-row"><span class="k">Region</span><span class="v">${esc(g.region)}</span></div>
         <div class="m-row"><span class="k">Status</span><span class="v">${esc(g.status)}</span></div>
+        <div class="m-row"><span class="k">Quality</span><span class="v">${esc(g.quality_status || "OK")}${g.quality_reason ? ` · ${esc(g.quality_reason)}` : ""}</span></div>
         <div class="m-row"><span class="k">W1 / W2 odds</span><span class="v">${num(mkt.w1_odds, 2)} / ${num(mkt.w2_odds, 2)}</span></div>
         <div class="m-row"><span class="k">Team totals</span><span class="v">${num(mkt.home_total_line, 1)} / ${num(mkt.away_total_line, 1)}</span></div>
         <div class="m-row"><span class="k">Source</span><span class="v">${esc(g.source)}</span></div>
@@ -1005,10 +1080,18 @@ function renderModal(g) {
       </table>
       <div class="muted" style="font-size:10px;margin-top:6px">Market frozen at-or-before each checkpoint — later movement never rewrites historical rows; missing market shown as –.</div>
     </div>` : ""}
+    ${mvf.length ? `<div class="m-panel m-wide">
+      <h4>MARKET VS FAIR — FROZEN PER-CHECKPOINT <span class="muted">· immutable rows; momentum frozen at record time (no look-ahead)</span></h4>
+      <table class="sc-table">
+        <tr><th>%</th><th>Market line</th><th>BLM fair</th><th>M−F</th><th>Signal</th><th>Outcome</th><th>Momentum</th><th>False mom</th></tr>
+        ${mvf}
+      </table>
+      <div class="muted" style="font-size:10px;margin-top:6px">False-momentum here is the RECORDED checkpoint value — distinct from the live-window heuristic chip on the card.</div>
+    </div>` : ""}
     <div class="timeline"><h4>Live Timeline (from stored snapshots)</h4>${tl}</div>
     ${rawJson ? `<details class="tech-raw"><summary>Technical / Raw Data</summary><pre>${esc(typeof rawJson === "string" ? rawJson : JSON.stringify(rawJson, null, 2))}</pre></details>` : ""}`;
 
-  renderModalCharts(g);
+  renderModalCharts(invalid ? null : g);
 }
 
 function baseChartOpts(yLabel) {
@@ -1031,6 +1114,14 @@ function baseChartOpts(yLabel) {
 }
 
 function renderModalCharts(g) {
+  // INVALID games render no model charts — gated (null) by renderModal.
+  if (!g) {
+    for (const k in state.modalCharts) {
+      if (state.modalCharts[k]) state.modalCharts[k].destroy();
+    }
+    state.modalCharts = {};
+    return;
+  }
   if (!hasChart()) {
     document.querySelectorAll(".m-chart canvas").forEach((c) => {
       c.replaceWith(Object.assign(document.createElement("div"),

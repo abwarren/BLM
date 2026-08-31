@@ -51,7 +51,7 @@ def _js(client) -> str:
 def test_disparity_bands_markers(client):
     js = _js(client)
     assert "DISPARITY BANDS" in js
-    assert "BLM win rate" in js
+    assert "BLM position win rate" in js
     assert "Market win rate" in js
     assert "Avg Δ (signed)" in js
     assert "edge_bucket_min_sample" in js
@@ -70,8 +70,8 @@ def test_disparity_bands_direction_separation(client):
 
 def test_observed_rate_with_n_not_strategy_claim(client):
     js = _js(client)
-    # analytical rule: 'N=443 | BLM win rate 70%' — never '70% winning strategy'
-    assert "N=${e.n} | BLM win rate" in js
+    # analytical rule: 'N=443 | BLM position win rate 70%' — never '70% winning strategy'
+    assert "N=${e.n} | BLM position win rate" in js
     assert "SMALL SAMPLE" in js
     assert "winning strategy" not in js
 
