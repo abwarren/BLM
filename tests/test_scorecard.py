@@ -676,6 +676,50 @@ def test_legacy_ok_contaminated_game_zero_headline(tmp_path):
     assert audit["9302"]["predictions_used"] == 0
 
 
+def test_m008_ou_hit_rate_excludes_pushes(tmp_path):
+    """M008-SCORE-M1 item 6: pushes must be EXCLUDED from the O/U hit-rate
+    denominator (hit rate = hits / (hits + misses)).  A push is not a miss.
+    """
+    import sqlite3
+    import blm_v4.scorecard as sc
+    from blm_v4.scorecard import SCORECARD_SCHEMA
+    db = tmp_path / "sc.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCORECARD_SCHEMA)
+    # 3 decided rows (2 hits, 1 miss) + 1 push row
+    conn.executescript("""
+        INSERT INTO predictions (id, source_game_id, classification, model_version,
+            checkpoint, predicted_at, source_snapshot_at, projected_home,
+            projected_away, projected_total, market_total, valid)
+        VALUES
+          (1,'9101','BETUAL_NBA','v4-pace-1','q1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z', 90,90,180,190,1),
+          (2,'9102','BETUAL_NBA','v4-pace-1','q1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z', 85,85,170,180,1),
+          (3,'9103','BETUAL_NBA','v4-pace-1','q1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z', 88,88,176,176,1),
+          (4,'9104','BETUAL_NBA','v4-pace-1','q1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z', 95,95,190,180,1);
+        INSERT INTO prediction_scores (prediction_id, source_game_id, classification,
+            model_version, home_error, away_error, total_error,
+            abs_home_error, abs_away_error, abs_total_error, total_pct_error,
+            model_total, market_total, actual_total, market_error,
+            model_beat_market, ou_prediction, ou_result, ou_correct, scored_at, fragment)
+        VALUES
+          (1,'9101','BETUAL_NBA','v4-pace-1', -4,-4,-4, 4,4,4, 2.17, 180,190,184, 6, 1, -1,-1,1, '2026-01-01T00:00:00Z', 0),
+          (2,'9102','BETUAL_NBA','v4-pace-1', -2,-2,-2, 2,2,2, 1.16, 170,180,172, 8, 1, -1,-1,1, '2026-01-01T00:00:00Z', 0),
+          (3,'9103','BETUAL_NBA','v4-pace-1', -1,-1,-1, 1,1,1, 0.57, 176,176,176, 0, 0, 0, 0,0, '2026-01-01T00:00:00Z', 0),
+          (4,'9104','BETUAL_NBA','v4-pace-1',  5, 5, 5, 5,5,5, 2.78, 190,180,184, 4, 0, 1, 1,0, '2026-01-01T00:00:00Z', 0);
+    """)
+    conn.commit()
+    try:
+        out = sc._market_compare_sql(conn)
+        assert out["ou_push"] == 1
+        assert out["ou_hit_n"] == 2
+        # denominator EXCLUDES the push: 2 hits + 1 miss = 3 decided
+        assert out["ou_hit_d"] == 3, f"push must be excluded from denominator, got {out['ou_hit_d']}"
+        assert out["ou_hit_rate"] == round(2 / 3, 3)
+    finally:
+        conn.close()
+
+
 def test_quality_gate_jump_is_gap_aware():
     """A >50pt hop in under 90s is physically impossible (foreign state)
     and rejects; the same hop across a multi-minute capture gap is a

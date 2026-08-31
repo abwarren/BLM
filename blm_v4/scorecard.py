@@ -1273,6 +1273,10 @@ def _market_compare_sql(conn) -> dict[str, Any]:
     market_beat_n = len(w_) - model_beat_n - sum(t_)
     ties_n = sum(t_)
     ou = [r["ou_correct"] for r in rows if r["ou_correct"] is not None]
+    # M008-SCORE-M1 item 6: hit rate = hits / (hits + misses).  Pushes
+    # (ou_result == 0) are NOT misses — excluded from the denominator.
+    ou_hits = sum(1 for r in rows if r["ou_correct"] == 1)
+    ou_decided = [r for r in rows if r["ou_correct"] is not None and r["ou_result"] != 0]
     ou_over = sum(1 for r in rows if r["ou_result"] == 1)
     ou_under = sum(1 for r in rows if r["ou_result"] == -1)
     ou_push = sum(1 for r in rows if r["ou_result"] == 0)
@@ -1292,9 +1296,9 @@ def _market_compare_sql(conn) -> dict[str, Any]:
         "market_beat_blm_n": market_beat_n,
         "ties_n": ties_n,
         "ou_predictions": len(ou),
-        "ou_hit_rate": round(sum(ou) / len(ou), 3) if ou else None,
-        "ou_hit_n": sum(ou),
-        "ou_hit_d": len(ou),
+        "ou_hit_rate": round(ou_hits / len(ou_decided), 3) if ou_decided else None,
+        "ou_hit_n": ou_hits,
+        "ou_hit_d": len(ou_decided),
         "ou_over": ou_over,
         "ou_under": ou_under,
         "ou_push": ou_push,
