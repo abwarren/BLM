@@ -158,6 +158,41 @@ CREATE TABLE IF NOT EXISTS market_history (
 
 CREATE INDEX IF NOT EXISTS idx_mh_hour    ON market_history(started_hour);
 CREATE INDEX IF NOT EXISTS idx_mh_clv     ON market_history(closing_total);
+
+-- M009: immutable per-checkpoint Market-vs-Fair history.  ONE row per
+-- (clean completed game, checkpoint 10..100%).  FROZEN at first write —
+-- never rebased (unlike predictions, which are current-code-wins): a
+-- later model build or later market observation NEVER rewrites a
+-- recorded checkpoint.  market_vs_fair = live_market_line - blm_fair_value
+-- (signed, retained); negative = OVER value, positive = UNDER value.
+CREATE TABLE IF NOT EXISTS checkpoint_market (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_game_id        TEXT NOT NULL,
+    classification        TEXT NOT NULL,
+    checkpoint_pct        INTEGER NOT NULL,   -- 10..100 (100 = terminal state)
+    checkpoint_timestamp  TEXT NOT NULL,      -- source snapshot captured_at
+    quarter               INTEGER,
+    progress              REAL,               -- 0..1 game completed at checkpoint
+    elapsed_minutes       REAL,
+    opening_line          REAL,               -- OLV: first verified line (snap or WS)
+    live_market_line      REAL,               -- frozen at-or-before checkpoint
+    blm_fair_value        REAL,               -- project() recompute, frozen at first write
+    closing_line          REAL,               -- CLV: last verified line (snap or WS)
+    actual_final_total    INTEGER,
+    market_vs_fair        REAL,               -- live - fair, signed, never discarded
+    signal                TEXT,               -- UNDER_VALUE | OVER_VALUE | PUSH
+    blm_vs_olv            REAL,               -- fair - OLV
+    blm_vs_clv            REAL,               -- fair - CLV
+    olv_to_clv            REAL,               -- CLV - OLV
+    market_move_toward_blm TEXT,              -- TOWARD | AWAY | UNCHANGED
+    outcome               TEXT,               -- UNDER_WIN|OVER_WIN|UNDER_LOSS|OVER_LOSS|PUSH
+    model_version         TEXT NOT NULL,
+    recorded_at           TEXT NOT NULL,
+    frozen                INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(source_game_id, checkpoint_pct)
+);
+CREATE INDEX IF NOT EXISTS idx_cm_game_pct ON checkpoint_market(source_game_id, checkpoint_pct);
+CREATE INDEX IF NOT EXISTS idx_cm_pct      ON checkpoint_market(checkpoint_pct);
 """
 
 _CHECKPOINTS = ("q1", "q2", "q3", "q4", "final")
@@ -281,6 +316,89 @@ def _edge_vs_line(final_total: Optional[int], line: Optional[float]) -> Optional
     if final_total is None or line is None:
         return None
     return round(final_total - line, 2)
+
+
+def _first_verified_line(conn, source_game_id: str, rows: list[dict]) -> Optional[float]:
+    """OLV: the FIRST verified total line of the game — first
+    snapshot-carried line; when the event-view route never delivered one,
+    the earliest eu-swarm WS MatchTotal observation (lowest line of the
+    earliest batch, same convention as the frozen checkpoint fallback)."""
+    for r in rows:
+        if r.get("total_line") is not None:
+            return float(r["total_line"])
+    row = conn.execute(
+        """SELECT line_value FROM market_observations
+           WHERE source_game_id=? AND market_type='MatchTotal'
+           ORDER BY captured_at ASC, line_value ASC LIMIT 1""",
+        (source_game_id,),
+    ).fetchone()
+    if row and row["line_value"] is not None:
+        return float(row["line_value"])
+    return None
+
+
+def _last_verified_line(conn, source_game_id: str, rows: list[dict]) -> Optional[float]:
+    """CLV: the LAST verified total line — last snapshot-carried line;
+    when none, the latest eu-swarm WS MatchTotal observation (lowest line
+    of the latest batch)."""
+    for r in reversed(rows):
+        if r.get("total_line") is not None:
+            return float(r["total_line"])
+    row = conn.execute(
+        """SELECT line_value FROM market_observations
+           WHERE source_game_id=? AND market_type='MatchTotal'
+           ORDER BY captured_at DESC, line_value ASC LIMIT 1""",
+        (source_game_id,),
+    ).fetchone()
+    if row and row["line_value"] is not None:
+        return float(row["line_value"])
+    return None
+
+
+def _market_vs_fair_signal(market: Optional[float],
+                           fair: Optional[float]) -> Optional[str]:
+    """Explicit terminology (M009): MARKET > FAIR = UNDER VALUE,
+    MARKET < FAIR = OVER VALUE, equal = PUSH (no measurable edge)."""
+    if market is None or fair is None:
+        return None
+    if market > fair:
+        return "UNDER_VALUE"
+    if market < fair:
+        return "OVER_VALUE"
+    return "PUSH"
+
+
+def _checkpoint_outcome(fair: Optional[float], market: Optional[float],
+                        actual: Optional[int]) -> Optional[str]:
+    """BLM checkpoint position vs market, resolved against the actual
+    (M009 section 5).  Pushes handled explicitly: a position exactly at
+    the line has no direction; an actual exactly on the line is a push
+    outcome regardless of position."""
+    if fair is None or market is None or actual is None:
+        return None
+    if fair == market:
+        return "PUSH"           # position push — no value direction
+    if actual == market:
+        return "PUSH"           # outcome push — line landed exactly
+    if fair < market:           # BLM positioned UNDER the market
+        return "UNDER_WIN" if actual < market else "UNDER_LOSS"
+    return "OVER_WIN" if actual > market else "OVER_LOSS"
+
+
+def _market_move_toward_blm(olv: Optional[float], clv: Optional[float],
+                            fair: Optional[float]) -> Optional[str]:
+    """Did the market subsequently move TOWARD / AWAY from BLM fair value
+    (M009 section 10)?  Compare the CLOSING line's distance to fair vs the
+    OPENING line's distance: |CLV - fair| < |OLV - fair| => TOWARD."""
+    if olv is None or clv is None or fair is None:
+        return None
+    dist_opening = abs(olv - fair)
+    dist_closing = abs(clv - fair)
+    if dist_closing < dist_opening:
+        return "TOWARD"
+    if dist_closing > dist_opening:
+        return "AWAY"
+    return "UNCHANGED"
 
 
 def _snapshot_history_quality(rows: list[dict]) -> tuple[str, str]:
@@ -946,6 +1064,130 @@ class Scorecard:
                 conn.close()
         return stats
 
+    # ── Immutable per-checkpoint Market-vs-Fair history (M009) ─────
+
+    def record_checkpoint_market(self) -> dict[str, int]:
+        """Record the immutable Market-vs-Fair history for clean completed
+        games — ONE row per (game, checkpoint 10..100%), M009 section 1.
+
+        Every row freezes what was actually available at that point in
+        the game: opening line (OLV), the market line observed at-or-
+        before the checkpoint, the BLM fair value computed from snapshots
+        up to that checkpoint, and (once known) closing line and actual
+        final total.  market_vs_fair = live - fair is SIGNED and retained;
+        negative disparity is as valuable as positive (OVER vs UNDER).
+
+        IMMUTABLE: INSERT OR IGNORE + UNIQUE(source_game_id,
+        checkpoint_pct) — a row written once is never rebased, never
+        rewritten by a later model build or later market observation
+        (the M009 section 3 rule; unlike predictions, which are
+        current-code-wins).
+
+        Eligibility mirrors the historical base: OK result, >= 15
+        snapshots, captured from Q1, not quality-INVALID.  Fragments and
+        contaminated games never enter (they would poison the edge
+        statistics).
+        """
+        stats = {"checked": 0, "recorded": 0, "skipped_ineligible": 0}
+        with self._lock:
+            conn = self._connect()
+            try:
+                games = conn.execute(
+                    f"""SELECT g.id, g.source_game_id, g.classification,
+                               (SELECT COUNT(*) FROM snapshots s
+                                WHERE s.game_id = g.id) AS n,
+                               {_STARTS_Q1_SQL} AS starts_q1,
+                               EXISTS (SELECT 1 FROM game_quality q
+                                       WHERE q.source_game_id = g.source_game_id
+                                         AND q.status = 'INVALID') AS bad_quality,
+                               r.final_total
+                        FROM games g
+                        JOIN game_results r ON r.source_game_id = g.source_game_id
+                        WHERE r.final_result_status = 'OK'"""
+                ).fetchall()
+                for g in games:
+                    stats["checked"] += 1
+                    if not (g["n"] >= 15 and g["starts_q1"] and not g["bad_quality"]):
+                        stats["skipped_ineligible"] += 1
+                        continue
+                    rows = [dict(r) for r in conn.execute(
+                        "SELECT * FROM snapshots WHERE game_id=? "
+                        "ORDER BY captured_at ASC", (g["id"],)).fetchall()]
+                    if not rows:
+                        stats["skipped_ineligible"] += 1
+                        continue
+                    olv = _first_verified_line(conn, g["source_game_id"], rows)
+                    clv = _last_verified_line(conn, g["source_game_id"], rows)
+                    stats["recorded"] += self._record_checkpoint_rows(
+                        conn, g, rows, olv, clv)
+                conn.commit()
+            finally:
+                conn.close()
+        return stats
+
+    def _record_checkpoint_rows(self, conn, g, rows: list[dict],
+                                olv: Optional[float], clv: Optional[float]) -> int:
+        """Record all checkpoints for one game: pct10..pct90 (closest
+        snapshot within ±5pp, same selection as the fixed checkpoints)
+        plus the terminal pct100 (the game's final snapshot)."""
+        n = 0
+        actual = g["final_total"]
+        for pct in FIXED_CHECKPOINT_PCTS:
+            target = pct / 100.0
+            best: Optional[tuple[float, int]] = None
+            for i, r in enumerate(rows):
+                prog = _progress_of(r)
+                if prog is None:
+                    continue
+                d = abs(prog - target)
+                if best is None or d < best[0]:
+                    best = (d, i)
+            if best is None:
+                continue
+            if round(best[0] * 100.0, 2) > MAX_DISTANCE_PCT:
+                continue
+            n += self._write_checkpoint_row(conn, g, rows, best[1], pct,
+                                            olv, clv, actual)
+        n += self._write_checkpoint_row(conn, g, rows, len(rows) - 1, 100,
+                                        olv, clv, actual)
+        return n
+
+    def _write_checkpoint_row(self, conn, g, rows: list[dict], idx: int,
+                              pct: int, olv: Optional[float],
+                              clv: Optional[float], actual: Optional[int]) -> int:
+        """Compute and freeze ONE checkpoint row (insert-once semantics)."""
+        r = rows[idx]
+        live = _frozen_market_line(conn, g["source_game_id"], rows, idx)
+        proj = project(rows[: idx + 1], live)
+        fair = proj["expected_total"]
+        if fair is None:
+            return 0
+        mvf = round(live - fair, 2) if live is not None else None
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO checkpoint_market (
+                source_game_id, classification, checkpoint_pct,
+                checkpoint_timestamp, quarter, progress, elapsed_minutes,
+                opening_line, live_market_line, blm_fair_value, closing_line,
+                actual_final_total, market_vs_fair, signal,
+                blm_vs_olv, blm_vs_clv, olv_to_clv, market_move_toward_blm,
+                outcome, model_version, recorded_at, frozen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+            (
+                g["source_game_id"], g["classification"], pct,
+                r["captured_at"], r.get("quarter"), proj["progress"],
+                proj["elapsed_minutes"],
+                olv, live, fair, clv, actual, mvf,
+                _market_vs_fair_signal(live, fair),
+                round(fair - olv, 2) if fair is not None and olv is not None else None,
+                round(fair - clv, 2) if fair is not None and clv is not None else None,
+                round(clv - olv, 2) if clv is not None and olv is not None else None,
+                _market_move_toward_blm(olv, clv, fair),
+                _checkpoint_outcome(fair, live, actual),
+                MODEL_VERSION, _utcnow(),
+            ),
+        )
+        return cur.rowcount if cur.rowcount == 1 else 0
+
     # ── Run all phases ─────────────────────────────────────────────
 
     def run(self) -> dict[str, Any]:
@@ -954,8 +1196,9 @@ class Scorecard:
         res = self.capture_results()
         sco = self.score_all()
         mkt = self.record_market_history()
+        cm = self.record_checkpoint_market()
         return {"recorded": rec, "fixed": fx, "results": res,
-                "scored": sco, "market": mkt}
+                "scored": sco, "market": mkt, "checkpoint_market": cm}
 
     # ── Read API (used by /api/v4/scorecard) ───────────────────────
 

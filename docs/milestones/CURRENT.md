@@ -1,4 +1,83 @@
-# BLM MILESTONE CHECKPOINT — M007-M4 (2026-08-31)
+# BLM MILESTONE CHECKPOINT — M009-M1 (2026-08-31)
+
+## M009 — SCORECARD REDESIGN: MARKET VS FAIR VALUE
+
+M009 supersedes M008-SCORE-M2 as the active scorecard milestone (same
+theme — OLV/CLV/checkpoint disparity — at higher fidelity: per-checkpoint
+Market-vs-Fair as the PRIMARY metric, not a generic model-vs-market
+block).  The M008-SCORE-M2 declaration below is retained as context.
+
+## M009-M1 (COMPLETE, NOT DEPLOYED) — immutable per-checkpoint Market-vs-Fair history
+
+MILESTONE: M009-M1 — data schema + checkpoint Market-vs-Fair
+calculations.
+
+OBJECTIVE: new `checkpoint_market` table — ONE immutable row per (clean
+completed game, checkpoint 10..100%) freezing what was actually
+available at that point: checkpoint_pct/timestamp, opening_line (OLV),
+live_market_line (frozen at-or-before the checkpoint), blm_fair_value
+(project() recompute from snapshots up to the checkpoint), closing_line
+(CLV), actual_final_total, signed market_vs_fair = live - fair,
+signal (UNDER_VALUE/OVER_VALUE/PUSH), blm_vs_olv / blm_vs_clv /
+olv_to_clv, market_move_toward_blm (TOWARD/AWAY/UNCHANGED per M009 §10),
+outcome (UNDER_WIN/OVER_WIN/UNDER_LOSS/OVER_LOSS/PUSH per M009 §5),
+model_version, recorded_at, frozen=1.
+
+WHAT WAS TRACED: synthetic clean 20-snapshot game (fast-early/slow-late
+scoring → both disparity directions in one game) → record_checkpoint_market
+→ 10 rows (pct10..90 + pct100); pct50: fair 148 < market 180 →
+UNDER_VALUE, actual 143 < 180 → UNDER_WIN; pct10: fair > market →
+negative disparity retained, OVER_VALUE, OVER_LOSS; second run → byte-
+identical (immutability).
+
+WHAT CHANGED:
+- `checkpoint_market` table + indexes in SCORECARD_SCHEMA.  INSERT OR
+  IGNORE + UNIQUE(source_game_id, checkpoint_pct) = frozen at first
+  write; NEVER rebased (unlike predictions, which are current-code-wins
+  — the M009 §3 rule: no recalculating old checkpoints with a later
+  model prediction).
+- `Scorecard.record_checkpoint_market()` — eligibility mirrors the
+  historical base (OK result + >=15 snaps + starts Q1 + not INVALID);
+  pct10..90 via the existing closest-snapshot ±5pp selection, pct100 =
+  terminal snapshot.
+- Helpers: `_first_verified_line` / `_last_verified_line` (OLV/CLV:
+  snapshot lines primary, eu-swarm WS MatchTotal fallback — WS-only
+  games get full rows), `_market_vs_fair_signal`, `_checkpoint_outcome`
+  (pushes explicit), `_market_move_toward_blm` (|CLV-fair| vs |OLV-fair|).
+- `run()` now returns `checkpoint_market` stats.
+
+FILES: blm_v4/scorecard.py, tests/test_m009_checkpoint_market.py,
+docs/milestones/CURRENT.md.
+
+TESTS: 10 new (RED confirmed: all failed on missing method before
+implementation).  RED→GREEN: rows for clean game / signed disparity +
+signal / outcome classification incl. push / OLV-CLV-actual linkage /
+market_move_toward_blm / immutability on re-run / ineligible games
+excluded (live, INVALID, fragment) / honest NULLs on missing market /
+WS fallback lines / terminal fair floor.  Full suite: 217 passed,
+0 failed (was 207).
+
+LIVE EVIDENCE: NONE YET — user denied DB access this session (read-only
+diagnostics and copy-tracer both blocked).  No production writes
+happened; the running blm-server does not have this code.
+
+COMMIT: <pending>
+
+DEPLOYED: NO — requires blm-server restart + a scorecard run.  Until
+then no checkpoint_market rows exist in production.
+
+ACCEPTANCE: PASS (code+tests) / LIVE VERIFICATION BLOCKED (user).
+
+KNOWN LIMITATION: market_history OLV/CLV remain snapshot-only (WS-era
+games get NULL there) while checkpoint_market is WS-aware — deliberate,
+documented divergence; a future milestone should unify.  pct100 fair is
+the model's final projection (floored >= actual), not a post-hoc
+prediction.  Fixed-checkpoint tolerance (±5pp) means not every game has
+every pct — honest N is handled at aggregation (M2).
+
+NEXT MILESTONE: M009-M2 — scorecard aggregation (per-checkpoint
+Avg Market / Avg Fair / Avg M-F table + Under/Over value % + outcome
+analysis, honest N per checkpoint).
 
 ## PROJECT
 BLM v4 (Betting Line Model) — PokerBet virtual-basketball live-score pace
@@ -313,8 +392,49 @@ confirm: predictions scored with fragment=0, market_history row recorded,
 2. api.py single-source via project().
 3. Identity guard in _capture_event_state + _restart_split_suffix.
 4. Explosion-split removed; verified final ends the game.
-5. market_history: OLVC never overwritten by CLV; only OK + non-fragment.
-6. Headline accuracy = fragment=0 only; no hard-coded time-of-day rules.
+NEXT: M008-SCORE-M2 — BLM vs OLV and BLM vs CLV scorecard sections
+(needs OLV/CLV timestamp columns in market_history).
+
+## M008-SCORE-M2 (IN PROGRESS) — three distinct market benchmarks
+
+MILESTONE: Rework MODEL vs MARKET so every comparison names its line
+type (OLV / CLV / live-checkpoint) and the scorecard answers the
+permanent acceptance question.
+
+OBJECTIVE: market_compare returns THREE benchmark sections (olv / clv /
+checkpoint) + per-checkpoint 10-90% table; every record carries
+market_line_type; MAE/RMSE/median/bias per benchmark; beat/ties with
+denominators; O/U split per line type; disparity min/max/absmax +
+checkpoint + progress retained.  Frontend renders the three sections.
+
+CURRENT STATE: M008-SCORE-M1 (e858abd) fixed MAE/bias/denominators but
+market_compare still uses ONE line type (checkpoint_market) via
+prediction_scores.market_total; market_history has opening_total/
+closing_total but NO timestamp columns; no per-line-type comparisons;
+frontend shows a single MODEL vs MARKET block.
+
+GAP: (a) no BLM-vs-OLV and BLM-vs-CLV aggregates; (b) no OLV/CLV
+timestamps in market_history; (c) no per-checkpoint (10-90%) market
+performance; (d) disparity not tied to progress/checkpoint/OLV/CLV.
+
+ACCEPTANCE (final): scorecard answers "at each point was BLM closer to
+the eventual total than the market, what was the disparity, where in the
+game, did the market move toward BLM, what were OLV and CLV, did BLM
+beat OLV/live/CLV" from clean fixture-verified data.
+
+TRACER BULLET: one valid completed game with OLV + checkpoint lines +
+CLV + actual → record carries market_line_type per comparison →
+market_compare emits olv/clv/checkpoint sections with MAE/bias/beat/O-U
+→ frontend renders three blocks → browser-verified.
+
+RED TEST (planned, tracer dataset): synthetic valid game with BLM pred,
+OLV, checkpoint line, CLV, actual, +positive/negative disparity, push,
+BLM win, market win, tie, missing market, invalid game — assert
+market_compare returns per-line-type sections, each beat/tie/denominator
+reconciles, O/U per line type, negative disparity retained.
+
+NEXT SINGLE ACTION: (authorized) write RED tests for _market_compare_sql
+3-benchmark output + OLV/CLV timestamp columns, then implement.
 
 ## M008-SCORE-M1 (COMPLETE, deployed 46adb70) — forensic metric accounting
 
