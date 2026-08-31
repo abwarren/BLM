@@ -31,7 +31,16 @@ TESTS: full suite 221 passed, 0 failed (was 217).
 
 COMMIT: b8df068 (api.py + test).  Pushed with a2fdb38..61929bb earlier.
 
-DEPLOYED: NO — requires blm-server restart; production DB untouched.
+DEPLOYED: YES (2026-08-31 ~19:47 SAST) — blm-server + blm-collector
+restarted on HEAD a3c0881; scorecard loop creates + populates
+checkpoint_market within 60s.
+
+LIVE EVIDENCE: /api/v4/game/30749637 (Betual NBA, ended, Tianjin vs
+Zhejiang) returns market_vs_fair with 10 rows (pct10..100): opening
+172.5, closing 172.5, actual 165; pct20 live 172.5 / fair 182.1 /
+M-F -9.6 (OVER_VALUE); honest NULLs where market absent (pct10
+live_market_line null -> mvf/signal/outcome null).  Real production
+data, served by the running service.
 
 NEXT MILESTONE: M009-M2 — scorecard aggregation (per-checkpoint Avg
 Market / Avg Fair / Avg M-F table + Under/Over value % + outcome
@@ -93,8 +102,9 @@ happened; the running blm-server does not have this code.
 
 COMMIT: a891104 (scorecard.py + tests + this record)
 
-DEPLOYED: NO — requires blm-server restart + a scorecard run.  Until
-then no checkpoint_market rows exist in production.
+DEPLOYED: YES (2026-08-31 ~19:47 SAST) — shipped with the M1b deploy;
+checkpoint_market table created + populated by the running scorecard
+loop (verified live via /api/v4/game/30749637, 10 rows).
 
 ACCEPTANCE: PASS (code+tests) / LIVE VERIFICATION BLOCKED (user).
 
