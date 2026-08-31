@@ -453,7 +453,10 @@ def _game_checkpoint_market(conn: sqlite3.Connection,
     from blm_v4.scorecard import (_edge_class, _freshness_bucket,
                                   _market_age_seconds, _market_status)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkpoint_market)")}
-    ts_sel = ", market_timestamp" if "market_timestamp" in cols else ""
+    extra = [c for c in ("market_timestamp", "momentum_state",
+                         "momentum_strength", "false_momentum",
+                         "false_momentum_confidence") if c in cols]
+    ts_sel = ", " + ", ".join(extra) if extra else ""
     rows = conn.execute(
         f"""SELECT checkpoint_pct, checkpoint_timestamp, quarter,
                   opening_line, live_market_line, blm_fair_value,

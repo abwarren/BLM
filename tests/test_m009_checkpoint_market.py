@@ -65,11 +65,13 @@ _LINES = [170 + i for i in range(20)]
 
 def _build(db: Path, gid: str, *, status: str = "ended", nsnaps: int = 20,
            lines: list | None = None, ws: list[tuple[int, float]] | None = None,
-           dip: bool = False) -> None:
+           dip: bool = False,
+           start: datetime | None = None) -> None:
     """Insert a synthetic game.  ws = [(snapshot_idx, line), ...] WS
-    observations; lines = per-snapshot total_line (None = no market)."""
+    observations; lines = per-snapshot total_line (None = no market).
+    start overrides the game's first_seen_at (default: now - 2h)."""
     st = PokerBetStore(db)
-    base = _now() - timedelta(hours=2)
+    base = start or (_now() - timedelta(hours=2))
     game = PokerBetGame(
         source="PokerBet", source_game_id=gid,
         competition_id="comp-1", competition_slug="betual-tbsl",

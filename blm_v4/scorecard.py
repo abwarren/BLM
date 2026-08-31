@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from blm_v4.api import _detect_signals, _momentum
 from blm_v4.projection import FULL_GAME_MINUTES, MODEL_VERSION, clock_minutes, project
 from blm_v4.trends import analytics_tz
 
@@ -190,6 +191,10 @@ CREATE TABLE IF NOT EXISTS checkpoint_market (
     olv_to_clv            REAL,               -- CLV - OLV
     market_move_toward_blm TEXT,              -- TOWARD | AWAY | UNCHANGED
     outcome               TEXT,               -- UNDER_WIN|OVER_WIN|UNDER_LOSS|OVER_LOSS|PUSH
+    momentum_state        TEXT,               -- RISING | FALLING | FLAT (M009-M4)
+    momentum_strength     REAL,               -- 0..3 strength (weak..extreme)
+    false_momentum        INTEGER,            -- 0/1 — burst with no line response
+    false_momentum_confidence REAL,           -- 0..1 signal confidence
     model_version         TEXT NOT NULL,
     recorded_at           TEXT NOT NULL,
     frozen                INTEGER NOT NULL DEFAULT 1,
@@ -202,13 +207,23 @@ CREATE INDEX IF NOT EXISTS idx_cm_pct      ON checkpoint_market(checkpoint_pct);
 _CHECKPOINTS = ("q1", "q2", "q3", "q4", "final")
 
 
-def _ensure_cm_market_timestamp(conn) -> None:
-    """Idempotent migration: existing checkpoint_market tables (created
-    before M009-M3) lack market_timestamp.  ALTER once; old rows keep
-    NULL (honest missing), new recordings populate it."""
+_ensure_cm_COLS = (
+    ("market_timestamp", "TEXT"),
+    ("momentum_state", "TEXT"),
+    ("momentum_strength", "REAL"),
+    ("false_momentum", "INTEGER"),
+    ("false_momentum_confidence", "REAL"),
+)
+
+
+def _ensure_cm_columns(conn) -> None:
+    """Idempotent migration for checkpoint_market (M009-M3/M4): existing
+    tables lack the freshness + momentum columns.  ALTER once; old rows
+    keep NULL (honest missing), new recordings populate them."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkpoint_market)")}
-    if "market_timestamp" not in cols:
-        conn.execute("ALTER TABLE checkpoint_market ADD COLUMN market_timestamp TEXT")
+    for name, decl in _ensure_cm_COLS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE checkpoint_market ADD COLUMN {name} {decl}")
 
 # A game is a FRAGMENT (diagnostics only, never headline) unless captured
 # with >= 15 snapshots starting in its 1st quarter — a short or mid-game
@@ -1192,7 +1207,7 @@ class Scorecard:
         with self._lock:
             conn = self._connect()
             try:
-                _ensure_cm_market_timestamp(conn)
+                _ensure_cm_columns(conn)
                 games = conn.execute(
                     f"""SELECT g.id, g.source_game_id, g.classification,
                                (SELECT COUNT(*) FROM snapshots s
@@ -1264,6 +1279,14 @@ class Scorecard:
         if fair is None:
             return 0
         mvf = round(live - fair, 2) if live is not None else None
+        # M009-M4: momentum state at the checkpoint — computed from the
+        # snapshots AT-OR-BEFORE it (no look-ahead), sharing the API's
+        # single signal definition.
+        prefix = rows[: idx + 1]
+        mom = _momentum(prefix)
+        mom_state = {"up": "RISING", "down": "FALLING", "flat": "FLAT"}.get(
+            mom["direction"], "FLAT")
+        fm = _detect_signals(prefix)["false_momentum"]
         cur = conn.execute(
             """INSERT OR IGNORE INTO checkpoint_market (
                 source_game_id, classification, checkpoint_pct,
@@ -1272,8 +1295,10 @@ class Scorecard:
                 closing_line,
                 actual_final_total, market_vs_fair, signal,
                 blm_vs_olv, blm_vs_clv, olv_to_clv, market_move_toward_blm,
-                outcome, model_version, recorded_at, frozen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                outcome, momentum_state, momentum_strength, false_momentum,
+                false_momentum_confidence,
+                model_version, recorded_at, frozen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
             (
                 g["source_game_id"], g["classification"], pct,
                 r["captured_at"], r.get("quarter"), proj["progress"],
@@ -1285,6 +1310,8 @@ class Scorecard:
                 round(clv - olv, 2) if clv is not None and olv is not None else None,
                 _market_move_toward_blm(olv, clv, fair),
                 _checkpoint_outcome(fair, live, actual),
+                mom_state, mom["strength"],
+                1 if fm["active"] else 0, fm["confidence"],
                 MODEL_VERSION, _utcnow(),
             ),
         )
@@ -1459,6 +1486,29 @@ def _market_history_sql(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _local_hour(iso: Optional[str]) -> Optional[int]:
+    """Hour of day (analytics tz) for a stored ISO timestamp — used for
+    time-of-day segmentation (M009-M4)."""
+    dt = _parse_ts(iso)
+    if dt is None:
+        return None
+    return dt.astimezone(ZoneInfo(analytics_tz())).hour
+
+
+# Configurable time bands for time-of-day segmentation (M009-M4): the
+# default is a hypothesis-neutral 6-hour split; conclusions about which
+# hours are Over/Under are MEASURED from data, never hard-coded.
+TOD_BANDS_DEF = os.environ.get("BLM_TOD_BANDS", "0-6,6-12,12-18,18-24")
+
+
+def _tod_bands() -> list[tuple[int, int, str]]:
+    out = []
+    for seg in TOD_BANDS_DEF.split(","):
+        lo, hi = (int(x) for x in seg.split("-"))
+        out.append((lo, hi, seg))
+    return out
+
+
 def _market_vs_fair_sql(conn) -> dict[str, Any]:
     """M009-M2 (REFINED) — MARKET VS FAIR: the PRIMARY scorecard section.
 
@@ -1487,8 +1537,11 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
     ).fetchone()
     if not has:
         return {"checkpoints": [], "games": []}
+    _ensure_cm_columns(conn)
     rows = [dict(r) for r in conn.execute(
-        """SELECT cm.*, g.home_team, g.away_team
+        """SELECT cm.*, g.home_team, g.away_team, g.first_seen_at,
+                  (SELECT MIN(s.captured_at) FROM snapshots s
+                   WHERE s.game_id = g.id) AS game_start
            FROM checkpoint_market cm
            JOIN games g ON g.source_game_id = cm.source_game_id
            ORDER BY cm.source_game_id, cm.checkpoint_pct""")]
@@ -1646,10 +1699,107 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
                        if f["avg_age"] else None
         market_freshness.append(f)
 
+    # ── time-of-day x outcome (M009-M4) ───────────────────────────
+    # Segment by game start (first_seen_at, analytics tz).  BLM win rate
+    # = BLM's side of the line won; market win rate = the market's side
+    # won (BLM's side lost).  Hypotheses measured, never hard-coded.
+    hours: dict[int, dict[str, Any]] = {
+        h: {"hour": h, "n": 0, "over_n": 0, "under_n": 0, "push_n": 0,
+            "blm_win": 0, "blm_loss": 0, "diffs": []} for h in range(24)}
+    for r in rows:
+        hour = _local_hour(r.get("game_start") or r.get("first_seen_at"))
+        if hour is None:
+            continue
+        h = hours[hour]
+        h["n"] += 1
+        line, actual = r.get("live_market_line"), r.get("actual_final_total")
+        if line is not None and actual is not None:
+            if actual > line:
+                h["over_n"] += 1
+            elif actual < line:
+                h["under_n"] += 1
+            else:
+                h["push_n"] += 1
+        oc = r.get("outcome")
+        if oc in ("OVER_WIN", "UNDER_WIN"):
+            h["blm_win"] += 1
+        elif oc in ("OVER_LOSS", "UNDER_LOSS"):
+            h["blm_loss"] += 1
+        if r.get("blm_fair_value") is not None and line is not None:
+            h["diffs"].append(r["blm_fair_value"] - line)
+    hours_out = []
+    for h in hours.values():
+        denom = h["blm_win"] + h["blm_loss"]
+        h["blm_win_rate"] = _round2(h["blm_win"] / denom) if denom else None
+        h["market_win_rate"] = _round2(h["blm_loss"] / denom) if denom else None
+        h["avg_diff"] = _round2(sum(h["diffs"]) / len(h["diffs"])) if h["diffs"] else None
+        del h["diffs"]
+        hours_out.append(h)
+    bands = []
+    for lo, hi, label in _tod_bands():
+        sel = [h for hour, h in enumerate(hours_out) if lo <= hour < hi]
+        agg = {"band": label, "n": sum(h["n"] for h in sel),
+               "over_n": sum(h["over_n"] for h in sel),
+               "under_n": sum(h["under_n"] for h in sel),
+               "push_n": sum(h["push_n"] for h in sel),
+               "blm_win": sum(h["blm_win"] for h in sel),
+               "blm_loss": sum(h["blm_loss"] for h in sel)}
+        denom = agg["blm_win"] + agg["blm_loss"]
+        agg["blm_win_rate"] = _round2(agg["blm_win"] / denom) if denom else None
+        agg["market_win_rate"] = _round2(agg["blm_loss"] / denom) if denom else None
+        diffs = [d for h in sel for d in ([h["avg_diff"]] if h["avg_diff"] is not None else [])]
+        agg["avg_diff"] = _round2(sum(diffs) / len(diffs)) if diffs else None
+        bands.append(agg)
+
+    # ── edge buckets x direction (M009-M4, large-edge investigation) ─
+    # |BLM - market| magnitude buckets, split by direction (BLM_OVER =
+    # fair > market, BLM_UNDER = fair < market).  avg_age keeps large
+    # apparent edges attributable to freshness (a big STALE differential
+    # is visible as such, never presented as a live edge).
+    EB = [("0-2", 0, 2), ("2-5", 2, 5), ("5-10", 5, 10),
+          ("10-15", 10, 15), ("15-20", 15, 20), ("20+", 20, None)]
+    edges: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        line, fair = r.get("live_market_line"), r.get("blm_fair_value")
+        if line is None or fair is None:
+            continue
+        diff = fair - line
+        direction = "BLM_OVER" if diff > 0 else ("BLM_UNDER" if diff < 0 else None)
+        if direction is None:
+            continue
+        ad = abs(diff)
+        label = next(b for b, lo, hi in EB
+                     if (hi is None and ad >= lo) or (hi is not None and lo <= ad < hi))
+        e = edges.setdefault((label, direction), {
+            "bucket": label, "direction": direction, "n": 0,
+            "win": 0, "loss": 0, "push": 0, "ages": []})
+        e["n"] += 1
+        oc = r.get("outcome")
+        if oc == "PUSH":
+            e["push"] += 1
+        elif oc in ("OVER_WIN", "UNDER_WIN"):
+            e["win"] += 1
+        elif oc in ("OVER_LOSS", "UNDER_LOSS"):
+            e["loss"] += 1
+        age = _market_age_seconds(r.get("market_timestamp"),
+                                  r.get("checkpoint_timestamp"))
+        if age is not None:
+            e["ages"].append(age)
+    edge_buckets = []
+    for e in sorted(edges.values(), key=lambda x: (x["bucket"], x["direction"])):
+        denom = e["win"] + e["loss"]
+        e["win_rate"] = _round2(e["win"] / denom) if denom else None
+        e["avg_age"] = _round2(sum(e["ages"]) / len(e["ages"])) if e["ages"] else None
+        del e["ages"]
+        edge_buckets.append(e)
+
     return {
         "checkpoints": checkpoints,
         "games": sorted(games.values(), key=lambda x: x["source_game_id"]),
         "market_freshness": market_freshness,
+        "time_of_day": {"hours": hours_out, "bands": bands,
+                        "band_def": TOD_BANDS_DEF},
+        "edge_buckets": edge_buckets,
     }
 
 
