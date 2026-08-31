@@ -1,4 +1,4 @@
-# BLM MILESTONE CHECKPOINT — M009-M4 (2026-08-31)
+# BLM MILESTONE CHECKPOINT — M009-M5 (2026-08-31)
 
 ## M009 — SCORECARD REDESIGN: MARKET VS FAIR VALUE
 
@@ -7,61 +7,70 @@ theme — OLV/CLV/checkpoint disparity — at higher fidelity: per-checkpoint
 Market-vs-Fair as the PRIMARY metric, not a generic model-vs-market
 block).  The M008-SCORE-M2 declaration below is retained as context.
 
-CURRENT STATE: M009-M1 + M1b + M2 (REFINED) + M3 + M4 COMPLETE,
+CURRENT STATE: M009-M1 + M1b + M2 (REFINED) + M3 + M4 + M5 COMPLETE,
 DEPLOYED, LIVE VERIFIED.  checkpoint_market immutable history with
 market timestamps + momentum capture; LIVE/STALE/MISSING (300s,
 configurable); STALE DIFFERENTIAL never a live edge; per-checkpoint
 aggregation + game-level scorecard + market_freshness + time_of_day +
-edge_buckets; dashboard MARKET VS FAIR primary.  §18 fixture-integrity
-regression in place.  Full suite 246 pass.
-Evidence docs/milestones/M009-EVIDENCE.md.
+edge_buckets (magnitude x direction, O/U/Push, fresh/stale split,
+small-sample flag); event dataset endpoint (/api/v4/scorecard/events);
+dashboard DISPARITY BANDS + SCORECARD EVENTS + TIME-OF-DAY (N=|rate|,
+never claims).  §18 fixture-integrity regression in place.  Full suite
+266 pass.  Evidence docs/milestones/M009-EVIDENCE.md.
 
-NEXT: **M009-M5 — disparity bands + O/U outcome analysis / frontend
-consumption (directive sections 9, 13, 20).  Do NOT start without
-explicit authorization.**
+NEXT: **M009-M6 — frontend polish / deeper statistical segmentation
+(confidence intervals, significance across bands) / browser-based
+verification.  Do NOT start without explicit authorization.**
 
-## M009-M4 (COMPLETE, DEPLOYED, LIVE VERIFIED) — CHECKPOINT MARKET-LINE ANALYTICS
+## M009-M5 (COMPLETE, DEPLOYED, LIVE VERIFIED) — DISPARITY BAND ANALYTICS + EVENT DATASET + FRONTEND
 
-MILESTONE: M009-M4 — momentum + time-of-day + edge-bucket analytics.
-Commit c0106a3 + docs commit.
+MILESTONE: M009-M5 — disparity bands + statistical segmentation +
+frontend exposure.  Commits c842d87 (frontend, parallel) + 36f09c0
+(analytics+events) + 601ae1d (avg_diff fix) + docs commit.
 
-OBJECTIVE: per-checkpoint momentum/false-momentum capture (no look-
-ahead, single signal definition via blm_v4.api import); time-of-day
-segmentation (hour + configurable bands, hypotheses measured);
-edge buckets |BLM-market| x direction with freshness visibility
-(large-edge investigation); duplicate protection; contamination
-exclusion.
+OBJECTIVE: explicit |BLM-market| differential bands with direction
+preserved and settlement context; sample-size/win-rate/fresh-vs-stale
+segmentation with small samples flagged; frontend that surfaces the
+underlying event data without replacing it with summary-only metrics
+or turning observed rates into claims.
 
-WHAT WAS TRACED: synthetic games (fresh/stale/momentum/TOD starts) ->
-record_checkpoint_market -> momentum columns + time_of_day +
-edge_buckets -> /api/v4/scorecard -> verified live.
+WHAT WAS TRACED: synthetic games (fresh/stale/momentum) ->
+record_checkpoint_market -> enhanced edge_buckets + /scorecard/events ->
+both dashboard sections -> verified live (events total 4654, BLM_OVER
+1548, large-edge 1912, STALE 0 honest).
 
-WHAT CHANGED: scorecard.py (schema momentum columns + _ensure_cm_columns
-migration + capture in _write_checkpoint_row + _local_hour/_tod_bands +
-TOD + edge_buckets aggregation; game start = MIN(snapshot.captured_at)),
-api.py (game-detail momentum fields, column-guarded),
-tests/test_m009_m4_analytics.py (7), _build start= param.
+WHAT CHANGED: scorecard.py (edge_buckets M5 fields + avg_diff +
+reliable/edge_bucket_min_sample, env BLM_MIN_BAND_SAMPLE default 30),
+api.py (GET /api/v4/scorecard/events with filters), dashboard.js +
+index.html + styles.css (DISPARITY BANDS, SCORECARD EVENTS, TIME-OF-DAY),
+tests/test_m009_m5_disparity.py (11), tests/test_m009_m5_frontend.py (9).
 
-TESTS: RED confirmed (5/7 failed pre-implementation).  Findings:
-upsert_game hardcodes first_seen_at -> game start = MIN snapshot;
-20+/BLM_UNDER bucket mixes fresh + stale rows — avg_age revealing that
-mix IS the investigation.  Full suite 246 passed, 0 failed (239 + 7);
-M3 regression green.
+PARALLEL SPLIT: Agent B (delegated, non-overlapping scope) did the
+frontend; Agent A (me) did the backend.  Contract locked before
+dispatch; file-scoped staging made concurrent commits safe; B's commit
+c842d87 is dashboard-only, verified contract-exact.
 
-LIVE VERIFIED (real production data): time_of_day hour 2 n=443,
-over 133/under 263, blm_win_rate 0.69, avg_diff -11.65; bands 0-6
-66% / 6-12 58% / 12-18 56% / 18-24 57% (measured); edge_buckets 0-2
-BLM_UNDER 75% win vs BLM_OVER 36%; 20+ BLM_UNDER n=834 vs BLM_OVER
-n=184.  Game detail serves momentum fields (NULL for pre-M4 frozen
-rows — honest).
+TESTS: RED confirmed (11/12 failed pre-implementation).  Findings:
+sqlite3.Row has no __contains__; loop var 'direction' shadowed the
+query param; avg_diff missing caught by LIVE verification (test now
+enforces).  Full suite 266 passed, 0 failed (257 + 11 backend + 9
+frontend - overlap); M4 regression green.
 
-COMMIT: c0106a3 (code + tests) + docs commit (this).  Pushed.
+LIVE VERIFIED (real production data): events total=4654 rows;
+direction=BLM_OVER → 1548; min_diff=10 → 1912; freshness=STALE → 0
+(pre-M3 rows honestly MISSING); edge_buckets n=12 all M5 fields
+present; reliable bool correct.  Ad-hoc /tmp/hermes-verify-m5.py
+(deleted) — live checks, NOT suite green.
 
-KNOWN LIMITATION: momentum columns NULL for pre-M4 rows (frozen without
-them); new completions populate.  avg_age in edge_buckets NULL until
-freshness timestamps exist (pre-M3 rows).
+COMMIT: c842d87 + 36f09c0 + 601ae1d + docs commit (this).  Pushed.
 
-NEXT MILESTONE: M009-M5 — disparity bands + frontend (awaiting explicit go).
+KNOWN LIMITATION: freshness=STALE rows 0 in production until games
+recorded after M3 deploy accumulate; avg_diff per band now enforced;
+frontend deploy status UNVERIFIED (static served from disk, no
+restart needed, but no browser check this session).
+
+NEXT MILESTONE: M009-M6 — statistical segmentation depth / browser
+verification (awaiting explicit go).
 
 ## M009-M1b (COMPLETE, DEPLOYED, LIVE VERIFIED) — Market-vs-Fair exposed through game detail API
 

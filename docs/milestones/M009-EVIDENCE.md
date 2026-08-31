@@ -38,6 +38,38 @@ VERIFICATION:
 
 ---
 
+## M009-M5 — DISPARITY BAND ANALYTICS + EVENT DATASET + FRONTEND (COMPLETE, c842d87 + 36f09c0 + 601ae1d)
+
+Directive: disparity bands (explicit |BLM-market| differential ranges,
+direction preserved, checkpoint/freshness/age/progress/settlement
+retained, magnitude and direction analytically separate); statistical
+segmentation (sample size, O/U/Push, BLM win rate, market win rate,
+differential, fresh vs stale, small-sample flagging); frontend exposure
+of the underlying event data; preserve M4 architecture.
+
+PARALLEL SPLIT (Agent A backend / Agent B frontend, non-overlapping
+scope, contract locked before dispatch):
+- Agent A (me): scorecard.py + api.py + tests/test_m009_m5_disparity.py (11) + commit 36f09c0 + 601ae1d.
+- Agent B (delegated): dashboard.js + index.html + styles.css + tests/test_m009_m5_frontend.py (9) + commit c842d87.  File-scoped staging; no backend touched; no M4 surface altered.
+
+WHAT CHANGED:
+- edge_buckets (M5 additive — M4 keys win/loss/push/win_rate/avg_age preserved): over_n/under_n/push_n (actual vs market line), market_win_rate (the market's side won = BLM losses), fresh_n/stale_n/missing_n + fresh_win_rate/stale_win_rate, avg_diff (signed mean, found missing by LIVE verification and fixed in 601ae1d), reliable = n >= edge_bucket_min_sample (env BLM_MIN_BAND_SAMPLE, default 30 — small samples flagged, never conclusions).
+- NEW GET /api/v4/scorecard/events: the underlying event dataset — one row per (game, checkpoint) with market line, BLM fair, diff, direction, market_status (LIVE/STALE/MISSING, never substituted), market_age_seconds, momentum fields, BLM side, actual, outcome, blm_won; filters direction/freshness/checkpoint/min_diff/max_diff (magnitude)/game/limit (1..1000).  Contaminated games excluded at source.
+- Dashboard: DISPARITY BANDS (magnitude x direction, N=|rate| notation + SMALL SAMPLE, never 'winning strategy'), SCORECARD EVENTS (filterable inspection table with LIVE/STALE/MISSING rendered as-is via distinct CSS classes, large-edges preset min_diff=10 labelled 'NOT a profitability claim'), TIME-OF-DAY hours+bands (from existing M4 data), NULL → '–'.
+
+VERIFICATION:
+- RED: 11/12 failed pre-implementation (edge_buckets M5 fields + events endpoint missing); duplicate + contamination passed (existing).
+- Findings: (1) sqlite3.Row has no __contains__ ('key' in row always False) → dict() access; (2) loop variable 'direction' shadowed the query param → renamed dirn; (3) LIVE verification caught avg_diff missing (suite missed it — no test asserted it) → fixed + test now enforces.
+- Full suite: 266 passed, 0 failed (257 + 11 backend + 9 frontend - overlap).  M4 regression green.
+- DEPLOYED + LIVE VERIFIED (real production data): events total=4654 rows; direction=BLM_OVER → 1548; min_diff=10 → 1912; freshness=STALE → 0 (pre-M3 rows honestly MISSING); edge_buckets n=12 all M5 fields present; reliable bool correct.  Ad-hoc /tmp/hermes-verify-m5.py (deleted) — live checks, NOT suite green.
+- Frontend: Agent B's commit c842d87 verified contract-exact (N=|rate|, SMALL SAMPLE, no stale→live coercion anywhere — the render path renders status verbatim, tests assert the exact no-coercion literals); 11 frontend tests pass (9 new + 2 M4).
+
+COMMITS: c842d87 (B frontend) + 36f09c0 (A analytics+events) + 601ae1d (avg_diff fix) + docs commit (this).  Pushed.
+
+NEXT: M009-M6 — frontend polish / deeper statistical segmentation (confidence intervals, significance across bands) / browser-based verification of the served dashboard — after explicit go.
+
+---
+
 ## M009-M4 — CHECKPOINT MARKET-LINE ANALYTICS: MOMENTUM + TIME-OF-DAY + EDGE BUCKETS (COMPLETE, c0106a3)
 
 Directive: strengthen market-line analytics; preserve M3 freshness
@@ -289,12 +321,13 @@ populates checkpoint_market automatically.  No manual DB writes.
 - M009-M2 (REFINED): COMPLETE, DEPLOYED, LIVE VERIFIED  (commit b6798f2)
 - M009-M3  : COMPLETE, DEPLOYED, LIVE VERIFIED  (commit d656680)
 - M009-M4  : COMPLETE, DEPLOYED, LIVE VERIFIED  (commit c0106a3)
-- Full suite 246 passed, 0 failed at L3 (fresh).
+- M009-M5  : COMPLETE, DEPLOYED, LIVE VERIFIED  (commits c842d87 + 36f09c0 + 601ae1d)
+- Full suite 266 passed, 0 failed at L3 (fresh).
 - Ad-hoc synthetic verifications (hermes-verify-* scripts, /tmp,
   deleted after run) used during development; NOT the evidence basis
   for L4/L5 — those are the running service + real DB.
 
 ## NEXT
 
-M009-M5 — disparity bands + O/U outcome analysis / frontend
-consumption (sections 9, 13, 20 of the directives).  After explicit go.
+M009-M6 — frontend polish / deeper statistical segmentation /
+browser-based verification.  After explicit go.
