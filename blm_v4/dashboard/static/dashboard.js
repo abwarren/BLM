@@ -298,9 +298,14 @@ function renderScorecard(d) {
   html.push(`<div class="sc-block">
     <h4>O/U PERFORMANCE — DIAGNOSTIC <span class="muted">(${mc.ou_line_type || "checkpoint market"}; population: prediction_scores fragment=0)</span></h4>
     <table class="sc-table">
+      <tr><td colspan="2" class="muted">BLM selection · BLM prediction vs market line</td></tr>
       <tr><td>BLM Over</td><td class="sc-num">${mc.ou_over ?? 0}</td></tr>
       <tr><td>BLM Under</td><td class="sc-num">${mc.ou_under ?? 0}</td></tr>
-      <tr><td>Push</td><td class="sc-num">${mc.ou_push ?? 0}</td></tr>
+      <tr><td>BLM No edge</td><td class="sc-num">${mc.ou_push ?? 0}</td></tr>
+      <tr><td colspan="2" class="muted">Actual outcome · final total vs market line</td></tr>
+      <tr><td>Actual Over</td><td class="sc-num">${mc.actual_over ?? 0}</td></tr>
+      <tr><td>Actual Under</td><td class="sc-num">${mc.actual_under ?? 0}</td></tr>
+      <tr><td>Actual Push</td><td class="sc-num">${mc.actual_push ?? 0}</td></tr>
       <tr><td>Hit rate</td><td class="sc-num">${mc.ou_hit_n ?? 0} / ${mc.ou_hit_d ?? 0} = ${((mc.ou_hit_rate ?? 0) * 100).toFixed(1)}%</td></tr>
     </table>
   </div>`);

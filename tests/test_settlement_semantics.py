@@ -281,3 +281,51 @@ def test_market_history_uses_ws_lines_when_snapshots_carry_none(tmp_path):
         assert row["closing_total_edge"] == -0.5
     finally:
         conn.close()
+
+
+# ═══════════ Diagnostic label fix: BLM selection vs actual outcome ═══════════
+
+class TestDiagnosticSelectionVsOutcome:
+    """The O/U diagnostic block labelled 'BLM Over / BLM Under' must count
+    ou_prediction (the side BLM selected vs the market line), NOT ou_result
+    (the actual market-side outcome).  The two distributions answer different
+    questions and must stay separate.  Synthetic data: ou_prediction OVER=1 /
+    UNDER=1 while ou_result OVER=2 / UNDER=0 — a regression implementation
+    counting ou_result returns ou_over=2 and this test fails."""
+
+    def test_blm_counts_use_ou_prediction_not_ou_result(self, tmp_path):
+        import sqlite3
+        from blm_v4.scorecard import _market_compare_sql
+        db = tmp_path / "sel.db"
+        con = sqlite3.connect(str(db))
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            CREATE TABLE prediction_scores (
+                prediction_id INTEGER PRIMARY KEY,
+                model_total REAL, market_total REAL, actual_total REAL,
+                total_error REAL, market_error REAL, model_beat_market INTEGER,
+                ou_prediction INTEGER, ou_result INTEGER, ou_correct INTEGER,
+                fragment INTEGER);
+            -- (1) BLM OVER pick (190>170), actual OVER (180>170)
+            -- (2) BLM UNDER pick (150<170), actual OVER (180>170)
+            INSERT INTO prediction_scores VALUES
+              (1, 190, 170, 180,  10, -10, 1,  1,  1, 1, 0),
+              (2, 150, 170, 180, -30, -10, 0, -1,  1, 0, 0);
+        """)
+        try:
+            out = _market_compare_sql(con)
+            assert out["n"] == 2
+            # BLM selections (ou_prediction): 1 OVER + 1 UNDER
+            assert out["ou_over"] == 1, \
+                f"BLM Over must count ou_prediction==1, got {out['ou_over']}"
+            assert out["ou_under"] == 1
+            assert out["ou_push"] == 0
+            # Actual outcomes (ou_result): 2 OVER + 0 UNDER
+            assert out["actual_over"] == 2
+            assert out["actual_under"] == 0
+            assert out["actual_push"] == 0
+            # partition: every market-bearing row has exactly one selection
+            assert out["ou_over"] + out["ou_under"] + out["ou_push"] \
+                == out["ou_predictions"] == 2
+        finally:
+            con.close()

@@ -2045,9 +2045,19 @@ def _market_compare_sql(conn) -> dict[str, Any]:
     # (ou_result == 0) are NOT misses — excluded from the denominator.
     ou_hits = sum(1 for r in rows if r["ou_correct"] == 1)
     ou_decided = [r for r in rows if r["ou_correct"] is not None and r["ou_result"] != 0]
-    ou_over = sum(1 for r in rows if r["ou_result"] == 1)
-    ou_under = sum(1 for r in rows if r["ou_result"] == -1)
-    ou_push = sum(1 for r in rows if r["ou_result"] == 0)
+    # Label-defect fix (settlement-audit follow-up): BLM SELECTION counts
+    # come from ou_prediction (BLM prediction vs market line), NOT from
+    # ou_result (actual final vs market line).  ou_over/ou_under/ou_push
+    # partition ou_predictions: every market-bearing row has exactly one
+    # BLM selection (OVER=1 / UNDER=-1 / NO_EDGE=0).
+    ou_over = sum(1 for r in rows if r["ou_prediction"] == 1)
+    ou_under = sum(1 for r in rows if r["ou_prediction"] == -1)
+    ou_push = sum(1 for r in rows if r["ou_prediction"] == 0)  # BLM == market
+    # Actual market-side outcome (settlement: ou_result) — exposed under
+    # explicit names so the two distributions can never be conflated.
+    actual_over = sum(1 for r in rows if r["ou_result"] == 1)
+    actual_under = sum(1 for r in rows if r["ou_result"] == -1)
+    actual_push = sum(1 for r in rows if r["ou_result"] == 0)
     # signed disparity = BLM prediction - market line (both directions kept)
     disp = [(r["model_total"] or 0) - (r["market_total"] or 0) for r in rows
             if r["model_total"] is not None and r["market_total"] is not None]
@@ -2070,6 +2080,9 @@ def _market_compare_sql(conn) -> dict[str, Any]:
         "ou_over": ou_over,
         "ou_under": ou_under,
         "ou_push": ou_push,
+        "actual_over": actual_over,
+        "actual_under": actual_under,
+        "actual_push": actual_push,
         "ou_line_type": "checkpoint_market",
         "disparity_min": round(min(disp), 2) if disp else None,
         "disparity_max": round(max(disp), 2) if disp else None,
