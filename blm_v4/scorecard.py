@@ -412,6 +412,12 @@ def _progress_of(r: dict) -> Optional[float]:
     q = r.get("quarter")
     if q is None:
         q = _period_quarter(r.get("period_label"))
+    # "Half End"/"Half Time" snapshots sit at the half-time boundary:
+    # 20 elapsed minutes (half the game), regardless of the clock display
+    # (the virtual clock shows the 12:00 sentinel there too).
+    label = (r.get("period_label") or "").lower()
+    if q == 2 and label.startswith("half"):
+        return round(FULL_GAME_MINUTES / 2.0 / FULL_GAME_MINUTES, 4)
     el = clock_minutes(q, r.get("clock"))
     if el is None:
         return None
@@ -1091,18 +1097,21 @@ class Scorecard:
                     if not (n >= 15 and starts_q1):
                         stats["skipped_fragment"] += 1
                         continue
-                    snaps = conn.execute(
+                    snaps = [dict(r) for r in conn.execute(
                         """SELECT captured_at, total_line, spread
                            FROM snapshots WHERE source_game_id = ?
                            ORDER BY captured_at""",
                         (r["source_game_id"],),
-                    ).fetchall()
+                    ).fetchall()]
                     if not snaps:
                         continue
-                    lines = [s["total_line"] for s in snaps
-                             if s["total_line"] is not None]
-                    olvc = lines[0] if lines else None
-                    clv = lines[-1] if lines else None
+                    # OLV/CLV via the SAME authoritative primitives as the
+                    # checkpoint layer (_first/_last_verified_line): first
+                    # snapshot-carried line, else the earliest/latest WS
+                    # MatchTotal observation (snapshots in this population
+                    # carry no total_line — the WS feed is the line source).
+                    olvc = _first_verified_line(conn, r["source_game_id"], snaps)
+                    clv = _last_verified_line(conn, r["source_game_id"], snaps)
                     spreads = [s["spread"] for s in snaps
                                if s["spread"] is not None]
                     osp = spreads[0] if spreads else None
@@ -1144,7 +1153,9 @@ class Scorecard:
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(source_game_id) DO UPDATE SET
                             classification = excluded.classification,
+                            opening_total = excluded.opening_total,
                             closing_total = excluded.closing_total,
+                            opening_spread = excluded.opening_spread,
                             closing_spread = excluded.closing_spread,
                             total_line_move = excluded.total_line_move,
                             spread_line_move = excluded.spread_line_move,
@@ -1152,7 +1163,9 @@ class Scorecard:
                             final_home = excluded.final_home,
                             final_away = excluded.final_away,
                             final_total = excluded.final_total,
+                            outcome_olvc = excluded.outcome_olvc,
                             outcome_clv = excluded.outcome_clv,
+                            opening_total_edge = excluded.opening_total_edge,
                             closing_total_edge = excluded.closing_total_edge,
                             model_versions = excluded.model_versions,
                             recorded_at = excluded.recorded_at""",
@@ -2062,6 +2075,130 @@ def _market_compare_sql(conn) -> dict[str, Any]:
         "disparity_max": round(max(disp), 2) if disp else None,
         "disparity_abs_max": round(max(abs(d) for d in disp), 2) if disp else None,
     }
+
+
+# ── Settlement integrity scan (directive §26/§33) ────────────────
+
+def settlement_integrity_violations(conn) -> dict[str, Any]:
+    """Scan every persisted settlement layer for impossible states.
+
+    Recomputes ou_prediction/ou_result/ou_correct, checkpoint outcomes and
+    market-history outcomes FROM PRIMITIVES and diffs against stored
+    values.  Zero violations among rows with valid data is the invariant
+    (BLM side vs market; actual vs market; never actual vs BLM).  Also
+    reports missing critical fields, duplicates, timestamp anomalies and
+    classification contamination.  Read-only; used by tests and the live
+    verification script.
+    """
+    out: dict[str, Any] = {
+        "prediction_scores_total": 0,
+        "ps_side_mismatch": [], "ps_result_mismatch": [],
+        "ps_correct_mismatch": [], "ps_missing_market": [],
+        "ps_missing_actual": [], "ps_stored_ou_without_market": [],
+        "checkpoint_total": 0, "cm_outcome_mismatch": [],
+        "mh_total": 0, "mh_outcome_mismatch": [],
+        "dup_checkpoint_market": [], "dup_predictions": [],
+        "scored_after_result": [], "contaminated_cm": [],
+        "contaminated_ps": [],
+    }
+    if conn.row_factory is not sqlite3.Row:
+        conn.row_factory = sqlite3.Row
+    sgn = lambda v: None if v is None else (1 if v > 0 else (-1 if v < 0 else 0))
+
+    rows = conn.execute("""
+        SELECT ps.prediction_id, ps.source_game_id, ps.classification,
+               ps.model_total, ps.market_total, ps.actual_total,
+               ps.ou_prediction, ps.ou_result, ps.ou_correct,
+               p.source_snapshot_at, r.result_at
+        FROM prediction_scores ps
+        JOIN predictions p ON p.id = ps.prediction_id
+        LEFT JOIN game_results r ON r.source_game_id = ps.source_game_id
+        WHERE ps.actual_total IS NOT NULL OR ps.market_total IS NOT NULL
+    """).fetchall()
+    for r in rows:
+        d = dict(r)
+        out["prediction_scores_total"] += 1
+        mkt, ft, pt = d["market_total"], d["actual_total"], d["model_total"]
+        if mkt is None:
+            out["ps_missing_market"].append(d["prediction_id"])
+            if d["ou_prediction"] is not None or d["ou_result"] is not None \
+                    or d["ou_correct"] is not None:
+                out["ps_stored_ou_without_market"].append(d["prediction_id"])
+            continue
+        if ft is None:
+            out["ps_missing_actual"].append(d["prediction_id"])
+            continue
+        exp_pred = sgn(pt - mkt) if pt is not None else None
+        exp_res = sgn(ft - mkt)
+        exp_corr = (1 if (exp_pred == exp_res and exp_pred != 0) else 0) \
+            if exp_pred is not None else None
+        if d["ou_prediction"] != exp_pred:
+            out["ps_side_mismatch"].append(d["prediction_id"])
+        if d["ou_result"] != exp_res:
+            out["ps_result_mismatch"].append(d["prediction_id"])
+        if d["ou_correct"] != exp_corr:
+            out["ps_correct_mismatch"].append(d["prediction_id"])
+
+    for r in conn.execute("""
+        SELECT source_game_id, classification, checkpoint_pct, blm_fair_value,
+               live_market_line, actual_final_total, outcome
+        FROM checkpoint_market"""):
+        d = dict(r)
+        out["checkpoint_total"] += 1
+        fair, mkt, act = d["blm_fair_value"], d["live_market_line"], \
+            d["actual_final_total"]
+        if mkt is None or fair is None or act is None:
+            continue
+        if fair == mkt or act == mkt:
+            exp = "PUSH"
+        elif fair < mkt:
+            exp = "UNDER_WIN" if act < mkt else "UNDER_LOSS"
+        else:
+            exp = "OVER_WIN" if act > mkt else "OVER_LOSS"
+        if exp != d["outcome"]:
+            out["cm_outcome_mismatch"].append(
+                (d["source_game_id"], d["checkpoint_pct"]))
+
+    for r in conn.execute("""
+        SELECT source_game_id, opening_total, closing_total, final_total,
+               outcome_olvc, outcome_clv
+        FROM market_history"""):
+        d = dict(r)
+        out["mh_total"] += 1
+        ft = d["final_total"]
+        if d["opening_total"] is not None and ft is not None:
+            exp = _outcome_vs_line(ft, d["opening_total"])
+            if exp != d["outcome_olvc"]:
+                out["mh_outcome_mismatch"].append(
+                    (d["source_game_id"], "olvc", d["outcome_olvc"], exp))
+        if d["closing_total"] is not None and ft is not None:
+            exp = _outcome_vs_line(ft, d["closing_total"])
+            if exp != d["outcome_clv"]:
+                out["mh_outcome_mismatch"].append(
+                    (d["source_game_id"], "clv", d["outcome_clv"], exp))
+
+    out["dup_checkpoint_market"] = [dict(r) for r in conn.execute("""
+        SELECT source_game_id, checkpoint_pct, COUNT(*) c
+        FROM checkpoint_market GROUP BY source_game_id, checkpoint_pct
+        HAVING c > 1""")]
+    out["dup_predictions"] = [dict(r) for r in conn.execute("""
+        SELECT source_game_id, checkpoint, model_version, COUNT(*) c
+        FROM predictions GROUP BY source_game_id, checkpoint, model_version
+        HAVING c > 1""")]
+    out["scored_after_result"] = [dict(r) for r in conn.execute("""
+        SELECT ps.prediction_id FROM prediction_scores ps
+        JOIN predictions p ON p.id = ps.prediction_id
+        JOIN game_results r ON r.source_game_id = ps.source_game_id
+        WHERE p.source_snapshot_at >= r.result_at""")]
+    out["contaminated_cm"] = [dict(r) for r in conn.execute("""
+        SELECT cm.source_game_id, cm.checkpoint_pct FROM checkpoint_market cm
+        JOIN game_quality q ON q.source_game_id = cm.source_game_id
+        WHERE q.status = 'INVALID'""")]
+    out["contaminated_ps"] = [dict(r) for r in conn.execute("""
+        SELECT ps.prediction_id FROM prediction_scores ps
+        JOIN game_quality q ON q.source_game_id = ps.source_game_id
+        WHERE q.status = 'INVALID'""")]
+    return out
 
 
 # ── CLI ───────────────────────────────────────────────────────────

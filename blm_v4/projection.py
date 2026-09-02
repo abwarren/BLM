@@ -53,7 +53,15 @@ def clock_minutes(quarter: Optional[int], clock: Optional[str]) -> Optional[floa
         mm, ss = int(m.group(1)), int(m.group(2))
         if mm > 12:  # MM:SS where MM is actually minutes-of-clock style
             return None
-        return round((q - 1) * QUARTER_MINUTES + (QUARTER_MINUTES - mm - ss / 60.0), 2)
+        # BetConstruct virtual clocks display 12:00 at a period start and
+        # tick down; a quarter is QUARTER_MINUTES long, so any display of
+        # 10:00+ means the period clock has NOT begun counting down
+        # (period-start/boundary sentinel — e.g. "12:00", "11:30").
+        # Clamping the contribution at 0 instead of letting it go negative
+        # fixes the 2-minute undercount that mislabeled checkpoint
+        # positions (12:00 -> elapsed (q-1)*10, not (q-1)*10 - 2).
+        contrib = max(0.0, QUARTER_MINUTES - mm - ss / 60.0)
+        return round((q - 1) * QUARTER_MINUTES + contrib, 2)
     try:
         return round((q - 1) * QUARTER_MINUTES + float(c.rstrip("'`")), 2)
     except Exception:
