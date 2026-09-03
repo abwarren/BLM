@@ -52,9 +52,35 @@ logic errors; all fixed in this session (one commit):
   relabeled NO_EDGE (semantic taxonomy alignment, not a value rebase).
   Live integrity scan now: cm_outcome_mismatch 0, cm_new_non_half 0,
   historical report-only 2000 (cm) / 2769 (ps) — pre-deploy 1dp rows.
-- Suite: 338 passed.  Deploy of the remediation commit NOT yet done
-  (systemd units still run the pre-remediation code; daemon-reload before
-  restart).
+- Suite: 338 passed (pre-RM-3).  DEPLOYED 2026-09-03 19:08:20Z (restart of
+  both units loaded c38e329; verified via tick_timing in collector_state.json
+  + live /api/v2/model real engine config/counter).
+
+## SESSION RM-3 (2026-09-03, commit 3a3b9be) — SIGNAL-AXIS TAXONOMY ALIGNMENT
+
+Follow-up audit of the a8d216f/c38e329 settlement fix found the SIGNAL axis
+still carried the legacy 'PUSH (equal)' label for fair==market — the same
+condition the fix renamed NO_EDGE on the OUTCOME axis.  Live DB had 10 rows
+with signal='PUSH' | outcome='NO_EDGE' (one condition, two vocabularies;
+signal-PUSH 10 vs outcome-PUSH 0 contradicted the taxonomy 'PUSH only
+actual==market').  Fixed: _market_vs_fair_signal equal -> NO_EDGE; schema
+comment; per-checkpoint push_n/push_pct renamed signal_no_edge[/pct]
+(signal-PUSH now unreachable); settlement_integrity_violations gained
+cm_signal_mismatch (recomputes expected signal, FAILs stored PUSH on
+fair==market; NULL signal stays honest when market/fair missing).  RED-first
+(2 new tests failed on c38e329); mutation-proved the 4 post-fix tests from
+the review remediation (grace scaling, ring summary, int-vs-str merge dedup,
+invariant predicted_at — each mutation FAILED its test, then reverted).
+Suite 340 passed.  Live relabel 10 signal rows PUSH->NO_EDGE (backup
+backups/blm_pokerbet.pre-signal-noedge-20260903T191829Z.db + sha256 +
+verify: 0 fair==market PUSH, signal/outcome predicates 0 mismatches).
+DEPLOYED 2026-09-03 19:18:05Z (blm-server restart; collector untouched).
+Post-restart live scan: cm_outcome_mismatch 0, cm_signal_mismatch [],
+dup 0; endpoints /api/v2/health /api/v2/model /api/v4/scorecard
+/api/v4/status / all 200; server journal 0 errors since restart.
+Known limitation: /api/v2/model active_games counts blm_v2.db (v2 storage
+DB) which nothing populates (v2 pipeline writes blm_ts.db snapshots only)
+— active_games 0 is an honest count of an empty side DB, not fabricated.
 
 ## M009-M5 (COMPLETE, DEPLOYED, LIVE VERIFIED) — DISPARITY BAND ANALYTICS + EVENT DATASET + FRONTEND
 
