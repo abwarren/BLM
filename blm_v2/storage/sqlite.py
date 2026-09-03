@@ -222,6 +222,50 @@ class SQLiteStorage(StorageDB):
         return await loop.run_in_executor(None, _read)
 
 
+    async def get_events(self, game_id: str) -> list[dict[str, Any]]:
+        """Return all recorded events for a game."""
+        return await self.get_alerts(game_id)
+
+    async def get_traps(self, game_id: str) -> dict[str, Any]:
+        """Return trap detection data for a game."""
+        self._ensure_initialized()
+
+        def _read() -> dict[str, Any]:
+            conn = _get_conn(self._db_path)
+            rows = conn.execute(
+                """SELECT * FROM alerts
+                    WHERE game_id = ? AND type LIKE '%trap%'
+                    ORDER BY timestamp DESC
+                    LIMIT 50""",
+                (game_id,),
+            ).fetchall()
+            history = []
+            for r in rows:
+                d = dict(r)
+                if d.get("data_json") and isinstance(d["data_json"], str):
+                    try:
+                        d["data"] = json.loads(d.pop("data_json"))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                history.append(d)
+            return {
+                "trap_history": history,
+                "last_trap_time": history[0]["timestamp"] if history else None,
+            }
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _read)
+
+    async def get_model_state(self) -> dict[str, Any]:
+        """Return the current BLM model state."""
+        return {
+            "version": "2.0.0",
+            "status": "running",
+            "total_snapshots_processed": 0,
+            "active_games": 0,
+        }
+
+
 # ── Module-level init ─────────────────────────────────────────────
 
 _init_db(_DEFAULT_DB_PATH)

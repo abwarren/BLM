@@ -438,27 +438,30 @@ async def list_games(
 ):
     """Return all known games (merged from TS and storage)."""
     with metrics.timer("api_response_time"):
-        ts_games = await ts.list_games()
+        ts_game_ids = await ts.list_games()
         storage_games = await storage.list_games()
 
+        # ts.list_games() returns list[str]; storage.list_games() returns list[dict]
         # Merge: index by game_id, storage overrides for metadata
         merged = {}
-        for g in ts_games:
-            merged[g["game_id"]] = g
+        for gid in ts_game_ids:
+            merged[gid] = {"game_id": gid}
         for g in storage_games:
-            merged[g["game_id"]] = g  # storage wins
+            gid = g.get("game_id", "") if isinstance(g, dict) else str(g)
+            if gid:
+                merged[gid] = g if isinstance(g, dict) else {"game_id": gid}
 
         items = [
             GameListItem(
-                game_id=meta["game_id"],
-                home_team=meta.get("home_team", ""),
-                away_team=meta.get("away_team", ""),
-                status=meta.get("status", "unknown"),
-                start_time=meta.get("start_time", ""),
-                home_score=meta.get("home_score", 0),
-                away_score=meta.get("away_score", 0),
+                game_id=str(meta.get("game_id", gid)) if isinstance(meta, dict) else str(meta),
+                home_team=meta.get("home_team", "") if isinstance(meta, dict) else "",
+                away_team=meta.get("away_team", "") if isinstance(meta, dict) else "",
+                status=meta.get("status", "unknown") if isinstance(meta, dict) else "unknown",
+                start_time=meta.get("start_time", meta.get("captured_at", "")) if isinstance(meta, dict) else "",
+                home_score=meta.get("home_score", 0) if isinstance(meta, dict) else 0,
+                away_score=meta.get("away_score", 0) if isinstance(meta, dict) else 0,
             )
-            for meta in merged.values()
+            for gid, meta in merged.items()
         ]
         items.sort(key=lambda x: x.start_time, reverse=True)
 

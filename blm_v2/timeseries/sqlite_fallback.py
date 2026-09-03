@@ -328,6 +328,89 @@ class SQLiteTimeSeries(TimeSeriesDB):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _delete)
 
+    # ── TSInterface adapter methods ────────────────────────────────
+
+    async def get_latest_snapshot(self, game_id: str) -> Optional[SnapshotData]:
+        """Alias for query_latest — satisfies TSInterface."""
+        return await self.query_latest(game_id)
+
+    async def get_snapshots(
+        self,
+        game_id: str,
+        from_ts: Optional[str] = None,
+        to_ts: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[SnapshotData]:
+        """Query snapshots with offset support — satisfies TSInterface."""
+        self._ensure_initialized()
+
+        def _query() -> list[SnapshotData]:
+            conn = _get_conn(self._db_path)
+            params: list[Any] = [game_id]
+            clauses = ["game_id = ?"]
+
+            if from_ts:
+                clauses.append("timestamp >= ?")
+                params.append(from_ts)
+            if to_ts:
+                clauses.append("timestamp <= ?")
+                params.append(to_ts)
+
+            where = " AND ".join(clauses)
+            rows = conn.execute(
+                f"SELECT * FROM snapshots_v2 WHERE {where} ORDER BY timestamp ASC LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
+            return [self._row_to_snapshot(r) for r in rows]
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _query)
+
+    async def get_replay_snapshots(self, game_id: str) -> list[SnapshotData]:
+        """Return all snapshots for a game in chronological order for replay."""
+        return await self.get_snapshots(game_id, limit=10000)
+
+    async def get_chart_data(self, game_id: str) -> list[SnapshotData]:
+        """Return snapshots formatted for charting (aggregated data points)."""
+        snapshots = await self.get_snapshots(game_id, limit=2000)
+        return [
+            {
+                "timestamp": s.get("timestamp", ""),
+                "home_score": s.get("home_score", 0),
+                "away_score": s.get("away_score", 0),
+                "total_line": s.get("total_line"),
+                "spread": s.get("spread"),
+                "pace": s.get("pace"),
+                "quarter": s.get("quarter", 1),
+                "clock": s.get("clock", ""),
+                "blm_score": s.get("blm_score"),
+                "confidence": s.get("confidence"),
+            }
+            for s in snapshots
+        ]
+
+    async def get_game_detail(self, game_id: str) -> Optional[dict]:
+        """Return full details for a single game from the latest snapshot."""
+        latest = await self.query_latest(game_id)
+        if latest is None:
+            return None
+        return {
+            "game_id": latest.get("game_id", game_id),
+            "home_team": latest.get("home_team", ""),
+            "away_team": latest.get("away_team", ""),
+            "status": latest.get("status", "unknown"),
+            "start_time": latest.get("start_time", latest.get("timestamp", "")),
+            "home_score": latest.get("home_score", 0),
+            "away_score": latest.get("away_score", 0),
+            "quarter": latest.get("quarter", 0),
+            "clock": latest.get("clock", ""),
+            "blm_score": latest.get("blm_score"),
+            "confidence": latest.get("confidence"),
+            "pace": latest.get("pace"),
+            "latest_snapshot": latest,
+        }
+
     # ── Internals ─────────────────────────────────────────────────
 
     @staticmethod

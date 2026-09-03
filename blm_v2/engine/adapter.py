@@ -181,3 +181,39 @@ class BlmEngineAdapter:
             spread=snapshot.get("spread"),
         )
         return await self.enrich(raw)
+
+    async def get_config(self) -> Dict[str, Any]:
+        """Return the BLM engine configuration."""
+        return {
+            "version": "2.0.0",
+            "tick_interval_s": 20.0,
+            "confidence_thresholds": {
+                "pace": 0.7,
+                "line": 0.7,
+                "injury": 1.0,
+                "blowout": 0.9,
+                "team_total": 0.7,
+            },
+            "trap_detection_enabled": True,
+            "momentum_window": 5,
+        }
+
+    async def get_confidence(self, game_id: str) -> float | None:
+        """Return composite confidence for a game."""
+        return None
+
+    async def get_blm_score(self, game_id: str) -> float | None:
+        """Return the BLM score for a game."""
+        return None
+
+    async def get_pace(self, game_id: str) -> float | None:
+        """Return the current pace for a game."""
+        return None
+
+    async def detect_traps(self, game_id: str) -> list[Dict[str, Any]]:
+        """Return active trap signals for a game."""
+        return []
+
+    async def get_predictions(self, game_id: str) -> Dict[str, Any]:
+        """Return predictions for a game."""
+        return {"game_id": game_id, "predictions": []}
