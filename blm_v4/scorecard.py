@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS checkpoint_market (
     closing_line          REAL,               -- CLV: last verified line (snap or WS)
     actual_final_total    INTEGER,
     market_vs_fair        REAL,               -- live - fair, signed, never discarded
-    signal                TEXT,               -- UNDER_VALUE | OVER_VALUE | PUSH
+    signal                TEXT,               -- UNDER_VALUE | OVER_VALUE | NO_EDGE (NO_EDGE=market==fair, never PUSH)
     blm_vs_olv            REAL,               -- fair - OLV
     blm_vs_clv            REAL,               -- fair - CLV
     olv_to_clv            REAL,               -- CLV - OLV
@@ -495,15 +495,19 @@ def _last_verified_line(conn, source_game_id: str, rows: list[dict]) -> Optional
 
 def _market_vs_fair_signal(market: Optional[float],
                            fair: Optional[float]) -> Optional[str]:
-    """Explicit terminology (M009): MARKET > FAIR = UNDER VALUE,
-    MARKET < FAIR = OVER VALUE, equal = PUSH (no measurable edge)."""
+    """Value-direction label (M009 terminology, RM-3 alignment):
+    MARKET > FAIR = UNDER_VALUE, MARKET < FAIR = OVER_VALUE,
+    MARKET == FAIR = NO_EDGE (position no-bet — no measurable edge;
+    NEVER 'PUSH'.  'PUSH' is reserved for the settlement outcome
+    actual==market; the old 'PUSH (equal)' signal label conflated
+    'no value position' with 'line landed')."""
     if market is None or fair is None:
         return None
     if market > fair:
         return "UNDER_VALUE"
     if market < fair:
         return "OVER_VALUE"
-    return "PUSH"
+    return "NO_EDGE"
 
 
 def _checkpoint_outcome(fair: Optional[float], market: Optional[float],
@@ -1679,12 +1683,13 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
             "abs_mf": _round2(sum(abs(m) for m in mfs) / n) if n else None,
             "over_value_n": sigs.count("OVER_VALUE"),
             "under_value_n": sigs.count("UNDER_VALUE"),
-            "push_n": sigs.count("PUSH"),
+            "signal_no_edge": sigs.count("NO_EDGE"),   # market==fair (never PUSH)
             "over_value_pct": _round2(sigs.count("OVER_VALUE") / len(sigs))
                               if sigs else None,
             "under_value_pct": _round2(sigs.count("UNDER_VALUE") / len(sigs))
                                if sigs else None,
-            "push_pct": _round2(sigs.count("PUSH") / len(sigs)) if sigs else None,
+            "signal_no_edge_pct": _round2(sigs.count("NO_EDGE") / len(sigs))
+                                  if sigs else None,
             "over_win": owin,
             "over_loss": oloss,
             "under_win": uwin,
@@ -2141,6 +2146,7 @@ def settlement_integrity_violations(conn) -> dict[str, Any]:
         "ps_correct_mismatch": [], "ps_missing_market": [],
         "ps_missing_actual": [], "ps_stored_ou_without_market": [],
         "checkpoint_total": 0, "cm_outcome_mismatch": [],
+        "cm_signal_mismatch": [],
         "mh_total": 0, "mh_outcome_mismatch": [],
         "dup_checkpoint_market": [], "dup_predictions": [],
         "scored_after_result": [], "contaminated_cm": [],
@@ -2206,6 +2212,20 @@ def settlement_integrity_violations(conn) -> dict[str, Any]:
         if exp != d["outcome"]:
             out["cm_outcome_mismatch"].append(
                 (d["source_game_id"], d["checkpoint_pct"]))
+
+    for r in conn.execute("""
+        SELECT source_game_id, checkpoint_pct, live_market_line,
+               blm_fair_value, signal
+        FROM checkpoint_market"""):
+        d = dict(r)
+        mkt, fair = d["live_market_line"], d["blm_fair_value"]
+        if mkt is None or fair is None:
+            continue                       # NULL signal is honest (no market/fair)
+        exp_sig = _market_vs_fair_signal(mkt, fair)
+        if d["signal"] != exp_sig:
+            out["cm_signal_mismatch"].append(
+                (d["source_game_id"], d["checkpoint_pct"],
+                 d["signal"], exp_sig))
 
     for r in conn.execute("""
         SELECT source_game_id, opening_total, closing_total, final_total,

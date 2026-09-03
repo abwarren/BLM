@@ -5,8 +5,10 @@ at every checkpoint (10..100%).  Each checkpoint must freeze what was
 actually available at that point in the game:
 
   market_vs_fair = live_market_line - blm_fair_value   (signed, retained)
-  signal         = UNDER_VALUE | OVER_VALUE | PUSH     (market vs fair)
-  outcome        = UNDER_WIN | OVER_WIN | UNDER_LOSS | OVER_LOSS | PUSH
+  signal         = UNDER_VALUE | OVER_VALUE | NO_EDGE  (market vs fair;
+  equal = NO_EDGE, never PUSH)
+  outcome        = UNDER_WIN | OVER_WIN | UNDER_LOSS | OVER_LOSS |
+                    NO_EDGE | PUSH  (NO_EDGE=fair==market; PUSH=actual==market)
                    (BLM position vs market, resolved against the actual)
 
 The historical record is FROZEN at first write: later model builds or

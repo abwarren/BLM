@@ -406,7 +406,7 @@ class TestNoEdgeVsPush:
                 market_vs_fair, signal, outcome, frozen, recorded_at)
             VALUES ('9001','BETUAL_NBA',100,'2026-01-01T00:00:00Z','v4-pace-1',
                 167.5, 175.5, '2026-01-01T00:00:00Z', 175.5, 175.5, 172,
-                0.0, 'PUSH', ?, 1, '2026-01-01T00:00:00Z')""",
+                0.0, 'NO_EDGE', ?, 1, '2026-01-01T00:00:00Z')""",
             (_checkpoint_outcome(175.5, 175.5, 172),))
         con.commit()
         try:
@@ -494,5 +494,54 @@ class TestModelOutputInvariantScan:
             # prediction_scores scored post-cutover -> new
             assert v["ps_new_non_half"] == 1, v["ps_new"]
             assert v["ps_historical_non_half"] == 0
+        finally:
+            con.close()
+
+
+# ═══════════ RM-3: signal-axis taxonomy (NO_EDGE, never PUSH, for fair==market) ═══════════
+
+class TestSignalAxisNoEdgeTaxonomy:
+    """The settlement-forensic fix redefined fair==market as NO_EDGE on the
+    OUTCOME axis; the SIGNAL axis (same predicate: market vs fair) kept the
+    old 'PUSH (equal)' label — one condition, two vocabularies, and
+    stored rows carrying signal='PUSH' | outcome='NO_EDGE'.  RM-3 aligns
+    the signal axis and makes the integrity scan protect both."""
+
+    def test_signal_axis_no_edge_when_fair_equals_market(self):
+        from blm_v4.scorecard import _market_vs_fair_signal
+        assert _market_vs_fair_signal(175.5, 175.5) == "NO_EDGE"   # no-value position
+        # _market_vs_fair_signal(market, fair): MARKET > FAIR = UNDER_VALUE
+        assert _market_vs_fair_signal(183.0, 175.5) == "UNDER_VALUE"
+        assert _market_vs_fair_signal(170.5, 175.5) == "OVER_VALUE"
+        assert _market_vs_fair_signal(None, 175.5) is None
+        assert _market_vs_fair_signal(175.5, None) is None
+
+    def test_integrity_scan_flags_legacy_signal_push(self, tmp_path):
+        """The scan must flag a stored signal='PUSH' on a fair==market row
+        (legacy taxonomy) and accept signal='NO_EDGE' (writer-consistent)."""
+        import sqlite3
+        from pathlib import Path
+        from blm_v4.scorecard import SCORECARD_SCHEMA, settlement_integrity_violations
+        db = Path(tmp_path) / "signal_scan.db"
+        con = sqlite3.connect(str(db))
+        con.row_factory = sqlite3.Row
+        con.executescript(SCORECARD_SCHEMA)
+        for gid, sig in [("G-A", "NO_EDGE"), ("G-B", "PUSH")]:
+            con.execute("""
+                INSERT INTO checkpoint_market (source_game_id, classification,
+                    checkpoint_pct, checkpoint_timestamp, model_version,
+                    opening_line, live_market_line, market_timestamp,
+                    blm_fair_value, closing_line, actual_final_total,
+                    market_vs_fair, signal, outcome, frozen, recorded_at)
+                VALUES (?, 'BETUAL_NBA', 100, '2026-01-01T00:00:00Z', 'v4-pace-1',
+                    167.5, 175.5, '2026-01-01T00:00:00Z', 175.5, 175.5, 172,
+                    0.0, ?, 'NO_EDGE', 1, '2026-01-01T00:00:00Z')""",
+                (gid, sig))
+        con.commit()
+        try:
+            v = settlement_integrity_violations(con)
+            assert v["cm_outcome_mismatch"] == []  # outcome axis already clean
+            assert v["cm_signal_mismatch"] == [("G-B", 100, "PUSH", "NO_EDGE")], \
+                f"legacy signal PUSH must be flagged: {v['cm_signal_mismatch']}"
         finally:
             con.close()

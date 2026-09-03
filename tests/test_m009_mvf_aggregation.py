@@ -12,7 +12,8 @@ Per checkpoint:
   avg_mf       mean(market_vs_fair) — SIGNED, the primary metric
   median_mf    median signed M-F
   abs_mf       mean(abs(market_vs_fair))
-  over_value_n/pct, under_value_n/pct, push_n/pct   (signal)
+  over_value_n/pct, under_value_n/pct, signal_no_edge[/pct]  (signal;
+  market==fair = NO_EDGE, never PUSH)
   over_win, over_loss, under_win, under_loss, push_outcome  (outcome)
   position_win_rate = (over_win + under_win) /
                       (over_win + over_loss + under_win + under_loss)
@@ -88,7 +89,7 @@ def test_mvf_checkpoints_shape(sc):
     for c in cps:
         for key in ("checkpoint_pct", "n", "avg_market", "avg_fair", "avg_mf",
                     "median_mf", "abs_mf", "over_value_n", "under_value_n",
-                    "push_n", "over_win", "over_loss", "under_win",
+                    "signal_no_edge", "over_win", "over_loss", "under_win",
                     "under_loss", "push_outcome", "position_win_rate",
                     "avg_olv_to_clv", "move_toward", "move_away",
                     "move_unchanged"):
@@ -113,7 +114,7 @@ def test_mvf_pct50_exact_stats(sc):
     assert c["abs_mf"] == pytest.approx(sum(abs(m) for m in mfs) / 2)
     assert all(m > 0 for m in mfs)            # both UNDER_VALUE
     assert c["under_value_n"] == 2 and c["over_value_n"] == 0
-    assert c["push_n"] == 0
+    assert c["signal_no_edge"] == 0
     assert c["under_win"] == 1 and c["under_loss"] == 0
     assert c["over_win"] == 0 and c["over_loss"] == 0
     assert c["push_outcome"] == 1             # G-PUSH actual == market
