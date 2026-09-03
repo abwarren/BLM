@@ -178,7 +178,7 @@ def _parsed_dict(home: str = "Home Virtual", away: str = "Away Virtual",
 
 class _FakePage:
     """Minimal Playwright Page stand-in: navigation + DOM reads are
-    no-ops/recorders — enough for _capture_next_market's control flow."""
+    no-ops/recorders — enough for _capture_slow_market's control flow."""
 
     def __init__(self, url: str = "https://www.pokerbet.co.za/en/sports/live/event-view/Basketball/Virtual%20Matches/18296756/betual-nba/30741757"):
         self.url = url
@@ -199,8 +199,11 @@ class _FakePage:
 
 
 def _freshness_harness(st: PokerBetStore, monkeypatch, gid: str = "30741757"):
-    """Collector + fake page + parse monkeypatches for _capture_next_market."""
+    """Collector + fake slow page + parse monkeypatches for
+    _capture_slow_market (the STEP-2 decoupled event-view path)."""
     c, game, _ = _tracked_collector(st, gid=gid)
+    page = _FakePage()
+    c._slow_page = page
     clicks: list[str] = []
     monkeypatch.setattr(c, "_click_tracked_row",
                         lambda page, g: (clicks.append(g.source_game_id) or True))
@@ -208,7 +211,7 @@ def _freshness_harness(st: PokerBetStore, monkeypatch, gid: str = "30741757"):
                         lambda text: _parsed_dict())
     monkeypatch.setattr(collector_mod, "parse_event_url", lambda url: None)
     c._reconcile = lambda *a, **k: None  # no reconciliation writes in unit tests
-    return c, game, _FakePage(), clicks
+    return c, game, page, clicks
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -374,9 +377,8 @@ def test_refresh_window_skips_game_captured_recently(tmp_path, monkeypatch):
     c, game, page, clicks = _freshness_harness(st, monkeypatch)
     c._last_market_at[game.source_game_id] = _iso(_now())  # captured just now
 
-    returned = c._capture_next_market(page)
+    c._capture_slow_market()
 
-    assert returned is page
     assert clicks == []                       # never even clicked the row
     assert st.get_snapshots(game.source_game_id) == []
     assert c.stats["snapshots"] == 0
@@ -391,7 +393,7 @@ def test_refresh_window_captures_game_due_for_refresh(tmp_path, monkeypatch):
     c._last_market_at[game.source_game_id] = _iso(_now() - timedelta(seconds=600))
     before = c._last_market_at[game.source_game_id]
 
-    c._capture_next_market(page)
+    c._capture_slow_market()
 
     assert clicks == [game.source_game_id]
     snaps = st.get_snapshots(game.source_game_id)
@@ -411,7 +413,7 @@ def test_refresh_window_boundary_at_480s(tmp_path, monkeypatch):
     c1, game1, page1, clicks1 = _freshness_harness(st1, monkeypatch)
     c1._last_market_at[game1.source_game_id] = "2026-08-31T00:00:00.000Z"
     monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 479.9)
-    c1._capture_next_market(page1)
+    c1._capture_slow_market()
     assert clicks1 == [] and st1.get_snapshots(game1.source_game_id) == []
 
     # 480.0s — exactly at the window edge → due for refresh
@@ -419,7 +421,7 @@ def test_refresh_window_boundary_at_480s(tmp_path, monkeypatch):
     c2, game2, page2, clicks2 = _freshness_harness(st2, monkeypatch)
     c2._last_market_at[game2.source_game_id] = "2026-08-31T00:00:00.000Z"
     monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 480.0)
-    c2._capture_next_market(page2)
+    c2._capture_slow_market()
     assert clicks2 == [game2.source_game_id]
     assert len(st2.get_snapshots(game2.source_game_id)) == 1
 

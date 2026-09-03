@@ -877,7 +877,8 @@ def test_collector_event_view_final_ends_game_not_split(tmp_path):
     assert c._is_final_state({"period_label": "4th Quarter", "clock": "21:00"}) is True
     assert c._is_final_state({"period_label": "4th Quarter", "clock": "05:00"}) is False
     assert c._is_final_state({"period_label": "Half End", "clock": "21:00"}) is False
-    # the final-state branch in _capture_next_market: forward final ends,
+    # the final-state branch in the event-view capture (formerly
+    # _capture_next_market, now _capture_slow_market): forward final ends,
     # no split.  (The branch logic is exercised via _is_final_state + the
     # cur >= prev guard; the full navigation path needs a live page.)
     assert c._is_final_state({"period_label": "Full Time", "clock": "21:00"}) is True
@@ -885,8 +886,8 @@ def test_collector_event_view_final_ends_game_not_split(tmp_path):
 
 def test_capture_event_state_rejects_foreign_teams(tmp_path):
     """The identity guard must live INSIDE the shared capture so the
-    _resolve_new_game path (which calls it directly, bypassing
-    _capture_next_market) can never store lobby/foreign content."""
+    _resolve_new_game path (which calls it directly, bypassing the
+    round-robin event-view capture) can never store lobby/foreign content."""
     st = _make_store(tmp_path)
     gid_db = _add_game(st, "5201", "BETUAL_NBA", "Home Virtual", "Away Virtual", status="live")
     c = _collector(st)

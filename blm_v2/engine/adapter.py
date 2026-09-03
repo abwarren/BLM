@@ -183,37 +183,61 @@ class BlmEngineAdapter:
         return await self.enrich(raw)
 
     async def get_config(self) -> Dict[str, Any]:
-        """Return the BLM engine configuration."""
+        """Return the REAL BLM engine configuration (from engine.config).
+
+        Never fabricated: momentum/trap/confidence knobs come straight
+        off the live BLMConfig instance the engine was built with.
+        ``version`` is the V2 API/engine version string (same constant
+        the health endpoint reports).  ``processed_snapshots`` is the
+        adapter's real runtime count of enrich() calls since boot.
+        """
+        cfg = self._engine.config
         return {
             "version": "2.0.0",
-            "tick_interval_s": 20.0,
-            "confidence_thresholds": {
-                "pace": 0.7,
-                "line": 0.7,
-                "injury": 1.0,
-                "blowout": 0.9,
-                "team_total": 0.7,
-            },
-            "trap_detection_enabled": True,
-            "momentum_window": 5,
+            "processed_snapshots": self._tick_counter,
+            "momentum_alpha": cfg.momentum_alpha,
+            "momentum_direction_threshold": cfg.momentum_direction_threshold,
+            "trap_alignment_bonus": cfg.trap_alignment_bonus,
+            "min_market_window": cfg.min_market_window,
+            "confidence_weights": cfg.confidence_weights,
+            "trap_weights": cfg.trap_weights,
         }
 
+    async def get_processed_count(self) -> int:
+        """Real count of snapshots enriched by this adapter since boot."""
+        return self._tick_counter
+
     async def get_confidence(self, game_id: str) -> float | None:
-        """Return composite confidence for a game."""
+        """Composite confidence is computed per-snapshot in enrich().
+
+        The V2 engine retains NO per-game state between snapshots (see
+        BLMEngine.reset()), so there is no stored value to return —
+        None means 'not available from the interface', never a real 0.
+        """
         return None
 
     async def get_blm_score(self, game_id: str) -> float | None:
-        """Return the BLM score for a game."""
+        """BLM score is computed per-snapshot in enrich() and is not
+        retained per game — see get_confidence().  None = unavailable."""
         return None
 
     async def get_pace(self, game_id: str) -> float | None:
-        """Return the current pace for a game."""
+        """Pace is computed per-snapshot in enrich() and is not retained
+        per game — see get_confidence().  None = unavailable."""
         return None
 
     async def detect_traps(self, game_id: str) -> list[Dict[str, Any]]:
-        """Return active trap signals for a game."""
+        """No retained per-game trap state (stateless engine).
+
+        Trap signals are computed live inside process_snapshot()/enrich()
+        and never stored on the engine, so the interface reports no
+        ACTIVE traps; the persisted trap ALERT history is served by
+        storage.get_traps().  [] therefore means 'nothing retained', not
+        'verified no traps'.
+        """
         return []
 
     async def get_predictions(self, game_id: str) -> Dict[str, Any]:
-        """Return predictions for a game."""
-        return {"game_id": game_id, "predictions": []}
+        """No stored predictions exist on the V2 engine (stateless);
+        per-snapshot outputs are returned by enrich()."""
+        return {"game_id": game_id, "predictions": [], "available": False}

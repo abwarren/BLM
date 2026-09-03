@@ -280,6 +280,10 @@ class BLMEngineInterface(Protocol):
     async def get_config(self) -> Dict[str, Any]:
         ...
 
+    async def get_processed_count(self) -> int:
+        """Real count of snapshots processed since boot (runtime counter)."""
+        ...
+
 
 # ── Application wiring (set at startup) ──────────────────────────────
 

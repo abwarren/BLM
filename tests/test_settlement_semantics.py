@@ -415,3 +415,84 @@ class TestNoEdgeVsPush:
                 f"integrity scan must accept NO_EDGE for fair==market: {v['cm_outcome_mismatch']}"
         finally:
             con.close()
+
+
+# ═══════════ Model-output invariant scan (post-merge review, L3) ═══════════
+
+class TestModelOutputInvariantScan:
+    """The integrity scan's half-grid invariant must (a) enforce only
+    rows written AT/AFTER the code-deploy cutover, (b) bucket the
+    predictions table by predicted_at (row-write time) — never
+    source_snapshot_at, which would let a post-cutover settlement hide
+    behind a pre-cutover game — and (c) survive naive (tz-less) legacy
+    timestamps without a TypeError."""
+
+    CUT = "2026-09-03T17:46:59Z"
+    POST, PRE = "2026-09-04T00:00:00Z", "2026-09-01T00:00:00Z"
+
+    def _db(self, tmp):
+        import sqlite3
+        from pathlib import Path
+        from blm_v4.scorecard import SCORECARD_SCHEMA
+        db = Path(tmp) / "invariant.db"
+        con = sqlite3.connect(str(db))
+        con.row_factory = sqlite3.Row
+        con.executescript(SCORECARD_SCHEMA)
+        return con
+
+    def _seed(self, con):
+        # checkpoint_market: (post, non-half), (pre, non-half), (post, half)
+        con.execute("""INSERT INTO checkpoint_market (source_game_id, classification,
+            checkpoint_pct, checkpoint_timestamp, model_version, blm_fair_value,
+            recorded_at) VALUES ('G1','BETUAL_NBA',50,'2026-09-04T00:00:00Z',
+            'v4-pace-1', 174.3, ?)""", (self.POST,))
+        con.execute("""INSERT INTO checkpoint_market (source_game_id, classification,
+            checkpoint_pct, checkpoint_timestamp, model_version, blm_fair_value,
+            recorded_at) VALUES ('G2','BETUAL_NBA',50,'2026-09-01T00:00:00Z',
+            'v4-pace-1', 174.3, ?)""", (self.PRE,))
+        con.execute("""INSERT INTO checkpoint_market (source_game_id, classification,
+            checkpoint_pct, checkpoint_timestamp, model_version, blm_fair_value,
+            recorded_at) VALUES ('G3','BETUAL_NBA',50,'2026-09-04T00:00:00Z',
+            'v4-pace-1', 174.5, ?)""", (self.POST,))
+        # predictions: post-cutover WRITE from a pre-cutover game -> must be
+        # NEW (enforced); pre-cutover write -> historical; half value ignored
+        for gid, p_at, snap_at, v in [
+            ("P1", self.POST, "2026-08-31T00:00:00Z", 174.3),   # game pre, write post
+            ("P2", self.PRE, "2026-08-31T00:00:00Z", 174.3),    # write pre
+            ("P3", self.POST, "2026-09-04T00:00:00Z", 174.5),   # half -> ignored
+        ]:
+            con.execute("""INSERT INTO predictions (source_game_id, classification,
+                model_version, checkpoint, predicted_at, source_snapshot_at,
+                projected_total) VALUES (?, 'BETUAL_NBA', 'v4-pace-1', 'pct50',
+                ?, ?, ?)""", (gid, p_at, snap_at, v))
+        # prediction_scores: non-half model_total scored post-cutover
+        pid = con.execute("SELECT id FROM predictions WHERE source_game_id='P1'").fetchone()["id"]
+        con.execute("""INSERT INTO prediction_scores (prediction_id, source_game_id,
+            classification, model_version, scored_at, model_total) VALUES (?, 'P1',
+            'BETUAL_NBA', 'v4-pace-1', ?, 174.3)""", (pid, self.POST))
+        # naive (tz-less) timestamp post-cutover must not crash the compare
+        con.execute("""INSERT INTO checkpoint_market (source_game_id, classification,
+            checkpoint_pct, checkpoint_timestamp, model_version, blm_fair_value,
+            recorded_at) VALUES ('G4','BETUAL_NBA',50,'2026-09-04T00:00:00Z',
+            'v4-pace-1', 173.3, '2026-09-04T00:00:00')""")
+        con.commit()
+
+    def test_cutover_buckets_and_predicted_at(self, tmp_path):
+        from blm_v4.scorecard import settlement_integrity_violations
+        con = self._db(tmp_path)
+        try:
+            self._seed(con)
+            v = settlement_integrity_violations(con)["model_output_invariant"]
+            assert v["cutoff"] == self.CUT
+            # checkpoint_market: post non-half G1 + naive-ts G4 -> new; G2 -> historical
+            assert v["cm_new_non_half"] == 2, v["cm_new"]
+            assert v["cm_historical_non_half"] == 1, v["cm_historical_non_half"]
+            # predictions: P1 (pre-game, POST write) is NEW; P2 historical
+            assert v["predictions_new_non_half"] == 1, v["predictions_new"]
+            assert [g[0] for g in v["predictions_new"]] == ["P1"]
+            assert v["predictions_historical_non_half"] == 1
+            # prediction_scores scored post-cutover -> new
+            assert v["ps_new_non_half"] == 1, v["ps_new"]
+            assert v["ps_historical_non_half"] == 0
+        finally:
+            con.close()

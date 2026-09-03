@@ -257,13 +257,32 @@ class SQLiteStorage(StorageDB):
         return await loop.run_in_executor(None, _read)
 
     async def get_model_state(self) -> dict[str, Any]:
-        """Return the current BLM model state."""
-        return {
-            "version": "2.0.0",
-            "status": "running",
-            "total_snapshots_processed": 0,
-            "active_games": 0,
-        }
+        """Real model-adjacent DB state (games + alerts), not a stub.
+
+        Counts come from the storage database the API shares with the
+        collector.  ``total_snapshots_processed`` is NOT knowable here
+        (snapshots live in the time-series store) — the /model handler
+        composes it from the engine adapter's runtime counter instead.
+        """
+        self._ensure_initialized()
+
+        def _read() -> dict[str, Any]:
+            conn = _get_conn(self._db_path)
+            total_games = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+            active_games = conn.execute(
+                "SELECT COUNT(*) FROM games WHERE status IS NULL OR status != 'ended'"
+            ).fetchone()[0]
+            total_alerts = conn.execute(
+                "SELECT COUNT(*) FROM alerts").fetchone()[0]
+            return {
+                "status": "running",
+                "total_games": total_games,
+                "active_games": active_games,
+                "total_alerts": total_alerts,
+            }
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _read)
 
 
 # ── Module-level init ─────────────────────────────────────────────

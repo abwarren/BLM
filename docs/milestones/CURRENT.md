@@ -22,6 +22,40 @@ NEXT: **M009-M6 — frontend polish / deeper statistical segmentation
 (confidence intervals, significance across bands) / browser-based
 verification.  Do NOT start without explicit authorization.**
 
+## SESSION 2026-09-03 — POST-MERGE REVIEW REMEDIATION (commits c151f15/a8d216f/bb822e2 + remediation commit)
+
+Independent review of the STEP-2 + settlement-forensic change-set found 3
+logic errors; all fixed in this session (one commit):
+
+- L1 _tick_stats unbounded growth: ring bounded to TICK_STATS_MAX (~24h
+  @10s), dead 'fast' key dropped, real consumer added — _tick_timing_summary
+  in the collector state payload (/api/v4/status).  Tested.
+- L2 v2 stubs live-mounted: storage.get_model_state() now REAL DB counts
+  (games/alerts); adapter.get_config() reads the live BLMConfig; handler
+  composes processed count from the adapter's real enrich() counter
+  (get_processed_count added to BLMEngineInterface); stateless-engine
+  methods (confidence/pace/blm_score/traps/predictions) docstrings now
+  honestly say None/[] = nothing retained, never fabricated live state.
+  list_games merge key normalized to str ('123' vs 123 dedup).  Tested.
+- L3 model_output_invariant cutover: moved to the actual code-deploy
+  instant 2026-09-03T17:46:59Z (an earlier cutover permanently failed
+  immutable pre-deploy rows); predictions bucket now keys off predicted_at
+  (row-write), not source_snapshot_at; _parse_ts always returns tz-aware
+  (naive legacy rows can no longer TypeError the scan).  Tested.
+- Suggestions also landed: dead _capture_next_market deleted (~127 lines,
+  superseded by _capture_slow_market; market-capture tests ported to the
+  slow path), ENDED_GRACE_S wall-time grace (60s = 6 ticks @10s, was 3
+  ticks @20s), cadence comments made accurate, TICK_DEFAULT single source,
+  test nits fixed.
+- LIVE-DB migration (backup backups/blm_pokerbet.pre-noedge-20260903T190202Z.db
+  sha256 7751ff01…f344ea): 4 legacy outcome='PUSH' rows with fair==market
+  relabeled NO_EDGE (semantic taxonomy alignment, not a value rebase).
+  Live integrity scan now: cm_outcome_mismatch 0, cm_new_non_half 0,
+  historical report-only 2000 (cm) / 2769 (ps) — pre-deploy 1dp rows.
+- Suite: 338 passed.  Deploy of the remediation commit NOT yet done
+  (systemd units still run the pre-remediation code; daemon-reload before
+  restart).
+
 ## M009-M5 (COMPLETE, DEPLOYED, LIVE VERIFIED) — DISPARITY BAND ANALYTICS + EVENT DATASET + FRONTEND
 
 MILESTONE: M009-M5 — disparity bands + statistical segmentation +

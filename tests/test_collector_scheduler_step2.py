@@ -69,17 +69,56 @@ def test_duplicate_timestamp_protection():
 
 
 def test_slow_event_path_isolation():
-    # EVENT_VIEW_EVERY_N = 30 fast ticks -> slow runs ~1/30
-    n_fast = 300
-    n_slow = sum(1 for i in range(1, n_fast + 1) if i % 30 == 0)
+    # gate constant imported from source — the isolation math must track
+    # the REAL cadence, not a hardcoded copy of it
+    import blm_v4.collector as C
+    n_fast = C.EVENT_VIEW_EVERY_N * 10
+    n_slow = sum(1 for i in range(1, n_fast + 1) if i % C.EVENT_VIEW_EVERY_N == 0)
     assert n_slow == 10
 
 
 def test_default_tick_is_10s():
+    # signature default + CLI default both derive from TICK_DEFAULT, so a
+    # cadence change updates one constant, not scattered literals
     import blm_v4.collector as C
-    src = inspect.getsource(C)
-    assert "tick_s: float = 10.0" in src, "PokerBetCollector default tick_s = 10.0"
-    assert "default=10.0" in src, "argparse --tick default = 10.0"
+    assert C.TICK_DEFAULT == 10.0
+    assert inspect.signature(C.PokerBetCollector.__init__).parameters["tick_s"].default == 10.0
+
+
+def test_ended_grace_scales_with_tick_interval():
+    """Disappearance tolerance is WALL-TIME (ENDED_GRACE_S), so halving
+    the tick must NOT halve the grace: 10s tick -> 6 ticks (60s), 5s tick
+    -> 12 ticks, 20s tick -> 3 ticks (the pre-STEP-2 behaviour)."""
+    import blm_v4.collector as C
+    c10 = C.PokerBetCollector(db_path=__import__("tempfile").mkdtemp() + "/t.db")
+    assert c10.tick_s == 10.0 and c10._ended_grace_ticks == 6
+    c5 = C.PokerBetCollector(tick_s=5.0, db_path=__import__("tempfile").mkdtemp() + "/t.db")
+    assert c5._ended_grace_ticks == 12
+    c20 = C.PokerBetCollector(tick_s=20.0, db_path=__import__("tempfile").mkdtemp() + "/t.db")
+    assert c20._ended_grace_ticks == 3
+
+
+def test_tick_timing_ring_is_bounded_and_summarized():
+    """The daemon's tick-timing ring must never grow unbounded: appends
+    beyond TICK_STATS_MAX drop the oldest, and the state-payload summary
+    reduces it to means (ms) + last event-view duration."""
+    from collections import deque
+    import blm_v4.collector as C
+    ring = {k: deque(maxlen=C.TICK_STATS_MAX) for k in ("work", "sleep", "cycle", "event")}
+    for i in range(C.TICK_STATS_MAX + 100):          # over-fill the ring
+        ring["work"].append(2.5)
+        ring["sleep"].append(7.5)
+        ring["cycle"].append(10.0)
+    ring["event"].append(6.25)
+    assert len(ring["work"]) == C.TICK_STATS_MAX     # bounded, oldest dropped
+    s = C._tick_timing_summary(ring)
+    assert s["n"] == C.TICK_STATS_MAX
+    assert s["mean_work_ms"] == 2500.0 and s["mean_sleep_ms"] == 7500.0
+    assert s["mean_cycle_ms"] == 10000.0
+    assert s["last_event_ms"] == 6250.0
+    # empty ring -> None means (a just-started collector reports nothing)
+    empty = C._tick_timing_summary({k: deque() for k in ("work", "sleep", "cycle", "event")})
+    assert empty["n"] == 0 and empty["mean_work_ms"] is None and empty["last_event_ms"] is None
 
 
 def test_tracked_state_roundtrip(monkeypatch, tmp_path):

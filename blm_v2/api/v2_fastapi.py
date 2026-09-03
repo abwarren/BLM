@@ -414,12 +414,13 @@ async def get_model_state(
     with metrics.timer("api_response_time"):
         config = await engine.get_config()
         state = await storage.get_model_state()
+        processed = await engine.get_processed_count()
         snap = metrics.snapshot()
         return ModelResponse(
-            version=state.get("version", "2.0.0"),
+            version=config.get("version", "2.0.0"),
             status=state.get("status", "running"),
             uptime_seconds=snap.uptime_seconds,
-            total_snapshots_processed=state.get("total_snapshots_processed", 0),
+            total_snapshots_processed=processed,
             active_games=state.get("active_games", 0),
             engine_config=config,
             metrics={
@@ -442,14 +443,16 @@ async def list_games(
         storage_games = await storage.list_games()
 
         # ts.list_games() returns list[str]; storage.list_games() returns list[dict]
-        # Merge: index by game_id, storage overrides for metadata
+        # Merge: index by game_id, storage overrides for metadata.  The key is
+        # ALWAYS str() — ts ids are str but a storage game_id may arrive as int
+        # ('123' vs 123 would otherwise produce duplicate list items).
         merged = {}
         for gid in ts_game_ids:
-            merged[gid] = {"game_id": gid}
+            merged[str(gid)] = {"game_id": str(gid)}
         for g in storage_games:
             gid = g.get("game_id", "") if isinstance(g, dict) else str(g)
             if gid:
-                merged[gid] = g if isinstance(g, dict) else {"game_id": gid}
+                merged[str(gid)] = g if isinstance(g, dict) else {"game_id": str(gid)}
 
         items = [
             GameListItem(

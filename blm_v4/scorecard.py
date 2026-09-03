@@ -326,20 +326,29 @@ MARKET_STALE_SECONDS = int(os.environ.get("BLM_MARKET_STALE_SECONDS", "300"))
 
 # Model-output invariant: authoritative BLM predictions (blm_fair_value /
 # model_total / projected_total) must lie on the half-point grid {n/2}.
-# Rows recorded/scored before this UTC cutover are HISTORICAL model
-# outputs (report-only in the integrity scan — immutable checkpoint rows
-# keep their 1dp fairs by design); rows at/after the cutover must be
-# x.0/x.5 and the scan FAILS on any that are not.
-MODEL_OUTPUT_INVARIANT_SINCE = "2026-09-02T00:00:00Z"
+# Rows recorded/scored BEFORE the cutover are HISTORICAL model outputs
+# (report-only in the integrity scan — immutable checkpoint rows keep
+# their 1dp fairs by design); rows AT/AFTER the cutover must be x.0/x.5
+# and the scan FAILS on any that are not.  The cutover is the UTC instant
+# the quantizing code first went live (systemd collector/server restart
+# that loaded projection.quantize_half) — an earlier cutover would
+# permanently FAIL immutable rows written by the pre-quantization code.
+MODEL_OUTPUT_INVARIANT_SINCE = "2026-09-03T17:46:59Z"
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # ALWAYS tz-aware: legacy rows may carry naive timestamps; comparing a
+    # naive datetime against an aware one raises TypeError.  Naive is
+    # interpreted as UTC (the store writes Z-suffixed UTC).
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _market_age_seconds(market_ts: Optional[str],
@@ -2263,10 +2272,16 @@ def settlement_integrity_violations(conn) -> dict[str, Any]:
             buckets["ps"][0 if (ts and cut and ts >= cut) else 1].append(
                 (r["prediction_id"], r["v"]))
     for r in conn.execute("""
-        SELECT source_game_id, checkpoint, source_snapshot_at, projected_total v
+        SELECT source_game_id, checkpoint, predicted_at, projected_total v
         FROM predictions WHERE projected_total IS NOT NULL"""):
         if _non_half(r["v"]):
-            ts = _parse_ts(r["source_snapshot_at"])
+            # bucket by PREDICTED_AT (row-write time) — the scan's own
+            # definition is "rows recorded/scored before the cutover are
+            # historical"; a game played pre-cutover but settled (written)
+            # post-cutover was produced by the quantizing code and must be
+            # enforced.  source_snapshot_at (mid-game capture) would
+            # misclassify it as report-only.
+            ts = _parse_ts(r["predicted_at"])
             buckets["predictions"][0 if (ts and cut and ts >= cut) else 1].append(
                 (r["source_game_id"], r["checkpoint"], r["v"]))
     out["model_output_invariant"] = {

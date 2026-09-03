@@ -57,6 +57,7 @@ def app():
     mock_engine.enrich_snapshot.return_value = {}
     mock_engine.detect_traps.return_value = []
     mock_engine.get_config.return_value = {}
+    mock_engine.get_processed_count.return_value = 0
 
     _deps.ts_interface = mock_ts
     _deps.storage_interface = mock_storage
@@ -253,3 +254,23 @@ async def test_openapi_docs(app):
     async with _async_client(app) as ac:
         resp = await ac.get("/api/v2/docs")
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_games_endpoint_dedupes_int_vs_str_game_ids(app):
+    """ts ids are str; a storage game_id may arrive as int.  The merge
+    key must be normalized to str or '123' vs 123 become TWO list items."""
+    from blm_v2.api.dependencies import _deps
+    _deps.ts_interface.list_games.return_value = ["123"]
+    _deps.storage_interface.list_games.return_value = [{
+        "game_id": 123, "home_team": "Warriors", "away_team": "Lakers",
+        "status": "live", "start_time": "2026-07-20T12:00:00Z",
+        "home_score": 55, "away_score": 48,
+    }]
+    async with _async_client(app) as ac:
+        resp = await ac.get("/api/v2/games")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 1, f"int/str dup not merged: {data['games']}"
+    assert data["games"][0]["game_id"] == "123"
+    assert data["games"][0]["home_team"] == "Warriors"  # storage metadata won
