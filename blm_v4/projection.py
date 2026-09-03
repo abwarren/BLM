@@ -11,6 +11,7 @@ tests/test_scorecard.py::test_projection_parity_with_api).
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any, Optional
@@ -23,6 +24,39 @@ FULL_GAME_MINUTES = 40.0  # cyber/virtual basketball: 4 × 10 min
 MODEL_VERSION = "v4-pace-1"
 
 _RE_CLOCK = re.compile(r"^(\d{1,2}):(\d{2})'?$")
+
+
+def quantize_half(x: Optional[float]) -> Optional[float]:
+    """Deterministic nearest-0.5 quantization (x.0/x.5 grid), HALF-UP.
+
+    Authoritative BLM predictions must lie on the half-point grid
+    {n/2 : n in Z} — never an arbitrary decimal.  Examples:
+        174.24 -> 174.0   174.25 -> 174.5   174.74 -> 174.5   174.75 -> 175.0
+
+    NOT ``round(raw * 2) / 2`` — Python's round() is banker's rounding
+    (ties-to-even).  This uses ``floor(2x + 0.5 + EPS) / 2``, i.e. ties
+    round UP toward +infinity: a value exactly on a .25/.75 boundary
+    rounds up to the next half (negative ties likewise move toward
+    +inf: -174.25 -> -174.0).  The EPS fuzz (~1e-9 on the scaled value)
+    absorbs binary-float error so a true boundary computed as
+    174.24999999999997 still rounds up; inputs are 1dp decimals whose
+    genuine float error is ~1e-13, so the fuzz can never flip a real
+    non-boundary value.  Returns None for None (pass-through).
+    """
+    if x is None:
+        return None
+    return math.floor(x * 2.0 + 0.5 + 1e-9) / 2.0
+
+
+def _ceil_half(x: Optional[float]) -> Optional[float]:
+    """Smallest half-grid value >= x (x.0/x.5, ceil on the half grid).
+
+    Used to lift a quantized total above a raw floored sum without
+    leaving the authoritative grid.  None passes through.
+    """
+    if x is None:
+        return None
+    return math.ceil(x * 2.0 - 1e-9) / 2.0
 
 
 def _f(v: Any) -> Optional[float]:
@@ -205,6 +239,30 @@ def project(rows: list[dict], market_override: Optional[float] = None) -> dict[s
         away_projection = max(away_projection, float(away_score))
     expected_total = max(expected_total, round(home_projection + away_projection, 1))
     expected_margin = round(home_projection - away_projection, 1)
+
+    # ── Authoritative x.0/x.5 quantization (model-output invariant) ──
+    # BLM's authoritative prediction/fair total MUST lie on the half-point
+    # grid {n/2}.  Quantize at THIS final boundary — AFTER the live-score
+    # floor — so the floor can never reintroduce an arbitrary decimal and
+    # every consumer (checkpoint_market, prediction_scores, predictions,
+    # API, dashboard) sees the same x.0/x.5 value.  The away split is
+    # re-derived from the quantized total (et_q - home) so the documented
+    # consistency home + away == expected_total holds EXACTLY, each team
+    # stays at/above its live score (et_q >= floored home+away), and no
+    # separate downstream rounding rule exists.  The 70/30 pace/market
+    # blend and the floor guard are untouched — only the final
+    # granularity tightens from 0.1 to 0.5.
+    if (home_projection is not None and away_projection is not None
+            and expected_total is not None):
+        hp_f = home_projection
+        q_et = quantize_half(expected_total)
+        c_sum = _ceil_half(hp_f + away_projection)
+        assert q_et is not None and c_sum is not None  # inputs non-None above
+        et_q = max(q_et, c_sum)
+        home_projection = hp_f
+        away_projection = et_q - hp_f
+        expected_total = et_q
+        expected_margin = round(home_projection - away_projection, 1)
 
     elapsed = clock_minutes(latest.get("quarter"), latest.get("clock")) if latest else None
     progress = None

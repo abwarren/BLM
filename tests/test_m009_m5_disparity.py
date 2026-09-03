@@ -125,8 +125,10 @@ def test_fresh_stale_separation_in_bands(sc):
     b = _band(agg, "10-15", "BLM_OVER")
     assert b["fresh_n"] == 1 and b["stale_n"] == 0 and b["missing_n"] == 0
     assert b["fresh_win_rate"] == 0.0
-    # 2-5 BLM_OVER: G-STALE pct10 (stale WS line) -> stale
-    s = _band(agg, "2-5", "BLM_OVER")
+    # 5-10 BLM_UNDER: G-STALE pct30 (stale WS line 180.0, fair 174.0
+    # quantized -> diff -6.0) -> stale only.  The pct10/pct20 stale rows
+    # (2-5 BLM_OVER at 1dp fairs) now quantize to +5.0 -> 5-10 BLM_OVER.
+    s = _band(agg, "5-10", "BLM_UNDER")
     assert s["stale_n"] >= 1 and s["fresh_n"] == 0
     assert s["stale_win_rate"] is not None
 

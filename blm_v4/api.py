@@ -33,7 +33,8 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from blm_v4.projection import closing_snapshot, opening_snapshot, project
+from blm_v4.projection import (closing_snapshot, opening_snapshot, project,
+                               quantize_half)
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -430,10 +431,13 @@ def _series(rows: list[dict]) -> list[dict]:
                     if 20 <= p <= 400:
                         pace = round(p, 1)
         entry["pace"] = pace or line
+        # model-output invariant: chart fair is the SAME authoritative
+        # x.0/x.5 value project() produces (half-up quantizer), never a
+        # separate 1dp rounding rule.
         if pace and line:
-            entry["expected_total"] = round(0.7 * pace + 0.3 * line, 1)
+            entry["expected_total"] = quantize_half(0.7 * pace + 0.3 * line)
         else:
-            entry["expected_total"] = pace or line
+            entry["expected_total"] = quantize_half(pace or line)
         if combined is not None and ts:
             scored_prev = (ts, combined)
         out.append(entry)

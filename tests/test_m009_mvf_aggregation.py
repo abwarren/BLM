@@ -148,8 +148,10 @@ def test_mvf_honest_n_missing_market(sc):
     assert len(all_rows) == 3 and len(fair_vals) == 3
     assert len(mkt_vals) == 2
     assert c["n"] == 2
-    assert c["avg_fair"] == pytest.approx(sum(fair_vals) / 3)
-    assert c["avg_market"] == pytest.approx(sum(mkt_vals) / 2)
+    # avg_fair is _round2 (2dp) of the mean of half-grid fairs; the exact
+    # mean (140.333...) is only ~1e-3 away, so use a tight abs tolerance.
+    assert c["avg_fair"] == pytest.approx(sum(fair_vals) / 3, abs=0.005)
+    assert c["avg_market"] == pytest.approx(sum(mkt_vals) / 2, abs=0.005)
     assert c["avg_mf"] is not None            # computed over the 2, not NULL
 
 

@@ -173,22 +173,25 @@ def test_edge_buckets_direction_and_large_edge_freshness(sc):
     stays attributable: the 20+ BLM_UNDER bucket holds G-MIX pct50
     (diff -31.6, FRESH, WIN) AND G-STALE late rows (diff ~-37, STALE) —
     avg_age reveals the stale contamination instead of hiding it.  A
-    fresh-only bucket (10-15 BLM_OVER, only G-MIX pct10 +12.4) shows
-    avg_age ~0.  A stale-only bucket (2-5 BLM_OVER, G-STALE pct10 +2.4)
+    fresh-only bucket (10-15 BLM_OVER, only G-MIX pct10 +10.5) shows
+    avg_age ~0.  A stale-only bucket (5-10 BLM_UNDER, G-STALE pct30 -6.0)
     shows avg_age > 300."""
     agg = sc.market_vs_fair()
     eb = agg["edge_buckets"]
     key = lambda b, d: next((x for x in eb if x["bucket"] == b and x["direction"] == d), None)
-    # G-MIX pct10: diff +12.4 -> BLM_OVER / 10-15; actual 143 < 170 -> LOSS
+    # G-MIX pct10: diff +10.5 (fair 182.5 - line 172) -> BLM_OVER / 10-15;
+    # actual 143 < 172 -> OVER LOSS (was +12.4 pre-quantize)
     o10 = key("10-15", "BLM_OVER")
     assert o10 is not None and o10["n"] >= 1 and o10["loss"] >= 1
     assert o10["avg_age"] is not None and o10["avg_age"] < 5     # fresh only
-    # G-MIX pct50 (-31.6, FRESH, WIN) + G-STALE late (~-37, STALE, WIN)
+    # G-MIX pct50 (-31.5, FRESH, WIN) + G-STALE late (~-37, STALE, WIN)
     u20 = key("20+", "BLM_UNDER")
     assert u20 is not None and u20["n"] >= 2 and u20["win"] >= 1
     assert u20["avg_age"] is not None and u20["avg_age"] > 300   # stale rows visible
-    # G-STALE pct10: diff +2.4 -> BLM_OVER / 2-5, STALE
-    s25 = key("2-5", "BLM_OVER")
+    # G-STALE pct30 (stale WS line 180.0): fair 174.0 quantized -> diff -6.0
+    # -> 5-10 BLM_UNDER, stale only (the pct10/pct20 stale rows that were
+    # 2-5 BLM_OVER at 1dp fairs now quantize to +5.0 -> 5-10 BLM_OVER)
+    s25 = key("5-10", "BLM_UNDER")
     assert s25 is not None and s25["n"] >= 1 and s25["avg_age"] is not None
     assert s25["avg_age"] > 300                                  # stale visible
 

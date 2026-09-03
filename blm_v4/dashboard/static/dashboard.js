@@ -159,12 +159,13 @@ function renderScorecard(d) {
         </tr>`).join("")}
       </table>
       <table class="sc-table" style="margin-top:8px">
-        <tr><th>Checkpoint</th><th>OVER WIN</th><th>OVER LOSS</th><th>UNDER WIN</th><th>UNDER LOSS</th><th>PUSH</th><th>Posn win rate</th><th>Avg OLV→CLV</th><th>→BLM</th><th>←BLM</th></tr>
+        <tr><th>Checkpoint</th><th>OVER WIN</th><th>OVER LOSS</th><th>UNDER WIN</th><th>UNDER LOSS</th><th>PUSH</th><th>NO EDGE</th><th>Posn win rate</th><th>Avg OLV→CLV</th><th>→BLM</th><th>←BLM</th></tr>
         ${mvc.map((c) => `<tr>
           <td>${c.checkpoint_pct}%</td>
           <td class="sc-num">${c.over_win}</td><td class="sc-num">${c.over_loss}</td>
           <td class="sc-num">${c.under_win}</td><td class="sc-num">${c.under_loss}</td>
           <td class="sc-num">${c.push_outcome}</td>
+          <td class="sc-num">${c.no_edge ?? 0}</td>
           <td class="sc-num">${c.position_win_rate != null ? (c.position_win_rate * 100).toFixed(0) + "%" : "–"}</td>
           <td class="sc-num">${c.avg_olv_to_clv ?? "–"}</td>
           <td class="sc-num">${c.move_toward}</td><td class="sc-num">${c.move_away}</td>

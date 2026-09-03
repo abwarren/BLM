@@ -202,11 +202,15 @@ def test_cm_outcome_classification(sc):
     assert rows[50]["outcome"] == "UNDER_WIN"
     # pct10: fair 182 > market 172, actual 143 < 172 -> OVER LOSS
     assert rows[10]["outcome"] == "OVER_LOSS"
-    # G-PUSH: market == actual -> PUSH at every checkpoint
+    # G-PUSH: market == actual == fair? -> fair==market fires first, so the
+    # position is NO_EDGE (BLM at the line has no bet).  A genuine PUSH
+    # (actual==market with fair!=market) is asserted in
+    # tests/test_settlement_semantics.py::TestNoEdgeVsPush.
     pushes = _rows(sc, "G-PUSH")
     assert pushes, "G-PUSH must record rows"
     for r in pushes:
-        assert r["outcome"] == "PUSH"
+        assert r["outcome"] in ("PUSH", "NO_EDGE"), \
+            f"expected PUSH or NO_EDGE, got {r['outcome']}"
 
 
 def test_cm_olv_clv_actual_linkage(sc):

@@ -122,7 +122,9 @@ def test_push_actual_on_line():
 
 
 def test_push_position_on_line():
-    assert _checkpoint_outcome(170.0, 170.0, 180) == "PUSH"
+    # fair 170 == market 170 but actual 180 != market -> NO_EDGE (position
+    # no-bet), NOT PUSH.  A genuine PUSH requires actual == market.
+    assert _checkpoint_outcome(170.0, 170.0, 180) == "NO_EDGE"
 
 
 # ═══════════ 2. same cases through the authoritative scorer ═════════
@@ -327,5 +329,89 @@ class TestDiagnosticSelectionVsOutcome:
             # partition: every market-bearing row has exactly one selection
             assert out["ou_over"] + out["ou_under"] + out["ou_push"] \
                 == out["ou_predictions"] == 2
+        finally:
+            con.close()
+
+
+# ═══════════ NO_EDGE vs PUSH accounting (settlement-forensic fix) ═══════════
+
+class TestNoEdgeVsPush:
+    """MODEL POSITION == market is NO_EDGE/NO_BET, never PUSH.  A genuine
+    settlement PUSH exists ONLY when actual == market.  With x.5 markets
+    and integer actuals the outcome-push branch is unreachable, so the
+    expected true PUSH count is 0 for the live population."""
+
+    def test_fair_eq_market_actual_below_is_no_edge(self):
+        # fair 175.5 == market 175.5, actual 172 -> NO_EDGE (NOT PUSH)
+        from blm_v4.scorecard import _checkpoint_outcome
+        assert _checkpoint_outcome(175.5, 175.5, 172) == "NO_EDGE"
+
+    def test_over_win(self):
+        from blm_v4.scorecard import _checkpoint_outcome
+        assert _checkpoint_outcome(190, 170.5, 180) == "OVER_WIN"
+
+    def test_over_loss(self):
+        from blm_v4.scorecard import _checkpoint_outcome
+        assert _checkpoint_outcome(190, 170.5, 160) == "OVER_LOSS"
+
+    def test_under_win(self):
+        from blm_v4.scorecard import _checkpoint_outcome
+        assert _checkpoint_outcome(160, 175.5, 170) == "UNDER_WIN"
+
+    def test_under_loss(self):
+        from blm_v4.scorecard import _checkpoint_outcome
+        assert _checkpoint_outcome(160, 175.5, 180) == "UNDER_LOSS"
+
+    def test_actual_eq_market_is_true_push(self):
+        # fair != market, actual == market -> genuine PUSH
+        from blm_v4.scorecard import _checkpoint_outcome
+        assert _checkpoint_outcome(190, 170.5, 170.5) == "PUSH"
+
+    def test_fair_and_actual_eq_market_is_no_edge(self):
+        # fair == market AND actual == market -> NO_EDGE for the position
+        # (the market outcome itself is a PUSH, but BLM had no bet)
+        from blm_v4.scorecard import _checkpoint_outcome
+        assert _checkpoint_outcome(170.5, 170.5, 170.5) == "NO_EDGE"
+
+    def test_no_edge_and_push_never_conflated(self):
+        from blm_v4.scorecard import _checkpoint_outcome
+        # the two branches must be mutually exclusive
+        r1 = _checkpoint_outcome(175.5, 175.5, 172)   # position no-bet
+        r2 = _checkpoint_outcome(190, 170.5, 170.5)   # genuine push
+        assert r1 == "NO_EDGE" and r2 == "PUSH" and r1 != r2
+
+    def test_integrity_scan_expects_no_edge_split(self):
+        """The integrity scan must expect NO_EDGE for fair==market and
+        PUSH only for actual==market — and must report 0 mismatches on
+        the reclassified rows."""
+        import sqlite3
+        from blm_v4.scorecard import (SCORECARD_SCHEMA,
+                                      _checkpoint_outcome,
+                                      settlement_integrity_violations)
+        db = tmp_path = __import__("pathlib").Path("/tmp") / "noedge_scan.db"
+        try:
+            db.unlink()
+        except FileNotFoundError:
+            pass
+        con = sqlite3.connect(str(db))
+        con.row_factory = sqlite3.Row
+        con.executescript(SCORECARD_SCHEMA)
+        # craft a minimal checkpoint_market via direct insert (mirror the
+        # writer: outcome = _checkpoint_outcome(fair, live, actual))
+        con.execute("""
+            INSERT INTO checkpoint_market (source_game_id, classification,
+                checkpoint_pct, checkpoint_timestamp, model_version,
+                opening_line, live_market_line, market_timestamp,
+                blm_fair_value, closing_line, actual_final_total,
+                market_vs_fair, signal, outcome, frozen, recorded_at)
+            VALUES ('9001','BETUAL_NBA',100,'2026-01-01T00:00:00Z','v4-pace-1',
+                167.5, 175.5, '2026-01-01T00:00:00Z', 175.5, 175.5, 172,
+                0.0, 'PUSH', ?, 1, '2026-01-01T00:00:00Z')""",
+            (_checkpoint_outcome(175.5, 175.5, 172),))
+        con.commit()
+        try:
+            v = settlement_integrity_violations(con)
+            assert v["cm_outcome_mismatch"] == [], \
+                f"integrity scan must accept NO_EDGE for fair==market: {v['cm_outcome_mismatch']}"
         finally:
             con.close()

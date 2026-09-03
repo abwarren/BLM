@@ -190,7 +190,7 @@ CREATE TABLE IF NOT EXISTS checkpoint_market (
     blm_vs_clv            REAL,               -- fair - CLV
     olv_to_clv            REAL,               -- CLV - OLV
     market_move_toward_blm TEXT,              -- TOWARD | AWAY | UNCHANGED
-    outcome               TEXT,               -- UNDER_WIN|OVER_WIN|UNDER_LOSS|OVER_LOSS|PUSH
+    outcome               TEXT,               -- UNDER_WIN|OVER_WIN|UNDER_LOSS|OVER_LOSS|NO_EDGE|PUSH (NO_EDGE=position no-bet; PUSH=actual==line only)
     momentum_state        TEXT,               -- RISING | FALLING | FLAT (M009-M4)
     momentum_strength     REAL,               -- 0..3 strength (weak..extreme)
     false_momentum        INTEGER,            -- 0/1 — burst with no line response
@@ -323,6 +323,14 @@ def _frozen_market_obs(conn, source_game_id: str, rows: list[dict],
 # market as fresh when its age <= 300s (dashboard.js `age <= 300`) —
 # made configurable via env rather than hard-coded.
 MARKET_STALE_SECONDS = int(os.environ.get("BLM_MARKET_STALE_SECONDS", "300"))
+
+# Model-output invariant: authoritative BLM predictions (blm_fair_value /
+# model_total / projected_total) must lie on the half-point grid {n/2}.
+# Rows recorded/scored before this UTC cutover are HISTORICAL model
+# outputs (report-only in the integrity scan — immutable checkpoint rows
+# keep their 1dp fairs by design); rows at/after the cutover must be
+# x.0/x.5 and the scan FAILS on any that are not.
+MODEL_OUTPUT_INVARIANT_SINCE = "2026-09-02T00:00:00Z"
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
@@ -490,17 +498,30 @@ def _market_vs_fair_signal(market: Optional[float],
 
 
 def _checkpoint_outcome(fair: Optional[float], market: Optional[float],
-                        actual: Optional[int]) -> Optional[str]:
+                        actual: Optional[float]) -> Optional[str]:
     """BLM checkpoint position vs market, resolved against the actual
-    (M009 section 5).  Pushes handled explicitly: a position exactly at
-    the line has no direction; an actual exactly on the line is a push
-    outcome regardless of position."""
+    (M009 section 5, settlement-forensic fix).
+
+    MODEL POSITION (fair vs market):
+        fair > market -> OVER       fair < market -> UNDER
+        fair == market -> NO_EDGE   (no bet — no direction; NEVER 'PUSH')
+    MARKET OUTCOME (actual vs market):
+        actual > market -> OVER     actual < market -> UNDER
+        actual == market -> PUSH    (the ONLY genuine settlement push)
+    BET RESULT:
+        OVER/UNDER + side wins -> *_WIN; side loses -> *_LOSS;
+        NO_EDGE -> NO_BET (contributes nothing to win/loss/denominator).
+
+    A position exactly on the line is NOT a push — it is a no-bet.
+    Only the actual landing exactly on the line is a PUSH.  With x.5
+    markets and integer actuals the outcome-push branch is
+    arithmetically unreachable (true PUSH count = 0)."""
     if fair is None or market is None or actual is None:
         return None
     if fair == market:
-        return "PUSH"           # position push — no value direction
+        return "NO_EDGE"        # position no-bet — no value direction
     if actual == market:
-        return "PUSH"           # outcome push — line landed exactly
+        return "PUSH"           # genuine market push — line landed exactly
     if fair < market:           # BLM positioned UNDER the market
         return "UNDER_WIN" if actual < market else "UNDER_LOSS"
     return "OVER_WIN" if actual > market else "OVER_LOSS"
@@ -1595,7 +1616,8 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
         oloss = outs.count("OVER_LOSS")
         uwin = outs.count("UNDER_WIN")
         uloss = outs.count("UNDER_LOSS")
-        push = outs.count("PUSH")
+        push = outs.count("PUSH")       # genuine market push only (actual==line)
+        no_edge = outs.count("NO_EDGE")  # position no-bet (fair==line)
         pos_denom = owin + oloss + uwin + uloss
         moves = [r["market_move_toward_blm"] for r in mrows
                  if r["market_move_toward_blm"] is not None]
@@ -1659,6 +1681,7 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
             "under_win": uwin,
             "under_loss": uloss,
             "push_outcome": push,
+            "no_edge": no_edge,
             "position_win_rate": _round2((owin + uwin) / pos_denom)
                                  if pos_denom else None,
             "avg_olv_to_clv": _round2(sum(olvclv) / len(olvclv)) if olvclv else None,
@@ -2113,6 +2136,7 @@ def settlement_integrity_violations(conn) -> dict[str, Any]:
         "dup_checkpoint_market": [], "dup_predictions": [],
         "scored_after_result": [], "contaminated_cm": [],
         "contaminated_ps": [],
+        "model_output_invariant": None,
     }
     if conn.row_factory is not sqlite3.Row:
         conn.row_factory = sqlite3.Row
@@ -2162,8 +2186,10 @@ def settlement_integrity_violations(conn) -> dict[str, Any]:
             d["actual_final_total"]
         if mkt is None or fair is None or act is None:
             continue
-        if fair == mkt or act == mkt:
-            exp = "PUSH"
+        if fair == mkt:
+            exp = "NO_EDGE"     # position no-bet (never PUSH)
+        elif act == mkt:
+            exp = "PUSH"        # genuine market push
         elif fair < mkt:
             exp = "UNDER_WIN" if act < mkt else "UNDER_LOSS"
         else:
@@ -2211,6 +2237,50 @@ def settlement_integrity_violations(conn) -> dict[str, Any]:
         SELECT ps.prediction_id FROM prediction_scores ps
         JOIN game_quality q ON q.source_game_id = ps.source_game_id
         WHERE q.status = 'INVALID'""")]
+
+    # Model-output invariant: authoritative predictions must be x.0/x.5.
+    # Rows at/after the adoption cutover must comply (violations FAIL);
+    # earlier rows are historical 1dp outputs, report-only (immutable
+    # checkpoint rows keep them by design).
+    def _non_half(v: Optional[float]) -> bool:
+        return v is not None and abs(v * 2.0 - round(v * 2.0)) > 1e-9
+
+    cut = _parse_ts(MODEL_OUTPUT_INVARIANT_SINCE)
+    buckets: dict[str, list] = {"cm": [[], []], "ps": [[], []],
+                                "predictions": [[], []]}
+    for r in conn.execute("""
+        SELECT source_game_id, checkpoint_pct, recorded_at, blm_fair_value f
+        FROM checkpoint_market WHERE blm_fair_value IS NOT NULL"""):
+        if _non_half(r["f"]):
+            ts = _parse_ts(r["recorded_at"])
+            buckets["cm"][0 if (ts and cut and ts >= cut) else 1].append(
+                (r["source_game_id"], r["checkpoint_pct"], r["f"]))
+    for r in conn.execute("""
+        SELECT prediction_id, scored_at, model_total v
+        FROM prediction_scores WHERE model_total IS NOT NULL"""):
+        if _non_half(r["v"]):
+            ts = _parse_ts(r["scored_at"])
+            buckets["ps"][0 if (ts and cut and ts >= cut) else 1].append(
+                (r["prediction_id"], r["v"]))
+    for r in conn.execute("""
+        SELECT source_game_id, checkpoint, source_snapshot_at, projected_total v
+        FROM predictions WHERE projected_total IS NOT NULL"""):
+        if _non_half(r["v"]):
+            ts = _parse_ts(r["source_snapshot_at"])
+            buckets["predictions"][0 if (ts and cut and ts >= cut) else 1].append(
+                (r["source_game_id"], r["checkpoint"], r["v"]))
+    out["model_output_invariant"] = {
+        "cutoff": MODEL_OUTPUT_INVARIANT_SINCE,
+        "cm_new_non_half": len(buckets["cm"][0]),
+        "cm_new": buckets["cm"][0],
+        "cm_historical_non_half": len(buckets["cm"][1]),
+        "ps_new_non_half": len(buckets["ps"][0]),
+        "ps_new": buckets["ps"][0],
+        "ps_historical_non_half": len(buckets["ps"][1]),
+        "predictions_new_non_half": len(buckets["predictions"][0]),
+        "predictions_new": buckets["predictions"][0],
+        "predictions_historical_non_half": len(buckets["predictions"][1]),
+    }
     return out
 
 
