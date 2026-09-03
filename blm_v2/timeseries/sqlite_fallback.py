@@ -34,6 +34,17 @@ ticks every ~20 s, so 180 s (9 missed ticks) cleanly separates 'live'
 from 'ended / between games / pipeline idle' with jitter margin."""
 
 
+def _ingested_at_cutoff(staleness_s: float) -> str:
+    """Return now minus *staleness_s* in the EXACT format SQLite's
+    ``strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`` DEFAULT writes (dot +
+    milliseconds).  Python's ``%f`` is 6-digit microseconds, so truncate
+    after the dot to 3 digits; a format mismatch (missing dot, space
+    separator, wrong precision) silently corrupts the lexical boundary.
+    """
+    base = datetime.now(timezone.utc) - timedelta(seconds=staleness_s)
+    return base.strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-4] + "Z"
+
+
 # ── Schema ────────────────────────────────────────────────────────
 
 _CREATE_SNAPSHOTS_TABLE = """
@@ -337,10 +348,7 @@ class SQLiteTimeSeries(TimeSeriesDB):
         live writer in the V2 pipeline.
         """
         self._ensure_initialized()
-        base = datetime.now(timezone.utc) - timedelta(seconds=staleness_s)
-        # Match SQLite's strftime('%Y-%m-%dT%H:%M:%fZ', 'now') millisecond
-        # format so the lexical comparison against stored ingested_at is exact.
-        cutoff = base.strftime("%Y-%m-%dT%H:%M:%fZ")[:-4] + "Z"
+        cutoff = _ingested_at_cutoff(staleness_s)
 
         def _query() -> int:
             conn = _get_conn(self._db_path)

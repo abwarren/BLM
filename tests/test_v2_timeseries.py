@@ -276,3 +276,66 @@ async def test_count_active_games_counts_recently_ingested_only():
         conn.close()
 
         assert await ts.count_active_games() == 1
+
+
+def test_ingested_at_cutoff_matches_sqlite_default_format():
+    """The lexical cutoff must be byte-compatible with SQLite's
+    strftime('%Y-%m-%dT%H:%M:%fZ','now') DEFAULT (dot + 3-digit ms).
+    A missing dot or wrong precision silently corrupts the boundary."""
+    import re
+    from blm_v2.timeseries.sqlite_fallback import _ingested_at_cutoff
+    cutoff = _ingested_at_cutoff(180.0)
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", cutoff), cutoff
+
+
+@pytest.mark.asyncio
+async def test_count_active_games_respects_staleness_boundary(monkeypatch):
+    """A game ingested 100 s ago counts only when the staleness window
+    covers it, driven by a FIXED clock.
+
+    The first version of this test used datetime.now() and passed even
+    against the buggy minute-floor cutoff for ~50 of every 60 wall-clock
+    seconds (the wrong-inclusion band is [minute floor of now-staleness,
+    now-staleness), which only overlaps the 100 s-old row when the wall
+    clock's seconds land in a ~10 s window).  A fixed reference time
+    (19:55:45) makes the wrong inclusion reproducible: with staleness 50 s
+    the cutoff minute is 19:54 and the stale row sits at 19:54:05 — the
+    same minute the buggy cutoff covers, so the old code counts it.
+    """
+    import sqlite3 as _sqlite3
+    from datetime import datetime as _real_datetime, timedelta as _timedelta
+    from blm_v2.timeseries import sqlite_fallback as _sf
+
+    fixed_now = _real_datetime.fromisoformat("2026-09-03T19:55:45+00:00")
+
+    class _FixedClock:
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    # The module's ONLY Python-side now() is inside _ingested_at_cutoff;
+    # ingested_at DEFAULTs are SQLite strftime, so stubbing is safe here.
+    monkeypatch.setattr(_sf, "datetime", _FixedClock)
+
+    with TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_blm_ts.db"
+        ts = SQLiteTimeSeries(db_path=db_path)
+        past = (fixed_now - _timedelta(seconds=100)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ")[:-4] + "Z"
+
+        await ts.write_snapshot({
+            "game_id": "edge-1", "timestamp": fixed_now.strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ")[:-4] + "Z",
+            "quarter": 1, "clock": "10:00",
+            "home_score": 0, "away_score": 0, "total_line": 220.5,
+        })
+        conn = _sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE snapshots_v2 SET ingested_at = ? WHERE game_id = 'edge-1'",
+            (past,))
+        conn.commit()
+        conn.close()
+
+        assert await ts.count_active_games(staleness_s=50) == 0  # too old
+        assert await ts.count_active_games(staleness_s=200) == 1  # covered
