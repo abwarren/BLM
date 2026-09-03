@@ -91,6 +91,12 @@ ENDED_GRACE_TICKS = 3
 # per-game freshness tracking.
 MARKET_BATCH = 1
 MARKET_REFRESH_S = 480
+# STEP 2: the slow (full event-view) path runs on its own page once every
+# N fast ticks — decoupled so a ~6s event-view nav never delays the ~10s
+# score poll.  N=30 at a 10s tick = one event-view attempt per ~5 min,
+# keeping each game's full-event refresh near its existing ~8-min cadence
+# without hammering the SPA.
+EVENT_VIEW_EVERY_N = 30
 # eu-swarm market observations: dedupe identical (game, line) frames within
 # this window — the feed pushes every price change, so movements still land,
 # but a game that stays flat is not spammed into the DB every second.
@@ -163,7 +169,7 @@ class PokerBetCollector:
         store: Optional[PokerBetStore] = None,
         *,
         headless: bool = True,
-        tick_s: float = 20.0,
+        tick_s: float = 10.0,
         db_path: Optional[Path] = None,
     ):
         self.headless = headless
@@ -186,6 +192,13 @@ class PokerBetCollector:
         self._running = False
         self._browser: Optional[Browser] = None
         self._pw: Any = None                  # active sync_playwright scope
+        # STEP 2: separate SLOW event-view page (decoupled from the fast
+        # score poll).  Single browser; the fast page holds the lobby and
+        # the WS market hook; the slow page does the round-robin event-view
+        # navigations so a slow nav never delays the ~10s score cadence.
+        self._slow_page: Optional[Page] = None
+        self._slow_browser_started_at: Optional[float] = None
+        self._tick_no = 0                     # fast-loop tick counter
         self._empty_ticks = 0                 # consecutive empty-parses
         self._event_view_failures = 0         # consecutive unverified event views
         self._ws_market_last: dict[tuple[str, Optional[float]], str] = {}
@@ -297,6 +310,7 @@ class PokerBetCollector:
         except Exception:
             pass
         self._browser = None
+        self._slow_page = None            # old browser gone — recreate on next guard
         self._empty_ticks = 0
         try:
             return self._new_session()
@@ -324,6 +338,10 @@ class PokerBetCollector:
             "games_resolved": self.stats["games_resolved"],
             "reconciliations": self.stats["reconciliations"],
             "errors": self.stats["errors"],
+            # crash/restart recovery: persist tracked games so a restart
+            # does NOT trigger a full re-resolution storm (each new-game
+            # resolve is a ~6s event-view nav that blocks the fast tick).
+            "tracked_games": self._tracked_serializable(),
         }
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -331,16 +349,91 @@ class PokerBetCollector:
         except Exception:
             logger.exception("state write failed")
 
+    # ── Tracked-game persistence (restart recovery) ───────────────
+
+    def _tracked_serializable(self) -> list[dict]:
+        """Compact serialization of the tracked games (no ended games)."""
+        out = []
+        for cls_map in self._tracked.values():
+            for g in cls_map.values():
+                if g.status == "ended":
+                    continue
+                out.append({
+                    "source_game_id": g.source_game_id,
+                    "classification": g.classification,
+                    "competition_id": g.competition_id,
+                    "competition_slug": g.competition_slug,
+                    "competition": g.competition,
+                    "region": g.region,
+                    "game_family": g.game_family,
+                    "sport": g.sport,
+                    "home_team": g.home_team, "away_team": g.away_team,
+                    "game_slug": g.game_slug, "source_url": g.source_url,
+                    "status": g.status,
+                    "first_seen_at": g.first_seen_at,
+                    "last_seen_at": g.last_seen_at,
+                })
+        return out
+
+    def _restore_tracked(self) -> int:
+        """Rebuild _tracked / _market_queue from the last state file.
+
+        Returns the number of games restored.  A restored game whose
+        fixture has since ended/replayed is handled by the existing
+        instance-reset / mark-ended machinery on the next ticks.
+        """
+        try:
+            raw = json.loads(STATE_FILE.read_text())
+        except Exception:
+            return 0
+        games = raw.get("tracked_games") or []
+        n = 0
+        for d in games:
+            try:
+                g = PokerBetGame(**d)
+            except Exception:
+                continue
+            cls_val = g.classification
+            if cls_val not in self._tracked:
+                continue
+            key = f"{g.home_team}|{g.away_team}"
+            if not key.strip("|") or key in self._tracked[cls_val]:
+                continue
+            self._tracked[cls_val][key] = g
+            self._unseen_ticks[cls_val][key] = 0
+            if g.source_game_id not in self._market_queue and g.source_url:
+                self._market_queue.append(g.source_game_id)
+            n += 1
+        if n:
+            logger.info("restored %d tracked games from state", n)
+        return n
+
     def start(self) -> None:
         if self._running:
             return
         self._running = True
+        # ── True fixed-rate scheduling (STEP 2 clean-data cadence) ──
+        # The tick loop is target-boundary: each cycle aims for the NEXT
+        # 10s boundary from the PREVIOUS target, so page/network/parse
+        # latency is absorbed INSIDE the interval instead of stacking on
+        # top of a full sleep.  When work overruns the target, the next
+        # target advances by the interval from the missed one (no sleep,
+        # no catch-up burst, no overlap).  Tracked for instrumentation.
+        self._next_tick_target = 0.0
+        self._tick_stats: dict[str, list[float]] = {
+            "work": [], "sleep": [], "cycle": [], "fast": [], "event": []}
+        # restart recovery: restore tracked games so a crash/restart does
+        # not force a full re-resolution storm in the fast path
+        self._restore_tracked()
         try:
             with sync_playwright() as pw:
                 self._pw = pw
                 page = self._new_session()
                 while self._running:
                     tick_start = time.monotonic()
+                    # schedule the NEXT target on the interval grid
+                    if self._next_tick_target <= 0.0:
+                        self._next_tick_target = tick_start + self.tick_s
                     try:
                         page = self._tick(page)
                     except Exception:
@@ -359,9 +452,17 @@ class PokerBetCollector:
                             > BROWSER_MAX_LIFETIME_S):
                         page = self._relaunch("browser lifetime cap")
                     elapsed = time.monotonic() - tick_start
-                    sleep_for = self.tick_s - elapsed
+                    # target-boundary sleep: absorb latency, never stack
+                    sleep_for = max(0.0, self._next_tick_target - time.monotonic())
                     if sleep_for > 0:
                         time.sleep(sleep_for)
+                    # advance the target by whole intervals past the missed one
+                    while self._next_tick_target <= time.monotonic():
+                        self._next_tick_target += self.tick_s
+                    self._tick_stats["work"].append(elapsed)
+                    self._tick_stats["sleep"].append(sleep_for)
+                    self._tick_stats["cycle"].append(
+                        time.monotonic() - tick_start)
         except Exception:
             logger.error("collector crashed:\n%s", traceback.format_exc())
         finally:
@@ -439,6 +540,7 @@ class PokerBetCollector:
 
     def _tick(self, page: Page) -> Page:
         self.stats["ticks"] += 1
+        self._tick_no += 1
         logger.info("tick %d start (url=%s)", self.stats["ticks"], page.url)
 
         # 1. Parse the live panel (all competitions + game rows)
@@ -493,10 +595,21 @@ class PokerBetCollector:
                 else:
                     self._store_list_snapshot(game, row, cls)
 
-        # 3. Round-robin full event-view capture for tracked games.
-        #    It may rotate the browser (event-view failure storm) — the
-        #    returned page is the live one; never reuse the closed page.
-        page = self._capture_next_market(page)
+        # 3. Slow path — round-robin full event-view capture, DECOUPLED.
+        #    Runs on its own page (self._slow_page) on a coarse cadence
+        #    (EVENT_VIEW_EVERY_N fast ticks), so a slow event-view nav
+        #    (~6s click+load+parse) never delays the ~10s score poll.
+        if self._slow_page is not None and self._tick_no % EVENT_VIEW_EVERY_N == 0:
+            t0 = time.monotonic()
+            try:
+                self._capture_slow_market()
+            except Exception:
+                logger.error("slow event-view capture error:\n%s",
+                             traceback.format_exc())
+            self._tick_stats["event"].append(time.monotonic() - t0)
+        elif self._slow_page is None:
+            # ensure the slow page exists once the browser is up
+            self._ensure_slow_page()
 
         # 4. Mark unseen games ended
         self._mark_ended(seen_keys)
@@ -1046,6 +1159,129 @@ class PokerBetCollector:
             return vals[index]
         return None
 
+    def _ensure_slow_page(self) -> None:
+        """Create (once) the dedicated SLOW event-view page in the same
+        browser/context as the fast page — so the slow path shares the
+        browser but never the fast page's URL/state.  Both pages attach
+        their own eu-swarm WS hook (raw market feed stays independent)."""
+        try:
+            if self._pw is None or self._browser is None:
+                return
+            context = self._browser.contexts[0] if self._browser.contexts \
+                else self._browser.new_context(**self._session_options())
+            page = context.new_page()
+            self._slow_page = page
+            self._slow_browser_started_at = time.monotonic()
+            self._attach_ws_market_hook(page)
+            # land on the discovery page so row clicks hydrate
+            self._goto(page, competition_url(
+                Classification.CYBER_2K26, self.comp_ids))
+            self._wait_panel(page)
+            logger.info("slow event-view page ready")
+        except Exception:
+            logger.error("slow page init failed:\n%s", traceback.format_exc())
+            self._slow_page = None
+
+    def _capture_slow_market(self) -> None:
+        """Round-robin full event-view capture on the SLOW page — the
+        decoupled equivalent of the old in-tick ``_capture_next_market``.
+        Runs once per EVENT_VIEW_EVERY_N fast ticks.  Only the slow page
+        navigates; the fast page stays on the lobby for the score poll.
+        ``_capture_event_state``/``_end_game`` may rotate the browser —
+        on rotation the slow page is recreated on the next guard."""
+        page = self._slow_page
+        if page is None or not self._market_queue:
+            return
+        now = utcnow_iso()
+        captured = 0
+        for _ in range(len(self._market_queue)):
+            if captured >= MARKET_BATCH:
+                break
+            if self._event_view_failures >= BROWSER_RELAUNCH_AFTER_EMPTY:
+                logger.warning("event-view failures %d — rotating browser",
+                               self._event_view_failures)
+                self._relaunch("event-view failure storm")
+                self._event_view_failures = 0
+                self._slow_page = None          # recreate on next guard
+                break
+            gid = self._market_queue.pop(0)
+            self._market_queue.append(gid)
+            last = self._last_market_at.get(gid)
+            if last and _ts_age_s(last) < MARKET_REFRESH_S:
+                continue  # fresh enough — leave room for others
+            game = self._find_tracked(gid)
+            if game is None or not game.source_url:
+                continue
+            cls = Classification(game.classification)
+            logger.info("slow event view for game %s", gid)
+            try:
+                if not self._click_tracked_row(page, game):
+                    continue
+                text = page.inner_text("body", timeout=10000)
+                parsed = parse_event_view(text)
+                if not self._verified_event_view(game, parsed):
+                    self._event_view_failures += 1
+                    logger.warning(
+                        "event view unverified for %s (parsed teams %r/%r) — "
+                        "skipped (unverified=%d)",
+                        gid, parsed.get("home_team"), parsed.get("away_team"),
+                        self._event_view_failures)
+                    continue
+                self._event_view_failures = 0
+                eh, ea = parsed.get("home_score"), parsed.get("away_score")
+                if eh is None or ea is None:
+                    continue
+                prev = self.store.get_snapshots(game.source_game_id, limit=1)
+                prev_tot = None
+                if prev:
+                    ph, pa = prev[0].get("home_score"), prev[0].get("away_score")
+                    if ph is not None and pa is not None:
+                        prev_tot = ph + pa
+                cur = int(eh) + int(ea)
+                if self._is_final_state(parsed) and (
+                        prev_tot is None or cur >= prev_tot):
+                    self._capture_event_state(page, cls, game, text, end=True)
+                    captured += 1
+                    continue
+                sig = self._detect_event_reset(
+                    game, int(eh), int(ea),
+                    parsed.get("period_label"), parsed.get("clock"))
+                if sig:
+                    row = RowGame(home_score=int(eh), away_score=int(ea))
+                    game = self._split_instance(
+                        game, row, cls, signal=sig, path="event")
+                tax = parse_event_url(page.url)
+                if tax:
+                    base = self._base_id(game.source_game_id)
+                    suffix = game.source_game_id[len(base):]
+                    if tax["game_id"] != base:
+                        game.source_game_id = tax["game_id"] + suffix
+                    game.competition_id = tax["competition_id"]
+                    game.competition_slug = tax["competition_slug"]
+                    game.game_slug = tax["game_slug"]
+                    game.source_url = page.url
+                    url_cls = classify_event_url(page.url)
+                    if url_cls != Classification.UNKNOWN:
+                        game.classification = url_cls.value
+                        game.game_family = url_cls.game_family.value
+                    self.store.upsert_game(game)
+                self._capture_event_state(page, cls, game, text)
+                captured += 1
+                self._last_market_at[gid] = now
+            except Exception:
+                logger.error("slow market capture failed:\n%s",
+                             traceback.format_exc())
+            finally:
+                # back to the discovery page for the next slow capture
+                try:
+                    self._goto(page, competition_url(cls, self.comp_ids))
+                    self._wait_panel(page)
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    logger.error("slow return-to-lobby failed:\n%s",
+                                 traceback.format_exc())
+                    self._slow_page = None      # recreate on next guard
+
     def _capture_next_market(self, page: Page) -> Page:
         """Visit the next tracked game's event view (round-robin).
 
@@ -1333,7 +1569,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="BLM PokerBet collector")
     ap.add_argument("--once", action="store_true", help="run a single tick and exit")
     ap.add_argument("--ticks", type=int, default=1, help="ticks for --once")
-    ap.add_argument("--tick", type=float, default=20.0, help="tick interval seconds")
+    ap.add_argument("--tick", type=float, default=10.0, help="tick interval seconds")
     ap.add_argument("--headed", action="store_true", help="run headed (debug)")
     ap.add_argument(
         "--db", type=str, default=None, help="sqlite db path",
