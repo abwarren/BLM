@@ -407,21 +407,28 @@ async def get_traps(
 
 async def get_model_state(
     engine: BLMEngineInterface = Depends(get_blm_engine),
-    storage: StorageInterface = Depends(get_storage_interface),
+    ts: TSInterface = Depends(get_ts_interface),
     metrics: MetricsCollector = Depends(get_metrics_collector_dep),
 ):
-    """Return the current BLM model state, configuration, and engine metrics."""
+    """Return the current BLM model state, configuration, and engine metrics.
+
+    ``active_games`` comes from the time-series store (blm_ts.db
+    snapshots_v2) — the only store the V2 scheduler writes — counted by
+    ingestion recency.  The storage games table (blm_v2.db) has no live
+    writer and is NOT a live data source; ``status`` reflects the serving
+    process, not a DB row.
+    """
     with metrics.timer("api_response_time"):
         config = await engine.get_config()
-        state = await storage.get_model_state()
         processed = await engine.get_processed_count()
+        active_games = await ts.count_active_games()
         snap = metrics.snapshot()
         return ModelResponse(
             version=config.get("version", "2.0.0"),
-            status=state.get("status", "running"),
+            status="running",
             uptime_seconds=snap.uptime_seconds,
             total_snapshots_processed=processed,
-            active_games=state.get("active_games", 0),
+            active_games=active_games,
             engine_config=config,
             metrics={
                 name: {"min": m.min, "max": m.max, "avg": m.avg, "count": m.count}

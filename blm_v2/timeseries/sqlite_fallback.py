@@ -13,6 +13,7 @@ import logging
 import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,6 +24,14 @@ logger = logging.getLogger(__name__)
 # ── Default DB path ───────────────────────────────────────────────
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "blm_ts.db"
+
+
+# ── Live-game staleness ──────────────────────────────────────────
+
+ACTIVE_GAME_STALENESS_S = 180.0
+"""A game counts as active while snapshots keep arriving.  The scheduler
+ticks every ~20 s, so 180 s (9 missed ticks) cleanly separates 'live'
+from 'ended / between games / pipeline idle' with jitter margin."""
 
 
 # ── Schema ────────────────────────────────────────────────────────
@@ -311,6 +320,36 @@ class SQLiteTimeSeries(TimeSeriesDB):
                 "SELECT DISTINCT game_id FROM snapshots_v2 ORDER BY game_id"
             ).fetchall()
             return [r["game_id"] for r in rows]
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _query)
+
+    async def count_active_games(
+        self, staleness_s: float = ACTIVE_GAME_STALENESS_S
+    ) -> int:
+        """Count games with a snapshot ingested within *staleness_s*.
+
+        The scheduler writes one enriched snapshot per tick (~20 s) while a
+        game is live, so a game whose latest ingestion is older than the
+        window is no longer being collected (ended / between games /
+        pipeline idle).  This is the authoritative live-game count for the
+        model-state endpoint — the storage games table (blm_v2.db) has no
+        live writer in the V2 pipeline.
+        """
+        self._ensure_initialized()
+        base = datetime.now(timezone.utc) - timedelta(seconds=staleness_s)
+        # Match SQLite's strftime('%Y-%m-%dT%H:%M:%fZ', 'now') millisecond
+        # format so the lexical comparison against stored ingested_at is exact.
+        cutoff = base.strftime("%Y-%m-%dT%H:%M:%fZ")[:-4] + "Z"
+
+        def _query() -> int:
+            conn = _get_conn(self._db_path)
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT game_id) FROM snapshots_v2 "
+                "WHERE ingested_at >= ?",
+                (cutoff,),
+            ).fetchone()
+            return int(row[0])
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _query)

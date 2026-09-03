@@ -52,7 +52,6 @@ def app():
     mock_storage.get_events.return_value = []
     mock_storage.get_alerts.return_value = []
     mock_storage.get_traps.return_value = {}
-    mock_storage.get_model_state.return_value = {}
 
     mock_engine.enrich_snapshot.return_value = {}
     mock_engine.detect_traps.return_value = []
@@ -246,6 +245,27 @@ async def test_model_endpoint(app):
     data = resp.json()
     assert "version" in data
     assert "status" in data
+
+
+@pytest.mark.asyncio
+async def test_model_active_games_reads_timeseries_not_storage(app):
+    """active_games must come from the live time-series store — the only
+    store the V2 scheduler writes (blm_ts.db snapshots_v2) — never the
+    storage games table (blm_v2.db), which has no live writer and would
+    report 0 while a game is actively being collected."""
+    from blm_v2.api.dependencies import _deps
+
+    # Storage claims zero active games; the ts store says one is live.
+    _deps.ts_interface.count_active_games = AsyncMock(return_value=1)
+    _deps.storage_interface.get_model_state = AsyncMock(
+        return_value={"status": "running", "total_games": 0, "active_games": 0})
+
+    async with _async_client(app) as ac:
+        resp = await ac.get("/api/v2/model")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["active_games"] == 1
+    _deps.ts_interface.count_active_games.assert_awaited()
 
 
 @pytest.mark.asyncio

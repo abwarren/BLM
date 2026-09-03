@@ -199,6 +199,16 @@ class TSInterface(Protocol):
     async def list_games(self) -> List[Dict[str, Any]]:
         ...
 
+    async def count_active_games(
+        self, staleness_s: float = 180.0
+    ) -> int:
+        """Count games with a snapshot ingested within ``staleness_s``.
+
+        The live-game source of truth is the time-series store the V2
+        scheduler writes; the storage games table has no live writer.
+        """
+        ...
+
     async def get_game_detail(self, game_id: str) -> Optional[Dict[str, Any]]:
         ...
 

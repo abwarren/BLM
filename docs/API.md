@@ -41,7 +41,7 @@ All V1 responses are JSON. Example `/api/live`:
 | `/api/v2/events/{game_id}` | GET | Events for a game |
 | `/api/v2/alerts` | GET | Active alerts (query: game_id) |
 | `/api/v2/traps/{game_id}` | GET | Trap detection data |
-| `/api/v2/model` | GET | BLM model state and config |
+| `/api/v2/model` | GET | BLM model state and config (`active_games` = games with a snapshot ingested in the last 180 s in blm_ts.db — the scheduler's only write target) |
 | `/api/v2/games` | GET | List all games |
 | `/ws` | WS | WebSocket for live push |
 

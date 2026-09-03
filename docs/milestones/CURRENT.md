@@ -78,9 +78,40 @@ DEPLOYED 2026-09-03 19:18:05Z (blm-server restart; collector untouched).
 Post-restart live scan: cm_outcome_mismatch 0, cm_signal_mismatch [],
 dup 0; endpoints /api/v2/health /api/v2/model /api/v4/scorecard
 /api/v4/status / all 200; server journal 0 errors since restart.
-Known limitation: /api/v2/model active_games counts blm_v2.db (v2 storage
-DB) which nothing populates (v2 pipeline writes blm_ts.db snapshots only)
-— active_games 0 is an honest count of an empty side DB, not fabricated.
+
+## SESSION V2-DS (2026-09-03) — /api/v2/model active_games DATA-SOURCE DEFECT (FIXED)
+
+Audit of the 'known limitation' (active_games reads the storage games table)
+traced the full ownership chain and found a real defect, NOT an honest empty
+count: the storage games table (blm_v2.db) has NO live writer — the V2
+scheduler (SnapshotScheduler, the only live writer) writes exclusively to the
+time-series store (blm_ts.db snapshots_v2 + line_analysis, scheduler.py
+write_snapshot/write_line_analysis; server.py wires ts=SQLiteTimeSeries
+blm_ts.db, storage=SQLiteStorage blm_v2.db).  SQLiteStorage.save_game has no
+caller in the pipeline; storage.get_model_state counted a table nothing
+feeds, so active_games=0 was coincidental — 45 snapshots were being written
+per minute for a live game while the endpoint reported 0.  AlertManager is
+constructed but never wired (alerts/traps/events read the alerts table its
+engine would write — an unfinished subsystem, documented below, not a
+reader/writer source mismatch).  No dashboard or decision logic consumes
+active_games (informational field), but the contract was false.
+
+FIX (commit pending): active_games now derives from the authoritative live
+store — SQLiteTimeSeries.count_active_games() counts DISTINCT game_ids with
+ingested_at within ACTIVE_GAME_STALENESS_S=180 s (scheduler ticks ~20 s; 9
+missed ticks separates live from ended/idle).  /api/v2/model handler drops
+the storage dependency (status='running' is a process truth, not a DB row;
+total_games/total_alerts were never exposed).  TSInterface protocol gained
+count_active_games.  RED-first: API test (ts says 1 / storage says 0 -> must
+report 1) + ts test (fresh vs stale ingestion) + hasattr — 3 failed before,
+green after.  Storage get_model_state left in place (truthfully counts its
+own DB; no production caller remains).
+Other v2 storage-sourced endpoints audited: alerts/traps/events read the
+alerts table — writer (AlertManager) exists but is never evaluated in
+server.py -> always empty is correct-for-store; wiring the alerts engine
+into the scheduler is an unfinished feature, NOT a data-source defect (out
+of scope, documented).  /api/v2/games unions ts.list_games (real) +
+storage.list_games (empty) — unaffected.
 
 ## M009-M5 (COMPLETE, DEPLOYED, LIVE VERIFIED) — DISPARITY BAND ANALYTICS + EVENT DATASET + FRONTEND
 

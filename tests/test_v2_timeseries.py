@@ -72,6 +72,7 @@ def test_ts_has_all_methods(sqlite_ts):
     assert hasattr(sqlite_ts, "query_snapshots")
     assert hasattr(sqlite_ts, "query_latest")
     assert hasattr(sqlite_ts, "list_games")
+    assert hasattr(sqlite_ts, "count_active_games")
     assert hasattr(sqlite_ts, "delete_game")
 
 
@@ -241,3 +242,37 @@ async def test_delete_game(sqlite_ts, sample_snapshot):
 async def test_delete_game_idempotent(sqlite_ts):
     """delete_game on a non-existent game doesn't raise."""
     await sqlite_ts.delete_game("does-not-exist")  # Should not raise
+
+
+@pytest.mark.asyncio
+async def test_count_active_games_counts_recently_ingested_only():
+    """Live-game count derives from snapshot ingestion recency — the ts
+    store is the scheduler's only write target (a game with no snapshot
+    ingested inside the staleness window is no longer being collected)."""
+    import sqlite3 as _sqlite3
+    from datetime import datetime, timezone
+
+    with TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_blm_ts.db"
+        ts = SQLiteTimeSeries(db_path=db_path)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%fZ")[:-4] + "Z"
+
+        await ts.write_snapshot({
+            "game_id": "live-1", "timestamp": now, "quarter": 1,
+            "clock": "10:00", "home_score": 0, "away_score": 0,
+            "total_line": 220.5,
+        })
+        await ts.write_snapshot({
+            "game_id": "done-1", "timestamp": now, "quarter": 4,
+            "clock": "0:01", "home_score": 101, "away_score": 99,
+            "total_line": 220.5,
+        })
+        # Force the finished game's ingestion time far outside the window.
+        conn = _sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE snapshots_v2 SET ingested_at = '2026-01-01T00:00:00.000Z' "
+            "WHERE game_id = 'done-1'")
+        conn.commit()
+        conn.close()
+
+        assert await ts.count_active_games() == 1
