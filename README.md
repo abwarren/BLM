@@ -1,155 +1,162 @@
 # BLM — Betting Logic Model
 
-A production-grade quantitative sports analytics platform for live basketball betting market analysis. Captures every BLM decision over time, stores telemetry in a time-series database, exposes realtime APIs, and provides professional dashboards with historical replay.
+A production-grade quantitative sports analytics platform for live basketball market analysis. BLM captures timestamped live-game observations, market state, pace/trajectory measurements, research diagnostics, and reproducible validation results.
 
-**Target:** BetConstruct Cyber Basketball 2K26 matches on PokerBet.co.za
+**Current research state: PROSPECTIVE CONFIRMATION — FROZEN / AWAITING DATA**
 
-## Quick Start
+**Confirmation freeze:** `2026-09-06T21:00:00Z`
 
-### V1 — Research Console (Legacy)
+> The current research relationship is **REPLICATED**, not yet an edge or betting signal. The prospective confirmation specification is frozen and cannot be retuned using future results.
 
-```bash
-cd ~/projects/blm
-python3 app.py
-# Open http://localhost:5000
+## Research Status
+
+```text
+Clean-data integrity                 COMPLETE
+Observational pace / market layer    COMPLETE
+Market ↔ trajectory residual         COMPLETE
+Historical forensic validation       COMPLETE
+Calibration audit                    COMPLETE
+Residual × market-age discovery      COMPLETE
+Historical replication               COMPLETE
+Prospective specification            FROZEN
+Prospective confirmation             AWAITING DATA
+Predictive model                     NOT STARTED
+Production betting logic             FROZEN / NOT AUTHORIZED
 ```
 
-### V2 — Platform (Recommended)
+### Frozen prospective protocol
+
+The prospective test uses only genuinely unseen post-freeze games. A game enters the prospective population only when both its checkpoint timestamp and its first checkpoint are strictly after the confirmation freeze. A game with any pre-freeze checkpoint remains historical in its entirety.
+
+**Residual bands:** `0–2.5`, `2.5–5`, `5–10`, `10–20`, `>20`
+
+**Market-age bands:** `0–5s`, `5–10s`, `10–20s`, `20–30s`, `30–60s`, `60–120s`, `120–300s`, `>300s`
+
+**Frozen nominated cells:**
+
+| Side | Residual magnitude | Market age |
+|---|---:|---:|
+| OVER | 5–10 | >300s |
+| OVER | 10–20 | >300s |
+| OVER | >20 | >300s |
+| UNDER | 10–20 | 0–5s |
+
+A cell passes only if `N ≥ 30`, win rate `≥ 60%`, and Wilson 95% lower bound `> 50%`. Overall confirmation requires all three stale-OVER cells and at least one fresh-UNDER cell to pass.
+
+**100% terminal checkpoints are excluded** from confirmation because the historical audit identified a terminal tautology.
+
+See [`docs/PLAN-005-RESEARCH-GATES-AND-PROSPECTIVE-CONFIRMATION.md`](docs/PLAN-005-RESEARCH-GATES-AND-PROSPECTIVE-CONFIRMATION.md) for the complete research gate and confirmation protocol.
+
+## Historical Research Finding
+
+The historical BETUAL_NBA analysis identified a residual × market-age relationship:
+
+- Stale-line OVER performance increased monotonically with residual magnitude: approximately `.44 → .78` across the frozen magnitude bands.
+- Stale-OVER residual magnitude `≥5` was `63.7%` checkpoint-weighted and `59.8%` game-weighted.
+- Fresh-line UNDER was `67.0%` checkpoint-weighted and `62.2%` game-weighted.
+- The relationship survived chronological, checkpoint, half-split, and game-level controls.
+- CYBER_2K26 did not contain enough OVER observations for independent confirmation.
+
+These are historical research results. They are **not production betting performance** and do not authorize thresholds, EV, probability, or staking.
+
+## V4 — PokerBet Live Basketball Pipeline
+
+BLM's production game source is PokerBet.co.za (BetConstruct). The V4 collector discovers live basketball games from the live panel, classifies each into an isolated statistical population, snapshots market state, and reconciles against the underlying event.
 
 ```bash
-cd ~/projects/blm
-python3 server.py
-# Open http://localhost:8000/dashboard
-# API: http://localhost:8000/api/v2/health
-```
-
-## V4 — PokerBet Live Basketball Pipeline (Current)
-
-BLM's production game source is **PokerBet.co.za** (BetConstruct). The V4
-collector discovers live basketball games from PokerBet's live panel,
-classifies each into an isolated statistical population, snapshots the
-full market state, and reconciles against the underlying BetConstruct
-event.
-
-```bash
-# One-shot live capture (both categories)
+# One-shot live capture
 python -m blm_v4.collector --once --ticks 1
 
-# Continuous collector (20s cadence) — systemd: blm-collector.service
-# API server (port 2262) — systemd: blm-server.service
+# Continuous collector — systemd: blm-collector.service
+# API server — systemd: blm-server.service
 ```
 
-### Classifications (isolated populations — zero statistical leakage)
+### Classifications
 
-| Classification | Competition (PokerBet) | Region | Example |
-|---|---|---|---|
-| `CYBER_2K26` | Cyber Basketball. 2K26 Matches | World | OKC Thunder Cyber vs SAS Spurs Cyber |
-| `BETUAL_NBA` | Betual NBA | Virtual Matches | Sacramento Kings Virtual vs Miami Heat Virtual |
+| Classification | Population |
+|---|---|
+| `CYBER_2K26` | Cyber Basketball 2K26 |
+| `BETUAL_NBA` | Betual NBA |
 
-Every game/snapshot record carries its own `classification`, `game_family`,
-`competition`, `region` — identity is `source + source_game_id` (the
-BetConstruct event ID from the event-view URL). Snapshots are append-only
-timestamped observations (score, period, clock, totals, spreads, odds,
-status, source metadata). Historical/statistical processing is scoped per
-classification; the two populations are never mixed.
+Historical/statistical processing is scoped per classification; populations are never mixed.
 
-### Reconciliation
+## Core Measurement Vocabulary
 
-Each recorded game is cross-verified against the BetConstruct event-view:
-game ID, teams, competition header, score/period/clock, totals/spreads
-present, and W1/W2 pricing — logged as `matched` or `mismatch` with the
-reason (blm_pokerbet.db `reconciliation` table).
+- `pace_gap` — required pace minus actual pace; observational only.
+- `market_trajectory_residual` — live market line minus projected trajectory; descriptive market-vs-trajectory divergence.
+- `market_forecast_error` — final settled total minus live market line at checkpoint; retrospective bookmaker forecast-error measurement.
+- Final outcomes are attached only after settlement.
+- Contemporaneous classification uses only information available at checkpoint T.
 
-### Tests
+## Validation and Safety Gates
 
-```bash
-python -m pytest tests/           # 112 passed (incl. blm_v4 fixtures both categories)
+The project follows a strict research sequence:
+
+```text
+Observation
+  ↓
+Measurement
+  ↓
+Forensic audit
+  ↓
+Historical validation
+  ↓
+Calibration
+  ↓
+Interaction discovery
+  ↓
+Replication
+  ↓
+Prospective confirmation
+  ↓
+Independent replication
+  ↓
+Predictive research
+  ↓
+Production consideration
 ```
 
-Replayable fixtures exist for both categories
-(`tests/test_blm_v4_pipeline.py`) proving discovery, classification,
-source, dedup, snapshot persistence, and statistical separation.
+No stage may silently promote an observational relationship into production decision logic.
 
-## Architecture
+## API / Dashboard Research Surface
 
-```
-┌─ V1 Legacy ───────────────────────────────────────┐
-│ Collector → SQLite → Flask API → Research Console │
-├─ V2 Platform ─────────────────────────────────────┤
-│ Collector → BLM Engine → Event Bus → TS DB        │
-│ ↓                                                  │
-│ FastAPI + WebSocket → Dashboard + Replay           │
-│ ↓                                                  │
-│ AI Dataset Builder → CSV / Parquet / Arrow         │
-└────────────────────────────────────────────────────┘
-```
+Current research surfaces include deviation analysis, calibration, freshness analysis, interaction validation, and the frozen prospective-confirmation report.
 
-## Project Structure
+The prospective confirmation endpoint is:
 
-```
-blm/
-├── blm_v1/              # V1: Legacy pipeline (preserved)
-│   ├── collector.py     # Playwright scraper
-│   ├── database.py      # SQLite schema + queries
-│   ├── app.py           # Flask API (port 5000)
-│   └── static/          # Research console
-├── blm_v2/              # V2: Platform
-│   ├── config.py        # Centralised configuration
-│   ├── collector/       # Collector interface + scheduler
-│   ├── engine/          # BLM Engine (confidence, momentum, traps)
-│   ├── models/          # Pydantic schemas
-│   ├── events/          # Event bus (pub/sub)
-│   ├── timeseries/      # TS abstraction (InfluxDB + SQLite)
-│   ├── storage/         # Storage interface
-│   ├── api/             # FastAPI v2 + WebSocket
-│   ├── dashboard/       # Live dashboard
-│   ├── replay/          # Historical replay engine
-│   ├── datasets/        # ML dataset builder
-│   ├── alerts/          # Real-time alert rules
-│   └── analytics/       # Model analytics
-├── tests/               # Unit + integration tests
-├── docs/                # Architecture, API, schema docs
-├── app.py               # V1 entry point
-├── server.py            # V2 entry point
-└── requirements.txt
-```
+`/api/v4/scorecard/prospective-confirmation`
 
-## V2 API Endpoints
+The dashboard section is:
 
-| Endpoint | Description |
-|----------|-------------|
-| `/api/v2/health` | Health check |
-| `/api/v2/live` | Current live game with full BLM enrichment |
-| `/api/v2/game/{id}` | Game details |
-| `/api/v2/history/{id}` | Historical snapshots |
-| `/api/v2/replay/{id}` | Replay data |
-| `/api/v2/chart/{id}` | Chart-optimized data |
-| `/api/v2/events/{id}` | Game events |
-| `/api/v2/alerts` | Active alerts |
-| `/api/v2/traps/{id}` | Trap detection data |
-| `/api/v2/model` | BLM model state |
-| `/api/v2/games` | All games |
-| `/ws` | WebSocket for live push (20s cadence) |
+`PROSPECTIVE CONFIRMATION — FROZEN SPEC`
 
-## Performance Targets
+## Tests
 
-| Metric | Target |
-|--------|--------|
-| Snapshot write | <50ms |
-| Dashboard refresh | <200ms |
-| Replay | 60 FPS |
-| Concurrent games | 10,000 |
-| Snapshot loss | Zero |
+The latest freeze audit reported:
+
+- **400 tests passed**
+- `dashboard.js` syntax check passed
+- confirmation harness temporal firewall verified
+- specification SHA256 tamper evidence verified
+- terminal exclusion verified
+- historical/prospective separation verified
+- deterministic confirmation report verified
+
+## Repository Documentation
+
+- [`docs/PLAN-005-RESEARCH-GATES-AND-PROSPECTIVE-CONFIRMATION.md`](docs/PLAN-005-RESEARCH-GATES-AND-PROSPECTIVE-CONFIRMATION.md) — current phase and frozen prospective protocol
+- [`docs/`](docs/) — architecture, API, schema, research directives, and implementation plans
 
 ## Engineering Principles
 
 - Historical data is the primary source of truth.
-- Every module has a single responsibility.
+- Every observation is timestamped and reproducible.
+- No future information may enter contemporaneous decisions.
 - Presentation never contains business logic.
 - Business logic never contains scraping logic.
-- Everything is reproducible from stored data.
-- Dependency injection for testability.
-- Strong typing throughout.
+- Statistical populations remain isolated.
+- Research specifications are frozen before prospective confirmation.
+- Production changes require explicit validation gates.
 
 ## License
 
