@@ -1225,6 +1225,369 @@ async function refresh() {
   }
 }
 
+/* ── CALIBRATION — RAW SCORE → ACTUAL PROBABILITY (read-only research) ── */
+
+const API_CALIB = "/api/v4/scorecard/calibration";
+let calibTimer = null;
+
+function calibMetricsTable(m, title) {
+  if (!m || !m.n) return `<div class="empty">${esc(title)}: no evaluated rows</div>`;
+  const bins = (m.reliability_bins || [])
+    .filter((b) => b.n > 0)
+    .map((b) => `<tr><td>${b.bin}</td><td>${b.n}</td><td>${num(b.mean_predicted, 3)}</td><td>${num(b.actual_frequency, 3)}</td></tr>`)
+    .join("");
+  return `<h4>${esc(title)} <span class="muted">· n=${m.n} · base rate ${num(m.base_rate, 3)}</span></h4>
+    <table class="ev-table"><thead><tr><th>bin</th><th>N</th><th>mean predicted</th><th>actual freq</th></tr></thead>
+    <tbody>${bins || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
+    <p class="muted">Brier ${num(m.brier, 4)} · log loss ${num(m.log_loss, 4)} · slope ${num(m.calibration && m.calibration.slope, 3)} · intercept ${num(m.calibration && m.calibration.intercept, 3)} · game-weighted Brier ${num(m.game_weighted && m.game_weighted.brier_mean_over_games, 4)} (${m.game_weighted ? m.game_weighted.games : 0} games)</p>`;
+}
+
+function calibBucketTable(buckets, rule) {
+  const rows = (buckets || [])
+    .filter((b) => b.n > 0)
+    .map((b) => `<tr><td>${esc(b.bucket)}</td><td>${b.n}</td><td>${b.wins}</td><td>${b.losses}</td><td>${num(b.win_rate, 3)}</td><td>[${num(b.wilson_lo, 3)}, ${num(b.wilson_hi, 3)}]</td></tr>`)
+    .join("");
+  return `<h4>EMPIRICAL RESIDUAL TABLE <span class="muted">· Wilson 95% CI · merge rule: ${esc(rule || "none")}</span></h4>
+    <table class="ev-table"><thead><tr><th>residual (M−F)</th><th>N</th><th>wins</th><th>losses</th><th>win rate</th><th>Wilson CI</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan=6>—</td></tr>'}</tbody></table>`;
+}
+
+function renderCalibration(payload) {
+  const grid = $("calibGrid");
+  if (!grid) return;
+  if (!payload || !payload.report) {
+    grid.innerHTML = '<div class="empty">Calibration unavailable</div>';
+    return;
+  }
+  const r = payload.report;
+  const pop = r.population || {};
+  const st = payload.status || {};
+  const desc = r.descriptive || {};
+  const emp = r.empirical || {};
+  const term = (r.terminal_sanity && r.terminal_sanity.terminal) || {};
+  const blocks = emp.blocks || [];
+  const blockRows = blocks
+    .map((b) => `<tr><td>${esc(b.date)}</td><td>${b.games}</td><td>${b.raw_direction.n}</td><td>${num(b.raw_direction.win_rate, 3)}</td><td>${num(b.over.win_rate, 3)}</td><td>${num(b.under.win_rate, 3)}</td><td>${num(b.live.win_rate, 3)}</td><td>${num(b.stale.win_rate, 3)}</td></tr>`)
+    .join("");
+  const base = r.baselines || {};
+  grid.innerHTML = `
+    <div>
+      <h4>STATUS <span class="muted">· walk-forward chronological · OVER/UNDER separate · LIVE/STALE separate</span></h4>
+      <p><b>${esc(st.CALIBRATION_STATUS || "—")}</b> — evaluated ${pop.evaluated_walk_forward ?? "–"} rows (${pop.over_evaluated ?? "–"} OVER / ${pop.under_evaluated ?? "–"} UNDER), skipped ${pop.skipped_no_history ?? "–"} (no prior history; skipped rows are walk-forward warming, never silently pooled).</p>
+      <p class="muted">${esc(st.EMPIRICAL_RELATIONSHIP || "")}</p>
+      <p class="muted">TERMINAL EXCLUSION: ${esc(st["TERMINAL EXCLUSION"] || "")}</p>
+      <p class="muted">${esc(st.VERDICT || "")}</p>
+      <h4>TERMINAL SANITY (100% — DIAGNOSTIC ONLY)</h4>
+      <p class="muted">pct100 rows ${term.n_rows ?? "–"} · decided ${term.n_decided ?? "–"} · win rate ${num(term.win_rate, 3)} — mechanically inflated by the live-score floor; ${esc(term.mechanical_note || "")}</p>
+      <h4>BASELINES <span class="muted">· exact same evaluated rows</span></h4>
+      <p>raw model direction ${num(base.raw_model_direction_hit_rate, 3)} · always-OVER ${num(base.always_over_hit_rate, 3)} · always-UNDER ${num(base.always_under_hit_rate, 3)} · constant-base-rate Brier ${num(base.constant_base_rate_brier, 4)}</p>
+    </div>
+    <div>${calibBucketTable(emp.residual_buckets && emp.residual_buckets.buckets, emp.residual_buckets && emp.residual_buckets.merge_rule)}
+      <h4>CHRONOLOGICAL BLOCKS <span class="muted">· each block independent · O/U/L/S win rates</span></h4>
+      <table class="ev-table"><thead><tr><th>date</th><th>games</th><th>N</th><th>raw</th><th>OVER</th><th>UNDER</th><th>LIVE</th><th>STALE</th></tr></thead><tbody>${blockRows || '<tr><td colspan=8>—</td></tr>'}</tbody></table>
+    </div>
+    <div>${calibMetricsTable(r.over && r.over.logistic, "OVER — LOGISTIC (walk-forward)")}</div>
+    <div>${calibMetricsTable(r.under && r.under.logistic, "UNDER — LOGISTIC (walk-forward)")}</div>
+    <div>${calibMetricsTable(r.over && r.over.isotonic, "OVER — ISOTONIC (walk-forward)")}</div>
+    <div>${calibMetricsTable(r.under && r.under.isotonic, "UNDER — ISOTONIC (walk-forward)")}</div>`;
+}
+
+async function refreshCalibration() {
+  try {
+    const resp = await fetch(API_CALIB);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    renderCalibration(await resp.json());
+  } catch (err) {
+    const grid = $("calibGrid");
+    if (grid) grid.innerHTML = `<div class="empty">Calibration unavailable (${esc(String(err))})</div>`;
+  }
+}
+
+$("calibToggle").addEventListener("click", () => {
+  const body = $("calibBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("calibToggle").setAttribute("aria-expanded", String(open));
+  $("calibToggle").classList.toggle("open", open);
+  if (open) {
+    refreshCalibration();
+    if (!calibTimer) calibTimer = setInterval(refreshCalibration, 60000);
+  } else if (calibTimer) {
+    clearInterval(calibTimer);
+    calibTimer = null;
+  }
+});
+
+/* ── MARKET FRESHNESS — WHY STALE VS LIVE? (read-only forensic) ── */
+
+const API_FRESH = "/api/v4/scorecard/freshness-audit";
+let freshTimer = null;
+
+function renderFreshness(payload) {
+  const grid = $("freshGrid");
+  if (!grid) return;
+  if (!payload || !payload.population) {
+    grid.innerHTML = '<div class="empty">Freshness audit unavailable</div>';
+    return;
+  }
+  const pop = payload.population;
+  const ad = payload.age_distribution || {};
+  const bandRows = (payload.by_age_band || [])
+    .map((b) => `<tr><td>${b.band}</td><td>${b.n}</td><td>${b.games}</td><td>${num(b.combined.win_rate, 3)}</td><td>${num(b.over.win_rate, 3)} (${b.over.n})</td><td>${num(b.under.win_rate, 3)} (${b.under.n})</td></tr>`)
+    .join("");
+  const cpRows = (payload.by_checkpoint || [])
+    .map((c) => `<tr><td>${c.checkpoint_pct}%</td><td>${c.n}</td><td>${num(c.live.win_rate, 3)} (${c.live.n})</td><td>${num(c.stale.win_rate, 3)} (${c.stale.n})</td><td>${num(c.median_age, 0)}s</td></tr>`)
+    .join("");
+  const blRows = (payload.by_block || [])
+    .map((b) => `<tr><td>${esc(b.date)}</td><td>${b.games}</td><td>${num(b.live.win_rate, 3)} (${b.live.n})</td><td>${num(b.stale.win_rate, 3)} (${b.stale.n})</td></tr>`)
+    .join("");
+  const mfeRows = ((payload.market_forecast_error || {}).bands || [])
+    .map((b) => `<tr><td>${b.band}</td><td>${b.n}</td><td>${num(b.mean_mfe, 2)}</td><td>${num(b.mean_abs_mfe, 2)}</td><td>${num(b.over_share, 3)}</td></tr>`)
+    .join("");
+  const tiers = ((payload.update_frequency || {}).by_tier) || {};
+  const tierRows = Object.entries(tiers)
+    .map(([t, v]) => `<tr><td>${esc(t)}</td><td>${v.games}</td><td>${v.n}</td><td>${num(v.win_rate, 3)}</td></tr>`)
+    .join("");
+  const gw = payload.game_weighted || {};
+  const rba = payload.residual_by_age || {magnitudes: [], grid: {}};
+  const rbaTable = (side) => {
+    const g = (rba.grid || {})[side] || {};
+    const ages = Object.keys(g);
+    if (!ages.length) return "<p class=\"muted\">no data</p>";
+    const head = `<tr><th>mag\\age</th>${ages.map((a) => `<th>${esc(a)}</th>`).join("")}</tr>`;
+    const body = (rba.magnitudes || []).map((m) => {
+      const cells = ages.map((a) => {
+        const cell = (g[a] || []).find((c) => c.mag === m);
+        return cell && cell.n ? `${num(cell.win_rate, 2)} (${cell.n})` : "–";
+      });
+      return `<tr><td>${esc(m)}</td>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
+    }).join("");
+    return `<table class="ev-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  };
+  grid.innerHTML = `
+    <div>
+      <h4>POPULATION <span class="muted">· rows ${pop.rows} · games ${pop.games} · LIVE ${pop.live} · STALE ${pop.stale}</span></h4>
+      <h4>AGE DISTRIBUTION <span class="muted">· seconds, strictly contemporaneous</span></h4>
+      <p>median ${num(ad.median, 1)}s · mean ${num(ad.mean, 1)}s · p5 ${num(ad.p5, 0)} · p25 ${num(ad.p25, 0)} · p75 ${num(ad.p75, 0)} · p95 ${num(ad.p95, 0)} · max ${num(ad.max, 0)} · LIVE(≤300s) ${(100 * (ad.live_fraction || 0)).toFixed(1)}%</p>
+      <p class="muted">bands: ${Object.entries(ad.bands || {}).map(([k, v]) => `${esc(k)}=${v}`).join(" · ")}</p>
+      <h4>UPDATE FREQUENCY <span class="muted">· eu-swarm MatchTotal feed</span></h4>
+      <table class="ev-table"><thead><tr><th>tier (median interval)</th><th>games</th><th>N</th><th>win rate</th></tr></thead><tbody>${tierRows || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
+      <h4>GAME-WEIGHTED <span class="muted">· per-game rate first, then mean</span></h4>
+      <p>LIVE ${num(gw.live && gw.live.mean_rate, 3)} (${gw.live ? gw.live.games : 0} games) · STALE ${num(gw.stale && gw.stale.mean_rate, 3)} (${gw.stale ? gw.stale.games : 0} games)</p>
+    </div>
+    <div>
+      <h4>FIXED AGE BANDS <span class="muted">· boundaries fixed a-priori, never optimized</span></h4>
+      <table class="ev-table"><thead><tr><th>age</th><th>N</th><th>games</th><th>combined</th><th>OVER</th><th>UNDER</th></tr></thead><tbody>${bandRows || '<tr><td colspan=6>—</td></tr>'}</tbody></table>
+      <h4>CHECKPOINT CONTROL <span class="muted">· LIVE vs STALE per checkpoint</span></h4>
+      <table class="ev-table"><thead><tr><th>cp</th><th>N</th><th>LIVE</th><th>STALE</th><th>median age</th></tr></thead><tbody>${cpRows || '<tr><td colspan=5>—</td></tr>'}</tbody></table>
+      <h4>CHRONOLOGICAL CONTROL</h4>
+      <table class="ev-table"><thead><tr><th>date</th><th>games</th><th>LIVE</th><th>STALE</th></tr></thead><tbody>${blRows || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
+      <h4>MARKET FORECAST ERROR BY AGE <span class="muted">· mfe = final − line · retrospective OUTCOME diagnostic</span></h4>
+      <table class="ev-table"><thead><tr><th>age</th><th>N</th><th>mean mfe</th><th>mean |mfe|</th><th>over share</th></tr></thead><tbody>${mfeRows || '<tr><td colspan=5>—</td></tr>'}</tbody></table>
+    </div>
+    <div>
+      <h4>RESIDUAL × AGE — OVER <span class="muted">· win rate (N) · fixed bands, never optimized</span></h4>
+      ${rbaTable("OVER")}
+      <h4>RESIDUAL × AGE — UNDER</h4>
+      ${rbaTable("UNDER")}
+    </div>`;
+}
+
+async function refreshFreshness() {
+  try {
+    const resp = await fetch(API_FRESH);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    renderFreshness(await resp.json());
+  } catch (err) {
+    const grid = $("freshGrid");
+    if (grid) grid.innerHTML = `<div class="empty">Freshness audit unavailable (${esc(String(err))})</div>`;
+  }
+}
+
+$("freshToggle").addEventListener("click", () => {
+  const body = $("freshBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("freshToggle").setAttribute("aria-expanded", String(open));
+  $("freshToggle").classList.toggle("open", open);
+  if (open) {
+    refreshFreshness();
+    if (!freshTimer) freshTimer = setInterval(refreshFreshness, 60000);
+  } else if (freshTimer) {
+    clearInterval(freshTimer);
+    freshTimer = null;
+  }
+});
+
+/* ── RESIDUAL × MARKET-STATE VALIDATION (read-only) ── */
+
+const API_IVAL = "/api/v4/scorecard/interaction-validation";
+let ivalTimer = null;
+
+function ivalGridTable(grid, side, mags) {
+  const g = (grid || {})[side] || {};
+  const ages = Object.keys(g);
+  if (!ages.length) return '<p class="muted">no data</p>';
+  const head = `<tr><th>mag\\age</th>${ages.map((a) => `<th>${esc(a)}</th>`).join("")}</tr>`;
+  const body = (mags || []).map((m) => {
+    const cells = ages.map((a) => {
+      const c = (g[a] || []).find((x) => x.mag === m);
+      if (!c || !c.n) return "–";
+      const tag = c.status === "exploratory" ? "*" : "";
+      return `${num(c.win_rate, 2)}${tag} (${c.n})`;
+    });
+    return `<tr><td>${esc(m)}</td>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
+  }).join("");
+  return `<table class="ev-table"><thead>${head}</thead><tbody>${body}</tbody></table><p class="muted">* exploratory (N&lt;30) · otherwise evaluable</p>`;
+}
+
+function renderIval(payload) {
+  const grid = $("ivalGrid");
+  if (!grid) return;
+  if (!payload || !payload.population) {
+    grid.innerHTML = '<div class="empty">Interaction validation unavailable</div>';
+    return;
+  }
+  const pop = payload.population;
+  const summ = (payload.grid && payload.grid.summary) || {};
+  const so = payload.stale_over_mechanism || {};
+  const fu = payload.fresh_under_mechanism || {};
+  const gw = payload.game_weighted || {};
+  const base = payload.baselines || {};
+  const flags = payload.discovery_flags || {};
+  const flagRows = Object.entries(flags)
+    .map(([k, v]) => {
+      const c = v.cell || {};
+      const d = v.discovery || {};
+      return `<tr><td>${esc(k)}</td><td>${c.n ?? "–"}</td><td>${num(c.win_rate, 3)}</td><td>[${num(c.wilson_lo, 3)}, ${num(c.wilson_hi, 3)}]</td><td>${(v.persistence || {}).persistent_blocks ?? "–"}</td><td>${(v.persistence || {}).half_replication ? "yes" : "no"}</td><td>${esc(d.label || "")}</td></tr>`;
+    }).join("");
+  const soMags = Object.entries(so.by_magnitude || {})
+    .map(([m, c]) => `<tr><td>${esc(m)}</td><td>${c.n}</td><td>${num(c.win_rate, 3)}</td><td>[${num(c.wilson_lo, 3)}, ${num(c.wilson_hi, 3)}]</td></tr>`).join("");
+  const fuMags = Object.entries(fu.by_magnitude || {})
+    .map(([m, c]) => `<tr><td>${esc(m)}</td><td>${c.n}</td><td>${num(c.win_rate, 3)}</td><td>[${num(c.wilson_lo, 3)}, ${num(c.wilson_hi, 3)}]</td></tr>`).join("");
+  const mfeRows = ((payload.mfe_by_interaction || {}).cells || [])
+    .map((c) => `<tr><td>${esc(c.side)} ${esc(c.mag)} @${esc(c.age)}</td><td>${c.n}</td><td>${num(c.mean_mfe, 2)}</td><td>${num(c.mean_abs_mfe, 2)}</td></tr>`).join("");
+  grid.innerHTML = `
+    <div>
+      <h4>POPULATION <span class="muted">· rows ${pop.rows} · games ${pop.games} · cells ${summ.cells_total} (${summ.cells_evaluable} evaluable / ${summ.cells_exploratory} exploratory)</span></h4>
+      <h4>PRE-REGISTERED DISCOVERY FLAGS <span class="muted">· criteria a-d · never an edge claim</span></h4>
+      <table class="ev-table"><thead><tr><th>cell</th><th>N</th><th>rate</th><th>Wilson 95%</th><th>persist blocks</th><th>split-half</th><th>label</th></tr></thead><tbody>${flagRows || '<tr><td colspan=7>—</td></tr>'}</tbody></table>
+      <h4>BASELINES <span class="muted">· diagnostic</span></h4>
+      <p>raw direction ${num(base.raw_direction, 3)} · always-OVER ${num(base.always_over, 3)} · always-UNDER ${num(base.always_under, 3)} · age-only ${num(base.age_only_diagnostic, 3)}</p>
+      <h4>GAME-WEIGHTED EFFECTS <span class="muted">· per-game rate first</span></h4>
+      <p>stale-OVER: ckpt ${num(gw.stale_over && gw.stale_over.checkpoint_weighted_rate, 3)} / game ${num(gw.stale_over && gw.stale_over.game_weighted_rate, 3)} (${gw.stale_over ? gw.stale_over.games : 0} games) · fresh-UNDER: ckpt ${num(gw.fresh_under && gw.fresh_under.checkpoint_weighted_rate, 3)} / game ${num(gw.fresh_under && gw.fresh_under.game_weighted_rate, 3)} (${gw.fresh_under ? gw.fresh_under.games : 0} games)</p>
+    </div>
+    <div>
+      <h4>GRID — OVER <span class="muted">· residual magnitude × market age · every cell reported</span></h4>
+      ${ivalGridTable(payload.grid && payload.grid.grid, "OVER", payload.grid && payload.grid.mags)}
+      <h4>GRID — UNDER</h4>
+      ${ivalGridTable(payload.grid && payload.grid.grid, "UNDER", payload.grid && payload.grid.mags)}
+      <h4>STALE-OVER MAGNITUDE GRADIENT (&gt;300s) <span class="muted">· low-vs-high contrast: ${esc(JSON.stringify(so.low_vs_high_contrast && Object.fromEntries(Object.entries(so.low_vs_high_contrast).map(([k, v]) => [k, v.win_rate])) || {}))}</span></h4>
+      <table class="ev-table"><thead><tr><th>mag</th><th>N</th><th>rate</th><th>Wilson 95%</th></tr></thead><tbody>${soMags || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
+      <h4>FRESH-UNDER MAGNITUDE TABLE (0-5s)</h4>
+      <table class="ev-table"><thead><tr><th>mag</th><th>N</th><th>rate</th><th>Wilson 95%</th></tr></thead><tbody>${fuMags || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
+      <h4>MFE BY INTERACTION CELL <span class="muted">· retrospective OUTCOME diagnostic</span></h4>
+      <table class="ev-table"><thead><tr><th>cell</th><th>N</th><th>mean MFE</th><th>mean |MFE|</th></tr></thead><tbody>${mfeRows || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
+    </div>`;
+}
+
+async function refreshIval() {
+  try {
+    const resp = await fetch(API_IVAL);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    renderIval(await resp.json());
+  } catch (err) {
+    const grid = $("ivalGrid");
+    if (grid) grid.innerHTML = `<div class="empty">Interaction validation unavailable (${esc(String(err))})</div>`;
+  }
+}
+
+$("ivalToggle").addEventListener("click", () => {
+  const body = $("ivalBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("ivalToggle").setAttribute("aria-expanded", String(open));
+  $("ivalToggle").classList.toggle("open", open);
+  if (open) {
+    refreshIval();
+    if (!ivalTimer) ivalTimer = setInterval(refreshIval, 60000);
+  } else if (ivalTimer) {
+    clearInterval(ivalTimer);
+    ivalTimer = null;
+  }
+});
+
+/* ── PROSPECTIVE CONFIRMATION — FROZEN SPEC (read-only) ── */
+
+const API_CONF = "/api/v4/scorecard/prospective-confirmation";
+let confTimer = null;
+
+function confCellTable(cells) {
+  const rows = (cells || []).map((c) => {
+    const pe = c.pass_evaluation || {};
+    const checks = pe.checks || {};
+    const ok = (b) => (b ? "✓" : "✗");
+    return `<tr><td>${esc(c.side)} ${esc(c.mag)} @${esc(c.age)}</td><td>${c.n}</td><td>${c.games}</td><td>${num(c.win_rate, 3)}</td><td>[${num(c.wilson_lo, 3)}, ${num(c.wilson_hi, 3)}]</td><td>${ok(checks.n_ge_30)} ${ok(checks.rate_ge_060)} ${ok(checks.wilson_lo_gt_050)}</td><td>${pe.passed ? "PASS" : "—"}</td></tr>`;
+  }).join("");
+  return `<table class="ev-table"><thead><tr><th>cell</th><th>N</th><th>games</th><th>rate</th><th>Wilson 95%</th><th>n≥30 · rate≥.60 · wlo&gt;.50</th><th>verdict</th></tr></thead><tbody>${rows || '<tr><td colspan=7>—</td></tr>'}</tbody></table>`;
+}
+
+function renderConf(payload) {
+  const grid = $("confGrid");
+  if (!grid) return;
+  if (!payload || !payload.status) {
+    grid.innerHTML = '<div class="empty">Prospective confirmation unavailable</div>';
+    return;
+  }
+  const A = payload.A_discovery || {};
+  const B = payload.B_historical_validation || {};
+  const C = payload.C_prospective || {};
+  const ta = payload.terminology_audit || {};
+  const blocks = (B.chronological_blocks || [])
+    .map((b) => `<tr><td>${esc(b.block)}</td><td>${b.n}</td><td>${b.games}</td><td>${num(b.raw_accuracy, 3)}</td></tr>`).join("");
+  grid.innerHTML = `
+    <div>
+      <h4>TERMINOLOGY AUDIT <span class="muted">· chronological split within history is NOT prospective</span></h4>
+      <p class="muted">${esc(ta.note || "")}</p>
+      <h4>FREEZE GATE <span class="muted">· spec integrity enforced by sha256</span></h4>
+      <p>CONFIRMATION_FREEZE_TIMESTAMP <strong>${esc(payload.CONFIRMATION_FREEZE_TIMESTAMP || "")}</strong> · spec sha256 <code>${esc((payload.spec_sha256 || "").slice(0, 16))}…</code> intact=${payload.spec_intact ? "yes" : "NO"}</p>
+      <h4>A — HISTORICAL / DISCOVERY <span class="muted">· rows ${A.n_rows ?? 0} · games ${A.n_games ?? 0}</span></h4>
+      ${confCellTable((A.nominated_cells_in_A || []).map((c) => ({ ...c, pass_evaluation: { passed: false, checks: {} } })))}
+      <h4>B — HISTORICAL WALK-FORWARD <span class="muted">· NOT prospective · excluded from verdict</span></h4>
+      <table class="ev-table"><thead><tr><th>block</th><th>N</th><th>games</th><th>raw accuracy</th></tr></thead><tbody>${blocks || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
+      <h4>C — PROSPECTIVE POST-FREEZE <span class="muted">· rows ${C.n_rows ?? 0} · games ${C.n_games ?? 0} · ONLY C contributes to the verdict</span></h4>
+      ${confCellTable(C.nominated_cells)}
+      <h4>STATUS</h4>
+      <p><strong>${esc(payload.status)}</strong>${payload.status === "AWAITING_PROSPECTIVE_DATA" ? ' — no post-freeze observations exist yet; no result manufactured; frozen spec untouched while waiting.' : ""}</p>
+    </div>`;
+}
+
+async function refreshConf() {
+  try {
+    const resp = await fetch(API_CONF);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    renderConf(await resp.json());
+  } catch (err) {
+    const grid = $("confGrid");
+    if (grid) grid.innerHTML = `<div class="empty">Prospective confirmation unavailable (${esc(String(err))})</div>`;
+  }
+}
+
+$("confToggle").addEventListener("click", () => {
+  const body = $("confBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("confToggle").setAttribute("aria-expanded", String(open));
+  $("confToggle").classList.toggle("open", open);
+  if (open) {
+    refreshConf();
+    if (!confTimer) confTimer = setInterval(refreshConf, 60000);
+  } else if (confTimer) {
+    clearInterval(confTimer);
+    confTimer = null;
+  }
+});
+
 /* ── Wiring ──────────────────────────────────────────────── */
 
 function syncLiveToggle(total, visible) {

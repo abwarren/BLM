@@ -988,6 +988,83 @@ def v4_scorecard() -> dict:
     }
 
 
+@router.get("/scorecard/calibration")
+def v4_scorecard_calibration(
+    classification: Optional[str] = Query(None),
+) -> dict:
+    """CALIBRATION SLICE — read-only research section (no model changes).
+
+    Maps the EXISTING raw market-vs-fair direction to an empirical
+    probability: descriptive calibration first, then strict
+    chronological walk-forward logistic + isotonic calibration, OVER
+    and UNDER calibrated separately, LIVE/STALE reported separately,
+    checkpoint-weighted AND game-weighted metrics, baselines on the
+    exact same rows.  Terminal pct100 rows are excluded from the
+    primary calibration (live-score floor tautology) and stay available
+    via /api/v4/scorecard/events?checkpoint=100.  Produces NO betting
+    threshold, stake sizing or EV signal."""
+    from blm_v4.calibration import calibration_report, calibration_status
+    db = _db_path()
+    report = calibration_report(db, classification)
+    return {
+        "model_version": "v4-pace-1 (frozen — calibration never modifies "
+                         "the projection)",
+        "report": report,
+        "status": calibration_status(report),
+    }
+
+
+@router.get("/scorecard/freshness-audit")
+def v4_freshness_audit(
+    classification: Optional[str] = Query(None),
+) -> dict:
+    """STALE-vs-LIVE MECHANISM AUDIT — read-only forensic section.
+
+    Establishes WHY the directional relationship concentrates in STALE
+    rows: precise age distribution, fixed age bands, update frequency,
+    residual x age interaction, checkpoint / chronological / O-U /
+    game-level controls, and the retrospective market forecast error
+    diagnostic.  Temporal rule: age is computed strictly from
+    contemporaneous observations; the final score appears only in the
+    labelled OUTCOME diagnostic.  No betting output."""
+    from blm_v4.freshness_audit import freshness_report
+    db = _db_path()
+    return freshness_report(db, classification)
+
+
+@router.get("/scorecard/interaction-validation")
+def v4_interaction_validation(
+    classification: Optional[str] = Query(None),
+) -> dict:
+    """RESIDUAL x MARKET-STATE WALK-FORWARD VALIDATION — read-only.
+
+    Validates the freshness-audit interaction out-of-sample: fixed
+    pre-specified grids, Wilson uncertainty, checkpoint / chronological /
+    game-level controls, fresh-UNDER and stale-OVER mechanisms,
+    retrospective MFE cells, and diagnostic baselines.  No model is fit;
+    no betting output; multiple-comparison discipline enforced."""
+    from blm_v4.interaction_validation import interaction_report
+    db = _db_path()
+    return interaction_report(db, classification)
+
+
+@router.get("/scorecard/prospective-confirmation")
+def v4_prospective_confirmation(
+    classification: Optional[str] = Query("BETUAL_NBA"),
+) -> dict:
+    """PROSPECTIVE CONFIRMATION — read-only, frozen spec.
+
+    Enforces the terminology audit: only observations whose game and
+    checkpoint timestamps occur strictly AFTER CONFIRMATION_FREEZE_TIMESTAMP
+    count as prospective (population C).  Historical chronological
+    revalidation (B) is reported separately and can never contribute to
+    the confirmation verdict.  If no post-freeze rows exist the harness
+    reports AWAITING_PROSPECTIVE_DATA — no result is manufactured."""
+    from blm_v4.confirmation import confirmation_report
+    db = _db_path()
+    return confirmation_report(db, classification)
+
+
 @router.get("/trends")
 def v4_trends() -> dict:
     """Historical market & time-of-day trends over CLEAN games only.

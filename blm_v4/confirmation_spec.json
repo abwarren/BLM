@@ -1,0 +1,51 @@
+{
+  "spec_name": "BLM RESIDUAL x MARKET-STATE — PROSPECTIVE CONFIRMATION SPEC",
+  "version": 1,
+  "CONFIRMATION_FREEZE_TIMESTAMP": "2026-09-06T21:00:00Z",
+  "freeze_rationale": "Recorded before any post-freeze observation existed. At freeze time the production database contained no checkpoint_market row with checkpoint_timestamp or recorded_at after this instant (max observed: checkpoint 2026-09-06T09:40:57.151117Z, recorded 2026-09-06T09:50:30.515086Z). An observation is PROSPECTIVE only if its own checkpoint_timestamp is strictly after the freeze AND its game's first checkpoint is strictly after the freeze. Rows recorded before the freeze are HISTORICAL forever, regardless of which chronological block they fall in.",
+  "temporal_partition": {
+    "A_discovery": "All eligible rows with checkpoint_timestamp <= freeze (the population in which the interaction was found and nominated).",
+    "B_historical_validation": "Same data as A, re-scored chronologically WITHIN history (chronological blocks, split halves). This is NOT prospective. It may never contribute to the confirmation verdict.",
+    "C_prospective": "Eligible rows with checkpoint_timestamp > freeze AND whose game has NO checkpoint at or before the freeze. Only C contributes to the confirmation verdict."
+  },
+  "nominated_cells": [
+    {"side": "OVER",  "mag": "5-10",  "age": ">300s", "origin": "freshness_audit discovery; interaction_validation cell rate 0.689 (n=421, Wilson [0.643, 0.731])"},
+    {"side": "OVER",  "mag": "10-20", "age": ">300s", "origin": "freshness_audit discovery; interaction_validation cell rate 0.741 (n=328, Wilson [0.691, 0.785])"},
+    {"side": "OVER",  "mag": ">20",   "age": ">300s", "origin": "freshness_audit discovery; interaction_validation cell rate 0.781 (n=105, Wilson [0.693, 0.849])"},
+    {"side": "UNDER", "mag": "10-20", "age": "0-5s",  "origin": "freshness_audit discovery (fresh-line UNDER); interaction_validation cell rate 0.701 (n=194, Wilson [0.633, 0.761])"}
+  ],
+  "cell_definitions_frozen": {
+    "residual_magnitude_bands": [["0-2.5", 0.0, 2.5], ["2.5-5", 2.5, 5.0], ["5-10", 5.0, 10.0], ["10-20", 10.0, 20.0], [">20", 20.0, null]],
+    "market_age_bands_seconds": [["0-5s", 0, 5], ["5-10s", 5, 10], ["10-20s", 10, 20], ["20-30s", 20, 30], ["30-60s", 30, 60], ["60-120s", 60, 120], ["120-300s", 120, 300], [">300s", 300, null]],
+    "age_definition": "age_seconds = checkpoint_timestamp - market_timestamp of the frozen line, strictly contemporaneous (freshness_audit._ages, unchanged)",
+    "side_definition": "OVER if signed residual (blm_fair_value - live_market_line) > 0 else UNDER; NO_EDGE (residual == 0) excluded"
+  },
+  "confirmation_criteria_frozen": {
+    "primary_population": "BETUAL_NBA only (the discovery population). CYBER_2K26 reported as a separate labelled diagnostic, never pooled.",
+    "exclusions": "checkpoint_pct == 100 (terminal tautology) excluded from the primary population; rows without a valid live market line excluded; PUSH settlements excluded from denominators; game must be clean-ended under the unchanged _CM_ELIGIBLE_SQL eligibility.",
+    "cell_pass": "A nominated cell PASSES if: (1) N >= 30 prospective rows, (2) win rate >= 0.60, (3) Wilson 95% LOWER bound > 0.50.",
+    "overall_confirmation": "CONFIRMED requires ALL THREE stale-OVER nominated cells to PASS and at least ONE fresh-UNDER nominated cell to PASS. If fewer cells pass, the verdict is the honest label below.",
+    "verdict_labels": {
+      "AWAITING_PROSPECTIVE_DATA": "No eligible post-freeze row exists yet. The only permitted verdict until C is non-empty.",
+      "CONFIRMED": "All 3 stale-OVER cells pass AND at least 1 fresh-UNDER cell passes (C only).",
+      "NOT_CONFIRMED": "C is non-empty, minimum Ns are met, and the pass conditions fail.",
+      "INSUFFICIENT_PROSPECTIVE_N": "C is non-empty but every nominated cell has N < 30. Report the counts and stop — no partial credit, no pool-and-rescue."
+    },
+    "minimum_C_sample": "The verdict remains AWAITING_PROSPECTIVE_DATA until at least one nominated cell reaches N >= 30; below that the run is INSUFFICIENT_PROSPECTIVE_N only if some post-freeze rows exist.",
+    "forbidden_while_waiting": [
+      "no edits to nominated cells, bands, thresholds, or criteria",
+      "no re-selection of cells using any data (prospective or historical)",
+      "no model, projection, scorecard, calibration, or freshness code changes",
+      "no addition of predictive features",
+      "no pooling of C with A/B to reach N",
+      "no CYBER_2K26 substitution if BETUAL_NBA C runs dry",
+      "no interim 'promising' claims from partial C counts"
+    ]
+  },
+  "governance": {
+    "frozen_at": "2026-09-06T21:00:00Z",
+    "frozen_by": "interaction-validation slice directive (ADDITIONAL AUDIT REQUIREMENT)",
+    "hash_enforcement": "confirmation.py computes sha256 over this file's canonical bytes and refuses to evaluate if the hash differs from CONFIRMATION_SPEC_SHA256 recorded at freeze time — any later edit invalidates the confirmation.",
+    "companion_artifacts": "interaction_validation.py (grid machinery), freshness_audit.py (_ages), calibration.py (load_rows, wilson_ci) are frozen dependencies; their behaviour is pinned by the existing 389-test suite."
+  }
+}
