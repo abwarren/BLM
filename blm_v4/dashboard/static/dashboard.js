@@ -7,10 +7,13 @@
    observation surface for clean post-epoch data ONLY.  Cards and the
    detail modal present measured state — score/clock/elapsed, the live
    total line with freshness, and pace as Pts/Min measurements (current,
-   required, gap, recent, acceleration).  Charts plot observed
+   required, gap, recent, acceleration).   Charts plot observed
    time-series only.  There are NO model totals, no fair values, no
    projections, no probabilities, no edges, no confidence, no signals
-   and no recommendations anywhere in the live view.  Model/audit
+   and no recommendations anywhere in the live view.  The expanded game
+   view shows exactly ONE primary chart — SCORE vs LIVE LINE — MARKET
+   MOVEMENT — whose Z-score is consumed from the authoritative stored
+   deviation data (never computed in the frontend).  Model/audit
    diagnostics live exclusively in the collapsed HISTORICAL / AUDIT
    sections at the bottom, behind a top-level HISTORICAL / RESEARCH
    collapse that is closed by default and persisted to localStorage;
@@ -22,12 +25,17 @@
 const POLL_MS = 5000;
 const API_LIVE = "/api/v4/live";
 const API_GAME = (id) => `/api/v4/game/${encodeURIComponent(id)}`;
+// READ-ONLY additive exposure: the observed live-line history (every
+// valid observed line at its exact observation time — the same
+// market_observations rows the collector writes; no fabrication).
+const API_GAME_LINES = (id) => `/api/v4/game/${encodeURIComponent(id)}/market-lines`;
 
 const state = {
   filter: "",
   games: [],
   cards: new Map(),        // game_id -> {el, spark, detOpen, chartsOpen}
   modalGameId: null,
+  modalDetailOk: null,     // detail-endpoint liveness for the open modal (null = pending)
   modalCharts: {},
   hideNonLive: true,       // default view: LIVE games only
 };
@@ -1022,6 +1030,7 @@ function renderCards(payload) {
 function openModal(gameId) {
   if (!$("modalBackdrop").hidden) return; // already open — keep current view
   state.modalGameId = gameId;
+  state.modalDetailOk = null;
   $("modalBackdrop").hidden = false;
   document.body.style.overflow = "hidden";
   // render immediately from the live payload (never an empty overlay)
@@ -1035,6 +1044,7 @@ function closeModal() {
   $("modalBackdrop").hidden = true;
   document.body.style.overflow = "";
   state.modalGameId = null;
+  state.modalDetailOk = null;
   for (const k in state.modalCharts) {
     if (state.modalCharts[k]) state.modalCharts[k].destroy();
   }
@@ -1046,7 +1056,7 @@ function modalPanel(title, inner) {
 }
 
 function renderModal(g) {
-  const mkt = g.market || {}, mom = g.momentum || {}, p = g.projector || {};
+  const mkt = g.market || {}, p = g.projector || {};
   const invalid = g.quality_status === "INVALID";
   const full = fullMin(g);
   const isLive = g.live === true;
@@ -1085,7 +1095,10 @@ function renderModal(g) {
     <td class="sc-num">${num(c.actual_final, 0)}</td>
     <td><span class="pill muted">TERMINAL — SETTLEMENT ONLY</span><div class="muted" style="font-size:9px">${esc(c.exclusion_reason || "")}</div></td>
   </tr>`).join("");
-  const tl = (g.timeline || []).map((e) =>
+  // Live Timeline — observed score/market events only.  Momentum-type
+  // annotations are pace-derivative commentary and are excluded from the
+  // expanded game view, whose chart section is strictly observational.
+  const tl = (g.timeline || []).filter((e) => (e.type || "") !== "momentum").map((e) =>
     `<div class="tl-item"><span class="tl-time">${fmtTime(e.t)}</span><span class="tl-label ${esc(e.type)}">${esc(e.label)}</span></div>`
   ).join("") || '<div class="tl-item"><span class="muted">No events yet</span></div>';
   const rawJson = g.raw || g.latest_snapshot || null;
@@ -1098,6 +1111,11 @@ function renderModal(g) {
   $("mCat").className = `cat-badge ${esc(g.classification)}`;
   $("mTitle").textContent = `${g.home_team || "–"} vs ${g.away_team || "–"}`;
 
+  // Preserve the primary chart canvas across re-renders: re-attaching the
+  // SAME canvas node into the new markup keeps the Chart.js instance alive
+  // so the 5-second refresh updates the series in place instead of
+  // rebuilding — the chart never blinks out of the expanded game view.
+  const prevCanvas = !invalid ? document.getElementById("mcTotal") : null;
   $("modalBody").innerHTML = `
     ${g.data_quality === "LEGACY" ? `<div class="legacy-banner">LEGACY / PRE-CLEAN GAME — started before the clean-data epoch (${esc(String(g.data_epoch || "").slice(0, 19))}Z). Current state below uses post-epoch observations only; full pre-clean history is available via the audit path.</div>` : ""}
     <div class="m-hero">
@@ -1118,9 +1136,7 @@ function renderModal(g) {
     ${invalid ? "" : `<details class="m-chart-toggle" ${chartsOpen ? "open" : ""}>
       <summary data-label="CHARTS">CHARTS ${chartsOpen ? "▾" : "▸"}</summary>
       <div class="m-charts">
-        <div class="m-chart"><h4>Score Progression</h4><canvas id="mcScore"></canvas></div>
-        <div class="m-chart"><h4>Score vs Live Line — market movement</h4><canvas id="mcTotal"></canvas></div>
-        <div class="m-chart"><h4>Pace Trend (momentum history)</h4><canvas id="mcMomentum"></canvas></div>
+        <div class="m-chart m-chart-full"><h4>SCORE vs LIVE LINE — MARKET MOVEMENT</h4><div class="chart-box"><canvas id="mcTotal"></canvas></div></div>
       </div>
     </details>`}
     <div class="m-panels">
@@ -1145,14 +1161,6 @@ function renderModal(g) {
         <div class="m-row"><span class="k">Recent pace 1/2/3/5 min</span><span class="v">${pace(1)} / ${pace(2)} / ${pace(3)} / ${pace(5)}</span></div>
         <div class="m-row"><span class="k">Acceleration${p.acceleration_window ? ` (${esc(p.acceleration_window)})` : ""}</span><span class="v ${(p.pace_acceleration ?? 0) > 0 ? "pos" : (p.pace_acceleration ?? 0) < 0 ? "neg" : ""}">${signed(p.pace_acceleration)}</span></div>
         <div class="muted" style="font-size:10px;margin-top:6px">Deterministic observed pace — measurements only, not a probability and not a forecast.</div>
-      `)}
-      ${modalPanel("Pace Trend", `
-        <div class="big ${esc(mom.direction)}">${mom.direction === "up" ? "↗" : mom.direction === "down" ? "↘" : "→"} ${esc((mom.direction || "flat").toUpperCase())}</div>
-        <div class="m-rows" style="margin-top:8px">
-          <div class="m-row"><span class="k">Velocity</span><span class="v ${mom.velocity >= 0 ? "pos" : "neg"}">${mom.velocity >= 0 ? "+" : ""}${num(mom.velocity, 2)} pts/min</span></div>
-          <div class="m-row"><span class="k">Acceleration</span><span class="v ${mom.acceleration >= 0 ? "pos" : "neg"}">${mom.acceleration >= 0 ? "+" : ""}${num(mom.acceleration, 2)}</span></div>
-        </div>
-        <div class="bar-track" style="margin-top:10px"><div class="bar-fill ${mom.direction === "up" ? "green" : mom.direction === "down" ? "red" : ""}" style="width:${Math.min(100, Math.abs((mom.score || 50) - 50) * 2 + 5)}%"></div></div>
       `)}
     </div>
     <details class="m-details" ${detailsOpen ? "open" : ""}>
@@ -1192,9 +1200,19 @@ function renderModal(g) {
     </details>
     ${rawJson ? `<details class="tech-raw"><summary>Technical / Raw Data</summary><pre>${esc(typeof rawJson === "string" ? rawJson : JSON.stringify(rawJson, null, 2))}</pre></details>` : ""}`;
 
+  if (prevCanvas) {
+    const box = $("modalBody").querySelector(".chart-box");
+    if (box) {
+      const fresh = box.querySelector("canvas");
+      if (fresh) fresh.replaceWith(prevCanvas);
+    }
+  }
   bindCollapsible($("modalBody").querySelector(".m-chart-toggle"), PREF.CHARTS);
   bindCollapsible($("modalBody").querySelector(".m-details"), PREF.GAME_DETAILS);
-  renderModalCharts(invalid ? null : g);
+  // Fire-and-forget is fine, but failures must surface — a silent no-chart
+  // state is exactly the bug class this view must never ship again.
+  renderModalCharts(invalid ? null : g).catch((err) =>
+    console.error("[BLM] chart render failed:", err));
 }
 
 function baseChartOpts(yLabel) {
@@ -1216,7 +1234,7 @@ function baseChartOpts(yLabel) {
   };
 }
 
-function renderModalCharts(g) {
+async function renderModalCharts(g) {
   // INVALID games render no charts — gated (null) by renderModal.
   if (!g) {
     for (const k in state.modalCharts) {
@@ -1232,46 +1250,136 @@ function renderModalCharts(g) {
     });
     return;
   }
+  // ONE primary chart: SCORE vs LIVE LINE — MARKET MOVEMENT.
+  // Authoritative BLM series only (deviation endpoint = stored residuals
+  // + benchmark + Z; market_observations history = observed lines with
+  // exact timestamps).  No frontend Z computation, no interpolation,
+  // no fabricated lines: gaps stay gaps (spanGaps:false), stale/missing
+  // lines never substitute for live ones.
   const h = g.history || [];
-  const labels = h.map((s) => fmtTime(s.t));
+  let dev = null, lines = null;
+  // Both series are fetched in parallel — the deviation store and the
+  // observed market-line history are independent authoritative sources.
+  const [devRes, linesRes] = await Promise.allSettled([
+    fetch(API_GAME_DEV(g.game_id)).then((r) => (r.ok ? r.json() : null)),
+    fetch(API_GAME_LINES(g.game_id)).then((r) => (r.ok ? r.json() : null)),
+  ]);
+  if (devRes.status === "fulfilled") dev = devRes.value;
+  if (linesRes.status === "fulfilled") lines = linesRes.value;
+  // a failed fetch is not fatal — the chart renders from history alone
+  if (state.modalGameId !== g.game_id) return; // modal switched games mid-fetch
+  const series = (dev && dev.series) || [];
+  const lineObs = (lines && lines.observations) || [];
+  // epoch-ms x placement; unparseable timestamps are dropped (never guessed)
+  const tMs = (iso) => { const ms = Date.parse(iso); return Number.isFinite(ms) ? ms : null; };
+  // Live-line series: every valid observed line at its exact observation
+  // timestamp — movement is drawn only from real observations, never
+  // interpolated.  A genuine observation gap (adjacent=0) becomes an
+  // explicit null-y break placed at the PREVIOUS observation's own
+  // timestamp: the line stops at the last real value and restarts at the
+  // next one — no timestamp and no line value is ever manufactured.
+  const lineData = [];
+  let prevT = null;
+  for (const o of lineObs) {
+    const x = tMs(o.captured_at);
+    if (x == null || o.line_value == null) continue;
+    // A non-adjacent observation is an explicit break.  Mid-series it is
+    // placed at the PREVIOUS observation's own timestamp (the line stops
+    // there and restarts at the next real value); at series start it
+    // marks that no observation exists before this point.  Nothing is
+    // manufactured: no timestamp and no line value is ever invented.
+    if (!o.adjacent) lineData.push({ x: prevT != null ? prevT : x, y: null });
+    lineData.push({ x, y: o.line_value });
+    prevT = x;
+  }
+  // Trajectory / residual / Z — the authoritative stored values from the
+  // deviation layer (benchmark-standardized; the frontend never computes
+  // z).  A missing value stays missing (null → gap), never substituted.
+  const devPts = (key) => series.map((s) => {
+    const x = tMs(s.captured_at);
+    return x == null ? null : { x, y: s[key] };
+  }).filter(Boolean);
+  // Current Z readout — the authoritative stored z_score of the latest
+  // eligible deviation observation (never computed in the frontend).
+  const last = series.length ? series[series.length - 1] : null;
+  const zTxt = last ? (last.z_score != null ? `z = ${num(last.z_score, 2)}`
+    : "z = n/a") : "z = n/a";
+  const opts = baseChartOpts("Points / line");
+  // Wall-clock x axis WITHOUT the Chart.js time scale: no date adapter is
+  // loaded (CDN core only), so a `type:"time"` scale would throw at
+  // construction.  A linear epoch-ms axis with clock-formatted ticks
+  // shows the exact same observation timestamps with zero extra deps.
+  opts.interaction = { mode: "nearest", intersect: false };
+  opts.scales.x = {
+    type: "linear",
+    ticks: { color: ChartColor.tick, maxTicksLimit: 8, font: { size: 9, family: "monospace" },
+      callback: (v) => fmtTime(new Date(v).toISOString()) },
+    grid: { color: ChartColor.grid },
+  };
+  // residual + Z keep their own scales — plotted as stored, never
+  // rescaled into the points axis
+  opts.scales.y2 = { display: false };
+  opts.scales.y3 = { display: false };
+  // Z readout on the chart itself — the authoritative stored z_score of
+  // the latest eligible deviation observation, or n/a when none exists
+  opts.plugins.title = {
+    display: true, text: `Z-SCORE GAP · ${zTxt}`,
+    color: ChartColor.tick, font: { size: 10, family: "monospace" }, padding: 2,
+  };
   const mk = (id) => document.getElementById(id);
+  const scoreData = h.map((s) => { const x = tMs(s.t); return x == null ? null : { x, y: s.combined }; });
+  const trajData = devPts("projected_final_total");
+  const residData = devPts("market_trajectory_residual");
+  const zData = devPts("z_score");
+  // Fast path — renderModal re-attaches the same canvas node, so a live
+  // chart for this game is updated in place: the plotted series refresh
+  // and the chart never blinks out during the fetch window.
+  const prev = state.modalCharts.total;
+  if (prev && prev.$gameId === g.game_id && prev.canvas && prev.canvas.isConnected) {
+    prev.data.datasets[0].data = scoreData;
+    prev.data.datasets[1].data = lineData;
+    prev.data.datasets[2].data = trajData;
+    prev.data.datasets[3].data = residData;
+    prev.data.datasets[4].data = zData;
+    prev.options.plugins.title.text = `Z-SCORE GAP · ${zTxt}`;
+    prev.$devCount = series.length;
+    prev.update("none");
+    return;
+  }
   for (const k in state.modalCharts) {
     if (state.modalCharts[k]) state.modalCharts[k].destroy();
   }
   state.modalCharts = {};
-
-  state.modalCharts.score = new Chart(mk("mcScore"), {
+  const canvas = mk("mcTotal");
+  const stale = Chart.getChart(canvas); // never build over a live instance
+  if (stale) stale.destroy();
+  state.modalCharts.total = new Chart(canvas, {
     type: "line",
-    data: { labels, datasets: [
-      { label: g.home_team, data: h.map((s) => s.home), borderColor: ChartColor.home,
-        backgroundColor: "rgba(34,211,238,.08)", fill: true, pointRadius: 0, tension: .25 },
-      { label: g.away_team, data: h.map((s) => s.away), borderColor: ChartColor.away,
-        backgroundColor: "rgba(251,191,36,.08)", fill: true, pointRadius: 0, tension: .25 },
+    data: { datasets: [
+      // A · actual cumulative score (observed)
+      { label: "Actual score (combined)", data: scoreData,
+        borderColor: "#eaf2ff", backgroundColor: "rgba(234,242,255,.06)",
+        fill: false, pointRadius: 0, tension: .25, spanGaps: false },
+      // B · every valid observed live line, exact timestamps, movement as-is
+      { label: "Live O/U line", data: lineData, borderColor: ChartColor.market,
+        pointRadius: 1.5, pointHoverRadius: 3, tension: 0, spanGaps: false },
+      // C · BLM trajectory (stored projected final total)
+      { label: "BLM trajectory (projected final total)", data: trajData,
+        borderColor: "#34d399", backgroundColor: "rgba(52,211,153,.06)",
+        fill: false, pointRadius: 1.5, pointHoverRadius: 3, tension: .15, spanGaps: false },
+      // D · market − trajectory residual (stored, signed)
+      { label: "Market − trajectory residual", data: residData,
+        borderColor: "#22d3ee", pointRadius: 1.5, pointHoverRadius: 3,
+        tension: .15, spanGaps: false, yAxisID: "y2" },
+      // E · Z-score (authoritative stored value, signed) on its own scale
+      { label: "Z-score", data: zData,
+        borderColor: "#eaf2ff", borderDash: [2, 3], pointRadius: 1.5,
+        pointHoverRadius: 3, tension: .15, spanGaps: false, yAxisID: "y3" },
     ]},
-    options: baseChartOpts("Points"),
+    options: opts,
   });
-
-  // Score vs Live Line — observed series only: the running combined score
-  // against the observed market total line.  No model series, no forecast.
-  state.modalCharts.total = new Chart(mk("mcTotal"), {
-    type: "line",
-    data: { labels, datasets: [
-      { label: "Actual (combined)", data: h.map((s) => s.combined), borderColor: "#eaf2ff", pointRadius: 0, tension: .25 },
-      { label: "Market total", data: h.map((s) => s.total_line), borderColor: ChartColor.market, borderDash: [6, 4], pointRadius: 0 },
-    ]},
-    options: baseChartOpts("Points"),
-  });
-
-  // Pace trend (momentum history) — observed scoring-rate index per
-  // snapshot; a factual time-series, not a prediction.
-  state.modalCharts.momentum = new Chart(mk("mcMomentum"), {
-    type: "line",
-    data: { labels, datasets: [
-      { label: "Momentum", data: h.map((s) => s.momentum_score), borderColor: ChartColor.momentum,
-        backgroundColor: "rgba(52,211,153,.08)", fill: true, pointRadius: 0, tension: .25 },
-    ]},
-    options: baseChartOpts("Score 0–100"),
-  });
+  state.modalCharts.total.$gameId = g.game_id;
+  state.modalCharts.total.$devCount = series.length;
 }
 
 async function loadModalDetail(gameId) {
@@ -1280,8 +1388,10 @@ async function loadModalDetail(gameId) {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const d = await resp.json();
     if (state.modalGameId !== gameId || $("modalBackdrop").hidden) return;
+    state.modalDetailOk = true;
     renderModal(d);
   } catch (err) {
+    if (state.modalGameId === gameId) state.modalDetailOk = false;
     // keep the cached live render — never show an empty overlay
     const box = $("modalBody").querySelector(".tech-raw");
     if (!box) $("modalBody").insertAdjacentHTML("beforeend",
@@ -1301,9 +1411,14 @@ async function refresh() {
     renderStatus(payload);
     renderSummary(payload);
     renderCards(payload);
-    // game vanished while its detail was open → close cleanly
+    // The open modal's game is absent from the live payload — but that
+    // list is not the authority on existence: the detail endpoint serves
+    // ended/stale games too.  Keep the modal and its chart alive by
+    // refreshing from the detail source; close cleanly only once the
+    // detail fetch itself has failed (game truly gone).
     if (state.modalGameId && !state.games.some((g) => g.game_id === state.modalGameId)) {
-      closeModal();
+      if (state.modalDetailOk === false) closeModal();
+      else if (!$("modalBackdrop").hidden) loadModalDetail(state.modalGameId);
     } else if (state.modalGameId && !$("modalBackdrop").hidden) {
       loadModalDetail(state.modalGameId);
     }

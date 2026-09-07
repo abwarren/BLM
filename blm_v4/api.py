@@ -1584,3 +1584,61 @@ def v4_game_deviation(game_id: str) -> dict:
         "buckets": buckets, "maturity": _MATURITY_LIMITS,
         "note": _DEVIATION_NOTE,
     }
+
+
+@router.get("/game/{game_id}/market-lines")
+def v4_game_market_lines(game_id: str) -> dict:
+    """Observed live O/U line history for one game — READ-ONLY additive
+    exposure for the primary game chart (SCORE vs LIVE LINE — MARKET
+    MOVEMENT).  Every stored market_observations row of type MatchTotal
+    at its exact capture time; clean-epoch boundary only (pre-epoch rows
+    are audit data, reachable via /api/v4/history).  No research
+    calculation is touched: this reads the collector's own market
+    observations.  Gaps between observations stay gaps — the frontend
+    must never interpolate, substitute, or fabricate a line."""
+    conn = _connect()
+    try:
+        has = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='market_observations'").fetchone()
+        if not has:
+            return {"game_id": game_id, "section": "market_line_history",
+                    "data_epoch": CLEAN_DATA_EPOCH, "total": 0,
+                    "observations": []}
+        rows = conn.execute(
+            """SELECT captured_at, line_value, over_price, under_price,
+                      home_score, away_score, period_label, clock
+               FROM market_observations
+               WHERE source_game_id = ? AND market_type = 'MatchTotal'
+                 AND captured_at >= ? AND line_value IS NOT NULL
+               ORDER BY captured_at ASC, id ASC""",
+            (game_id, CLEAN_DATA_EPOCH),
+        ).fetchall()
+        out = []
+        prev = None
+        for r in rows:
+            t = r["captured_at"]
+            adjacent = 0
+            if prev is not None:
+                try:
+                    dt = (_parse_ts(t) - _parse_ts(prev)).total_seconds()
+                    adjacent = 1 if dt <= 120 else 0
+                except Exception:
+                    adjacent = 0
+            out.append({
+                "captured_at": t,
+                "line_value": _f(r["line_value"]),
+                "over_price": _f(r["over_price"]),
+                "under_price": _f(r["under_price"]),
+                "home_score": _i(r["home_score"]),
+                "away_score": _i(r["away_score"]),
+                "period_label": r["period_label"],
+                "clock": r["clock"],
+                "adjacent": adjacent,
+            })
+            prev = t
+    finally:
+        conn.close()
+    return {"game_id": game_id, "section": "market_line_history",
+            "data_epoch": CLEAN_DATA_EPOCH, "total": len(out),
+            "observations": out}
