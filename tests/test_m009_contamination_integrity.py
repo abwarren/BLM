@@ -233,9 +233,10 @@ def test_historical_rows_retained_and_auditable(client):
     assert r50["live_market_line"] is not None
     assert r50["checkpoint_timestamp"] is not None
     assert r50["blm_fair_value"] is not None
-    # game detail (diagnostic) still shows the historical rows
+    # game detail (diagnostic) still shows the historical rows —
+    # predictive view (9 non-terminal) + settlement view (1 terminal)
     d = c.get("/api/v4/game/G-REV").json()
-    assert len(d["market_vs_fair"]) == 10
+    assert len(d["market_vs_fair"]) + len(d["market_vs_fair_settlement"]) == 10
     # events (headline) must NOT include them
     ev = c.get("/api/v4/scorecard/events").json()
     assert all(r["game"] != "G-REV" for r in ev["rows"])

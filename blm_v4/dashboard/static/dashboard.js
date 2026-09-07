@@ -1073,6 +1073,18 @@ function renderModal(g) {
     <td class="sc-num">${num(c.market_at_checkpoint, 1)}</td>
     <td class="muted" style="font-size:10px">${c.source_snapshot_at ? `@ ${fmtTime(c.source_snapshot_at)}` : "–"}</td>
   </tr>`).join("");
+  // SETTLEMENT / TERMINAL — the game's end-state checkpoint(s), served
+  // separately from the predictive table (directive).  The stored row is
+  // never deleted: it stays available as settlement/audit data with
+  // predictive_eligible=0, so the end state can never be mistaken for a
+  // predictive checkpoint.
+  const settle = (g.checkpoints_settlement || []).map((c) => `<tr>
+    <td><b>${esc(c.label)}</b><div class="muted" style="font-size:9px">${fmtTime(c.predicted_at)}</div></td>
+    <td class="sc-num">${num(c.market_at_checkpoint, 1)}</td>
+    <td class="muted" style="font-size:10px">${c.elapsed_minutes != null ? `${num(c.elapsed_minutes, 2)} min · ${c.progress != null ? (c.progress * 100).toFixed(1) : "–"}%` : "–"}</td>
+    <td class="sc-num">${num(c.actual_final, 0)}</td>
+    <td><span class="pill muted">TERMINAL — SETTLEMENT ONLY</span><div class="muted" style="font-size:9px">${esc(c.exclusion_reason || "")}</div></td>
+  </tr>`).join("");
   const tl = (g.timeline || []).map((e) =>
     `<div class="tl-item"><span class="tl-time">${fmtTime(e.t)}</span><span class="tl-label ${esc(e.type)}">${esc(e.label)}</span></div>`
   ).join("") || '<div class="tl-item"><span class="muted">No events yet</span></div>';
@@ -1146,12 +1158,20 @@ function renderModal(g) {
     <details class="m-details" ${detailsOpen ? "open" : ""}>
       <summary data-label="DETAILS">DETAILS ${detailsOpen ? "▾" : "▸"}</summary>
       ${cps.length ? `<div class="m-panel m-wide">
-        <h4>CHECKPOINTS — frozen market at each checkpoint</h4>
+        <h4>PREDICTIVE CHECKPOINTS — 10–90% non-terminal observations</h4>
         <table class="sc-table">
           <tr><th>Check</th><th>Market @CP</th><th>Snapshot</th></tr>
           ${cps}
         </table>
-        <div class="muted" style="font-size:10px;margin-top:6px">Market line frozen at-or-before each checkpoint from stored observations — later movement never rewrites these rows; missing market shown as –.</div>
+        <div class="muted" style="font-size:10px;margin-top:6px">Market line frozen at-or-before each checkpoint from stored observations — later movement never rewrites these rows; missing market shown as –. The terminal end-state row is served under SETTLEMENT / TERMINAL below — never deleted, never predictive.</div>
+      </div>` : ""}
+      ${settle.length ? `<div class="m-panel m-wide">
+        <h4>SETTLEMENT / TERMINAL</h4>
+        <table class="sc-table">
+          <tr><th>Check</th><th>Market @CP</th><th>Game time</th><th>Actual</th><th>State</th></tr>
+          ${settle}
+        </table>
+        <div class="muted" style="font-size:10px;margin-top:6px">Terminal observation (the game's end state, e.g. 100.0% / 40.00/40.00) — settlement/audit only: predictive_eligible=0, absent from every predictive checkpoint table and research statistic. The stored row is preserved (never deleted).</div>
       </div>` : ""}
       <div class="timeline"><h4>Live Timeline (from stored snapshots)</h4>${tl}</div>
       <div class="m-panel m-wide">

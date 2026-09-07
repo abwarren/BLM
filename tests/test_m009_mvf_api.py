@@ -76,12 +76,18 @@ def _mvf(client, gid):
 
 
 def test_detail_exposes_market_vs_fair_rows(client):
-    """G-MIX: market_vs_fair[] present, ordered, full field set."""
+    """G-MIX: market_vs_fair[] present, ordered, full field set.
+    Predictive view carries the NON-TERMINAL checkpoints (10-90%); the
+    terminal 100% end state is served separately as settlement/audit."""
     body = _mvf(client, "G-MIX")
     rows = body.get("market_vs_fair")
     assert rows, "market_vs_fair must be non-empty for a clean game"
-    assert [r["checkpoint_pct"] for r in rows] == list(range(10, 101, 10))
-    for r in rows:
+    assert [r["checkpoint_pct"] for r in rows] == list(range(10, 100, 10))
+    settle = body.get("market_vs_fair_settlement")
+    assert [r["checkpoint_pct"] for r in settle] == [100]
+    assert all(r["terminal"] == 1 and r["predictive_eligible"] == 0
+               for r in settle)
+    for r in rows + settle:
         for key in ("checkpoint_pct", "checkpoint_timestamp", "opening_line",
                     "live_market_line", "blm_fair_value", "closing_line",
                     "actual_final_total", "market_vs_fair", "signal",

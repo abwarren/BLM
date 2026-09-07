@@ -321,8 +321,12 @@ def test_ws_multi_line_batch_freezes_lowest_line(client, db, sc):
 
 
 def test_dashboard_detail_modal_renders_checkpoint_table(client, sc):
-    """The deployed detail modal must carry the checkpoint table columns."""
+    """The deployed detail modal must carry the PREDICTIVE checkpoint
+    table columns, with the terminal end state served separately as
+    SETTLEMENT / TERMINAL (never inside the predictive table)."""
     js = client.get("/static/dashboard.js").text
-    assert "CHECKPOINTS — frozen market at each checkpoint" in js
+    assert "PREDICTIVE CHECKPOINTS — 10–90% non-terminal observations" in js
+    assert "SETTLEMENT / TERMINAL" in js
     assert "Market @CP" in js
     assert "market_at_checkpoint" in js
+    assert "checkpoints_settlement" in js

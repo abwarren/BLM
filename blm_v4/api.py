@@ -119,6 +119,22 @@ def _checkpoint_label(cp: Optional[str], pct: Optional[float]) -> str:
     return cp or "–"
 
 
+def _pred_terminal_sql(conn: sqlite3.Connection) -> str:
+    """Terminal classifier for the predictions table at the DB's actual
+    schema state (defensive, same semantics as
+    ``terminal_eligibility.pred_nonterminal_sql``): prefer the stamped
+    ``terminal`` column (written by the scorecard migration); rows
+    predating the stamp are classified by their recorded game progress
+    (progress >= 1.0 = the terminal snapshot).  Never the bucket label."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(predictions)")}
+    if "terminal" in cols:
+        return ("COALESCE(terminal, CASE WHEN COALESCE(progress, 0) >= 1.0 "
+                "THEN 1 ELSE 0 END)")
+    if "progress" in cols:
+        return "CASE WHEN COALESCE(progress, 0) >= 1.0 THEN 1 ELSE 0 END"
+    return "0"
+
+
 def _game_checkpoints(conn: sqlite3.Connection,
                       source_game_id: str) -> list[dict]:
     """Historical checkpoint rows for the game-detail table.
@@ -129,6 +145,14 @@ def _game_checkpoints(conn: sqlite3.Connection,
     never reconstructed).  Missing markets stay NULL.  The final result and
     the per-checkpoint error are attached only when a verified result
     exists — no result, no error.
+
+    PREDICTIVE SET (directive): only NON-TERMINAL observations —
+    ``COALESCE(terminal, progress>=1.0) = 0`` (the shared
+    ``pred_nonterminal_sql`` predicate; the COALESCE keeps pre-stamp rows
+    classified by their recorded game progress).  The terminal row (the
+    game's end state, e.g. 40.00/40.00 = 100.0%) is SETTLEMENT/AUDIT
+    data: it is served separately in ``checkpoints_settlement`` and is
+    NEVER deleted from storage.
     """
     # A DB the scorecard has never touched has no checkpoint rows yet.
     has = conn.execute(
@@ -136,12 +160,13 @@ def _game_checkpoints(conn: sqlite3.Connection,
     ).fetchone()
     if not has:
         return []
+    tsql = _pred_terminal_sql(conn)
     rows = conn.execute(
-        """SELECT checkpoint, checkpoint_percent, quarter, predicted_at,
-                  source_snapshot_at, projected_total, market_total
-           FROM predictions
-           WHERE source_game_id = ?
-           ORDER BY source_snapshot_at ASC, checkpoint ASC""",
+        f"""SELECT checkpoint, checkpoint_percent, quarter, predicted_at,
+                   source_snapshot_at, projected_total, market_total
+            FROM predictions
+            WHERE source_game_id = ? AND {tsql} = 0
+            ORDER BY source_snapshot_at ASC, checkpoint ASC""",
         (source_game_id,),
     ).fetchall()
     res = conn.execute(
@@ -168,6 +193,57 @@ def _game_checkpoints(conn: sqlite3.Connection,
             "error": (round(blm - actual, 2)
                       if blm is not None and actual is not None else None),
         })
+    return out
+
+
+def _prediction_settlement_rows(conn: sqlite3.Connection,
+                                source_game_id: str) -> list[dict]:
+    """Terminal prediction rows, SETTLEMENT/AUDIT ONLY (directive).
+
+    Same storage as ``_game_checkpoints`` — the rows are never deleted,
+    never rewritten — but served through this separate collection so no
+    consumer can mistake the game's end state for a predictive
+    checkpoint.  Every row carries its explicit exclusion state
+    (terminal=1, predictive_eligible=0, reason).
+    """
+    has = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='predictions'"
+    ).fetchone()
+    if not has:
+        return []
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(predictions)")}
+    stamped = [c for c in ("terminal", "predictive_eligible",
+                           "exclusion_reason") if c in cols]
+    extra = (", " + ", ".join(stamped)) if stamped else ""
+    tsql = _pred_terminal_sql(conn)
+    rows = conn.execute(
+        f"""SELECT checkpoint, checkpoint_percent, quarter, predicted_at,
+                   source_snapshot_at, elapsed_minutes, progress,
+                   projected_total, market_total{extra}
+            FROM predictions
+            WHERE source_game_id = ? AND {tsql} = 1
+            ORDER BY source_snapshot_at ASC, checkpoint ASC""",
+        (source_game_id,),
+    ).fetchall()
+    res = conn.execute(
+        "SELECT final_total FROM game_results WHERE source_game_id = ?",
+        (source_game_id,),
+    ).fetchone()
+    actual = _f(res["final_total"]) if res else None
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        d["check"] = d["checkpoint"]
+        d["label"] = _checkpoint_label(d["checkpoint"], d["checkpoint_percent"])
+        d["market_at_checkpoint"] = _f(d.get("market_total"))
+        d["actual_final"] = actual
+        term = bool(d.get("terminal"))
+        d["terminal"] = 1 if term else 0
+        d["predictive_eligible"] = 0
+        d["predictive_validation"] = predictive_validation_label(True)
+        d["exclusion_reason"] = (d.get("exclusion_reason")
+                                 or TERMINAL_EXCLUSION_REASON)
+        out.append(d)
     return out
 
 
@@ -1322,13 +1398,14 @@ def v4_game_detail(game_id: str) -> dict:
         detail["market_vs_fair"] = [c for c in detail["market_vs_fair"]
                                      if (c.get("checkpoint_timestamp") or "")
                                      >= CLEAN_DATA_EPOCH]
-        # TERMINAL EXCLUSION (directive): terminal rows stay visible here
-        # (settlement/audit/game reconstruction) but carry their explicit
-        # exclusion state so no consumer can mistake them for research
-        # evidence: terminal=1, predictive_eligible=0,
-        # predictive_validation="PREDICTIVE VALIDATION: EXCLUDED",
-        # exclusion_reason="TERMINAL CHECKPOINT".
-        for c in detail["market_vs_fair"]:
+        # TERMINAL SEPARATION (directive): PREDICTIVE CHECKPOINTS default
+        # to predictive_eligible=1 / terminal=0 — the game's end state
+        # (e.g. 40.00/40.00 = 100.0% TERMINAL) is served separately as
+        # SETTLEMENT / TERMINAL audit data.  Same storage, same immutable
+        # rows, same authoritative game-time predicate (never the bucket
+        # label); nothing is deleted.
+        all_mvf = detail["market_vs_fair"]
+        for c in all_mvf:
             # BUCKET-INDEPENDENT (directive): the checkpoint bucket is
             # never terminal evidence — the row's own game-time decides.
             term = is_terminal_checkpoint(
@@ -1344,14 +1421,17 @@ def v4_game_detail(game_id: str) -> dict:
             c["predictive_eligible"] = 0 if term else 1
             c["predictive_validation"] = predictive_validation_label(term)
             c["exclusion_reason"] = TERMINAL_EXCLUSION_REASON if term else None
+        detail["market_vs_fair_settlement"] = [c for c in all_mvf
+                                                if c["terminal"]]
+        detail["market_vs_fair"] = [c for c in all_mvf if not c["terminal"]]
+        detail["checkpoints_settlement"] = _prediction_settlement_rows(
+            conn, game["source_game_id"])
         detail["terminal_exclusion"] = {
             "rule": "TERMINAL = SETTLEMENT/AUDIT ONLY; "
                     "NON-TERMINAL = PREDICTIVE RESEARCH ELIGIBLE",
-            "n_rows": len(detail["market_vs_fair"]),
-            "n_terminal": sum(1 for c in detail["market_vs_fair"]
-                              if c["terminal"]),
-            "n_predictive_eligible": sum(1 for c in detail["market_vs_fair"]
-                                         if c["predictive_eligible"]),
+            "n_rows": len(all_mvf),
+            "n_terminal": len(detail["market_vs_fair_settlement"]),
+            "n_predictive_eligible": len(detail["market_vs_fair"]),
         }
         detail["timeline"] = _timeline_events(rows, game["classification"])
         detail["raw"] = rows[-1] if rows else None

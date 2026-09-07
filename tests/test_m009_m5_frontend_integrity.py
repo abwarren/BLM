@@ -189,7 +189,8 @@ def test_no_trap_signal_ui_in_live_view(client):
     assert "bull_trap" not in js
     assert "trap_meter" not in js
     assert "False Mom" not in js
-    assert "CHECKPOINTS — frozen market at each checkpoint" in js
+    assert "PREDICTIVE CHECKPOINTS — 10–90% non-terminal observations" in js
+    assert "SETTLEMENT / TERMINAL" in js
     assert "Market @CP" in js
     assert "market_at_checkpoint" in js
 
