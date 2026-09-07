@@ -166,9 +166,21 @@ class PokerBetStore:
         if not read_only:
             self._init()
 
+    @property
+    def db_path(self) -> Path:
+        """Location of the main operational database file."""
+        return self._db_path
+
     def _connect(self) -> sqlite3.Connection:
         uri = f"file:{self._db_path}?mode=ro" if False else str(self._db_path)
-        conn = sqlite3.connect(uri, timeout=30)
+        # timeout = SQLite busy_timeout (seconds).  The server's scorecard
+        # holds per-section write transactions on this same DB for ~30-90s
+        # windows; 30s was shorter than a window, so live snapshot/market
+        # writes failed with "database is locked" and the collector
+        # relaunched healthy browsers.  90s waits out a section window —
+        # transient cross-process contention must never drop an
+        # observation or kill a live session.
+        conn = sqlite3.connect(uri, timeout=90)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -233,6 +245,31 @@ class PokerBetStore:
                     (source_game_id,),
                 ).fetchone()
                 return dict(row) if row else None
+            finally:
+                conn.close()
+
+    def get_recorded_final(self, source_game_id: str) -> Optional[dict]:
+        """Read-only lookup of a recorded final result (game_results), if any.
+
+        game_results is created/written by the scorecard (server-side), so
+        the table may not exist on a fresh DB — a missing table reads as
+        "no recorded final".  Used by the collector's replay guard to prove
+        a fixture has already finished before classifying an earlier
+        observed frame as a replay.
+        """
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT final_home, final_away, final_total, "
+                    "final_result_status, result_at FROM game_results "
+                    "WHERE source_game_id = ?",
+                    (source_game_id,),
+                ).fetchone()
+                return dict(row) if row else None
+            except sqlite3.OperationalError:
+                # no game_results table yet (scorecard has never run)
+                return None
             finally:
                 conn.close()
 
@@ -461,6 +498,55 @@ class PokerBetStore:
                     ORDER BY line_value ASC LIMIT 1
                 """, (source_game_id, market_type, source_game_id, market_type)).fetchone()
                 return dict(r) if r else None
+            finally:
+                conn.close()
+
+    def latest_market_batch(
+        self, source_game_id: str, market_type: str = "MatchTotal",
+    ) -> list[dict]:
+        """ALL rows of the most recent WS market observation batch (every
+        distinct line at the latest captured_at, ascending by line).
+
+        The book offers a RANGE of O/U lines per game at one capture
+        (204.5/206.5/208.5) — the clean-metrics writer preserves every
+        line identity instead of collapsing to one value.
+        """
+        with self._lock:
+            conn = self._connect()
+            try:
+                return [dict(r) for r in conn.execute("""
+                    SELECT * FROM market_observations
+                    WHERE source_game_id=? AND market_type=?
+                      AND captured_at = (
+                          SELECT MAX(captured_at) FROM market_observations
+                          WHERE source_game_id=? AND market_type=?)
+                    ORDER BY line_value ASC
+                """, (source_game_id, market_type, source_game_id, market_type)).fetchall()]
+            finally:
+                conn.close()
+
+    def game_has_market_line(self, source_game_id: str) -> bool:
+        """True when a verified MatchTotal market line exists for the game
+        (a market_observations MatchTotal row OR a snapshot carrying
+        total_line).  Used by the collector's early-checkpoint priority to
+        detect games that have never had a line captured."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                r = conn.execute(
+                    "SELECT 1 FROM market_observations "
+                    "WHERE source_game_id=? AND market_type='MatchTotal' "
+                    "AND line_value IS NOT NULL LIMIT 1",
+                    (source_game_id,),
+                ).fetchone()
+                if r:
+                    return True
+                r = conn.execute(
+                    "SELECT 1 FROM snapshots WHERE source_game_id=? "
+                    "AND total_line IS NOT NULL LIMIT 1",
+                    (source_game_id,),
+                ).fetchone()
+                return r is not None
             finally:
                 conn.close()
 

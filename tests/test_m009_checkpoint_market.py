@@ -91,8 +91,8 @@ def _build(db: Path, gid: str, *, status: str = "ended", nsnaps: int = 20,
         q = i // 5 + 1
         clock = "00:00" if (i == nsnaps - 1 and q >= 4) else _CLOCKS[i % 5]
         hs, as_ = _HOME[i], _AWAY[i]
-        if dip and i == 6:  # score regression -> quality INVALID
-            hs = _HOME[5] - 1
+        if dip and i == 6:  # genuine regression (> tolerance) -> INVALID
+            hs = _HOME[5] - 5   # 5-pt drop, over the 4-pt transient tolerance
         obs = MarketObservation(
             source="PokerBet", source_game_id=gid, classification="BETUAL_NBA",
             captured_at=_iso(t),
@@ -190,7 +190,7 @@ def test_cm_signed_disparity_and_signal(sc):
     # pct50: fair 148.x vs market 180 -> POSITIVE disparity
     assert rows[50]["market_vs_fair"] > 0
     assert rows[50]["signal"] == "UNDER_VALUE"
-    # pct100: terminal, fair >= actual (floor) -> positive disparity retained
+    # pct100 (final-snapshot bucket): fair >= actual (floor) -> positive disparity retained
     assert rows[100]["market_vs_fair"] > 0
     assert rows[100]["signal"] == "UNDER_VALUE"
 

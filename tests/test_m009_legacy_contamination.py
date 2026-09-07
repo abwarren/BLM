@@ -90,8 +90,11 @@ def _result_status(db: Path, gid: str) -> str | None:
 
 def _inject_regression_snapshot(db: Path, gid: str) -> None:
     """Simulate a LATE-ARRIVING contaminated snapshot: a score regression
-    (home 40 -> 39) inserted between existing snapshots 5 and 6 — exactly
-    the data glitch the M007-M8 re-verify was built to catch."""
+    (home 40 -> 35, over the 4-pt transient tolerance) inserted between
+    existing snapshots 5 and 6 — exactly the data glitch the M007-M8
+    re-verify was built to catch (a small recoverable dip is now tolerated
+    as a transient render glitch, so the injected contamination must be a
+    genuine >tolerance regression)."""
     conn = sqlite3.connect(str(db))
     try:
         conn.row_factory = sqlite3.Row
@@ -108,7 +111,7 @@ def _inject_regression_snapshot(db: Path, gid: str) -> None:
                 game_id, source, source_game_id, classification, captured_at,
                 home_team, away_team, home_score, away_score, period_label,
                 quarter, clock, game_status, total_line, markets_json)
-               VALUES (?, 'PokerBet', ?, 'BETUAL_NBA', ?, ?, ?, 39, 30,
+               VALUES (?, 'PokerBet', ?, 'BETUAL_NBA', ?, ?, ?, 35, 30,
                        '2nd Quarter', 2, '10:00', 'ended', ?, '{}')""",
             (gid_db, gid, contam, f"{gid} Home Virtual",
              f"{gid} Away Virtual", _LINES[5]))

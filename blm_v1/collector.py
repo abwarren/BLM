@@ -27,11 +27,33 @@ logger = logging.getLogger(__name__)
 # ── Configuration ───────────────────────────────────────────────────
 
 SCRAPE_INTERVAL = 1.0
+# Retry backoff for crashed browser sessions: a transient startup
+# failure must never kill the collector thread permanently (V2 scheduler
+# starvation incident 2026-09-03).  Bounded exponential: 5 -> 10 -> 20
+# -> 40 -> 60s cap.
+START_RETRY_BACKOFF_S = 5.0
+MAX_RETRY_BACKOFF_S = 60.0
 POKERBET_URL = (
     "https://www.pokerbet.co.za/en/sports/live/event-view/Basketball/World/18295203/"
     "cyber-basketball-2k26-matches/30346555/denver-nuggets-cyber-houston-rockets-cyber"
 )
 NAV_TIMEOUT = 30000
+# Staleness watchdog: if the scraped page keeps returning the same
+# game-progress signature (score/quarter/clock) AND makes no live
+# requests for this many consecutive ticks, the session is wedged
+# (finished game / dead page) and is restarted via the retry backoff.
+# Live pages keep polling (tracker reqs > 0), so network-silence is
+# required — a halftime stall or slow clock never trips this.
+STALE_TICK_LIMIT = 30
+
+
+class StalePageError(RuntimeError):
+    """Raised when the scraped page stops producing live game state.
+
+    Caught by the session retry loop (same path as a crashed browser):
+    the session is closed and restarted with bounded exponential
+    backoff instead of spinning on the frozen page forever.
+    """
 
 # ── Resource types to always abort ─────────────────────────────────
 
@@ -76,6 +98,10 @@ class BandwidthTracker:
     @property
     def saved_kb(self) -> float:
         return self._blocked_bytes / 1024
+
+    @property
+    def total_requests(self) -> int:
+        return sum(self._counts.values())
 
     def summary(self) -> str:
         return (
@@ -207,6 +233,9 @@ class SnapshotCollector:
         self._latest_state: Optional[dict] = None
         self._snapshot_count = 0
         self._game_id: Optional[str] = None
+        # Staleness watchdog state (see STALE_TICK_LIMIT).
+        self._stale_ticks = 0
+        self._last_progress: Optional[tuple] = None
 
     @property
     def latest_state(self) -> Optional[dict]:
@@ -221,43 +250,63 @@ class SnapshotCollector:
         return self._game_id
 
     def start(self) -> None:
+        """Run the collector until stop(), retrying crashed sessions.
+
+        A transient startup failure (network blip, event-view failure,
+        TargetClosedError burst) must never kill the collector thread —
+        the V2 scheduler polls ``latest_snapshot`` and a dead thread
+        starves blm_ts.db forever while reporting nothing (incident
+        2026-09-03 19:45:14Z: a single ERR_INTERNET_DISCONNECTED on
+        ``page.goto`` ended the session permanently).  The session body
+        is retried with bounded exponential backoff until ``stop()``
+        clears ``_running``.
+        """
         self._running = True
-        try:
-            with sync_playwright() as pw:
-                self._browser = pw.chromium.launch(
-                    headless=self.headless,
-                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-                )
-                context = self._browser.new_context(
-                    viewport={"width": 1920, "height": 1080},
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/125.0.0.0 Safari/537.36"
-                    ),
-                    extra_http_headers={
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language": "en-ZA,en;q=0.9",
-                        "Accept-Encoding": "gzip, deflate, br",
-                    },
-                )
-                page = context.new_page()
-                page.route("**/*", _handle_route)
+        backoff_s = START_RETRY_BACKOFF_S
+        while self._running:
+            try:
+                with sync_playwright() as pw:
+                    self._browser = pw.chromium.launch(
+                        headless=self.headless,
+                        args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+                    )
+                    context = self._browser.new_context(
+                        viewport={"width": 1920, "height": 1080},
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/125.0.0.0 Safari/537.36"
+                        ),
+                        extra_http_headers={
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                            "Accept-Language": "en-ZA,en;q=0.9",
+                            "Accept-Encoding": "gzip, deflate, br",
+                        },
+                    )
+                    page = context.new_page()
+                    page.route("**/*", _handle_route)
 
-                # Navigate once — reuse page for all ticks
-                _tracker.reset()
-                t0 = time.monotonic()
-                page.goto(POKERBET_URL, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
-                logger.info(
-                    "Navigated (%.1fs) | %s",
-                    time.monotonic() - t0, _tracker.summary(),
-                )
-                page.wait_for_timeout(2000)  # React hydration
+                    # Navigate once — reuse page for all ticks
+                    _tracker.reset()
+                    self._stale_ticks = 0
+                    self._last_progress = None
+                    t0 = time.monotonic()
+                    page.goto(POKERBET_URL, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+                    logger.info(
+                        "Navigated (%.1fs) | %s",
+                        time.monotonic() - t0, _tracker.summary(),
+                    )
+                    page.wait_for_timeout(2000)  # React hydration
 
-                while self._running:
-                    try:
-                        text = page.inner_text("body", timeout=5000)
-                        state = extract_game_state(text)
+                    while self._running:
+                        try:
+                            text = page.inner_text("body", timeout=5000)
+                            state = extract_game_state(text)
+                        except Exception:
+                            logger.error("Tick error: %s", traceback.format_exc())
+                            time.sleep(SCRAPE_INTERVAL)
+                            continue
+
                         if state:
                             self._store_snapshot(state)
                             logger.info(
@@ -267,23 +316,68 @@ class SnapshotCollector:
                                 state.get("total_line", "?"), state.get("spread", "?"),
                                 _tracker.summary(),
                             )
+                            progress = (
+                                state["home_score"], state["away_score"],
+                                state["quarter"], state.get("clock"),
+                            )
+                            if (
+                                progress == self._last_progress
+                                and _tracker.total_requests == 0
+                            ):
+                                # Same score/clock as the last tick AND the
+                                # page has made no live requests since
+                                # navigation — finished game / wedged page.
+                                # Count it; restart the session once the
+                                # limit hits (bounded, backoff applies).
+                                self._stale_ticks += 1
+                                if self._stale_ticks >= STALE_TICK_LIMIT:
+                                    raise StalePageError(
+                                        f"page frozen {self._stale_ticks} ticks "
+                                        f"({_tracker.summary()})"
+                                    )
+                            else:
+                                self._stale_ticks = 0
+                                self._last_progress = progress
                         else:
                             logger.debug("No game state — waiting")
-                    except Exception:
-                        logger.error("Tick error: %s", traceback.format_exc())
-                    time.sleep(SCRAPE_INTERVAL)
+                        time.sleep(SCRAPE_INTERVAL)
 
-        except Exception:
-            logger.error("Collector crashed: %s", traceback.format_exc())
-        finally:
-            if self._browser:
-                self._browser.close()
+            except StalePageError as e:
+                logger.warning("Stale page — restarting session: %s", e)
+            except Exception:
+                logger.error("Collector crashed: %s", traceback.format_exc())
+            finally:
+                if self._browser is not None:
+                    try:
+                        self._browser.close()
+                    except Exception:
+                        logger.warning(
+                            "Browser close during collector restart failed: %s",
+                            traceback.format_exc(),
+                        )
+                    self._browser = None
+
+            if not self._running:
+                break
+            logger.warning(
+                "Collector session ended unexpectedly — restarting in %.1fs",
+                backoff_s,
+            )
+            time.sleep(backoff_s)
+            backoff_s = min(backoff_s * 2.0, MAX_RETRY_BACKOFF_S)
 
     def _store_snapshot(self, state: dict) -> None:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        gid = self._game_id or f"{state['home_team']}-vs-{state['away_team']}-{ts[:10]}"
-        if not self._game_id:
-            self._game_id = gid
+        # Label each row by the teams observed in THIS capture.  The old
+        # frozen first-parse label asserted identity the text-parse never
+        # had: the scraped page is a multi-game view whose DOM order
+        # changes, so consecutive captures can show DIFFERENT games — a
+        # frozen label then stored rows for game X under game Y's id
+        # (proven: blm_ts.db game_id buckets containing up to 11
+        # different team-pairs).  The only identity this parse can attest
+        # is the parsed pair itself.
+        gid = f"{state['home_team']}-vs-{state['away_team']}-{ts[:10]}"
+        self._game_id = gid
 
         upsert_game(game_id=gid, home=state["home_team"], away=state["away_team"])
         insert_snapshot(

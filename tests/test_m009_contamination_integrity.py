@@ -54,13 +54,14 @@ DASH_STATIC = HERE.parent / "blm_v4" / "dashboard" / "static"
 
 def _force_regression(db: Path, gid: str) -> None:
     """Mutate the 7th snapshot (idx 6) so home_score REGRESSES below the
-    6th snapshot's value — the same score-regression that dip=True
-    creates — so the NEXT capture_results() re-verification marks the
-    game INVALID (M007-M8 path)."""
+    6th snapshot's value by more than the transient tolerance (40 -> 34,
+    a genuine -6 regression) — so the NEXT capture_results() re-verification
+    marks the game INVALID (M007-M8 path).  A small recoverable dip would
+    now be tolerated as a transient render glitch."""
     conn = sqlite3.connect(db)
     try:
         conn.execute(
-            """UPDATE snapshots SET home_score = home_score - 5
+            """UPDATE snapshots SET home_score = home_score - 10
                WHERE id = (SELECT s.id FROM snapshots s
                            JOIN games g ON g.id = s.game_id
                            WHERE g.source_game_id = ?

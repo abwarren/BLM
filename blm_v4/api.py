@@ -4,8 +4,8 @@ BLM V4 — PokerBet Pipeline API (dashboard data source).
 Serves the classification-aware live view the operator dashboard renders:
 
     GET /api/v4/status   — collector heartbeat + DB freshness (per class)
-    GET /api/v4/live     — every live/recent game with latest market state,
-                            derived BLM-style analytics, signals and the
+    GET /api/v4/live     — every live/recent CLEAN game with latest market
+                            state, observed scoring-rate analytics and the
                             snapshot history needed for charts
     GET /api/v4/games    — all known games (summary)
     GET /api/v4/history/{game_id} — full snapshot history for one game
@@ -16,10 +16,14 @@ Everything is read from the SAME ``blm_pokerbet.db`` the collector writes
 (read-only URI connection, WAL-safe).  No new pipeline, no duplicated
 storage — classification, identity and snapshots are the collector's own.
 
-Derived analytics (win probability, confidence, pace, projections,
-momentum, traps) are computed HERE from the actual collected snapshots so
-every game — not just the single V2-engine game — gets a full model card.
-They are labelled as derived and are a pure function of stored data.
+Live-state objects are DESCRIPTIVE ONLY (prediction generation frozen
+during the clean-data accumulation phase): observed score/clock/period,
+market total line + freshness, Pts/min + required Pts/min + pace gap,
+recent pace and acceleration from the clean trajectory layer, and the
+momentum scoring-rate index.  No model expected-total / edge /
+probability / confidence / signal / trap fields are emitted from the
+live view; historical prediction and market-vs-fair records remain
+reachable only through the explicit audit sections.
 """
 
 from __future__ import annotations
@@ -33,8 +37,13 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from blm_v4.projection import (closing_snapshot, opening_snapshot, project,
-                               quantize_half)
+from blm_v4.clean_boundary import (CLEAN, CLEAN_DATA_EPOCH, LEGACY,
+                                   game_data_quality, is_clean_ts)
+from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
+                               opening_snapshot, project)
+from blm_v4.terminal_eligibility import (is_terminal_checkpoint,
+                                         predictive_validation_label,
+                                         TERMINAL_EXCLUSION_REASON)
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -45,7 +54,6 @@ STATE_FILE = Path(__file__).resolve().parent / "state" / "collector_state.json"
 
 # A game is considered LIVE if its latest snapshot is fresher than this.
 LIVE_AGE_S = 15 * 60
-FULL_GAME_MINUTES = 40.0  # cyber/virtual basketball game length (4 × 10)
 
 
 def _db_path() -> Path:
@@ -193,15 +201,35 @@ def _confidence(snap_count: int, has_line: bool, has_spread: bool,
 
 
 def _velocity(rows: list[dict]) -> tuple[Optional[float], Optional[float]]:
-    """(velocity pts/min, acceleration pts/min²) over the last 3 snapshots."""
+    """(velocity pts/min, acceleration pts/min²) over the last 3 snapshots.
+
+    Repeated observations of ONE source state — consecutive rows with the
+    SAME home/away score, period label AND clock (the ~10s poll catching a
+    1s-tick virtual clock mid-dwell) — collapse to the run's first row, so
+    velocity measures change across DISTINCT source states using the
+    wall-clock between their first observations.  A legitimate no-basket
+    interval where the clock keeps advancing is a distinct state per row
+    (clock differs) and its 0-delta stays analytically valid.  Prefix-only:
+    reads only the rows it is given (callers pass rows[:idx+1]).
+    """
     scored = [r for r in rows if r.get("home_score") is not None
               and r.get("away_score") is not None]
     if len(scored) < 2:
         return None, None
-    times = [_parse_ts(r["captured_at"]) for r in scored]
-    vals = [r["home_score"] + r["away_score"] for r in scored]
+    # Collapse runs of identical source state to their first observation.
+    states: list[dict] = []
+    for r in scored:
+        if (states
+                and r.get("home_score") == states[-1].get("home_score")
+                and r.get("away_score") == states[-1].get("away_score")
+                and (r.get("period_label") or "") == (states[-1].get("period_label") or "")
+                and (r.get("clock") or "") == (states[-1].get("clock") or "")):
+            continue
+        states.append(r)
+    times = [_parse_ts(r["captured_at"]) for r in states]
+    vals = [r["home_score"] + r["away_score"] for r in states]
     deltas: list[float] = []
-    for i in range(1, len(scored)):
+    for i in range(1, len(states)):
         if times[i - 1] and times[i]:
             dt = (times[i] - times[i - 1]).total_seconds() / 60.0
             if dt >= 1 / 60:
@@ -388,11 +416,13 @@ def _timeline_events(rows: list[dict], classification: str) -> list[dict]:
 
 
 def _series(rows: list[dict]) -> list[dict]:
-    """Per-snapshot derived series for model-history charts.
+    """Per-snapshot derived series for descriptive charts.
 
-    Additive keys on top of the raw snapshot values: combined, win_prob,
-    momentum_score, momentum_direction, confidence, pace, expected_total.
-    Pure function of stored snapshots — no fabrication.
+    Additive keys on top of the raw snapshot values: combined,
+    momentum_score, momentum_direction, pace (observed scoring rate).
+    Pure function of stored snapshots — no fabrication.  Prediction
+    generation is frozen: no win_prob / confidence / expected_total
+    series are produced (charts describe observations only).
     """
     scored_prev: Optional[tuple] = None  # (ts, combined) of previous scored row
     out: list[dict] = []
@@ -408,36 +438,25 @@ def _series(rows: list[dict]) -> list[dict]:
             "home": h, "away": a, "combined": combined,
             "total_line": line, "spread": _f(r["spread"]),
             "quarter": _i(r["quarter"]), "period": r.get("period_label") or "",
-            "win_prob": _implied_win(w1, w2)
-                       if (w1 is not None and w2 is not None
-                           and w1 > 1 and w2 > 1) else None,
         }
         window = rows[max(0, i - 2):i + 1]
         mom = _momentum(window)
         entry["momentum_score"] = mom["score"]
         entry["momentum_direction"] = mom["direction"]
-        entry["confidence"] = _confidence(
-            i + 1, line is not None, _f(r["spread"]) is not None,
-            w1 is not None and w2 is not None, i == n - 1,
-        )
-        # rolling pace (wall-clock vs previous scored snapshot)
+        # rolling pace (wall-clock vs previous scored snapshot) — scaled to
+        # the classification's regulation duration (40 BETUAL / 48 CYBER).
+        # A measurement of the observed scoring rate — not a forecast.
         pace: Optional[float] = None
         if combined is not None and scored_prev and ts:
             t0, c0 = scored_prev
             if t0 and ts > t0:
                 dt_min = (ts - t0).total_seconds() / 60.0
                 if dt_min >= 0.1:
-                    p = (combined - c0) / dt_min * FULL_GAME_MINUTES
+                    full = duration_for(r.get("classification"))[1]
+                    p = (combined - c0) / dt_min * full
                     if 20 <= p <= 400:
                         pace = round(p, 1)
-        entry["pace"] = pace or line
-        # model-output invariant: chart fair is the SAME authoritative
-        # x.0/x.5 value project() produces (half-up quantizer), never a
-        # separate 1dp rounding rule.
-        if pace and line:
-            entry["expected_total"] = quantize_half(0.7 * pace + 0.3 * line)
-        else:
-            entry["expected_total"] = quantize_half(pace or line)
+        entry["pace"] = pace
         if combined is not None and ts:
             scored_prev = (ts, combined)
         out.append(entry)
@@ -450,18 +469,32 @@ def _game_checkpoint_market(conn: sqlite3.Connection,
     game-detail payload.  Sourced from checkpoint_market (frozen at
     first write, never rebased).  Empty list when the table has no rows
     for this game — never fabricated.  NULLs preserved (missing market
-    -> signal/outcome/market_vs_fair NULL)."""
+    -> signal/outcome/market_vs_fair NULL).
+
+    Checkpoint game-state fields (home/away score, clock, period,
+    elapsed_minutes, progress, remaining/current_pace/required_pace) are
+    derived deterministically by joining each checkpoint_timestamp to the
+    IMMUTABLE snapshots table — the exact source snapshot the checkpoint
+    was frozen from (point-in-time state, never the final state; the
+    terminal 100 % row's snapshot IS the final snapshot by definition).
+    elapsed_minutes is recomputed from the snapshot's clock/period on the
+    classification's regulation duration (40 BETUAL / 48 CYBER); stored
+    values are the fallback when the snapshot lacks a parseable clock.
+    projected_final = blm_fair_value (the existing Fair — one definition).
+    """
     has = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint_market'"
     ).fetchone()
     if not has:
         return []
     from blm_v4.scorecard import (_edge_class, _freshness_bucket,
-                                  _market_age_seconds, _market_status)
+                                  _market_age_seconds, _market_status,
+                                  _period_quarter)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkpoint_market)")}
     extra = [c for c in ("market_timestamp", "momentum_state",
                          "momentum_strength", "false_momentum",
-                         "false_momentum_confidence") if c in cols]
+                         "false_momentum_confidence", "classification",
+                         "progress", "elapsed_minutes") if c in cols]
     ts_sel = ", " + ", ".join(extra) if extra else ""
     rows = conn.execute(
         f"""SELECT checkpoint_pct, checkpoint_timestamp, quarter,
@@ -474,6 +507,20 @@ def _game_checkpoint_market(conn: sqlite3.Connection,
            ORDER BY checkpoint_pct ASC""",
         (source_game_id,),
     ).fetchall()
+    # One batched lookup of the checkpoint source snapshots (same
+    # captured_at the rows were frozen from — snapshots are immutable).
+    snaps: dict[str, dict] = {}
+    cpts = [r["checkpoint_timestamp"] for r in rows if r["checkpoint_timestamp"]]
+    if cpts:
+        marks = ",".join("?" * len(cpts))
+        for s in conn.execute(
+                f"""SELECT captured_at, quarter, clock, period_label,
+                           home_score, away_score
+                    FROM snapshots WHERE source_game_id = ?
+                      AND captured_at IN ({marks})
+                    ORDER BY id ASC""",
+                (source_game_id, *cpts)).fetchall():
+            snaps[s["captured_at"]] = dict(s)  # last row wins (deterministic)
     out = []
     for r in rows:
         d = dict(r)
@@ -486,6 +533,38 @@ def _game_checkpoint_market(conn: sqlite3.Connection,
         d["blm_market_diff"] = round(fair - live, 2) \
             if fair is not None and live is not None else None
         d["edge_class"] = _edge_class(d["market_status"], d["blm_market_diff"])
+        # ── Checkpoint point-in-time state (from the source snapshot) ──
+        snap = snaps.get(d.get("checkpoint_timestamp") or "") or {}
+        hs, aw = snap.get("home_score"), snap.get("away_score")
+        d["home_score_at_checkpoint"] = hs
+        d["away_score_at_checkpoint"] = aw
+        d["clock_at_checkpoint"] = snap.get("clock")
+        d["period_label_at_checkpoint"] = snap.get("period_label")
+        if d.get("quarter") is None and snap.get("quarter") is not None:
+            d["quarter"] = snap["quarter"]
+        q_min, full = duration_for(d.get("classification"))
+        elapsed: Optional[float] = None
+        label = (snap.get("period_label") or "").lower()
+        sq = d.get("quarter")
+        if sq is None and snap.get("period_label"):
+            sq = _period_quarter(snap.get("period_label"))
+        if sq == 2 and label.startswith("half"):
+            elapsed = round(full / 2.0, 2)  # half-time boundary in any format
+        elif sq is not None and snap.get("clock"):
+            elapsed = clock_minutes(sq, str(snap["clock"]), q_min)
+        d["elapsed_minutes"] = elapsed if elapsed is not None \
+            else d.get("elapsed_minutes")  # stored fallback (recorded basis)
+        if elapsed is not None:
+            d["progress"] = round(min(1.0, max(0.0, elapsed / full)), 4)
+        d["remaining_minutes"] = round(full - d["elapsed_minutes"], 2) \
+            if d["elapsed_minutes"] is not None else None
+        total = (int(hs) + int(aw)) if (hs is not None and aw is not None) else None
+        d["current_total"] = total
+        d["current_pace"] = round(total / elapsed, 2) \
+            if total is not None and elapsed else None
+        d["required_pace"] = round((live - total) / (full - elapsed), 2) \
+            if (live is not None and total is not None and elapsed is not None
+                and full - elapsed > 0) else None
         out.append(d)
     return out
 
@@ -536,14 +615,19 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     mkt_src: Optional[str] = "event-view" if mlatest else None
     ws_obs: Optional[dict] = None
     if conn is not None:
+        # clean-data boundary: only post-epoch WS observations may feed
+        # the current live market line (legacy lines are audit data only)
         r = conn.execute(
             """SELECT * FROM market_observations
                WHERE source_game_id=? AND market_type='MatchTotal'
+                 AND captured_at >= ?
                  AND captured_at = (
                      SELECT MAX(captured_at) FROM market_observations
-                     WHERE source_game_id=? AND market_type='MatchTotal')
+                     WHERE source_game_id=? AND market_type='MatchTotal'
+                       AND captured_at >= ?)
                ORDER BY line_value ASC LIMIT 1""",
-            (game["source_game_id"], game["source_game_id"]),
+            (game["source_game_id"], CLEAN_DATA_EPOCH,
+             game["source_game_id"], CLEAN_DATA_EPOCH),
         ).fetchone()
         ws_obs = dict(r) if r else None
     ws_line = _f(ws_obs["line_value"]) if ws_obs else None
@@ -558,23 +642,15 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     # (blm_v4.projection.project) — never re-implemented in the API layer.
     # When the WS feed supplied the effective line, pin it as the model's
     # observed market input (same pure function, same blend).
+    # The effective observed market total for the live-state block (the
+    # line the model WOULD have seen — snapshot-carried or eu-swarm WS;
+    # never fabricated).  Descriptive only: prediction generation is
+    # frozen, so no model expected-total / margin / projection fields are
+    # emitted from this live-state object.
     proj = project(rows, total_line if mkt_src == "ws" else None)
-    pace = proj["pace"]
     market_total = proj["market_total"]
-    expected_total = proj["expected_total"]
-    expected_margin = proj["expected_margin"]
-    home_projection = proj["home_projection"]
-    away_projection = proj["away_projection"]
 
     momentum = _momentum(rows)
-    vel, accel = momentum["velocity"], momentum["acceleration"]
-
-    signals = _detect_signals(rows)
-    active = [k for k, v in signals.items() if v["active"]]
-    trap_meter = min(100.0, 5.0 * len(active) + sum(
-        v["confidence"] * 40 for v in signals.values() if v["active"]))
-    trap_level = ("high" if trap_meter >= 60 else
-                  "medium" if trap_meter >= 30 else "low")
 
     market_efficiency = None
     if market_total and home_score is not None and away_score is not None:
@@ -588,7 +664,8 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     if len(lines) >= 2 and lines[-1] is not None and lines[-2] is not None:
         market_momentum = round(lines[-1] - lines[-2], 2)
 
-    # chart series (score + market + model over time) — actual stored data
+    # chart series (score + market + observed scoring-rate over time) —
+    # actual stored data, no model series (prediction generation frozen)
     history = _series(rows)
     step = max(1, len(history) // 80)
     if step > 1:
@@ -643,31 +720,13 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
             "w1_odds": w1,
             "w2_odds": w2,
         },
-        "model": {
-            "win_probability": _implied_win(w1, w2),
-            "confidence": _confidence(
-                snap_count, market_total is not None, spread is not None,
-                w1 is not None and w2 is not None,
-                bool(age is not None and age <= 120),
-            ),
-            "expected_total": expected_total,
-            "expected_margin": expected_margin,
-            "home_projection": home_projection,
-            "away_projection": away_projection,
-            "pace": pace,
-            "possessions": None,
-        },
         "momentum": momentum,
-        "signals": {
-            **signals,
-            "trap_meter": round(trap_meter, 1),
-            "trap_meter_level": trap_level,
-            "active": active,
-        },
         "market_efficiency": market_efficiency,
         "market_momentum": market_momentum,
         "foul_correlation": None,
         "history": history,
+        "projector": _projector_live_view(
+            _pace_projector_for(game["source_game_id"])),
     }
     if with_checkpoints and conn is not None:
         detail["checkpoints"] = _game_checkpoints(conn, game["source_game_id"])
@@ -679,6 +738,57 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
 # ────────────────────────────────────────────────────────────────────────
 # DB reads
 # ────────────────────────────────────────────────────────────────────────
+
+def _pace_projector_for(source_game_id: str) -> Optional[dict]:
+    """Latest deterministic trajectory row for a game from the clean
+    metrics DB (blm_metrics_clean.db) — failure-isolated, None when the
+    clean DB or a projection row does not exist yet.
+    """
+    try:
+        from blm_v4.clean_metrics import CleanMetricsStore
+        from blm_v4.pace_projector import PaceProjector
+        clean_path = _db_path().parent / "blm_metrics_clean.db"
+        if not clean_path.exists():
+            return None
+        return PaceProjector().latest_for_game(
+            CleanMetricsStore(clean_path), source_game_id)
+    except Exception:
+        return None
+
+
+# Projector keys that describe OBSERVED/trajectory state.  The frozen
+# (stored-for-research) trajectory forecast fields — projected_final_total,
+# projection_vs_live_line, fair_total — are NOT emitted in live-state
+# payloads: the pace projector may store a deterministic projected
+# trajectory for research, but it must not be presented or consumed as a
+# betting prediction in the live view.
+_PROJECTOR_LIVE_KEYS = (
+    "source_game_id", "classification", "captured_at", "period_label",
+    "clock", "elapsed_game_minutes", "remaining_game_minutes",
+    "progress_pct", "current_total_points", "live_total_line",
+    "market_captured_at", "market_age_seconds", "market_status",
+    "actual_pts_per_min", "required_pts_per_min", "pace_gap",
+    "required_to_actual_ratio",
+    "recent_pace_1m", "recent_span_1m", "recent_pace_2m",
+    "recent_span_2m", "recent_pace_3m", "recent_span_3m",
+    "recent_pace_5m", "recent_span_5m",
+    "pace_acceleration", "acceleration_window", "trajectory_state",
+    "subsequent_observation_id", "subsequent_actual_pace",
+    "subsequent_pace_change", "subsequent_live_line",
+    "subsequent_live_line_change", "final_settled_total",
+    "status", "computed_at",
+)
+
+
+def _projector_live_view(row: Optional[dict]) -> Optional[dict]:
+    """Live-state projector block: descriptive trajectory fields only
+    (no projected-fair / forecast fields — prediction generation is
+    frozen; trajectory forecasts are stored for research, never served
+    to the live view)."""
+    if not row:
+        return None
+    return {k: row.get(k) for k in _PROJECTOR_LIVE_KEYS if k in row}
+
 
 def _quality_map(conn: sqlite3.Connection,
                  source_game_ids: list[str]) -> dict[str, dict]:
@@ -721,14 +831,21 @@ def _load_games(conn: sqlite3.Connection, classification: Optional[str] = None,
 
 
 def _load_snapshots(conn: sqlite3.Connection, source_game_id: str,
-                    limit: int = 400) -> list[dict]:
-    rows = conn.execute("""
+                    limit: int = 400, since: Optional[str] = None) -> list[dict]:
+    """Snapshots for a game ascending; ``since`` (clean epoch) restricts to
+    post-epoch observations only — analytical views must never consume
+    pre-epoch (legacy) observations."""
+    q = """
         SELECT s.* FROM snapshots s
         JOIN games g ON g.id = s.game_id
-        WHERE g.source_game_id = ?
-        ORDER BY s.captured_at ASC LIMIT ?
-    """, (source_game_id, limit)).fetchall()
-    return [dict(r) for r in rows]
+        WHERE g.source_game_id = ?"""
+    params: list = [source_game_id]
+    if since:
+        q += " AND s.captured_at >= ?"
+        params.append(since)
+    q += " ORDER BY s.captured_at ASC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in conn.execute(q, params)]
 
 
 def _load_collector_state() -> Optional[dict]:
@@ -815,16 +932,25 @@ def v4_status() -> dict:
 
 @router.get("/live")
 def v4_live(classification: Optional[str] = Query(None)) -> dict:
+    """LIVE view — CLEAN post-epoch games ONLY (the frontend's current
+    analytical surface).  Legacy/pre-clean games never appear here; their
+    data is reachable only through explicitly labeled legacy paths.
+    Analysis is computed exclusively from post-epoch observations."""
     now = datetime.now(timezone.utc)
     conn = _connect()
     try:
         games = _load_games(conn, classification)
+        # clean-data boundary: exclude games that started before the epoch
+        games = [g for g in games
+                 if is_clean_ts(g.get("first_seen_at"))]
         qm = _quality_map(conn, [g["source_game_id"] for g in games])
         out = []
         for g in games:
-            rows = _load_snapshots(conn, g["source_game_id"])
+            rows = _load_snapshots(conn, g["source_game_id"],
+                                   since=CLEAN_DATA_EPOCH)
             if not rows:
-                # games table entry with no snapshots yet — still show it
+                # games table entry with no post-epoch snapshots yet —
+                # still show it (NULL fields, never legacy fallback)
                 out.append(_analyze_game(g, [], now, conn,
                                          quality=qm.get(g["source_game_id"])))
             else:
@@ -833,8 +959,13 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
     finally:
         conn.close()
     out.sort(key=lambda g: (not g["live"], -(g["age_s"] or 0)))
+    for g in out:
+        g["data_quality"] = CLEAN
     return {
         "generated_at": now.isoformat(),
+        "data_epoch": CLEAN_DATA_EPOCH,
+        "data_quality": CLEAN,
+        "source": "clean_post_epoch",
         "collector": _load_collector_state(),
         "games": out,
         "totals": {
@@ -846,12 +977,17 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
 
 @router.get("/games")
 def v4_games(classification: Optional[str] = Query(None), limit: int = Query(200, le=1000)) -> dict:
+    """Full game list partitioned by data quality: every item carries
+    data_quality (CLEAN = first observation at/after the epoch, LEGACY =
+    contains pre-epoch observations).  Latest-state rows are computed
+    from post-epoch snapshots only."""
     conn = _connect()
     try:
         games = _load_games(conn, classification, limit)
         items = []
         for g in games:
-            rows = _load_snapshots(conn, g["source_game_id"], limit=5)
+            rows = _load_snapshots(conn, g["source_game_id"], limit=5,
+                                   since=CLEAN_DATA_EPOCH)
             latest = rows[-1] if rows else None
             items.append({
                 "game_id": g["source_game_id"],
@@ -862,6 +998,7 @@ def v4_games(classification: Optional[str] = Query(None), limit: int = Query(200
                 "status": g.get("status") or "live",
                 "first_seen_at": g.get("first_seen_at"),
                 "last_seen_at": g.get("last_seen_at"),
+                "data_quality": game_data_quality(g.get("first_seen_at")),
                 "home_score": _i(latest["home_score"]) if latest else None,
                 "away_score": _i(latest["away_score"]) if latest else None,
                 "quarter": _i(latest["quarter"]) if latest else None,
@@ -870,7 +1007,10 @@ def v4_games(classification: Optional[str] = Query(None), limit: int = Query(200
             })
     finally:
         conn.close()
-    return {"total": len(items), "games": items}
+    clean_n = sum(1 for i in items if i["data_quality"] == CLEAN)
+    return {"total": len(items), "data_epoch": CLEAN_DATA_EPOCH,
+            "games": items,
+            "totals": {"clean": clean_n, "legacy": len(items) - clean_n}}
 
 
 @router.get("/scorecard/events")
@@ -881,6 +1021,8 @@ def v4_scorecard_events(
     min_diff: Optional[float] = Query(None, ge=0),
     max_diff: Optional[float] = Query(None, ge=0),
     game: Optional[str] = None,
+    quality: Optional[str] = Query(None, pattern="^(CLEAN|LEGACY)$"),
+    predictive: str = Query("eligible", pattern="^(eligible|excluded|all)$"),
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict:
     """M009-M5 — the underlying event dataset behind the disparity bands.
@@ -890,9 +1032,27 @@ def v4_scorecard_events(
     (LIVE/STALE/MISSING — never substituted), market age, momentum,
     BLM's side, actual, settlement.  Filters are applied in Python;
     min_diff/max_diff are on MAGNITUDE (direction separates sign).
-    Contaminated games are excluded at the source (checkpoint_market)."""
-    from blm_v4.scorecard import (_CM_ELIGIBLE_SQL, _market_age_seconds,
-                                  _market_status)
+    Contaminated games are excluded at the source (checkpoint_market).
+
+    Clean-data boundary: default (and analytical) view is CLEAN games
+    only (started at/after the clean epoch).  quality=LEGACY is the
+    explicit audit path for pre-clean rows and is never a default.
+
+    TERMINAL EXCLUSION (directive): the default ``predictive=eligible``
+    view serves NON-TERMINAL rows only — terminal checkpoints are
+    settlement/audit data and can never be consumed as research evidence
+    through this endpoint.  ``predictive=excluded`` serves the terminal
+    population alone (audit); ``predictive=all`` serves everything with
+    the explicit eligibility state on every row (audit/reconstruction).
+    Terminal rows are never deleted — they remain available for final
+    settlement, audit and game reconstruction here and in game detail."""
+    from blm_v4.clean_boundary import CLEAN, LEGACY
+    from blm_v4.scorecard import (_CM_ELIGIBLE_SQL_CLEAN, _CM_ELIGIBLE_SQL_LEGACY,
+                                  _market_age_seconds, _market_status,
+                                  _period_quarter)
+    quality = quality or CLEAN
+    elig_sql = (_CM_ELIGIBLE_SQL_CLEAN if quality == CLEAN
+                else _CM_ELIGIBLE_SQL_LEGACY)
     conn = _connect()
     try:
         has = conn.execute(
@@ -903,8 +1063,11 @@ def v4_scorecard_events(
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkpoint_market)")}
         extra = [c for c in ("market_timestamp", "momentum_state",
                              "momentum_strength", "false_momentum",
-                             "false_momentum_confidence") if c in cols]
-        sel = ", ".join(extra) + "," if extra else ""
+                             "false_momentum_confidence", "classification",
+                             "progress", "elapsed_minutes", "terminal")
+                 if c in cols]
+        # qualify with cm. — the games join also carries classification
+        sel = ", ".join(f"cm.{c}" for c in extra) + "," if extra else ""
         # Headline dataset: apply the SAME logical-exclusion eligibility as
         # market_vs_fair (single definition — _CM_ELIGIBLE_SQL) so a game
         # re-verified INVALID after its rows were frozen can never reappear
@@ -913,17 +1076,77 @@ def v4_scorecard_events(
         rows = conn.execute(
             f"""SELECT cm.source_game_id, cm.checkpoint_pct, cm.checkpoint_timestamp,
                       cm.live_market_line, cm.blm_fair_value, cm.actual_final_total,
-                      cm.outcome, {sel} g.home_team, g.away_team
+                      cm.outcome, {sel} g.home_team, g.away_team, g.first_seen_at
                FROM checkpoint_market cm
                JOIN games g ON g.source_game_id = cm.source_game_id
-               {_CM_ELIGIBLE_SQL}
+               {elig_sql}
                ORDER BY cm.source_game_id, cm.checkpoint_pct""").fetchall()
+        # Point-in-time game state per checkpoint row (same batched
+        # snapshot join + calculation as _game_checkpoint_market) so the
+        # events table can show the actual clock/elapsed game state next
+        # to the checkpoint target % — never the terminal state.
+        cpts = [r["checkpoint_timestamp"] for r in rows if r["checkpoint_timestamp"]]
+        snaps: dict[str, dict] = {}
+        if cpts:
+            marks = ",".join("?" * len(cpts))
+            for s in conn.execute(
+                    f"""SELECT captured_at, quarter, clock, period_label,
+                               home_score, away_score
+                        FROM snapshots WHERE captured_at IN ({marks})
+                        ORDER BY id ASC""",
+                    (*cpts,)).fetchall():
+                snaps[s["captured_at"]] = dict(s)
     finally:
         conn.close()
 
     events = []
     for r in rows:
         d = dict(r)
+        # Checkpoint point-in-time game state — identical resolution to
+        # _game_checkpoint_market (structured quarter → label fallback →
+        # half-time boundary → stored recorded basis).
+        snap = snaps.get(d.get("checkpoint_timestamp") or "") or {}
+        q_min, full = duration_for(d.get("classification"))
+        label = (snap.get("period_label") or "").lower()
+        sq = d.get("quarter")
+        if sq is None and snap.get("quarter") is not None:
+            sq = snap["quarter"]
+        if sq is None and snap.get("period_label"):
+            sq = _period_quarter(snap.get("period_label"))
+        elapsed: Optional[float] = None
+        if sq == 2 and label.startswith("half"):
+            elapsed = round(full / 2.0, 2)
+        elif sq is not None and snap.get("clock"):
+            elapsed = clock_minutes(sq, str(snap["clock"]), q_min)
+        d["elapsed_minutes"] = elapsed if elapsed is not None \
+            else d.get("elapsed_minutes")
+        d["progress"] = round(min(1.0, max(0.0, elapsed / full)), 4) \
+            if elapsed is not None else d.get("progress")
+        d["remaining_minutes"] = round(full - d["elapsed_minutes"], 2) \
+            if d["elapsed_minutes"] is not None else None
+        d["period_label_at_checkpoint"] = snap.get("period_label")
+        d["clock_at_checkpoint"] = snap.get("clock")
+        # ── terminal-eligibility state (directive) ──────────────────
+        # Prefer the stamped terminal column (writer / startup migration);
+        # rows predating the stamp are classified by the authoritative
+        # predicate from their own game-time evidence — never 100% alone
+        # when better fields exist.
+        term = d.get("terminal")
+        if term is None:
+            # BUCKET-INDEPENDENT (directive): the checkpoint bucket is
+            # never terminal evidence — the row's own game-time decides.
+            term = is_terminal_checkpoint(
+                classification=d.get("classification"),
+                elapsed_minutes=d.get("elapsed_minutes"),
+                progress=d.get("progress"),
+                quarter=snap.get("quarter"),
+                clock=snap.get("clock"),
+                period_label=snap.get("period_label"),
+            )
+        d["terminal"] = int(bool(term))
+        d["predictive_eligible"] = 0 if term else 1
+        d["predictive_validation"] = predictive_validation_label(term)
+        d["exclusion_reason"] = TERMINAL_EXCLUSION_REASON if term else None
         line, fair, actual = d["live_market_line"], d["blm_fair_value"], d["actual_final_total"]
         diff = round(fair - line, 2) if fair is not None and line is not None else None
         dirn = ("BLM_OVER" if diff and diff > 0 else
@@ -936,6 +1159,8 @@ def v4_scorecard_events(
                    False if oc in ("OVER_LOSS", "UNDER_LOSS") else None)
         events.append({
             "game": d["source_game_id"],
+            "data_quality": game_data_quality(d.get("first_seen_at")),
+            "classification": d.get("classification"),
             "home_team": d["home_team"], "away_team": d["away_team"],
             "checkpoint_pct": d["checkpoint_pct"],
             "checkpoint_ts": d["checkpoint_timestamp"],
@@ -944,11 +1169,20 @@ def v4_scorecard_events(
             "market_status": status,
             "market_age_seconds": _market_age_seconds(
                 d.get("market_timestamp"), d["checkpoint_timestamp"]),
+            "period_label_at_checkpoint": d["period_label_at_checkpoint"],
+            "clock_at_checkpoint": d["clock_at_checkpoint"],
+            "elapsed_minutes": d["elapsed_minutes"],
+            "progress": d["progress"],
+            "remaining_minutes": d["remaining_minutes"],
             "momentum_state": d.get("momentum_state"),
             "momentum_strength": d.get("momentum_strength"),
             "false_momentum": d.get("false_momentum"),
             "blm_side": blm_side,
             "actual": actual, "outcome": oc, "blm_won": blm_won,
+            "terminal": d["terminal"],
+            "predictive_eligible": d["predictive_eligible"],
+            "predictive_validation": d["predictive_validation"],
+            "exclusion_reason": d["exclusion_reason"],
         })
 
     if direction:
@@ -966,19 +1200,37 @@ def v4_scorecard_events(
     if game:
         needle = game.lower()
         events = [e for e in events if needle in e["game"].lower()]
+    # TERMINAL EXCLUSION boundary (directive): default view = predictive
+    # research population only.  Terminal rows stay stored (settlement/
+    # audit) and are reachable via predictive=excluded / predictive=all.
+    if predictive == "eligible":
+        events = [e for e in events if not e.get("terminal")]
+    elif predictive == "excluded":
+        events = [e for e in events if e.get("terminal")]
+    n_terminal = sum(1 for e in events if e.get("terminal"))
     total = len(events)
-    return {"total": total, "rows": events[:limit]}
+    return {"total": total, "rows": events[:limit],
+            "data_epoch": CLEAN_DATA_EPOCH, "data_quality": quality,
+            "predictive_filter": predictive,
+            "n_terminal": n_terminal,
+            "n_predictive_eligible": total - n_terminal,
+            "source": "clean_post_epoch" if quality == CLEAN else "legacy_audit",
+            "data_source": "clean_post_epoch" if quality == CLEAN else "legacy_audit"}
 
 
 @router.get("/scorecard")
 def v4_scorecard() -> dict:
-    """Projection-accuracy scorecard (persisted, quality-gated)."""
+    """Projection-accuracy scorecard (persisted, quality-gated) — CLEAN
+    games only (aggregations filter to the post-epoch population)."""
     from blm_v4.projection import MODEL_VERSION
     from blm_v4.scorecard import Scorecard
     db = _db_path()
     sc = Scorecard(db)
     return {
         "model_version": MODEL_VERSION,
+        "data_epoch": CLEAN_DATA_EPOCH,
+        "data_quality": CLEAN,
+        "source": "clean_post_epoch",
         "summary": sc.summary(),
         "fixed_checkpoints": sc.fixed_checkpoints(),
         "by_progress": sc.by_progress(),
@@ -986,83 +1238,6 @@ def v4_scorecard() -> dict:
         "market_vs_fair": sc.market_vs_fair(),
         "recent": sc.recent(25),
     }
-
-
-@router.get("/scorecard/calibration")
-def v4_scorecard_calibration(
-    classification: Optional[str] = Query(None),
-) -> dict:
-    """CALIBRATION SLICE — read-only research section (no model changes).
-
-    Maps the EXISTING raw market-vs-fair direction to an empirical
-    probability: descriptive calibration first, then strict
-    chronological walk-forward logistic + isotonic calibration, OVER
-    and UNDER calibrated separately, LIVE/STALE reported separately,
-    checkpoint-weighted AND game-weighted metrics, baselines on the
-    exact same rows.  Terminal pct100 rows are excluded from the
-    primary calibration (live-score floor tautology) and stay available
-    via /api/v4/scorecard/events?checkpoint=100.  Produces NO betting
-    threshold, stake sizing or EV signal."""
-    from blm_v4.calibration import calibration_report, calibration_status
-    db = _db_path()
-    report = calibration_report(db, classification)
-    return {
-        "model_version": "v4-pace-1 (frozen — calibration never modifies "
-                         "the projection)",
-        "report": report,
-        "status": calibration_status(report),
-    }
-
-
-@router.get("/scorecard/freshness-audit")
-def v4_freshness_audit(
-    classification: Optional[str] = Query(None),
-) -> dict:
-    """STALE-vs-LIVE MECHANISM AUDIT — read-only forensic section.
-
-    Establishes WHY the directional relationship concentrates in STALE
-    rows: precise age distribution, fixed age bands, update frequency,
-    residual x age interaction, checkpoint / chronological / O-U /
-    game-level controls, and the retrospective market forecast error
-    diagnostic.  Temporal rule: age is computed strictly from
-    contemporaneous observations; the final score appears only in the
-    labelled OUTCOME diagnostic.  No betting output."""
-    from blm_v4.freshness_audit import freshness_report
-    db = _db_path()
-    return freshness_report(db, classification)
-
-
-@router.get("/scorecard/interaction-validation")
-def v4_interaction_validation(
-    classification: Optional[str] = Query(None),
-) -> dict:
-    """RESIDUAL x MARKET-STATE WALK-FORWARD VALIDATION — read-only.
-
-    Validates the freshness-audit interaction out-of-sample: fixed
-    pre-specified grids, Wilson uncertainty, checkpoint / chronological /
-    game-level controls, fresh-UNDER and stale-OVER mechanisms,
-    retrospective MFE cells, and diagnostic baselines.  No model is fit;
-    no betting output; multiple-comparison discipline enforced."""
-    from blm_v4.interaction_validation import interaction_report
-    db = _db_path()
-    return interaction_report(db, classification)
-
-
-@router.get("/scorecard/prospective-confirmation")
-def v4_prospective_confirmation(
-    classification: Optional[str] = Query("BETUAL_NBA"),
-) -> dict:
-    """PROSPECTIVE CONFIRMATION — read-only, frozen spec.
-
-    Enforces the terminology audit: only observations whose game and
-    checkpoint timestamps occur strictly AFTER CONFIRMATION_FREEZE_TIMESTAMP
-    count as prospective (population C).  Historical chronological
-    revalidation (B) is reported separately and can never contribute to
-    the confirmation verdict.  If no post-freeze rows exist the harness
-    reports AWAITING_PROSPECTIVE_DATA — no result is manufactured."""
-    from blm_v4.confirmation import confirmation_report
-    db = _db_path()
-    return confirmation_report(db, classification)
 
 
 @router.get("/trends")
@@ -1093,6 +1268,10 @@ def v4_trends() -> dict:
 
 @router.get("/history/{game_id}")
 def v4_history(game_id: str, limit: int = Query(500, le=2000)) -> dict:
+    """Explicit HISTORY / AUDIT path: serves the game's FULL observation
+    history (clean + legacy) for audit/reference only — never a current
+    analytical view.  data_quality tells the consumer which partition the
+    game belongs to."""
     conn = _connect()
     try:
         rows = _load_snapshots(conn, game_id, limit)
@@ -1105,6 +1284,10 @@ def v4_history(game_id: str, limit: int = Query(500, le=2000)) -> dict:
         raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found")
     return {
         "game_id": game_id,
+        "section": "history_audit",
+        "data_epoch": CLEAN_DATA_EPOCH,
+        "data_quality": game_data_quality(
+            game["first_seen_at"] if game else None),
         "classification": game["classification"] if game else None,
         "home_team": game["home_team"] if game else None,
         "away_team": game["away_team"] if game else None,
@@ -1115,6 +1298,10 @@ def v4_history(game_id: str, limit: int = Query(500, le=2000)) -> dict:
 
 @router.get("/game/{game_id}")
 def v4_game_detail(game_id: str) -> dict:
+    """Single-game detail — the current analytical view.  Analysis and
+    checkpoint tables are computed from post-epoch observations ONLY
+    (clean-data boundary); pre-epoch rows for a legacy game are reachable
+    through the explicit /api/v4/history/{game_id} audit path."""
     conn = _connect()
     try:
         game = conn.execute(
@@ -1122,13 +1309,198 @@ def v4_game_detail(game_id: str) -> dict:
         ).fetchone()
         if not game:
             raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found")
-        rows = _load_snapshots(conn, game_id, 1000)
+        rows = _load_snapshots(conn, game_id, 1000, since=CLEAN_DATA_EPOCH)
         qm = _quality_map(conn, [game_id])
         detail = _analyze_game(dict(game), rows, datetime.now(timezone.utc),
                                conn, with_checkpoints=True,
                                quality=qm.get(game_id))
+        # checkpoint tables: point-in-time frozen history — keep only rows
+        # frozen from post-epoch snapshots (legacy rows are audit data)
+        detail["checkpoints"] = [c for c in detail["checkpoints"]
+                                  if (c.get("source_snapshot_at") or "")
+                                  >= CLEAN_DATA_EPOCH]
+        detail["market_vs_fair"] = [c for c in detail["market_vs_fair"]
+                                     if (c.get("checkpoint_timestamp") or "")
+                                     >= CLEAN_DATA_EPOCH]
+        # TERMINAL EXCLUSION (directive): terminal rows stay visible here
+        # (settlement/audit/game reconstruction) but carry their explicit
+        # exclusion state so no consumer can mistake them for research
+        # evidence: terminal=1, predictive_eligible=0,
+        # predictive_validation="PREDICTIVE VALIDATION: EXCLUDED",
+        # exclusion_reason="TERMINAL CHECKPOINT".
+        for c in detail["market_vs_fair"]:
+            # BUCKET-INDEPENDENT (directive): the checkpoint bucket is
+            # never terminal evidence — the row's own game-time decides.
+            term = is_terminal_checkpoint(
+                classification=c.get("classification")
+                or game["classification"],
+                elapsed_minutes=c.get("elapsed_minutes"),
+                progress=c.get("progress"),
+                quarter=c.get("quarter"),
+                clock=c.get("clock_at_checkpoint"),
+                period_label=c.get("period_label_at_checkpoint"),
+            )
+            c["terminal"] = int(bool(term))
+            c["predictive_eligible"] = 0 if term else 1
+            c["predictive_validation"] = predictive_validation_label(term)
+            c["exclusion_reason"] = TERMINAL_EXCLUSION_REASON if term else None
+        detail["terminal_exclusion"] = {
+            "rule": "TERMINAL = SETTLEMENT/AUDIT ONLY; "
+                    "NON-TERMINAL = PREDICTIVE RESEARCH ELIGIBLE",
+            "n_rows": len(detail["market_vs_fair"]),
+            "n_terminal": sum(1 for c in detail["market_vs_fair"]
+                              if c["terminal"]),
+            "n_predictive_eligible": sum(1 for c in detail["market_vs_fair"]
+                                         if c["predictive_eligible"]),
+        }
         detail["timeline"] = _timeline_events(rows, game["classification"])
         detail["raw"] = rows[-1] if rows else None
+        detail["data_epoch"] = CLEAN_DATA_EPOCH
+        detail["data_quality"] = game_data_quality(game["first_seen_at"])
+        detail["data_source"] = "clean_post_epoch"
+        detail["clean_snapshot_count"] = len(rows)
     finally:
         conn.close()
     return detail
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Deviation / benchmark / z-score — research/calibration reads ONLY.
+# The empirical market-vs-trajectory residual benchmark (Phase 2).  These
+# endpoints serve the RESEARCH / CALIBRATION surface (never the live
+# predictive view): z-scores are descriptive measurements with explicit
+# bucket maturity — no O/U, no edge, no probability, no recommendation.
+# ────────────────────────────────────────────────────────────────────────
+
+_MATURITY_LIMITS = {
+    "exploratory": "N < 100",
+    "provisional": "100 <= N < 1000",
+    "established": "N >= 1000",
+}
+
+_DEVIATION_NOTE = (
+    "Empirical market-vs-trajectory deviation instrument (research only). "
+    "residual = live total line - pace-projected final total at that "
+    "observation. z_score is standardized against the bucket's PRIOR "
+    "residuals (no self-contamination, no future leakage). "
+    "EXPLORATORY/PROVISIONAL/ESTABLISHED are operational maturity labels "
+    "for the bucket size N, NOT claims of statistical significance; N is "
+    "the count of eligible observations in this league+period bucket, "
+    "never total observations. z is NULL when the bucket std is "
+    "unavailable (N<2) or zero. This is not an O/U or betting model."
+)
+
+
+@router.get("/deviation/benchmarks")
+def v4_deviation_benchmarks(
+    classification: Optional[str] = None,
+) -> dict:
+    """Current empirical benchmark state per bucket (league + quarter):
+    N / mean / std / min / max / status.  Research/calibration only."""
+    clean_path = _db_path().parent / "blm_metrics_clean.db"
+    if not clean_path.exists():
+        return {
+            "section": "deviation_benchmarks", "benchmarks": [],
+            "maturity": _MATURITY_LIMITS, "note": _DEVIATION_NOTE,
+        }
+    try:
+        from blm_v4.deviation import DeviationStore
+        store = DeviationStore(clean_path)
+        buckets = store.bucket_summaries(classification=classification)
+    except Exception:
+        buckets = []
+    return {
+        "section": "deviation_benchmarks",
+        "classification": classification,
+        "benchmarks": buckets,
+        "maturity": _MATURITY_LIMITS,
+        "note": _DEVIATION_NOTE,
+    }
+
+
+@router.get("/deviation/validation")
+def v4_deviation_validation() -> dict:
+    """Retrospective research: what subsequently happened after each
+    measured market-vs-trajectory deviation.  Read-only aggregate over
+    the stored deviation dataset + its STORED outcome fields — never a
+    predictive model, no O/U / edge / probability / recommendation."""
+    clean_path = _db_path().parent / "blm_metrics_clean.db"
+    if not clean_path.exists():
+        return {"section": "deviation_validation", "n_gated_rows": 0,
+                "note": "no clean metrics database yet",
+                "sign_buckets": [], "magnitude_buckets": [],
+                "correlations": {}, "by_context": [], "by_progress": [],
+                "ungated_comparison": {}, "scatter": {}}
+    try:
+        from blm_v4.deviation_analysis import DeviationAnalysis
+        return DeviationAnalysis(clean_path).validation()
+    except Exception:
+        return {"section": "deviation_validation", "n_gated_rows": 0,
+                "note": "validation unavailable (clean DB read failed)",
+                "sign_buckets": [], "magnitude_buckets": [],
+                "correlations": {}, "by_context": [], "by_progress": [],
+                "ungated_comparison": {}, "scatter": {}}
+
+
+@router.get("/game/{game_id}/deviation")
+def v4_game_deviation(game_id: str) -> dict:
+    """Per-game deviation research payload: the market line vs the
+    observational trajectory, the signed residual, and the provisional
+    z-score with its stored benchmark snapshot — over game time.  Empty
+    series when the clean DB has no residuals for this game yet."""
+    clean_path = _db_path().parent / "blm_metrics_clean.db"
+    if not clean_path.exists():
+        return {
+            "game_id": game_id, "section": "deviation_research",
+            "classification": None, "total": 0, "series": [],
+            "buckets": [], "maturity": _MATURITY_LIMITS,
+            "note": _DEVIATION_NOTE,
+        }
+    try:
+        from blm_v4.deviation import DeviationStore
+        store = DeviationStore(clean_path)
+        rows = store.residuals_for_game(game_id)
+        cls = rows[-1].get("classification") if rows else None
+        buckets = (store.bucket_summaries(classification=cls)
+                   if cls else [])
+        # per-observation context from the trajectory rows + snapshots
+        # (read-only join; deviation.py itself is untouched): period/clock,
+        # home/away score, observed + required pace, pace_gap
+        ctx: dict[int, dict] = {}
+        if rows:
+            conn = sqlite3.connect(f"file:{clean_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            try:
+                for x in conn.execute(
+                        """SELECT p.observation_id, p.period_label, p.clock,
+                                  p.actual_pts_per_min, p.required_pts_per_min,
+                                  p.pace_gap, o.home_score, o.away_score
+                           FROM clean_projections p
+                           LEFT JOIN clean_observations o ON o.id = p.observation_id"""):
+                    ctx[int(x["observation_id"])] = dict(x)
+            finally:
+                conn.close()
+        keys = (
+            "captured_at", "elapsed_game_minutes", "progress_pct",
+            "current_total_points", "live_total_line",
+            "projected_final_total", "market_trajectory_residual",
+            "benchmark_n", "benchmark_mean", "benchmark_std",
+            "benchmark_status", "z_score",
+        )
+        series = []
+        for r in rows:
+            item = {k: r.get(k) for k in keys}
+            c = ctx.get(r.get("observation_id")) or {}
+            for k in ("period_label", "clock", "actual_pts_per_min",
+                      "required_pts_per_min", "pace_gap",
+                      "home_score", "away_score"):
+                item[k] = c.get(k)
+            series.append(item)
+    except Exception:
+        cls, buckets, series = None, [], []
+    return {
+        "game_id": game_id, "section": "deviation_research",
+        "classification": cls, "total": len(series), "series": series,
+        "buckets": buckets, "maturity": _MATURITY_LIMITS,
+        "note": _DEVIATION_NOTE,
+    }

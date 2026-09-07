@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 import traceback
 from collections import deque
@@ -44,6 +45,9 @@ from blm_v4.classifications import (
     parse_event_url,
     slugify_team,
 )
+from blm_v4.clean_metrics import CleanMetricsStore
+from blm_v4.deviation import DeviationEngine
+from blm_v4.pace_projector import PaceProjector
 from blm_v4.discovery import (
     RowGame,
     discover_competitions,
@@ -92,20 +96,21 @@ TICK_DEFAULT = 10.0
 # Market data is first-class live data.  The SPA's event view hydrates
 # only via an in-app row click + ~2.5s wait; back-to-back clicks in one
 # tick leave the SPA on blank views (observed: empty-team parses).  So
-# capture ONE event view per tick (proven path) — at a 20s tick that is
-# a full market refresh of ~21 tracked games every ~7 min, and every
-# game is refreshed at least once per MARKET_REFRESH window thanks to
-# per-game freshness tracking.
-MARKET_BATCH = 1
+# capture up to MARKET_BATCH event views per slow run (proven path),
+# bounded by per-game MARKET_REFRESH freshness.
+MARKET_BATCH = 2
 MARKET_REFRESH_S = 480
 # STEP 2: the slow (full event-view) path runs on its OWN page, gated to
 # once every N fast ticks — decoupled from the score poll's page/state.
-# N=30 at a 10s tick = one event-view attempt per ~5 min; per-game
-# round-robin cadence is ~N×5 min across N tracked games.  The attempt
-# still runs synchronously inside that 30th tick (a ~6-20s overrun that
-# the target-boundary scheduler absorbs), so the score poll cadence on
-# the OTHER 29 ticks is untouched; full async decoupling is future work.
-EVENT_VIEW_EVERY_N = 30
+# Real cycles run ~36s (browser work dominates), so N=3 ≈ one event-view
+# run every ~2 min; each run captures up to MARKET_BATCH games.  With
+# ~30 tracked games that bounds a full rotation to ~15 min — the honest
+# single-browser limit for one-thread WS subscription coverage (the
+# eu-swarm feed only pushes the OPEN event's markets).  The attempt
+# still runs synchronously inside that tick (a ~6-20s overrun that the
+# target-boundary scheduler absorbs), so the score poll cadence on the
+# other ticks is untouched; full async decoupling is future work.
+EVENT_VIEW_EVERY_N = 3
 # In-memory tick-timing ring (instrumentation): keep ~24h of samples at
 # the 10s tick, then drop the oldest — a daemon must never grow without
 # bound.  The summary is exposed via the collector state payload.
@@ -142,6 +147,59 @@ def _ts_age_s(iso_ts: str) -> float:
         return (datetime.now(timezone.utc) - dt).total_seconds()
     except Exception:
         return float("inf")
+
+
+_PERIOD_Q = {
+    "1st Quarter": 1, "2nd Quarter": 2,
+    "3rd Quarter": 3, "4th Quarter": 4,
+}
+
+
+def ws_matchtotal_snapshot(
+    game: PokerBetGame, obs: dict,
+) -> Optional[MarketObservation]:
+    """Event-quality snapshot from a persisted eu-swarm MatchTotal obs.
+
+    The WS stream for the OPEN event is the same observed bookmaker data
+    as the event-view DOM (identity, score, period, O/U line + prices)
+    but arrives with NO DOM parse — so a tracked game whose event page
+    is open gets a complete score + market history even when the
+    event-view DOM parse fails verification (the Betual/Cyber virtual
+    pages regularly do).  Pure mapping of an already-persisted obs; the
+    caller throttles per game and persists.  Returns None when the obs
+    carries no line (defensive).
+    """
+    line = obs.get("line_value")
+    if line is None:
+        return None
+    period = obs.get("period_label") or ""
+    return MarketObservation(
+        source=SOURCE_POKERBET,
+        source_game_id=game.source_game_id,
+        classification=game.classification,
+        captured_at=obs["captured_at"],
+        home_team=game.home_team,
+        away_team=game.away_team,
+        home_score=obs.get("home_score"),
+        away_score=obs.get("away_score"),
+        period_label=period or "",
+        quarter=_PERIOD_Q.get(period),
+        clock=obs.get("clock"),
+        game_status=PokerBetCollector._infer_status(period) if period else "live",
+        total_line=line,
+        total_over_odds=obs.get("over_price"),
+        total_under_odds=obs.get("under_price"),
+        source_url=game.source_url,
+        markets_json=json.dumps({
+            "source": "ws",
+            "market_type": obs.get("market_type"),
+            "market_name": obs.get("market_name"),
+            "line_value": line,
+            "over_price": obs.get("over_price"),
+            "under_price": obs.get("under_price"),
+        }, default=str),
+        raw_json=json.dumps(obs.get("raw") or {}, default=str),
+    )
 
 
 def competition_url(cls: Classification, comp_ids: dict[str, str]) -> str:
@@ -217,6 +275,38 @@ class PokerBetCollector:
             db_path or Path(__file__).resolve().parent.parent / "blm_pokerbet.db",
         )
         self.comp_ids = load_comp_ids()
+        # Clean metrics database (statistical foundation): a SEPARATE DB
+        # populated only from validated observations flowing through this
+        # collector's quality/replay protections.  Failure-isolated — a
+        # clean-metrics problem must never affect collection.
+        self.clean_metrics: Optional[CleanMetricsStore] = None
+        self._deviation: Optional[DeviationEngine] = None
+        try:
+            clean_path = Path(self.store.db_path).parent / "blm_metrics_clean.db"
+            self.clean_metrics = CleanMetricsStore(clean_path)
+            logger.info(
+                "clean metrics db ready: %s (start %s)",
+                clean_path, self.clean_metrics.started_at(),
+            )
+        except Exception:
+            self.clean_metrics = None
+            logger.error(
+                "clean metrics db unavailable (collector continues):\n%s",
+                traceback.format_exc(),
+            )
+        # Deviation / benchmark / z-score layer (Phase 2): reads the same
+        # clean trajectory rows; failure-isolated like the rest of the
+        # clean-metrics path.
+        try:
+            if self.clean_metrics is not None:
+                self._deviation = DeviationEngine(self.clean_metrics.db_path)
+        except Exception:
+            self._deviation = None
+            logger.error(
+                "deviation benchmark layer unavailable (collector "
+                "continues):\n%s",
+                traceback.format_exc(),
+            )
 
         # tracked games: classification -> team-key -> PokerBetGame
         self._tracked: dict[str, dict[str, PokerBetGame]] = {
@@ -241,6 +331,7 @@ class PokerBetCollector:
         self._empty_ticks = 0                 # consecutive empty-parses
         self._event_view_failures = 0         # consecutive unverified event views
         self._ws_market_last: dict[tuple[str, Optional[float]], str] = {}
+        self._ws_snap_last: dict[str, str] = {}  # gid -> last bridge snapshot ts
         self._browser_started_at = 0.0
         self._started_at_iso = utcnow_iso()
         self._last_success_iso = ""
@@ -318,6 +409,27 @@ class PokerBetCollector:
                             logger.error(
                                 "market observation persist failed:\n%s",
                                 traceback.format_exc())
+                        # WS → snapshot bridge: the open event's feed is an
+                        # observed capture of THIS game (score/period/line),
+                        # independent of the DOM parse that keeps failing on
+                        # virtual events.  Persist an event-quality snapshot
+                        # (throttled per game) so the live card is complete
+                        # and total_line reaches the API/dashboard even when
+                        # the event-view parse is unverified.
+                        try:
+                            snap = ws_matchtotal_snapshot(game, obs)
+                            last = self._ws_snap_last.get(gid)
+                            if snap is not None and (
+                                    last is None
+                                    or _ts_age_s(last) >= WS_MARKET_DEDUP_S):
+                                if self.store.insert_snapshot(
+                                        self._game_db_id(game), snap):
+                                    self._ws_snap_last[gid] = obs["captured_at"]
+                                    self.stats["snapshots"] += 1
+                                    self._record_clean(game, snap)
+                        except Exception:
+                            logger.error("ws snapshot bridge failed:\n%s",
+                                         traceback.format_exc())
                 except Exception:
                     # a malformed frame must never kill the collector
                     logger.debug("ws market frame error: %s",
@@ -467,6 +579,20 @@ class PokerBetCollector:
         # restart recovery: restore tracked games so a crash/restart does
         # not force a full re-resolution storm in the fast path
         self._restore_tracked()
+        # one-time backfill: pre-existing clean observations (already in
+        # blm_metrics_clean.db from before this layer existed) enter the
+        # deviation benchmark immediately; per-observation refreshes keep
+        # it current afterwards.  Idempotent and failure-isolated.
+        if self._deviation is not None:
+            try:
+                stats = self._deviation.refresh_all()
+                logger.info(
+                    "deviation benchmark backfill: %s",
+                    {k: v for k, v in stats.items()},
+                )
+            except Exception:
+                logger.error("deviation benchmark backfill failed:\n%s",
+                             traceback.format_exc())
         try:
             with sync_playwright() as pw:
                 self._pw = pw
@@ -478,6 +604,18 @@ class PokerBetCollector:
                         self._next_tick_target = tick_start + self.tick_s
                     try:
                         page = self._tick(page)
+                    except sqlite3.OperationalError as exc:
+                        # Cross-process SQLite contention: the server's
+                        # scorecard holds a long write transaction on
+                        # blm_pokerbet.db (busy_timeout already waited 90s).
+                        # NOT a browser fault — skip this tick and retry on
+                        # the next boundary.  Relaunching would kill the WS
+                        # market subscription and tracked state for no
+                        # reason; the DOM is re-read fresh next tick, so no
+                        # observation is lost by skipping.
+                        self.stats["errors"] += 1
+                        self._last_error_iso = utcnow_iso()
+                        logger.warning("tick db lock — skipping tick: %s", exc)
                     except Exception:
                         self.stats["errors"] += 1
                         self._last_error_iso = utcnow_iso()
@@ -899,8 +1037,9 @@ class PokerBetCollector:
         replay of the same fixture (Betual/Cyber games replay every ~5 min
         under the SAME BetConstruct event URL), else None.
 
-        A reset is a score drop or a game-clock regression vs the game's
-        last stored snapshot — both impossible within one game."""
+        A reset is a score drop, a game-clock regression vs the game's
+        last stored snapshot, or a post-final replay frame below the
+        fixture's recorded final — all impossible within one game."""
         if row.home_score is None or row.away_score is None:
             return None
         return self._detect_event_reset(
@@ -925,16 +1064,27 @@ class PokerBetCollector:
                             period_label: Optional[str] = None,
                             clock: Optional[str] = None) -> Optional[str]:
         """Return the positive-evidence signal ('score_drop' |
-        'clock_regression') when an observed state (panel row OR verified
-        event view) is a NEW virtual replay of the same fixture, else None.
+        'clock_regression' | 'post_final_replay') when an observed state
+        (panel row OR verified event view) is a NEW virtual replay of the
+        same fixture, else None.
 
-        Two signals, both IMPOSSIBLE within one game:
+        Three signals, all IMPOSSIBLE within one game:
           1. score drop: last total >= 30 and new total < 50% of it
           2. clock regression: the observed game phase is EARLIER than the
              stored last snapshot by > 2 game-minutes (Q4 -> Q1 is
              impossible within one game).  Needed because at 20s ticks the
              new replay's first row can already carry a score (e.g. 28-28)
              above the 50% score-drop threshold.
+          3. post-final replay: the fixture ALREADY has a recorded final
+             (game_results.final_total) and the observed total is strictly
+             BELOW it.  A live game can never dip below its own recorded
+             final, so the frame must be an EARLIER state of the finished
+             fixture — the source re-listing the finished event with a
+             frozen replay frame.  This covers the case the first two
+             signals miss: a replay total close to the recorded final
+             (no score_drop) with a blank/unparseable period label
+             (no clock_regression) — observed 2026-09-05 as 123-118 @
+             01:30 blank period after a 123-121 final (games 4859/4860).
 
         There is deliberately NO score-EXPLOSION signal: a forward jump
         (even > 15 pts in < 90s) is NOT positive evidence of a new replay —
@@ -966,6 +1116,13 @@ class PokerBetCollector:
         new_el = self._elapsed_minutes(None, clock, period_label)
         if last_el is not None and new_el is not None and new_el < last_el - 2.0:
             return "clock_regression"
+        # post-final replay: recorded final exists and the observed total
+        # is strictly below it — positive evidence of an earlier frame of
+        # a fixture that has already finished (see docstring signal 3).
+        final = self.store.get_recorded_final(game.source_game_id)
+        if final is not None and final.get("final_total") is not None \
+                and cur < final["final_total"]:
+            return "post_final_replay"
         return None
 
     def _split_instance(self, game: PokerBetGame, row: RowGame, cls,
@@ -1069,9 +1226,72 @@ class PokerBetCollector:
         row_id = self.store.insert_snapshot(self._game_db_id(game), obs)
         if row_id:
             self.stats["snapshots"] += 1
+            self._record_clean(game, obs)
         self._unseen_ticks[game.classification][
             f"{row.home_team}|{row.away_team}"
         ] = 0
+
+    def _record_clean(self, game: PokerBetGame, obs: MarketObservation) -> None:
+        """Feed one VALIDATED observation into the clean metrics DB.
+
+        Called only after ``insert_snapshot`` accepted the row (so exact
+        capture duplicates are never re-recorded) and only for the live
+        instance the collector wrote to — the replay protections already
+        routed post-final frames to a fresh #iN instance, never back to
+        the finished base.  Failure-isolated: any clean-metrics error is
+        logged and swallowed so collection is unaffected."""
+        if self.clean_metrics is None:
+            return
+        try:
+            self.clean_metrics.record_snapshot_obs(game, obs, self.store)
+            self._refresh_projections(game.source_game_id)
+        except Exception:
+            logger.error("clean metrics record failed:\n%s",
+                         traceback.format_exc())
+
+    def _refresh_projections(self, source_game_id: str) -> None:
+        """Recompute the deterministic pace-trajectory rows for one game
+        from its VALID clean observations (idempotent, failure-isolated).
+        Called as observations arrive so the subsequent-observation
+        linkage stays current; also called on finalize so
+        final_settled_total updates when the game completes."""
+        if self.clean_metrics is None:
+            return
+        try:
+            PaceProjector().refresh_game(self.clean_metrics, source_game_id)
+        except Exception:
+            logger.error("pace projector refresh failed:\n%s",
+                         traceback.format_exc())
+        # Deviation benchmark: residuals + provisional z-scores for any new
+        # eligible trajectory rows (idempotent, never rewrites history).
+        if self._deviation is not None:
+            try:
+                self._deviation.refresh_game(source_game_id)
+            except Exception:
+                logger.error("deviation refresh failed:\n%s",
+                             traceback.format_exc())
+
+    def _finalize_clean(
+        self, game: PokerBetGame, obs: Optional[MarketObservation] = None,
+    ) -> None:
+        """Record the final result on the clean game/instance record.
+
+        ``obs`` carries the verified final scores when the event view
+        observed the terminal state; otherwise the game ended unseen and
+        the clean record is finalized as UNKNOWN (NULL finals)."""
+        if self.clean_metrics is None:
+            return
+        try:
+            self.clean_metrics.finalize(
+                game.source_game_id,
+                final_home=obs.home_score if obs is not None else None,
+                final_away=obs.away_score if obs is not None else None,
+                classification=game.classification,
+            )
+            self._refresh_projections(game.source_game_id)
+        except Exception:
+            logger.error("clean metrics finalize failed:\n%s",
+                         traceback.format_exc())
 
     def _capture_event_state(
         self, page: Optional[Page], cls: Classification, game: PokerBetGame,
@@ -1150,10 +1370,12 @@ class PokerBetCollector:
             row_id = self.store.insert_snapshot(self._game_db_id(game), obs)
             if row_id:
                 self.stats["snapshots"] += 1
+                self._record_clean(game, obs)
             if page is not None:
                 self._reconcile(game, page.url, event_text, parsed)
             if end:
                 self._end_game(game)
+                self._finalize_clean(game, obs)
             return True
         except Exception:
             logger.error("event capture failed:\n%s", traceback.format_exc())
@@ -1201,6 +1423,26 @@ class PokerBetCollector:
             return vals[index]
         return None
 
+    def _never_line_gids(self) -> set[str]:
+        """Tracked games that have NEVER had a verified MatchTotal market
+        line persisted (no market_observations MatchTotal row AND no
+        snapshot-carried total_line).  These are the games whose early
+        checkpoints (10/20/30%) are at risk of missing the line — the
+        slow event-view rotation prioritises them so their first line is
+        captured as early as possible."""
+        gids = set()
+        for games in self._tracked.values():
+            for g in games.values():
+                if g.status == "ended":
+                    continue
+                gid = g.source_game_id
+                if not gid or not g.source_url:
+                    continue
+                has_line = self.store.game_has_market_line(gid)
+                if not has_line:
+                    gids.add(gid)
+        return gids
+
     def _ensure_slow_page(self) -> None:
         """Create (once) the dedicated SLOW event-view page in the same
         browser/context as the fast page — so the slow path shares the
@@ -1230,12 +1472,29 @@ class PokerBetCollector:
         Runs once per EVENT_VIEW_EVERY_N fast ticks.  Only the slow page
         navigates; the fast page stays on the lobby for the score poll.
         ``_capture_event_state``/``_end_game`` may rotate the browser —
-        on rotation the slow page is recreated on the next guard."""
+        on rotation the slow page is recreated on the next guard.
+
+        Early-checkpoint priority (2026-09-04): the eu-swarm WS feed only
+        pushes the OPEN event's markets (verified: every WS frame carries
+        exactly one game), so a non-open game's ONLY line source is this
+        event-view rotation.  The uniform 480s refresh gate let a
+        newly-tracked young game sit at the back of the queue until it
+        was already past the 10/20/30% checkpoints — the dominant cause
+        of missing early market lines (65% of checkpoint rows had none).
+        A game that has NEVER had a MatchTotal line captured is treated
+        as not-yet-covered and is visited immediately (its first
+        event-view capture happens on the next slow run, capturing the
+        line as early as the game's current elapsed state), instead of
+        waiting for the round-robin to reach it."""
         page = self._slow_page
         if page is None or not self._market_queue:
             return
         now = utcnow_iso()
         captured = 0
+        # Snapshot of which games still lack any verified MatchTotal line.
+        # Consulted per slow run (cheap: one indexed SELECT per candidate
+        # only when the fast path found no line for that game).
+        never_line = self._never_line_gids()
         for _ in range(len(self._market_queue)):
             if captured >= MARKET_BATCH:
                 break
@@ -1249,7 +1508,15 @@ class PokerBetCollector:
             gid = self._market_queue.pop(0)
             self._market_queue.append(gid)
             last = self._last_market_at.get(gid)
-            if last and _ts_age_s(last) < MARKET_REFRESH_S:
+            # Early-checkpoint priority: a game that has NEVER had a
+            # verified market total line is not-yet-covered — visit it
+            # regardless of the 480s freshness gate (unless we captured it
+            # within the last few seconds).  This gets young games their
+            # first line at the earliest possible checkpoint.
+            if gid in never_line:
+                if last and _ts_age_s(last) < 15:
+                    continue  # just visited; avoid a hot loop
+            elif last and _ts_age_s(last) < MARKET_REFRESH_S:
                 continue  # fresh enough — leave room for others
             game = self._find_tracked(gid)
             if game is None or not game.source_url:
@@ -1257,17 +1524,39 @@ class PokerBetCollector:
             cls = Classification(game.classification)
             logger.info("slow event view for game %s", gid)
             try:
+                # The SPA event route hydrates only from the matching
+                # lobby — a stale event page or foreign lobby makes every
+                # row-click fail, starving whole leagues (CYBER_2K26).
+                if not self._ensure_comp_lobby(page, cls):
+                    logger.warning(
+                        "slow event view: %s lobby unreachable for %s — skipped",
+                        cls.value, gid)
+                    continue
                 if not self._click_tracked_row(page, game):
                     continue
                 text = page.inner_text("body", timeout=10000)
                 parsed = parse_event_view(text)
                 if not self._verified_event_view(game, parsed):
-                    self._event_view_failures += 1
-                    logger.warning(
-                        "event view unverified for %s (parsed teams %r/%r) — "
-                        "skipped (unverified=%d)",
-                        gid, parsed.get("home_team"), parsed.get("away_team"),
-                        self._event_view_failures)
+                    # The eu-swarm feed subscribed by this visit is an
+                    # independent, verified capture of the SAME game — when
+                    # the WS→snapshot bridge persisted during the dwell the
+                    # visit succeeded even though the DOM parse failed.
+                    ws_at = self._ws_snap_last.get(gid)
+                    ws_ok = ws_at is not None and _ts_age_s(ws_at) < 10
+                    if not ws_ok:
+                        self._event_view_failures += 1
+                        logger.warning(
+                            "event view unverified for %s (parsed teams %r/%r) — "
+                            "skipped (unverified=%d)",
+                            gid, parsed.get("home_team"), parsed.get("away_team"),
+                            self._event_view_failures)
+                        continue
+                    self._event_view_failures = 0
+                    self._last_market_at[gid] = now
+                    captured += 1
+                    logger.info(
+                        "event view unverified for %s but WS bridge captured "
+                        "market — visit counted", gid)
                     continue
                 self._event_view_failures = 0
                 eh, ea = parsed.get("home_score"), parsed.get("away_score")
@@ -1323,6 +1612,33 @@ class PokerBetCollector:
                     logger.error("slow return-to-lobby failed:\n%s",
                                  traceback.format_exc())
                     self._slow_page = None      # recreate on next guard
+
+    def _ensure_comp_lobby(self, page: Page, cls: Classification) -> bool:
+        """Make sure ``page`` shows a live LOBBY containing ``cls`` rows.
+
+        The SPA's event-view route hydrates only from an in-app row click
+        on the matching lobby list.  A stale event page or a foreign
+        competition's lobby makes every click fail — the cross-lobby
+        starvation that left whole leagues (CYBER_2K26) with zero market
+        capture for hours.  Reload the competition lobby until rows exist.
+        """
+        try:
+            for _ in range(3):
+                has_rows = page.evaluate(
+                    "() => document.querySelectorAll("
+                    "'.market-game-section').length > 0")
+                if has_rows:
+                    return True
+                url = competition_url(cls, self.comp_ids)
+                if not self._goto(page, url):
+                    continue
+                self._wait_panel(page)
+                self._expand_target_sections(page)
+            return False
+        except Exception:
+            logger.error("ensure comp lobby failed:\n%s",
+                         traceback.format_exc())
+            return False
 
     def _click_tracked_row(self, page: Page, game: PokerBetGame) -> bool:
         """Open ``game``'s event view by clicking its panel row.
@@ -1423,6 +1739,7 @@ class PokerBetCollector:
                         game.status = "ended"
                         self.store.upsert_game(game)
                         logger.info("game ended (disappeared): %s", game.source_game_id)
+                        self._finalize_clean(game)
                     # keep the game record; drop from live tracking
                     del games[key]
                     if game.source_game_id in self._market_queue:

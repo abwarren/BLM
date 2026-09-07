@@ -16,8 +16,39 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
+# Regulation duration defaults — BETUAL_NBA / unknown classifications are
+# 4 × 10-minute quarters.  CYBER_2K26 is 4 × 12 (confirmed from source
+# clock 12:00 at quarter starts) — see duration_for().  Callers MUST go
+# through duration_for(classification); these constants are only the
+# fallback/default.
 QUARTER_MINUTES = 10.0
-FULL_GAME_MINUTES = 40.0  # cyber/virtual basketball: 4 × 10 min
+FULL_GAME_MINUTES = 40.0  # betual/cyber-virtual basketball default: 4 × 10 min
+
+# Classification -> (quarter_minutes, full_game_minutes).
+# CYBER_2K26: source virtual-clock counts down from 12:00 each quarter.
+CLASSIFICATION_DURATION = {
+    "BETUAL_NBA": (10.0, 40.0),
+    "CYBER_2K26": (12.0, 48.0),
+}
+
+
+def duration_for(classification: Optional[str]) -> tuple[float, float]:
+    """(quarter_minutes, full_game_minutes) for a game classification.
+
+    Unknown/None classifications fall back to the BETUAL_NBA default
+    (10/40) so legacy and unclassified games keep the historical basis.
+    """
+    return CLASSIFICATION_DURATION.get(classification or "",
+                                       (QUARTER_MINUTES, FULL_GAME_MINUTES))
+
+
+def _rows_classification(rows: list[dict]) -> Optional[str]:
+    """First classification found on the snapshot rows (snapshots carry it)."""
+    for r in rows:
+        cls = r.get("classification")
+        if cls:
+            return str(cls)
+    return None
 
 # Bump this whenever the projection algorithm changes.  Accuracy
 # aggregates are always split by model version — never mixed.
@@ -76,8 +107,14 @@ def _parse_ts(iso: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def clock_minutes(quarter: Optional[int], clock: Optional[str]) -> Optional[float]:
-    """Elapsed game minutes from period + clock (MM:SS or M')."""
+def clock_minutes(quarter: Optional[int], clock: Optional[str],
+                  quarter_minutes: float = QUARTER_MINUTES) -> Optional[float]:
+    """Elapsed game minutes from period + clock (MM:SS or M').
+
+    ``quarter_minutes`` is the regulation quarter length for the game's
+    classification (10 for BETUAL_NBA, 12 for CYBER_2K26) — callers with a
+    classification should pass ``duration_for(cls)[0]``.
+    """
     q = _i(quarter)
     if q is None or q < 1:
         return None
@@ -87,23 +124,78 @@ def clock_minutes(quarter: Optional[int], clock: Optional[str]) -> Optional[floa
         mm, ss = int(m.group(1)), int(m.group(2))
         if mm > 12:  # MM:SS where MM is actually minutes-of-clock style
             return None
-        # BetConstruct virtual clocks display 12:00 at a period start and
-        # tick down; a quarter is QUARTER_MINUTES long, so any display of
-        # 10:00+ means the period clock has NOT begun counting down
-        # (period-start/boundary sentinel — e.g. "12:00", "11:30").
-        # Clamping the contribution at 0 instead of letting it go negative
-        # fixes the 2-minute undercount that mislabeled checkpoint
-        # positions (12:00 -> elapsed (q-1)*10, not (q-1)*10 - 2).
-        contrib = max(0.0, QUARTER_MINUTES - mm - ss / 60.0)
-        return round((q - 1) * QUARTER_MINUTES + contrib, 2)
+        # BetConstruct virtual clocks display the period length at a period
+        # start and tick down; a quarter is quarter_minutes long, so any
+        # display of quarter_minutes+ means the period clock has NOT begun
+        # counting down (period-start/boundary sentinel — e.g. "12:00",
+        # "11:30").  Clamping the contribution at 0 instead of letting it
+        # go negative fixes the 2-minute undercount that mislabeled
+        # checkpoint positions (12:00 -> elapsed (q-1)*qm, not (q-1)*qm-2).
+        contrib = max(0.0, quarter_minutes - mm - ss / 60.0)
+        return round((q - 1) * quarter_minutes + contrib, 2)
     try:
-        return round((q - 1) * QUARTER_MINUTES + float(c.rstrip("'`")), 2)
+        return round((q - 1) * quarter_minutes + float(c.rstrip("'`")), 2)
     except Exception:
         return None
 
 
+_PERIOD_Q_RE = re.compile(r"(\d)(?:st|nd|rd|th)?\s*quarter")
+
+
+def period_quarter(period_label: Optional[str]) -> Optional[int]:
+    """Derive quarter number from a period label ("3rd Quarter" -> 3).
+
+    Mirrors scorecard._period_quarter / api._period_quarter so every
+    layer resolves the same quarter from the same label.
+    """
+    p = (period_label or "").lower()
+    m = _PERIOD_Q_RE.search(p)
+    if m:
+        return int(m.group(1))
+    if p.startswith("half"):
+        return 2
+    return None
+
+
+def row_quarter(row: dict) -> Optional[int]:
+    """Effective quarter for a snapshot row: structured ``quarter`` when
+    available, else the period-label fallback (list/WS snapshots often
+    store only the label)."""
+    q = _i(row.get("quarter"))
+    if q is not None:
+        return q
+    return period_quarter(row.get("period_label"))
+
+
+def row_elapsed_minutes(row: dict,
+                        quarter_minutes: float = QUARTER_MINUTES,
+                        full_game_minutes: Optional[float] = None) -> Optional[float]:
+    """Elapsed game minutes for a snapshot row (count-down clock), with
+    the period-label fallback for rows whose structured quarter is NULL.
+
+    Half-time boundary rows ("Half Time"/"Half End") are pinned at half
+    the game regardless of the clock sentinel — identical to
+    scorecard._progress_of and api._game_checkpoint_market, so the
+    projection layer reports the SAME game state every other layer does.
+    Returns None when the period cannot be resolved or the clock is
+    unparseable."""
+    q = row_quarter(row)
+    if q is None or q < 1 or q > 4:
+        return None
+    label = (row.get("period_label") or "").lower()
+    if q == 2 and label.startswith("half"):
+        full = full_game_minutes if full_game_minutes else quarter_minutes * 4.0
+        return round(full / 2.0, 2)
+    return clock_minutes(q, row.get("clock"), quarter_minutes)
+
+
 def pace_from_snapshots(rows: list[dict]) -> Optional[float]:
-    """Points-per-full-game pace from wall-clock deltas (fallback: game clock)."""
+    """Points-per-full-game pace from wall-clock deltas (fallback: game clock).
+
+    Full-game minutes come from the rows' classification (40 for BETUAL_NBA,
+    48 for CYBER_2K26) so pace is on the correct regulation scale.
+    """
+    q_min, full = duration_for(_rows_classification(rows))
     scored = [r for r in rows if r.get("home_score") is not None
               and r.get("away_score") is not None]
     if len(scored) >= 2:
@@ -113,15 +205,15 @@ def pace_from_snapshots(rows: list[dict]) -> Optional[float]:
             pts = (scored[-1]["home_score"] + scored[-1]["away_score"]
                    - scored[0]["home_score"] - scored[0]["away_score"])
             if pts >= 0 and span_min > 0:
-                pace = pts / span_min * FULL_GAME_MINUTES
+                pace = pts / span_min * full
                 if 20 <= pace <= 400:
                     return round(pace, 1)
     last = scored[-1] if scored else None
     if last:
-        el = clock_minutes(last.get("quarter"), last.get("clock"))
+        el = row_elapsed_minutes(last, q_min, full)
         if el and el > 0:
             total = (last["home_score"] or 0) + (last["away_score"] or 0)
-            pace = total / el * FULL_GAME_MINUTES
+            pace = total / el * full
             if 20 <= pace <= 400:
                 return round(pace, 1)
     return None
@@ -187,6 +279,7 @@ def project(rows: list[dict], market_override: Optional[float] = None) -> dict[s
     NEVER fabricates a line — override is always observed PokerBet data.
     """
     rows = list(rows)
+    q_min, full = duration_for(_rows_classification(rows))
     scored = [r for r in rows if r.get("home_score") is not None
               and r.get("away_score") is not None]
     latest = scored[-1] if scored else None
@@ -205,16 +298,16 @@ def project(rows: list[dict], market_override: Optional[float] = None) -> dict[s
 
     expected_margin = 0.0
     if home_score is not None and away_score is not None:
-        el = clock_minutes(latest.get("quarter"), latest.get("clock")) if latest else None
+        el = row_elapsed_minutes(latest, q_min, full) if latest else None
         if el and el > 1:
-            expected_margin = round((home_score - away_score) / el * FULL_GAME_MINUTES, 1)
+            expected_margin = round((home_score - away_score) / el * full, 1)
         elif len(scored) >= 2:
             t0, t1 = _parse_ts(scored[0]["captured_at"]), _parse_ts(scored[-1]["captured_at"])
             if t0 and t1 and (t1 - t0).total_seconds() >= 60:
                 span_min = (t1 - t0).total_seconds() / 60.0
                 expected_margin = round(
                     (home_score - away_score - scored[0]["home_score"]
-                     + scored[0]["away_score"]) / span_min * FULL_GAME_MINUTES, 1,
+                     + scored[0]["away_score"]) / span_min * full, 1,
                 )
 
     home_projection = round((expected_total + expected_margin) / 2, 1)
@@ -264,10 +357,10 @@ def project(rows: list[dict], market_override: Optional[float] = None) -> dict[s
         expected_total = et_q
         expected_margin = round(home_projection - away_projection, 1)
 
-    elapsed = clock_minutes(latest.get("quarter"), latest.get("clock")) if latest else None
+    elapsed = row_elapsed_minutes(latest, q_min, full) if latest else None
     progress = None
     if elapsed is not None:
-        progress = round(min(1.0, max(0.0, elapsed / FULL_GAME_MINUTES)), 4)
+        progress = round(min(1.0, max(0.0, elapsed / full)), 4)
 
     return {
         "pace": pace,

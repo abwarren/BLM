@@ -159,6 +159,8 @@ def test_project_market_override_is_observed_line():
 # ════════════════════════════════════════════════════════════════════
 
 def test_api_market_falls_back_to_ws(tmp_path):
+    # The live API only consumes POST-EPOCH (clean) WS observations —
+    # legacy lines are audit data and never feed a current live line.
     from blm_v4.api import _analyze_game
     conn = sqlite3.connect(tmp_path / "t.db")
     conn.row_factory = sqlite3.Row
@@ -203,12 +205,12 @@ def test_api_market_falls_back_to_ws(tmp_path):
     gid = conn.execute("SELECT id FROM games").fetchone()[0]
     conn.execute("""INSERT INTO snapshots (game_id, source_game_id, classification,
         captured_at, home_score, away_score, period_label, clock, quarter)
-        VALUES (?, '30734614', 'BETUAL_NBA', '2026-08-31T00:00:30Z', 44, 53,
+        VALUES (?, '30734614', 'BETUAL_NBA', '2026-09-05T06:00:30Z', 44, 53,
                 '3rd Quarter', '06:48', 3)""", (gid,))
     conn.execute("""INSERT INTO market_observations
         (game_id, source_game_id, captured_at, market_type, market_name,
          line_value, over_price, under_price, home_score, away_score)
-        VALUES (?, '30734614', '2026-08-31T00:00:10Z', 'MatchTotal', 'Total Points',
+        VALUES (?, '30734614', '2026-09-05T06:00:10Z', 'MatchTotal', 'Total Points',
                 204.5, 1.94, 1.87, 44, 53)""", (gid,))
     conn.commit()
     game = dict(conn.execute("SELECT * FROM games").fetchone())
@@ -217,8 +219,93 @@ def test_api_market_falls_back_to_ws(tmp_path):
     assert d["market"]["total_line"] == 204.5
     assert d["market"]["market_source"] == "ws"
     assert d["market"]["over_odds"] == 1.94 and d["market"]["under_odds"] == 1.87
-    assert d["market"]["total_line_at"] == "2026-08-31T00:00:10Z"
-    # model receives the observed WS line — blended with pace, then the
-    # live-score floor lifts the total to hp+ap (81.5+97.0 = 178.5)
-    assert d["model"]["expected_total"] == 178.5
+    assert d["market"]["total_line_at"] == "2026-09-05T06:00:10Z"
+    # prediction generation is frozen — the live-state object carries NO
+    # model block (no expected_total, no probability/edge fields)
+    assert "model" not in d
+    assert "signals" not in d
     conn.close()
+
+
+# ── WS → snapshot bridge ──────────────────────────────────────────────
+# The eu-swarm feed for the OPEN event is an independent, verified capture
+# of the same game (identity, score, period, O/U line + prices) that needs
+# no DOM parse.  The bridge maps a persisted MatchTotal observation to an
+# event-quality snapshot so a tracked game whose event page is open gets a
+# complete live card even when the event-view DOM parse is unverified.
+# Regression: before the bridge, snapshots with total_line stayed at ZERO
+# for hours while the live games' dashboard cards showed no current line.
+
+
+def _matchtotal_obs():
+    payloads = ws_market.parse_market_frame(REAL_FRAME)
+    return [o for o in ws_market.normalize_observations(
+        payloads, "2026-08-31T00:00:00.000Z")
+        if o["market_type"] == "MatchTotal"][0]
+
+
+def test_ws_bridge_maps_obs_to_event_snapshot():
+    from blm_v4.collector import ws_matchtotal_snapshot
+    from blm_v4.models import PokerBetGame
+    obs = _matchtotal_obs()
+    game = PokerBetGame(
+        source_game_id="30734614", classification="BETUAL_NBA",
+        home_team="Dorados de Chihuahua", away_team="Mineros de Zacatecas",
+    )
+    snap = ws_matchtotal_snapshot(game, obs)
+    assert snap is not None
+    # the OBSERVED bookmaker line and prices, untouched
+    assert snap.total_line == 204.5
+    assert snap.total_over_odds == 1.94 and snap.total_under_odds == 1.87
+    # scoreboard + identity flow through
+    assert snap.home_score == 44 and snap.away_score == 53
+    assert snap.period_label == "3rd Quarter" and snap.quarter == 3
+    assert snap.clock == "06:48"
+    assert snap.home_team == "Dorados de Chihuahua"
+    assert snap.away_team == "Mineros de Zacatecas"
+    assert snap.source_game_id == "30734614"
+    # provenance survives for the traceability requirement
+    assert '"source": "ws"' in snap.markets_json
+
+
+def test_ws_bridge_snapshot_roundtrip_carries_line(tmp_path):
+    from blm_v4.collector import ws_matchtotal_snapshot
+    from blm_v4.models import PokerBetGame
+    store = PokerBetStore(tmp_path / "t.db")
+    obs = _matchtotal_obs()
+    game = PokerBetGame(
+        source_game_id="30734614", classification="BETUAL_NBA",
+        home_team="Dorados de Chihuahua", away_team="Mineros de Zacatecas",
+    )
+    store.upsert_game(game)
+    gid = store.get_game("30734614")["id"]
+    snap = ws_matchtotal_snapshot(game, obs)
+    assert snap is not None
+    assert store.insert_snapshot(gid, snap) is not None
+    rows = store.get_snapshots("30734614")
+    assert len(rows) == 1
+    assert rows[0]["total_line"] == 204.5
+    assert rows[0]["home_score"] == 44
+    assert rows[0]["period_label"] == "3rd Quarter"
+
+
+def test_ws_bridge_tolerates_frame_without_period():
+    """Live regression: real frames can carry a NULL period_label (no
+    current_game_state/quarter) — the bridge must still map the obs
+    (period_label is a str field; None previously raised ValidationError
+    on every frame and starved the snapshot bridge)."""
+    from blm_v4.collector import ws_matchtotal_snapshot
+    from blm_v4.models import PokerBetGame
+    obs = _matchtotal_obs()
+    obs["period_label"] = None
+    obs["clock"] = None
+    game = PokerBetGame(
+        source_game_id="30734614", classification="BETUAL_NBA",
+        home_team="Dorados de Chihuahua", away_team="Mineros de Zacatecas",
+    )
+    snap = ws_matchtotal_snapshot(game, obs)
+    assert snap is not None
+    assert snap.total_line == 204.5
+    assert snap.period_label == ""
+    assert snap.quarter is None
+    assert snap.game_status == "live"

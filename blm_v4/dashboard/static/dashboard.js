@@ -1,8 +1,21 @@
 /* ═══════════════════════════════════════════════════════════════
    BLM LIVE ANALYTICS — operator dashboard
    Polls /api/v4/live every 5s; renders game cards + detail charts.
-   No manual refresh required.  Analytics first — raw JSON is only
-   available via the API endpoints or "Technical / Raw Data" in detail.
+   No manual refresh required.
+
+   SCOPE: LIVE + CLEAN + DESCRIPTIVE + COMPACT.  This is an
+   observation surface for clean post-epoch data ONLY.  Cards and the
+   detail modal present measured state — score/clock/elapsed, the live
+   total line with freshness, and pace as Pts/Min measurements (current,
+   required, gap, recent, acceleration).  Charts plot observed
+   time-series only.  There are NO model totals, no fair values, no
+   projections, no probabilities, no edges, no confidence, no signals
+   and no recommendations anywhere in the live view.  Model/audit
+   diagnostics live exclusively in the collapsed HISTORICAL / AUDIT
+   sections at the bottom, behind a top-level HISTORICAL / RESEARCH
+   collapse that is closed by default and persisted to localStorage;
+   raw JSON is only available via the API or "Technical / Raw Data" in
+   the modal DETAILS.
    ═══════════════════════════════════════════════════════════════ */
 "use strict";
 
@@ -13,11 +26,55 @@ const API_GAME = (id) => `/api/v4/game/${encodeURIComponent(id)}`;
 const state = {
   filter: "",
   games: [],
-  cards: new Map(),        // game_id -> {el, spark}
+  cards: new Map(),        // game_id -> {el, spark, detOpen, chartsOpen}
   modalGameId: null,
   modalCharts: {},
-  hideNonLive: false,
+  hideNonLive: true,       // default view: LIVE games only
 };
+
+/* ── UI section preferences — persisted in localStorage ─────
+   Frontend presentation state only (no backend involvement).
+     blm.historicalResearchCollapsed  — top-level HISTORICAL / RESEARCH
+     blm.gameDetailsCollapsed         — DETAILS in game cards / detail modal
+     blm.chartsCollapsed              — CHARTS (cards' sparkline / modal)
+   Defaults: historical + game details collapsed; charts visible.
+   "1" = collapsed, "0" = expanded.  New users get the defaults. */
+const PREF = {
+  HISTORICAL: "blm.historicalResearchCollapsed",
+  GAME_DETAILS: "blm.gameDetailsCollapsed",
+  CHARTS: "blm.chartsCollapsed",
+  CHECKPOINTS: "blm.checkpointsCollapsed",
+  MARKET_TRAJ: "blm.marketTrajectoryCollapsed",
+  DEVIATION_Z: "blm.deviationCollapsed",
+  VALIDATION: "blm.validationCollapsed",
+};
+const prefGet = (key, dflt) => {
+  try {
+    const v = localStorage.getItem(key);
+    return v == null ? dflt : v === "1";
+  } catch (_) { return dflt; }
+};
+const prefSet = (key, collapsed) => {
+  try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch (_) {}
+};
+
+// keep a collapsible section's ▸/▾ arrow in sync with its state
+function setSectionLabel(det) {
+  if (!det) return;
+  const sum = det.querySelector(":scope > summary");
+  const lab = sum && sum.dataset.label;
+  if (sum && lab) sum.textContent = `${lab} ${det.open ? "▾" : "▸"}`;
+}
+// bind a collapsible <details>; syncs its label and, when a pref key is
+// given, persists the collapsed preference on user toggles.
+function bindCollapsible(det, prefKey) {
+  if (!det) return;
+  setSectionLabel(det);
+  det.addEventListener("toggle", () => {
+    setSectionLabel(det);
+    if (prefKey) prefSet(prefKey, !det.open);
+  });
+}
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -55,8 +112,7 @@ const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
 const hasChart = () => typeof Chart !== "undefined";
 const ChartColor = {
   home: "rgba(34,211,238,1)", away: "rgba(251,191,36,1)",
-  model: "rgba(96,165,250,1)", market: "rgba(251,191,36,1)",
-  momentum: "rgba(52,211,153,1)", confidence: "rgba(96,165,250,1)",
+  market: "rgba(251,191,36,1)", momentum: "rgba(52,211,153,1)",
   grid: "rgba(30,42,58,.6)", tick: "#6b7a90",
 };
 
@@ -139,6 +195,11 @@ function renderScorecard(d) {
   const mc = d.market_compare || {};
   const recent = d.recent || [];
   const html = [];
+  // Clean-data boundary: the scorecard is the CLEAN statistical surface.
+  // Pre-epoch rows are excluded from every aggregate (audit only).
+  html.push(`<div class="sc-block sc-wide">
+    <div class="legacy-banner" style="margin:0">CLEAN DATA — FROM ${esc(String(d.data_epoch || "").slice(0, 19))}Z · legacy / pre-clean observations excluded from every aggregate (audit only, via /api/v4/history and the events LEGACY view)</div>
+  </div>`);
   // ── MARKET VS FAIR — PRIMARY (M009-M2 refined) ────────────────
   const mvF = d.market_vs_fair || {};
   const mvc = mvF.checkpoints || [];
@@ -181,13 +242,12 @@ function renderScorecard(d) {
           <table class="sc-table">
             <tr><th>%</th><th>Market</th><th>BLM Fair</th><th>M-F</th><th>Signal</th><th>Actual</th><th>Outcome</th></tr>
             ${(g.rows || []).map((r) => `<tr>
-              <td>${r.checkpoint_pct}%</td>
-              <td class="sc-num">${r.market ?? "–"}</td>
+              <td>${obsPctLabel(r)}<div class="muted" style="font-size:9px">${r.elapsed_minutes != null ? num(r.elapsed_minutes, 2) + " min" : ""}</div></td>
               <td class="sc-num">${r.fair ?? "–"}</td>
               <td class="sc-num">${sig(r.mf)}</td>
               <td>${r.signal ? esc(r.signal) : "–"}</td>
               <td class="sc-num">${r.actual ?? "–"}</td>
-              <td>${r.outcome ? esc(r.outcome) : "–"}</td>
+              <td>${r.outcome ? esc(r.outcome) : "–"}${r.terminal ? ` <span class="st st-stale" title="${esc(r.exclusion_reason || "TERMINAL CHECKPOINT")}">SETTLEMENT ONLY</span>` : ""}</td>
             </tr>`).join("")}
           </table>
         </details>`).join("")}
@@ -516,7 +576,7 @@ const API_EVENTS = "/api/v4/scorecard/events";
 let eventsTimer = null;
 const eventsState = {
   direction: "", freshness: "", checkpoint: "",
-  minDiff: "", maxDiff: "", game: "", limit: 200,
+  minDiff: "", maxDiff: "", game: "", quality: "CLEAN", limit: 200,
 };
 
 function eventsURL() {
@@ -527,12 +587,55 @@ function eventsURL() {
   if (eventsState.minDiff) p.set("min_diff", eventsState.minDiff);
   if (eventsState.maxDiff) p.set("max_diff", eventsState.maxDiff);
   if (eventsState.game) p.set("game", eventsState.game);
+  if (eventsState.quality) p.set("quality", eventsState.quality);
   p.set("limit", String(eventsState.limit));
   return `${API_EVENTS}?${p.toString()}`;
 }
 
 const evStatusCls = (s) => s === "LIVE" ? "st-live"
   : s === "STALE" ? "st-stale" : s === "MISSING" ? "st-missing" : "";
+
+// B2: under a checkpoint target % (e.g. "30%"), show the ACTUAL game
+// state the API supplies at that checkpoint — period, clock, elapsed
+// minutes over the classification duration, and true progress — so the
+// target position is never mistaken for game time.  Empty when the API
+// has no game state (historical rows without a resolvable snapshot).
+// ACTUAL OBSERVATION PROGRESS (label-semantics directive): the
+// checkpoint bucket (10..100) is a grouping target, not game time.  The
+// displayed progress must be the observation's real elapsed/full
+// duration (authoritative elapsed_game_minutes / total_game_minutes),
+// e.g. a final snapshot at 39.25/40.00 min displays 98.1% — never the
+// 100% bucket label.  Falls back to the bucket only when the row has no
+// recorded game time.
+function obsPctLabel(r) {
+  if (r.progress != null) return (r.progress * 100).toFixed(1) + "%";
+  if (r.elapsed_minutes != null) {
+    const full = r.classification === "CYBER_2K26" ? 48 : 40;
+    return (r.elapsed_minutes / full * 100).toFixed(1) + "%";
+  }
+  return r.checkpoint_pct != null ? r.checkpoint_pct + "%" : "–";
+}
+
+function cpStateHTML(r, classification) {
+  const parts = [];
+  if (r.period_label_at_checkpoint) parts.push(esc(r.period_label_at_checkpoint));
+  if (r.clock_at_checkpoint) parts.push(esc(r.clock_at_checkpoint));
+  if (r.elapsed_minutes != null) {
+    const full = classification === "CYBER_2K26" ? 48 : 40;
+    parts.push(num(r.elapsed_minutes, 2) + "/" + full.toFixed(2) + " min");
+  }
+  if (r.progress != null) parts.push((r.progress * 100).toFixed(1) + "%");
+  // ACTUAL PROGRESS vs CHECKPOINT BUCKET (label-semantics directive):
+  // when the row's actual observation time differs from its analytical
+  // bucket target, name the bucket explicitly — the 100% bucket must
+  // never be mistaken for game time or for terminal status.
+  if (r.progress != null && r.checkpoint_pct != null
+      && Math.round(r.progress * 100) !== r.checkpoint_pct) {
+    parts.push(`bucket ${r.checkpoint_pct}%`);
+  }
+  return parts.length
+    ? `<div class="muted" style="font-size:9px">${parts.join(" · ")}</div>` : "";
+}
 
 function renderEvents(d) {
   const grid = $("eventsGrid");
@@ -541,7 +644,7 @@ function renderEvents(d) {
   const total = d.total ?? rows.length;
   const rowsHtml = rows.map((r) => `<tr>
     <td>${esc(r.home_team || r.game || "–")} vs ${esc(r.away_team || "")}<div class="muted" style="font-size:9px">${esc(r.game || "")}</div></td>
-    <td>${r.checkpoint_pct != null ? r.checkpoint_pct + "%" : "–"}<div class="muted" style="font-size:9px">${fmtTime(r.checkpoint_ts)}</div></td>
+    <td>${obsPctLabel(r)}<div class="muted" style="font-size:9px">${fmtTime(r.checkpoint_ts)}</div>${cpStateHTML(r, r.classification)}</td>
     <td class="sc-num">${num(r.market_line, 1)}</td>
     <td class="sc-num">${num(r.blm_fair, 1)}</td>
     <td class="sc-num ${r.diff > 0 ? "pos" : r.diff < 0 ? "neg" : ""}">${sig(r.diff)}</td>
@@ -554,14 +657,20 @@ function renderEvents(d) {
     <td class="sc-num">${num(r.actual, 1)}</td>
     <td>${esc(r.outcome || "–")}</td>
     <td class="sc-num">${r.blm_won == null ? "–" : r.blm_won ? "✓" : "✗"}</td>
+    <td>${r.terminal
+      ? `<span class="st st-stale" title="${esc(r.exclusion_reason || "TERMINAL CHECKPOINT")}">EXCLUDED</span> <span class="muted" style="font-size:9px">settlement only</span>`
+      : `<span class="st" title="terminal: NO — actual game time is authoritative, the checkpoint bucket is analytical grouping only" style="color:var(--ok,#2e7d32)">ELIGIBLE</span>`}</td>
   </tr>`).join("");
+  const epochNote = d.data_quality === "LEGACY"
+    ? `LEGACY / PRE-CLEAN DATA · audit only · before ${esc(String(d.data_epoch || "").slice(0, 19))}Z`
+    : `CLEAN DATA — FROM ${esc(String(d.data_epoch || "").slice(0, 19))}Z`;
   grid.innerHTML = `<div class="sc-block sc-wide">
-    <h4>SCORECARD EVENTS <span class="muted">· inspection dataset — observed rows, never a strategy claim</span></h4>
+    <h4>SCORECARD EVENTS <span class="muted">· ${epochNote} · inspection dataset — observed rows, never a strategy claim</span></h4>
     <table class="sc-table">
-      <tr><th>Game</th><th>CP</th><th>Market line</th><th>BLM fair</th><th>Diff</th><th>Direction</th><th>Market status</th><th>Market age s</th><th>Momentum</th><th>False mom</th><th>BLM side</th><th>Actual</th><th>Outcome</th><th>BLM won</th></tr>
-      ${rowsHtml || `<tr><td colspan="14" class="sc-num">no events match filters</td></tr>`}
+      <tr><th>Game</th><th>CP</th><th>Market line</th><th>BLM fair</th><th>Diff</th><th>Direction</th><th>Market status</th><th>Market age s</th><th>Momentum</th><th>False mom</th><th>BLM side</th><th>Actual</th><th>Outcome</th><th>BLM won</th><th>PRED VALIDATION</th></tr>
+      ${rowsHtml || `<tr><td colspan="15" class="sc-num">no events match filters</td></tr>`}
     </table>
-    <div class="muted" style="margin-top:6px">Total ${total} · showing ${rows.length} of ${total}${rows.length < total ? " — narrow filters or raise limit" : ""}</div>
+    <div class="muted" style="margin-top:6px">Total ${total} · showing ${rows.length} of ${total}${rows.length < total ? " — narrow filters or raise limit" : ""}${d.n_terminal != null ? ` · terminal (settlement/audit only) <b>${d.n_terminal}</b> · predictive-eligible <b>${d.n_predictive_eligible ?? total - d.n_terminal}</b> · TERMINAL = SETTLEMENT/AUDIT ONLY, never predictive evidence` : ""}</div>
   </div>`;
   $("eventsSub").textContent = `total ${total} · showing ${rows.length}`;
 }
@@ -584,6 +693,7 @@ function syncEventsControls() {
   eventsState.checkpoint = $("evCp").value;
   eventsState.minDiff = $("evMinDiff").value;
   eventsState.game = $("evGame").value.trim();
+  eventsState.quality = $("evQuality").value || "CLEAN";
   eventsState.limit = Number($("evLimit").value) || 200;
 }
 
@@ -600,9 +710,11 @@ function bindEventsControls() {
   $("evReset").addEventListener("click", () => {
     eventsState.direction = eventsState.freshness = eventsState.checkpoint = "";
     eventsState.minDiff = eventsState.maxDiff = eventsState.game = "";
+    eventsState.quality = "CLEAN";
     eventsState.limit = 200;
     $("evDir").value = $("evFresh").value = $("evCp").value = "";
     $("evMinDiff").value = $("evGame").value = "";
+    $("evQuality").value = "CLEAN";
     $("evLimit").value = "200";
     refreshEvents();
   });
@@ -626,184 +738,128 @@ bindEventsControls();
 
 /* ── Game cards ──────────────────────────────────────────── */
 
-function winprobHTML(g) {
-  const m = g.market || {};
-  const w1 = m.w1_odds, w2 = m.w2_odds;
-  const hasOdds = w1 != null && w2 != null && w1 > 1 && w2 > 1;
-  // Missing odds: never render the 0.5 fallback as a genuine 50/50
-  // assessment — the bar is the MARKET's implied probability.
-  if (!hasOdds) {
-    return `<div class="winprob">
-      <div class="winprob-label">WIN PROBABILITY · MARKET-IMPLIED</div>
-      <div class="muted" style="font-size:11px">unavailable — no odds captured</div>
-    </div>`;
-  }
-  const wp = g.model ? g.model.win_probability : 0.5;
-  const h = Math.round(wp * 100), a = 100 - h;
-  return `
-    <div class="winprob">
-      <div class="winprob-label">WIN PROBABILITY · MARKET-IMPLIED</div>
-      <div class="winprob-bar">
-        <div class="home" style="width:${h}%"><span>${h}%</span></div>
-        <div class="away" style="width:${a}%"><span>${a}%</span></div>
-      </div>
-      <div class="winprob-legend">
-        <span>${esc(g.home_team)} <b>${h}%</b></span>
-        <span><b>${a}%</b> ${esc(g.away_team)}</span>
-      </div>
-    </div>`;
+// Regulation duration for elapsed/remaining/progress display
+// (CYBER 2K26 = 48 min, BETUAL NBA = 40 min).
+const fullMin = (g) => g.classification === "CYBER_2K26" ? 48 : 40;
+
+// GAME STATE — observed score, period, clock, and (when the clean
+// trajectory row exists) elapsed / remaining / progress minutes.  All
+// measurements; nothing here is a forecast.
+function gameStateHTML(g) {
+  const p = g.projector || {};
+  const full = fullMin(g);
+  const bits = [];
+  if (p.elapsed_game_minutes != null) bits.push(`${num(p.elapsed_game_minutes, 1)}/${full.toFixed(0)} min`);
+  if (p.remaining_game_minutes != null) bits.push(`${num(p.remaining_game_minutes, 1)} left`);
+  if (p.progress_pct != null) bits.push(`${(p.progress_pct * 100).toFixed(0)}%`);
+  const extra = bits.length ? `<span class="muted">· ${bits.join(" · ")}</span>` : "";
+  return `<div class="game-meta">
+    <span class="period">${esc(g.period_label || (g.quarter ? "Q" + g.quarter : "–"))}</span>
+    <span>${esc(g.clock || "–")}</span>
+    <span>${g.snapshot_count} snaps</span>
+    ${extra}
+  </div>`;
 }
 
-function divergenceHTML(g) {
-  const m = g.market || {}, mdl = g.model || {};
-  const mkt = m.total_line, mod = mdl.expected_total;
-  const mSpr = m.spread, modSpr = mdl.expected_margin;
-  const hasS = mSpr != null && modSpr != null;
-  const invalid = g.quality_status === "INVALID";
-  const sEdge = !invalid && hasS ? +(modSpr - mSpr).toFixed(1) : null;
-  const edgeCls = (v) => (v == null ? "flat" : v > 0.05 ? "pos" : v < -0.05 ? "neg" : "flat");
-  const edgeSym = (v) => (v == null ? "–" : (v > 0 ? "+" : "") + v);
-  const lineRow = (lab, v, meta) => `
-    <div class="line-cell"><div class="lab">${lab}</div>
-      <div class="val">${num(v, 1)}${meta ? `<span class="muted" style="font-size:10px"> ${meta}</span>` : ""}</div>
-    </div>`;
-  // M007-M7 — six distinct concepts, never conflated:
-  //   PREMATCH BLM   (not stored → "–", never fabricated)
-  //   OPENING LINE   (first verified PokerBet total — immutable)
-  //   CURRENT LIVE LINE (latest verified PokerBet total — ONLY when the
-  //                      game is live AND the observation is fresh)
-  //   LAST OBSERVED  (historical line w/ timestamp + ENDED/STALE — shown
-  //                   for ended/stale games, never presented as current)
-  //   BLM PREDICTION (model.expected_total; "historical" when not live)
-  //   CLOSING LINE   (frozen at end)
-  // liveEdge is ONLY ever computed against the CURRENT live line — an
-  // ended/stale game shows no live trading signal.
+// LIVE MARKET — the observed market total line with its freshness state
+// (LIVE/STALE/MISSING at the M3 300s threshold, exact age).  A line is
+// presented as CURRENT only when the game is live AND the observation is
+// fresh; otherwise the last observed line is labeled as such (ENDED/STALE)
+// and is never presented as current.  No comparison to any model value.
+function liveMarketHTML(g) {
+  const m = g.market || {};
+  const p = g.projector || {};
   const isLive = g.live === true;
-  const age = m.total_line_age_s;
-  const fresh = age != null && age <= 300;        // existing freshness threshold
-  const liveLine = isLive && fresh ? mkt : null;
-  const lastObs = liveLine == null && mkt != null ? mkt : null;
+  // Prefer the clean trajectory row's line + freshness; fall back to the
+  // API market block (same observed line, same M3 rules).
+  const line = p.live_total_line != null ? p.live_total_line : m.total_line;
+  const age = p.market_age_seconds != null ? p.market_age_seconds : m.total_line_age_s;
+  const mstatus = p.market_status || mktStatusWord(age, line != null);
+  const liveLine = isLive && mstatus === "LIVE" ? line : null;
+  const lastObs = liveLine == null && line != null ? line : null;
   const statusWord = g.status === "ended" ? "ENDED" : "STALE";
-  const mstatus = mktStatusWord(age, mkt != null);
   // exact market age (M009-M5 integrity): LIVE · 18s / STALE · 4m 21s /
   // MISSING · — ; never fabricated, absent age renders unavailable.
-  const ageMeta = mstatus == null ? "" : ` · ${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}`;
-  const prematch = "–";
-  const opening = m.opening_line;
-  const openingMeta = m.opening_line_at ? `@ ${(m.opening_line_at || "").slice(11, 19)}Z` : "";
-  const liveMeta = m.market_source ? ` · ${m.market_source}` : "";
-  const lastObsMeta = lastObs != null
-    ? `${m.total_line_at ? `@ ${(m.total_line_at || "").slice(11, 19)}Z` : ""} · ${statusWord}`
+  const freshTxt = mstatus == null ? "" : `${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}`;
+  const lastMeta = lastObs != null
+    ? ` @ ${((m.total_line_at || p.market_captured_at) || "").slice(11, 19)}Z · ${statusWord}`
     : "";
-  const closing = m.closing_line;
-  const closingMeta = m.closing_line_at ? `@ ${(m.closing_line_at || "").slice(11, 19)}Z` : "";
-  // model-derived values are GATED for analytically invalid games — the
-  // game is excluded from headline analytics; lines stay as diagnostics.
-  const liveEdge = !invalid && liveLine != null && mod != null ? +(mod - liveLine).toFixed(1) : null;
-  const modVal = invalid ? null : mod;
-  const modMeta = invalid ? "excluded from analytics" : (liveEdge != null ? "· live mkt" : "");
-  return `
-    <div class="divergence">
-      <div class="divergence-title">Market vs Model</div>
-      <div class="line-grid">
-        ${lineRow("Prematch BLM", null, prematch)}
-        ${lineRow("Opening Line", opening, openingMeta)}
-        ${lineRow("Current Live Line", liveLine, liveLine != null ? liveMeta : "")}
-        ${lineRow("Last observed", lastObs, lastObsMeta)}
-        ${lineRow(isLive ? "Live BLM Prediction" : "BLM (historical)", modVal, modMeta)}
-        ${lineRow("Closing Line", closing, closingMeta)}
-      </div>
-      <div class="div-row">
-        <div><div class="lab">${isLive ? "Mkt Total" : "Last observed"}</div><div class="val">${num(mkt, 1)}${mkt != null ? `${lastObs != null ? `<span class="muted" style="font-size:10px"> · ${statusWord}</span>` : ""}${ageMeta}${liveLine != null && m.market_source === "ws" ? `<span class="muted" style="font-size:10px"> · ws</span>` : ""}` : ""}</div></div>
-        <div><div class="lab">Model Total</div><div class="val">${num(modVal, 1)}</div></div>
-        <div><div class="lab">Edge</div>${liveEdge != null ? `<div class="edge ${edgeCls(liveEdge)}">${edgeSym(liveEdge)}</div>` : `<div class="edge flat">–</div>`}</div>
-      </div>
-      ${hasS ? `<div class="div-row" style="margin-top:6px">
-        <div><div class="lab">Mkt Spread</div><div class="val">${num(mSpr, 1)}</div></div>
-        <div><div class="lab">Model Margin</div><div class="val">${invalid ? "—" : num(modSpr, 1)}</div></div>
-        <div><div class="lab">Edge</div><div class="edge ${sEdge != null ? edgeCls(sEdge) : "flat"}">${sEdge != null ? edgeSym(sEdge) : "–"}</div></div>
-      </div>` : ""}
-    </div>`;
+  const src = m.market_source ? ` · ${m.market_source}` : "";
+  return `<div class="live-market">
+    <div class="live-market-label">Live Market</div>
+    <div class="live-market-row">
+      <span class="lm-line">${liveLine != null ? `LIVE TOTAL <b>${num(liveLine, 1)}</b>`
+        : lastObs != null ? `LAST OBSERVED <b>${num(lastObs, 1)}</b>`
+        : "LIVE TOTAL <b>–</b>"}</span>
+      <span class="lm-fresh">${freshTxt ? `<span class="st ${mstatus === "LIVE" ? "st-live" : mstatus === "STALE" ? "st-stale" : "st-missing"}">${esc(freshTxt)}</span>` : ""}</span>
+      <span class="muted">${src}</span>
+    </div>
+    ${lastMeta ? `<div class="lm-sub muted">${lastMeta}</div>` : ""}
+  </div>`;
 }
 
-function momentumHTML(g) {
+// Observed pace trend — direction, velocity and acceleration as
+// measurements of the observed scoring rate.  Descriptive only.
+function paceTrendHTML(g) {
   const m = g.momentum || {};
   const dir = m.direction || "flat";
   const word = dir === "up" ? "RISING" : dir === "down" ? "FALLING" : "FLAT";
   const arrow = dir === "up" ? "↗" : dir === "down" ? "↘" : "→";
-  const conf = g.model ? Math.round((g.model.confidence || 0) * 100) : 0;
-  return `
-    <div class="gauges">
-      <div class="gauge">
-        <div class="gauge-label">Momentum</div>
-        <div class="gauge-value mom-value ${dir}">${arrow}<span class="mom-word">${word}</span></div>
-        <div class="gauge-sub">${esc(m.strength_label || "—")} · ${num(m.velocity, 1)} pts/min · acc ${num(m.acceleration, 1)}</div>
-        <div class="bar-track"><div class="bar-fill ${dir === "up" ? "green" : dir === "down" ? "red" : ""}"
-          style="width:${Math.min(100, Math.abs(m.score - 50) * 2 + 5)}%"></div></div>
-      </div>
-      <div class="gauge">
-        <div class="gauge-label">Model data confidence</div>
-        <div class="gauge-value" style="font-size:22px">${conf}%</div>
-        <div class="gauge-sub">pace ${num(g.model ? g.model.pace : null, 1)} · exp total ${num(g.model ? g.model.expected_total : null, 1)}</div>
-        <div class="bar-track"><div class="bar-fill ${conf >= 70 ? "green" : conf >= 50 ? "amber" : "red"}"
-          style="width:${conf}%"></div></div>
-      </div>
-    </div>`;
-}
-
-function signalsHTML(g) {
-  const s = g.signals || {};
-  const names = [
-    ["bull_trap", "Bull"], ["bear_trap", "Bear"], ["reverse_bull_trap", "Rev Bull"],
-    ["dead_market", "Dead"], ["false_momentum", "False Mom (live)"], ["late_trap", "Late"],
-    ["sharp_trap", "Sharp"],
-  ];
-  const anyActive = (s.active || []).length;
-  if (!anyActive) return `<div class="signals"><span class="sig-none">No active signals</span></div>`;
-  return `<div class="signals">${names.map(([k, label]) => {
-    const v = s[k] || {};
-    if (!v.active) return "";
-    const tip = k === "false_momentum"
-      ? "live-window heuristic — distinct from the frozen per-checkpoint false_momentum record"
-      : `${label} trap · conf ${Math.round((v.confidence || 0) * 100)}%`;
-    return `<span class="sig active" title="${esc(tip)}">● ${label} ${Math.round((v.confidence || 0) * 100)}%</span>`;
-  }).join("")}</div>`;
+  if (m.velocity == null && m.acceleration == null) return "";
+  const accelCls = m.acceleration > 0 ? "pos" : m.acceleration < 0 ? "neg" : "";
+  return `<div class="pace-trend" title="Observed scoring pace trend — velocity pts/min and acceleration, measurements only">
+    <span class="pt-dir ${dir}">${arrow} ${word}</span>
+    <span class="pt-item">vel <b>${num(m.velocity, 2)}</b> pts/min</span>
+    <span class="pt-item">accel <b class="${accelCls}">${m.acceleration > 0 ? "+" : ""}${num(m.acceleration, 2)}</b></span>
+  </div>`;
 }
 
 // Analytically INVALID games: the backend quality gate excluded them from
-// every headline metric.  The card marks them EXCLUDED and gates the
-// model-derived panel while keeping historical diagnostics (lines,
-// scoreboard, raw history) visible.
+// every headline metric.  The card marks them EXCLUDED (data-quality
+// state) while keeping the descriptive panels and historical diagnostics
+// (lines, scoreboard, raw history) visible.
 function gatedNoteHTML(g) {
   const reason = g.quality_reason || "quality gate failed";
   return `<div class="gated-note">INVALID — EXCLUDED FROM ANALYTICS
     <span class="muted">· ${esc(reason)} · historical rows retained for diagnostics</span></div>`;
 }
 
-function projHTML(g) {
-  const mdl = g.model || {};
-  const hp = mdl.home_projection, ap = mdl.away_projection;
-  const total = (hp != null && ap != null) ? +(hp + ap).toFixed(1) : null;
-  const max = Math.max(hp || 0, ap || 0, 1);
-  return `
-    <div class="projs">
-      <div class="winprob-label">Team Projections</div>
-      <div class="proj-row"><span class="pname">${esc(g.home_team)}</span>
-        <span class="ptrack"><span class="pfill" style="width:${Math.round((hp || 0) / max * 100)}%;background:var(--cyan)"></span></span>
-        <span class="pval">${num(hp, 1)}</span></div>
-      <div class="proj-row"><span class="pname">${esc(g.away_team)}</span>
-        <span class="ptrack"><span class="pfill" style="width:${Math.round((ap || 0) / max * 100)}%;background:var(--amber)"></span></span>
-        <span class="pval">${num(ap, 1)}</span></div>
-      ${total != null ? `<div class="proj-total"><span>PROJECTED TOTAL</span><b>${num(total, 1)}</b></div>` : ""}
-    </div>`;
+// Pace strip — deterministic state on LIVE cards: actual Pts/Min vs the
+// pace required to reach the live total line (gap = required − actual),
+// plus the most recent observed pace window and acceleration where the
+// clean trajectory row has them.  Measurements only — never a
+// probability or an Over/Under call.
+function paceStripHTML(g) {
+  const p = g.projector;
+  if (!p || !g.live) return "";
+  const ap = p.actual_pts_per_min, rp = p.required_pts_per_min;
+  if (ap == null && rp == null) return "";
+  const gap = p.pace_gap;
+  const gapCls = gap > 0 ? "pos" : gap < 0 ? "neg" : "";
+  const signed = (v) => v == null ? "–" : (v > 0 ? "+" : "") + num(v, 2);
+  const recent = p.recent_pace_1m != null ? `${num(p.recent_pace_1m, 2)} (1m)`
+    : p.recent_pace_3m != null ? `${num(p.recent_pace_3m, 2)} (3m)` : null;
+  const accel = p.pace_acceleration != null ? `accel ${signed(p.pace_acceleration)}` : null;
+  const extra = [recent && `recent ${recent}`, accel].filter(Boolean).join(" · ");
+  return `<div class="pace-strip" title="Current scoring pace vs pace required to reach the live total line — deterministic observed state, not a probability">
+    <span class="pace-item"><b>PACE ${num(ap, 2)}</b> <span class="muted">pts/min</span></span>
+    <span class="pace-item muted">req ${num(rp, 2)}</span>
+    <span class="pace-item">gap <b class="${gapCls}">${signed(gap)}</b></span>
+    ${extra ? `<span class="pace-item muted">${extra}</span>` : ""}
+  </div>`;
 }
 
-function cardHTML(g) {
+function cardHTML(g, ui) {
   const invalid = g.quality_status === "INVALID";
   const liveCls = invalid ? "chip-excluded"
     : (g.live ? "chip-live" : (g.status === "ended" ? "chip-ended" : "chip-stale"));
   const liveTxt = invalid ? "EXCLUDED" : (g.live ? "LIVE" : g.status === "ended" ? "ENDED" : "STALE");
   const score = (v) => (v == null ? "–" : v);
+  const m = g.market || {};
+  // section collapse state (frontend-only): CHARTS default visible,
+  // DETAILS default collapsed — users control both independently.
+  const detOpen = !!(ui && ui.detOpen);
+  const chartsOpen = !!(ui && ui.chartsOpen);
   return `
     <div class="card-head">
       <span class="cat-badge ${esc(g.classification)}">${esc(g.classification)}</span>
@@ -817,18 +873,29 @@ function cardHTML(g) {
       <div class="team away"><div class="team-name">${esc(g.away_team)}</div>
         <div class="team-score away">${score(g.away_score)}</div></div>
     </div>
-    <div class="game-meta">
-      <span class="period">${esc(g.period_label || (g.quarter ? "Q" + g.quarter : "–"))}</span>
-      <span>${esc(g.clock || "–")}</span>
-      <span>${g.snapshot_count} snaps</span>
-    </div>
-    ${winprobHTML(g)}
-    ${divergenceHTML(g)}
-    ${invalid ? gatedNoteHTML(g) : `${momentumHTML(g)}${signalsHTML(g)}${projHTML(g)}`}
-    <div class="spark"><canvas></canvas></div>
+    ${gameStateHTML(g)}
+    ${paceStripHTML(g)}
+    ${liveMarketHTML(g)}
+    ${paceTrendHTML(g)}
+    ${invalid ? gatedNoteHTML(g) : ""}
+    <details class="card-charts" ${chartsOpen ? "open" : ""}>
+      <summary data-label="CHARTS">CHARTS ${chartsOpen ? "▾" : "▸"}</summary>
+      <div class="spark"><canvas></canvas></div>
+    </details>
+    <details class="card-details" ${detOpen ? "open" : ""}>
+      <summary data-label="DETAILS">DETAILS ${detOpen ? "▾" : "▸"}</summary>
+      <div class="cd-grid">
+        <div class="cd-item"><span class="cd-k">Opening line</span><span class="cd-v">${num(m.opening_line, 1)}${m.opening_line_at ? ` <span class="muted">@ ${(m.opening_line_at || "").slice(11, 19)}Z</span>` : ""}</span></div>
+        <div class="cd-item"><span class="cd-k">Closing line</span><span class="cd-v">${num(m.closing_line, 1)}${m.closing_line_at ? ` <span class="muted">@ ${(m.closing_line_at || "").slice(11, 19)}Z</span>` : ""}</span></div>
+        <div class="cd-item"><span class="cd-k">Market source</span><span class="cd-v">${esc(m.market_source || "–")}</span></div>
+        <div class="cd-item"><span class="cd-k">Quality</span><span class="cd-v">${esc(g.quality_status || "OK")}</span></div>
+        <div class="cd-item"><span class="cd-k">Snapshots</span><span class="cd-v">${g.snapshot_count || 0}</span></div>
+        <div class="cd-item"><span class="cd-k">Status</span><span class="cd-v">${esc(g.status || "–")}</span></div>
+      </div>
+    </details>
     <div class="card-foot">
       <span>${fmtTime(g.last_update)}</span>
-      <span title="1 − |score total − market line| ÷ market line">mkt proximity ${num(g.market_efficiency, 3)}</span>
+      <span title="1 − |score total − market line| ÷ market line — observed proximity, not a model comparison">mkt proximity ${num(g.market_efficiency, 3)}</span>
       <span>id ${esc(g.game_id)}</span>
     </div>`;
 }
@@ -865,6 +932,23 @@ function updateSpark(chart, g) {
   chart.update("none");
 }
 
+/* bind a card's collapsible CHARTS / DETAILS sections.  Each card keeps
+   its own open state across the 5s re-renders (independent per card; the
+   persisted prefs only seed brand-new cards). */
+function bindCardSections(el, card) {
+  const det = el.querySelector("details.card-details");
+  if (det) det.addEventListener("toggle", () => {
+    setSectionLabel(det);
+    if (card) card.detOpen = det.open;
+  });
+  const ch = el.querySelector("details.card-charts");
+  if (ch) ch.addEventListener("toggle", () => {
+    setSectionLabel(ch);
+    if (card) card.chartsOpen = ch.open;
+  });
+  el.querySelectorAll("details").forEach(setSectionLabel);
+}
+
 function renderCards(payload) {
   const grid = $("grid");
   const games = (payload.games || []).filter(
@@ -884,13 +968,23 @@ function renderCards(payload) {
     if (!card) {
       const el = document.createElement("div");
       el.className = "card";
-      el.innerHTML = cardHTML(g);
-      el.addEventListener("click", () => openModal(g.game_id));
+      const ui = {
+        detOpen: !prefGet(PREF.GAME_DETAILS, true),   // DETAILS collapsed by default
+        chartsOpen: !prefGet(PREF.CHARTS, false),     // CHARTS visible by default
+      };
+      el.innerHTML = cardHTML(g, ui);
+      el.addEventListener("click", (ev) => {
+        // clicks inside the CHARTS / DETAILS sections only toggle the
+        // section — they never open the detail modal
+        if (ev.target.closest("details")) return;
+        openModal(g.game_id);
+      });
       grid.appendChild(el);
       const canvas = el.querySelector(".spark canvas");
       const spark = makeSpark(canvas, g);
-      state.cards.set(g.game_id, { el, spark, lastScore: null });
+      state.cards.set(g.game_id, { el, spark, lastScore: null, detOpen: ui.detOpen, chartsOpen: ui.chartsOpen });
       card = state.cards.get(g.game_id);
+      bindCardSections(el, card);
     }
     // score change → flash
     const nowScore = `${g.home_score}|${g.away_score}`;
@@ -900,7 +994,9 @@ function renderCards(payload) {
       card.el.classList.add("flash");
     }
     card.lastScore = nowScore;
-    card.el.innerHTML = cardHTML(g);
+    // re-render while preserving each card's CHARTS / DETAILS state
+    card.el.innerHTML = cardHTML(g, { detOpen: card.detOpen, chartsOpen: card.chartsOpen });
+    bindCardSections(card.el, card);
     if (card.spark) {
       const holder = card.el.querySelector(".spark");
       holder.innerHTML = "";
@@ -950,58 +1046,48 @@ function modalPanel(title, inner) {
 }
 
 function renderModal(g) {
-  const mdl = g.model || {}, mkt = g.market || {}, mom = g.momentum || {},
-        sgn = g.signals || {};
+  const mkt = g.market || {}, mom = g.momentum || {}, p = g.projector || {};
   const invalid = g.quality_status === "INVALID";
-  const confPct = Math.round((mdl.confidence || 0) * 100);
-  const wpPct = Math.round((mdl.win_probability || 0) * 100);
-  const hasOdds = mkt.w1_odds != null && mkt.w2_odds != null
-    && mkt.w1_odds > 1 && mkt.w2_odds > 1;
+  const full = fullMin(g);
   const isLive = g.live === true;
-  const age = mkt.total_line_age_s;
-  const fresh = age != null && age <= 300;               // existing freshness threshold
-  const liveLine = isLive && fresh ? mkt.total_line : null;
-  const lastObs = liveLine == null && mkt.total_line != null ? mkt.total_line : null;
+  // modal section state from the persisted prefs — CHARTS visible,
+  // DETAILS collapsed for new users
+  const chartsOpen = !prefGet(PREF.CHARTS, false);
+  const detailsOpen = !prefGet(PREF.GAME_DETAILS, true);
+  // Observed market line + freshness (clean trajectory row preferred,
+  // API market block as fallback).  A line is current only when the game
+  // is live AND fresh; otherwise it is labeled "Last observed".
+  const line = p.live_total_line != null ? p.live_total_line : mkt.total_line;
+  const age = p.market_age_seconds != null ? p.market_age_seconds : mkt.total_line_age_s;
+  const mstatus = p.market_status || mktStatusWord(age, line != null);
+  const liveLine = isLive && mstatus === "LIVE" ? line : null;
+  const lastObs = liveLine == null && line != null ? line : null;
   const statusWord = g.status === "ended" ? "ENDED" : "STALE";
-  const mstatus = mktStatusWord(age, mkt.total_line != null);
-  const ageMeta = mstatus == null ? "" : ` · ${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}`;
-  const tEdge = !invalid && liveLine != null && mdl.expected_total != null
-    ? +(mdl.expected_total - liveLine).toFixed(1) : null;
-  const sEdge = !invalid && mkt.spread != null && mdl.expected_margin != null
-    ? (mdl.expected_margin - mkt.spread).toFixed(1) : null;
-  const activeSigs = (sgn.active || []).map((k) =>
-    `<span class="sig active" title="${k === "false_momentum" ? esc("live-window heuristic — not the frozen per-checkpoint record") : ""}">● ${esc(k)} ${Math.round((sgn[k]?.confidence || 0) * 100)}%</span>`).join("");
+  const freshTxt = mstatus == null ? "" : `${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}`;
+  const signed = (v) => v == null ? "–" : (v > 0 ? "+" : "") + num(v, 2);
+  const pace = (w) => p["recent_pace_" + w + "m"] != null ? num(p["recent_pace_" + w + "m"], 2) : "–";
+  // Checkpoint market history — the market line frozen at-or-before each
+  // checkpoint (observed rows only; no model prediction, no edge).
+  const cps = (g.checkpoints || []).map((c) => `<tr>
+    <td><b>${esc(c.label)}</b><div class="muted" style="font-size:9px">${fmtTime(c.predicted_at)}</div></td>
+    <td class="sc-num">${num(c.market_at_checkpoint, 1)}</td>
+    <td class="muted" style="font-size:10px">${c.source_snapshot_at ? `@ ${fmtTime(c.source_snapshot_at)}` : "–"}</td>
+  </tr>`).join("");
   const tl = (g.timeline || []).map((e) =>
     `<div class="tl-item"><span class="tl-time">${fmtTime(e.t)}</span><span class="tl-label ${esc(e.type)}">${esc(e.label)}</span></div>`
   ).join("") || '<div class="tl-item"><span class="muted">No events yet</span></div>';
-  const cps = (g.checkpoints || []).map((c) => `<tr>
-    <td><b>${esc(c.label)}</b><div class="muted" style="font-size:9px">${fmtTime(c.predicted_at)}</div></td>
-    <td class="sc-num">${num(c.blm_prediction, 1)}</td>
-    <td class="sc-num">${num(c.market_at_checkpoint, 1)}</td>
-    <td class="sc-num ${c.edge > 0 ? "pos" : c.edge < 0 ? "neg" : ""}">${c.edge != null ? (c.edge > 0 ? "+" : "") + c.edge.toFixed(1) : "–"}</td>
-    <td class="sc-num">${num(c.actual_final, 1)}</td>
-    <td class="sc-num ${c.error != null && c.error < 0 ? "neg" : ""}">${num(c.error, 1)}</td>
-  </tr>`).join("");
-  // M009-M5 integrity: frozen per-checkpoint Market-vs-Fair rows expose
-  // the RECORDED false-momentum (distinct from the live-window heuristic
-  // chip) — momentum fields frozen at record time, no look-ahead.
-  const mvf = (g.market_vs_fair || []).map((r) => `<tr>
-    <td>${r.checkpoint_pct}%</td>
-    <td class="sc-num">${num(r.live_market_line, 1)}</td>
-    <td class="sc-num">${num(r.blm_fair_value, 1)}</td>
-    <td class="sc-num ${(r.market_vs_fair ?? 0) > 0 ? "pos" : (r.market_vs_fair ?? 0) < 0 ? "neg" : ""}">${r.market_vs_fair != null ? (r.market_vs_fair > 0 ? "+" : "") + r.market_vs_fair : "–"}</td>
-    <td>${esc(r.signal || "–")}</td>
-    <td>${esc(r.outcome || "–")}</td>
-    <td>${esc(r.momentum_state || "–")}${r.momentum_strength != null ? " · " + num(r.momentum_strength, 1) : ""}</td>
-    <td>${r.false_momentum == null ? "–" : r.false_momentum ? "1" : "0"}</td>
-  </tr>`).join("");
   const rawJson = g.raw || g.latest_snapshot || null;
+  const stateBits = [];
+  if (p.elapsed_game_minutes != null) stateBits.push(`${num(p.elapsed_game_minutes, 1)}/${full.toFixed(0)} min elapsed`);
+  if (p.remaining_game_minutes != null) stateBits.push(`${num(p.remaining_game_minutes, 1)} min remaining`);
+  if (p.progress_pct != null) stateBits.push(`${(p.progress_pct * 100).toFixed(0)}% progress`);
 
   $("mCat").textContent = g.classification || "–";
   $("mCat").className = `cat-badge ${esc(g.classification)}`;
   $("mTitle").textContent = `${g.home_team || "–"} vs ${g.away_team || "–"}`;
 
   $("modalBody").innerHTML = `
+    ${g.data_quality === "LEGACY" ? `<div class="legacy-banner">LEGACY / PRE-CLEAN GAME — started before the clean-data epoch (${esc(String(g.data_epoch || "").slice(0, 19))}Z). Current state below uses post-epoch observations only; full pre-clean history is available via the audit path.</div>` : ""}
     <div class="m-hero">
       <div class="m-score">
         <div><div class="team-name">${esc(g.home_team)}</div>
@@ -1013,90 +1099,81 @@ function renderModal(g) {
       <div style="text-align:right">
         <div class="period" style="font-family:var(--mono)">${esc(g.period_label || "")} ${esc(g.clock || "")}</div>
         <div class="muted" style="margin-top:4px">${g.snapshot_count || 0} snapshots · last ${fmtAge(g.age_s)}</div>
+        ${stateBits.length ? `<div class="muted" style="margin-top:2px">${stateBits.join(" · ")}</div>` : ""}
       </div>
     </div>
     ${invalid ? gatedNoteHTML(g) : ""}
-    ${invalid ? "" : `<div class="m-charts">
-      <div class="m-chart"><h4>Score Progression</h4><canvas id="mcScore"></canvas></div>
-      <div class="m-chart"><h4>Actual vs Market vs Model Total</h4><canvas id="mcTotal"></canvas></div>
-      <div class="m-chart"><h4>Model History — Win Probability &amp; Confidence</h4><canvas id="mcModel"></canvas></div>
-      <div class="m-chart"><h4>Momentum History</h4><canvas id="mcMomentum"></canvas></div>
-    </div>`}
+    ${invalid ? "" : `<details class="m-chart-toggle" ${chartsOpen ? "open" : ""}>
+      <summary data-label="CHARTS">CHARTS ${chartsOpen ? "▾" : "▸"}</summary>
+      <div class="m-charts">
+        <div class="m-chart"><h4>Score Progression</h4><canvas id="mcScore"></canvas></div>
+        <div class="m-chart"><h4>Score vs Live Line — market movement</h4><canvas id="mcTotal"></canvas></div>
+        <div class="m-chart"><h4>Pace Trend (momentum history)</h4><canvas id="mcMomentum"></canvas></div>
+      </div>
+    </details>`}
     <div class="m-panels">
-      ${modalPanel("Market vs Model", `
-        <div class="m-rows">
-          <div class="m-row"><span class="k">${isLive ? "Market total" : "Last observed"}</span><span class="v">${num(mkt.total_line, 1)}${lastObs != null ? ` <span class="muted" style="font-size:10px">@ ${(mkt.total_line_at || "").slice(11, 19)}Z · ${statusWord}</span>` : ""}${liveLine != null && mkt.market_source === "ws" ? ` <span class="muted" style="font-size:10px">(ws)</span>` : ""}${mstatus != null ? ` <span class="muted" style="font-size:10px">· ${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}</span>` : ""}</span></div>
-          <div class="m-row"><span class="k">Model total${isLive ? "" : " (historical)"}</span><span class="v">${invalid ? "— (excluded from analytics)" : num(mdl.expected_total, 1)}</span></div>
-          <div class="m-row"><span class="k">Total edge</span><span class="v ${tEdge > 0 ? "pos" : tEdge < 0 ? "neg" : ""}">${tEdge != null ? (tEdge > 0 ? "+" : "") + tEdge : "–"}</span></div>
-          <div class="m-row"><span class="k">Market spread</span><span class="v">${num(mkt.spread, 1)}</span></div>
-          <div class="m-row"><span class="k">Model margin</span><span class="v">${invalid ? "— (excluded)" : num(mdl.expected_margin, 1)}</span></div>
-          <div class="m-row"><span class="k">Spread edge</span><span class="v ${sEdge > 0 ? "pos" : sEdge < 0 ? "neg" : ""}">${sEdge != null ? (sEdge > 0 ? "+" : "") + sEdge : "–"}</span></div>
-          <div class="m-row"><span class="k">Market efficiency</span><span class="v">${num(g.market_efficiency, 3)}</span></div>
-          <div class="m-row"><span class="k">Market momentum</span><span class="v">${num(g.market_momentum, 2)}</span></div>
-        </div>`)}
-      ${invalid
-        ? modalPanel("Model", `<div class="muted">model panel unavailable — game excluded from analytics</div>`)
-        : modalPanel("Model", `
-        <div class="m-row"><span class="k">Market-implied win prob (home)</span><span class="v">${hasOdds ? wpPct + "%" : "— (no odds captured)"}</span></div>
-        ${hasOdds ? `<div class="winprob-bar" style="margin:6px 0"><div class="home" style="width:${wpPct}%"><span>${wpPct}%</span></div><div class="away" style="width:${100 - wpPct}%"><span>${100 - wpPct}%</span></div></div>` : ""}
-        <div class="m-row"><span class="k">Model data confidence</span><span class="v">${confPct}%</span></div>
-        <div class="bar-track"><div class="bar-fill ${confPct >= 70 ? "green" : confPct >= 50 ? "amber" : "red"}" style="width:${confPct}%"></div></div>
-        <div class="m-row" style="margin-top:8px"><span class="k">Home projection</span><span class="v">${num(mdl.home_projection, 1)}</span></div>
-        <div class="m-row"><span class="k">Away projection</span><span class="v">${num(mdl.away_projection, 1)}</span></div>
-        <div class="m-row"><span class="k">Pace</span><span class="v">${num(mdl.pace, 1)}</span></div>
-        <div class="m-row"><span class="k">Expected total</span><span class="v">${num(mdl.expected_total, 1)}</span></div>
+      ${modalPanel("Game State", `
+        <div class="m-row"><span class="k">Score</span><span class="v">${g.home_score ?? "–"} – ${g.away_score ?? "–"}</span></div>
+        <div class="m-row"><span class="k">Period</span><span class="v">${esc(g.period_label || (g.quarter ? "Q" + g.quarter : "–"))}</span></div>
+        <div class="m-row"><span class="k">Clock</span><span class="v">${esc(g.clock || "–")}</span></div>
+        <div class="m-row"><span class="k">Elapsed</span><span class="v">${p.elapsed_game_minutes != null ? num(p.elapsed_game_minutes, 1) + " min" : "–"}</span></div>
+        <div class="m-row"><span class="k">Remaining</span><span class="v">${p.remaining_game_minutes != null ? num(p.remaining_game_minutes, 1) + " min" : "–"}</span></div>
+        <div class="m-row"><span class="k">Progress</span><span class="v">${p.progress_pct != null ? (p.progress_pct * 100).toFixed(1) + "%" : "–"}</span></div>
       `)}
-      ${invalid
-        ? modalPanel("Momentum", `<div class="muted">momentum unavailable — game excluded from analytics</div>`)
-        : modalPanel("Momentum", `
+      ${modalPanel("Live Market", `
+        <div class="m-row"><span class="k">${liveLine != null ? "Live total" : (lastObs != null ? "Last observed" : "Live total")}</span><span class="v">${num(line, 1)}${lastObs != null ? ` <span class="muted" style="font-size:10px">@ ${((mkt.total_line_at || p.market_captured_at) || "").slice(11, 19)}Z · ${statusWord}</span>` : ""}</span></div>
+        <div class="m-row"><span class="k">Line freshness</span><span class="v">${freshTxt ? `<span class="st ${mstatus === "LIVE" ? "st-live" : mstatus === "STALE" ? "st-stale" : "st-missing"}">${esc(freshTxt)}</span>` : "–"}</span></div>
+        <div class="m-row"><span class="k">Line age</span><span class="v">${age != null ? fmtAgeExact(age) : "–"}</span></div>
+        <div class="m-row"><span class="k">Market source</span><span class="v">${esc(mkt.market_source || "–")}</span></div>
+      `)}
+      ${modalPanel("Pace", `
+        <div class="m-row"><span class="k">Current Pts/Min</span><span class="v">${num(p.actual_pts_per_min, 2)}</span></div>
+        <div class="m-row"><span class="k">Required Pts/Min (vs live line)</span><span class="v">${num(p.required_pts_per_min, 2)}</span></div>
+        <div class="m-row"><span class="k">Pace gap (required − actual)</span><span class="v ${(p.pace_gap ?? 0) > 0 ? "pos" : (p.pace_gap ?? 0) < 0 ? "neg" : ""}">${signed(p.pace_gap)}</span></div>
+        <div class="m-row"><span class="k">Recent pace 1/2/3/5 min</span><span class="v">${pace(1)} / ${pace(2)} / ${pace(3)} / ${pace(5)}</span></div>
+        <div class="m-row"><span class="k">Acceleration${p.acceleration_window ? ` (${esc(p.acceleration_window)})` : ""}</span><span class="v ${(p.pace_acceleration ?? 0) > 0 ? "pos" : (p.pace_acceleration ?? 0) < 0 ? "neg" : ""}">${signed(p.pace_acceleration)}</span></div>
+        <div class="muted" style="font-size:10px;margin-top:6px">Deterministic observed pace — measurements only, not a probability and not a forecast.</div>
+      `)}
+      ${modalPanel("Pace Trend", `
         <div class="big ${esc(mom.direction)}">${mom.direction === "up" ? "↗" : mom.direction === "down" ? "↘" : "→"} ${esc((mom.direction || "flat").toUpperCase())}</div>
         <div class="m-rows" style="margin-top:8px">
-          <div class="m-row"><span class="k">Score</span><span class="v">${num(mom.score, 0)} / 100</span></div>
-          <div class="m-row"><span class="k">Strength</span><span class="v">${esc(mom.strength_label)}</span></div>
           <div class="m-row"><span class="k">Velocity</span><span class="v ${mom.velocity >= 0 ? "pos" : "neg"}">${mom.velocity >= 0 ? "+" : ""}${num(mom.velocity, 2)} pts/min</span></div>
           <div class="m-row"><span class="k">Acceleration</span><span class="v ${mom.acceleration >= 0 ? "pos" : "neg"}">${mom.acceleration >= 0 ? "+" : ""}${num(mom.acceleration, 2)}</span></div>
         </div>
         <div class="bar-track" style="margin-top:10px"><div class="bar-fill ${mom.direction === "up" ? "green" : mom.direction === "down" ? "red" : ""}" style="width:${Math.min(100, Math.abs((mom.score || 50) - 50) * 2 + 5)}%"></div></div>
       `)}
-      ${modalPanel("Signals / Traps", `
-        <div class="m-row"><span class="k">Trap meter</span><span class="v">${num(sgn.trap_meter, 1)} / 100 (${esc(sgn.trap_meter_level)})</span></div>
-        <div class="bar-track"><div class="bar-fill ${sgn.trap_meter >= 60 ? "red" : sgn.trap_meter >= 30 ? "amber" : "green"}" style="width:${Math.min(100, sgn.trap_meter || 0)}%"></div></div>
-        <div class="signals" style="margin-top:8px">${activeSigs || '<span class="sig-none">No active signals</span>'}</div>
-        ${["bull_trap", "bear_trap", "reverse_bull_trap", "dead_market", "false_momentum", "late_trap", "sharp_trap"]
-          .map((k) => `<div class="m-row" style="margin-top:4px"><span class="k">${esc(k)}</span><span class="v">${sgn[k]?.active ? "ACTIVE" : "no"} · conf ${Math.round((sgn[k]?.confidence || 0) * 100)}%</span></div>`).join("")}
-        <div class="muted" style="font-size:10px;margin-top:6px">Signal chips are live-window heuristics — the frozen per-checkpoint false-momentum record lives in the MARKET VS FAIR table below.</div>
-      `)}
-      ${modalPanel("Game Info", `
-        <div class="m-row"><span class="k">Classification</span><span class="v">${esc(g.classification)}</span></div>
-        <div class="m-row"><span class="k">Competition</span><span class="v">${esc(g.competition)}</span></div>
-        <div class="m-row"><span class="k">Event ID</span><span class="v">${esc(g.game_id)}</span></div>
-        <div class="m-row"><span class="k">Region</span><span class="v">${esc(g.region)}</span></div>
-        <div class="m-row"><span class="k">Status</span><span class="v">${esc(g.status)}</span></div>
-        <div class="m-row"><span class="k">Quality</span><span class="v">${esc(g.quality_status || "OK")}${g.quality_reason ? ` · ${esc(g.quality_reason)}` : ""}</span></div>
-        <div class="m-row"><span class="k">W1 / W2 odds</span><span class="v">${num(mkt.w1_odds, 2)} / ${num(mkt.w2_odds, 2)}</span></div>
-        <div class="m-row"><span class="k">Team totals</span><span class="v">${num(mkt.home_total_line, 1)} / ${num(mkt.away_total_line, 1)}</span></div>
-        <div class="m-row"><span class="k">Source</span><span class="v">${esc(g.source)}</span></div>
-      `)}
     </div>
-    ${cps.length ? `<div class="m-panel m-wide">
-      <h4>CHECKPOINTS — frozen market at each checkpoint</h4>
-      <table class="sc-table">
-        <tr><th>Check</th><th>BLM Pred</th><th>Market @CP</th><th>Edge</th><th>Actual</th><th>Error</th></tr>
-        ${cps}
-      </table>
-      <div class="muted" style="font-size:10px;margin-top:6px">Market frozen at-or-before each checkpoint — later movement never rewrites historical rows; missing market shown as –.</div>
-    </div>` : ""}
-    ${mvf.length ? `<div class="m-panel m-wide">
-      <h4>MARKET VS FAIR — FROZEN PER-CHECKPOINT <span class="muted">· immutable rows; momentum frozen at record time (no look-ahead)</span></h4>
-      <table class="sc-table">
-        <tr><th>%</th><th>Market line</th><th>BLM fair</th><th>M−F</th><th>Signal</th><th>Outcome</th><th>Momentum</th><th>False mom</th></tr>
-        ${mvf}
-      </table>
-      <div class="muted" style="font-size:10px;margin-top:6px">False-momentum here is the RECORDED checkpoint value — distinct from the live-window heuristic chip on the card.</div>
-    </div>` : ""}
-    <div class="timeline"><h4>Live Timeline (from stored snapshots)</h4>${tl}</div>
+    <details class="m-details" ${detailsOpen ? "open" : ""}>
+      <summary data-label="DETAILS">DETAILS ${detailsOpen ? "▾" : "▸"}</summary>
+      ${cps.length ? `<div class="m-panel m-wide">
+        <h4>CHECKPOINTS — frozen market at each checkpoint</h4>
+        <table class="sc-table">
+          <tr><th>Check</th><th>Market @CP</th><th>Snapshot</th></tr>
+          ${cps}
+        </table>
+        <div class="muted" style="font-size:10px;margin-top:6px">Market line frozen at-or-before each checkpoint from stored observations — later movement never rewrites these rows; missing market shown as –.</div>
+      </div>` : ""}
+      <div class="timeline"><h4>Live Timeline (from stored snapshots)</h4>${tl}</div>
+      <div class="m-panel m-wide">
+        <h4>Game Info / Data Quality</h4>
+        <div class="m-rows">
+          <div class="m-row"><span class="k">Classification</span><span class="v">${esc(g.classification)}</span></div>
+          <div class="m-row"><span class="k">Competition</span><span class="v">${esc(g.competition)}</span></div>
+          <div class="m-row"><span class="k">Event ID</span><span class="v">${esc(g.game_id)}</span></div>
+          <div class="m-row"><span class="k">Region</span><span class="v">${esc(g.region)}</span></div>
+          <div class="m-row"><span class="k">Status</span><span class="v">${esc(g.status)}</span></div>
+          <div class="m-row"><span class="k">Quality</span><span class="v">${esc(g.quality_status || "OK")}${g.quality_reason ? ` · ${esc(g.quality_reason)}` : ""}</span></div>
+          <div class="m-row"><span class="k">W1 / W2 odds</span><span class="v">${num(mkt.w1_odds, 2)} / ${num(mkt.w2_odds, 2)}</span></div>
+          <div class="m-row"><span class="k">Team totals</span><span class="v">${num(mkt.home_total_line, 1)} / ${num(mkt.away_total_line, 1)}</span></div>
+          <div class="m-row"><span class="k">Source</span><span class="v">${esc(g.source)}</span></div>
+          ${g.data_epoch ? `<div class="m-row"><span class="k">Clean epoch</span><span class="v">${esc(String(g.data_epoch).slice(0, 19))}Z</span></div>` : ""}
+        </div>
+      </div>
+    </details>
     ${rawJson ? `<details class="tech-raw"><summary>Technical / Raw Data</summary><pre>${esc(typeof rawJson === "string" ? rawJson : JSON.stringify(rawJson, null, 2))}</pre></details>` : ""}`;
 
+  bindCollapsible($("modalBody").querySelector(".m-chart-toggle"), PREF.CHARTS);
+  bindCollapsible($("modalBody").querySelector(".m-details"), PREF.GAME_DETAILS);
   renderModalCharts(invalid ? null : g);
 }
 
@@ -1120,7 +1197,7 @@ function baseChartOpts(yLabel) {
 }
 
 function renderModalCharts(g) {
-  // INVALID games render no model charts — gated (null) by renderModal.
+  // INVALID games render no charts — gated (null) by renderModal.
   if (!g) {
     for (const k in state.modalCharts) {
       if (state.modalCharts[k]) state.modalCharts[k].destroy();
@@ -1154,25 +1231,19 @@ function renderModalCharts(g) {
     options: baseChartOpts("Points"),
   });
 
+  // Score vs Live Line — observed series only: the running combined score
+  // against the observed market total line.  No model series, no forecast.
   state.modalCharts.total = new Chart(mk("mcTotal"), {
     type: "line",
     data: { labels, datasets: [
       { label: "Actual (combined)", data: h.map((s) => s.combined), borderColor: "#eaf2ff", pointRadius: 0, tension: .25 },
       { label: "Market total", data: h.map((s) => s.total_line), borderColor: ChartColor.market, borderDash: [6, 4], pointRadius: 0 },
-      { label: "Model total", data: h.map((s) => s.expected_total), borderColor: ChartColor.model, borderDash: [2, 3], pointRadius: 0 },
     ]},
     options: baseChartOpts("Points"),
   });
 
-  state.modalCharts.model = new Chart(mk("mcModel"), {
-    type: "line",
-    data: { labels, datasets: [
-      { label: "Win prob %", data: h.map((s) => (s.win_prob ?? null) != null ? s.win_prob * 100 : null), borderColor: ChartColor.home, pointRadius: 0, tension: .25 },
-      { label: "Confidence %", data: h.map((s) => (s.confidence ?? null) != null ? s.confidence * 100 : null), borderColor: ChartColor.confidence, borderDash: [4, 3], pointRadius: 0, tension: .25 },
-    ]},
-    options: baseChartOpts("%"),
-  });
-
+  // Pace trend (momentum history) — observed scoring-rate index per
+  // snapshot; a factual time-series, not a prediction.
   state.modalCharts.momentum = new Chart(mk("mcMomentum"), {
     type: "line",
     data: { labels, datasets: [
@@ -1225,369 +1296,6 @@ async function refresh() {
   }
 }
 
-/* ── CALIBRATION — RAW SCORE → ACTUAL PROBABILITY (read-only research) ── */
-
-const API_CALIB = "/api/v4/scorecard/calibration";
-let calibTimer = null;
-
-function calibMetricsTable(m, title) {
-  if (!m || !m.n) return `<div class="empty">${esc(title)}: no evaluated rows</div>`;
-  const bins = (m.reliability_bins || [])
-    .filter((b) => b.n > 0)
-    .map((b) => `<tr><td>${b.bin}</td><td>${b.n}</td><td>${num(b.mean_predicted, 3)}</td><td>${num(b.actual_frequency, 3)}</td></tr>`)
-    .join("");
-  return `<h4>${esc(title)} <span class="muted">· n=${m.n} · base rate ${num(m.base_rate, 3)}</span></h4>
-    <table class="ev-table"><thead><tr><th>bin</th><th>N</th><th>mean predicted</th><th>actual freq</th></tr></thead>
-    <tbody>${bins || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
-    <p class="muted">Brier ${num(m.brier, 4)} · log loss ${num(m.log_loss, 4)} · slope ${num(m.calibration && m.calibration.slope, 3)} · intercept ${num(m.calibration && m.calibration.intercept, 3)} · game-weighted Brier ${num(m.game_weighted && m.game_weighted.brier_mean_over_games, 4)} (${m.game_weighted ? m.game_weighted.games : 0} games)</p>`;
-}
-
-function calibBucketTable(buckets, rule) {
-  const rows = (buckets || [])
-    .filter((b) => b.n > 0)
-    .map((b) => `<tr><td>${esc(b.bucket)}</td><td>${b.n}</td><td>${b.wins}</td><td>${b.losses}</td><td>${num(b.win_rate, 3)}</td><td>[${num(b.wilson_lo, 3)}, ${num(b.wilson_hi, 3)}]</td></tr>`)
-    .join("");
-  return `<h4>EMPIRICAL RESIDUAL TABLE <span class="muted">· Wilson 95% CI · merge rule: ${esc(rule || "none")}</span></h4>
-    <table class="ev-table"><thead><tr><th>residual (M−F)</th><th>N</th><th>wins</th><th>losses</th><th>win rate</th><th>Wilson CI</th></tr></thead>
-    <tbody>${rows || '<tr><td colspan=6>—</td></tr>'}</tbody></table>`;
-}
-
-function renderCalibration(payload) {
-  const grid = $("calibGrid");
-  if (!grid) return;
-  if (!payload || !payload.report) {
-    grid.innerHTML = '<div class="empty">Calibration unavailable</div>';
-    return;
-  }
-  const r = payload.report;
-  const pop = r.population || {};
-  const st = payload.status || {};
-  const desc = r.descriptive || {};
-  const emp = r.empirical || {};
-  const term = (r.terminal_sanity && r.terminal_sanity.terminal) || {};
-  const blocks = emp.blocks || [];
-  const blockRows = blocks
-    .map((b) => `<tr><td>${esc(b.date)}</td><td>${b.games}</td><td>${b.raw_direction.n}</td><td>${num(b.raw_direction.win_rate, 3)}</td><td>${num(b.over.win_rate, 3)}</td><td>${num(b.under.win_rate, 3)}</td><td>${num(b.live.win_rate, 3)}</td><td>${num(b.stale.win_rate, 3)}</td></tr>`)
-    .join("");
-  const base = r.baselines || {};
-  grid.innerHTML = `
-    <div>
-      <h4>STATUS <span class="muted">· walk-forward chronological · OVER/UNDER separate · LIVE/STALE separate</span></h4>
-      <p><b>${esc(st.CALIBRATION_STATUS || "—")}</b> — evaluated ${pop.evaluated_walk_forward ?? "–"} rows (${pop.over_evaluated ?? "–"} OVER / ${pop.under_evaluated ?? "–"} UNDER), skipped ${pop.skipped_no_history ?? "–"} (no prior history; skipped rows are walk-forward warming, never silently pooled).</p>
-      <p class="muted">${esc(st.EMPIRICAL_RELATIONSHIP || "")}</p>
-      <p class="muted">TERMINAL EXCLUSION: ${esc(st["TERMINAL EXCLUSION"] || "")}</p>
-      <p class="muted">${esc(st.VERDICT || "")}</p>
-      <h4>TERMINAL SANITY (100% — DIAGNOSTIC ONLY)</h4>
-      <p class="muted">pct100 rows ${term.n_rows ?? "–"} · decided ${term.n_decided ?? "–"} · win rate ${num(term.win_rate, 3)} — mechanically inflated by the live-score floor; ${esc(term.mechanical_note || "")}</p>
-      <h4>BASELINES <span class="muted">· exact same evaluated rows</span></h4>
-      <p>raw model direction ${num(base.raw_model_direction_hit_rate, 3)} · always-OVER ${num(base.always_over_hit_rate, 3)} · always-UNDER ${num(base.always_under_hit_rate, 3)} · constant-base-rate Brier ${num(base.constant_base_rate_brier, 4)}</p>
-    </div>
-    <div>${calibBucketTable(emp.residual_buckets && emp.residual_buckets.buckets, emp.residual_buckets && emp.residual_buckets.merge_rule)}
-      <h4>CHRONOLOGICAL BLOCKS <span class="muted">· each block independent · O/U/L/S win rates</span></h4>
-      <table class="ev-table"><thead><tr><th>date</th><th>games</th><th>N</th><th>raw</th><th>OVER</th><th>UNDER</th><th>LIVE</th><th>STALE</th></tr></thead><tbody>${blockRows || '<tr><td colspan=8>—</td></tr>'}</tbody></table>
-    </div>
-    <div>${calibMetricsTable(r.over && r.over.logistic, "OVER — LOGISTIC (walk-forward)")}</div>
-    <div>${calibMetricsTable(r.under && r.under.logistic, "UNDER — LOGISTIC (walk-forward)")}</div>
-    <div>${calibMetricsTable(r.over && r.over.isotonic, "OVER — ISOTONIC (walk-forward)")}</div>
-    <div>${calibMetricsTable(r.under && r.under.isotonic, "UNDER — ISOTONIC (walk-forward)")}</div>`;
-}
-
-async function refreshCalibration() {
-  try {
-    const resp = await fetch(API_CALIB);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    renderCalibration(await resp.json());
-  } catch (err) {
-    const grid = $("calibGrid");
-    if (grid) grid.innerHTML = `<div class="empty">Calibration unavailable (${esc(String(err))})</div>`;
-  }
-}
-
-$("calibToggle").addEventListener("click", () => {
-  const body = $("calibBody");
-  const open = body.hidden;
-  body.hidden = !open;
-  $("calibToggle").setAttribute("aria-expanded", String(open));
-  $("calibToggle").classList.toggle("open", open);
-  if (open) {
-    refreshCalibration();
-    if (!calibTimer) calibTimer = setInterval(refreshCalibration, 60000);
-  } else if (calibTimer) {
-    clearInterval(calibTimer);
-    calibTimer = null;
-  }
-});
-
-/* ── MARKET FRESHNESS — WHY STALE VS LIVE? (read-only forensic) ── */
-
-const API_FRESH = "/api/v4/scorecard/freshness-audit";
-let freshTimer = null;
-
-function renderFreshness(payload) {
-  const grid = $("freshGrid");
-  if (!grid) return;
-  if (!payload || !payload.population) {
-    grid.innerHTML = '<div class="empty">Freshness audit unavailable</div>';
-    return;
-  }
-  const pop = payload.population;
-  const ad = payload.age_distribution || {};
-  const bandRows = (payload.by_age_band || [])
-    .map((b) => `<tr><td>${b.band}</td><td>${b.n}</td><td>${b.games}</td><td>${num(b.combined.win_rate, 3)}</td><td>${num(b.over.win_rate, 3)} (${b.over.n})</td><td>${num(b.under.win_rate, 3)} (${b.under.n})</td></tr>`)
-    .join("");
-  const cpRows = (payload.by_checkpoint || [])
-    .map((c) => `<tr><td>${c.checkpoint_pct}%</td><td>${c.n}</td><td>${num(c.live.win_rate, 3)} (${c.live.n})</td><td>${num(c.stale.win_rate, 3)} (${c.stale.n})</td><td>${num(c.median_age, 0)}s</td></tr>`)
-    .join("");
-  const blRows = (payload.by_block || [])
-    .map((b) => `<tr><td>${esc(b.date)}</td><td>${b.games}</td><td>${num(b.live.win_rate, 3)} (${b.live.n})</td><td>${num(b.stale.win_rate, 3)} (${b.stale.n})</td></tr>`)
-    .join("");
-  const mfeRows = ((payload.market_forecast_error || {}).bands || [])
-    .map((b) => `<tr><td>${b.band}</td><td>${b.n}</td><td>${num(b.mean_mfe, 2)}</td><td>${num(b.mean_abs_mfe, 2)}</td><td>${num(b.over_share, 3)}</td></tr>`)
-    .join("");
-  const tiers = ((payload.update_frequency || {}).by_tier) || {};
-  const tierRows = Object.entries(tiers)
-    .map(([t, v]) => `<tr><td>${esc(t)}</td><td>${v.games}</td><td>${v.n}</td><td>${num(v.win_rate, 3)}</td></tr>`)
-    .join("");
-  const gw = payload.game_weighted || {};
-  const rba = payload.residual_by_age || {magnitudes: [], grid: {}};
-  const rbaTable = (side) => {
-    const g = (rba.grid || {})[side] || {};
-    const ages = Object.keys(g);
-    if (!ages.length) return "<p class=\"muted\">no data</p>";
-    const head = `<tr><th>mag\\age</th>${ages.map((a) => `<th>${esc(a)}</th>`).join("")}</tr>`;
-    const body = (rba.magnitudes || []).map((m) => {
-      const cells = ages.map((a) => {
-        const cell = (g[a] || []).find((c) => c.mag === m);
-        return cell && cell.n ? `${num(cell.win_rate, 2)} (${cell.n})` : "–";
-      });
-      return `<tr><td>${esc(m)}</td>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
-    }).join("");
-    return `<table class="ev-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
-  };
-  grid.innerHTML = `
-    <div>
-      <h4>POPULATION <span class="muted">· rows ${pop.rows} · games ${pop.games} · LIVE ${pop.live} · STALE ${pop.stale}</span></h4>
-      <h4>AGE DISTRIBUTION <span class="muted">· seconds, strictly contemporaneous</span></h4>
-      <p>median ${num(ad.median, 1)}s · mean ${num(ad.mean, 1)}s · p5 ${num(ad.p5, 0)} · p25 ${num(ad.p25, 0)} · p75 ${num(ad.p75, 0)} · p95 ${num(ad.p95, 0)} · max ${num(ad.max, 0)} · LIVE(≤300s) ${(100 * (ad.live_fraction || 0)).toFixed(1)}%</p>
-      <p class="muted">bands: ${Object.entries(ad.bands || {}).map(([k, v]) => `${esc(k)}=${v}`).join(" · ")}</p>
-      <h4>UPDATE FREQUENCY <span class="muted">· eu-swarm MatchTotal feed</span></h4>
-      <table class="ev-table"><thead><tr><th>tier (median interval)</th><th>games</th><th>N</th><th>win rate</th></tr></thead><tbody>${tierRows || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
-      <h4>GAME-WEIGHTED <span class="muted">· per-game rate first, then mean</span></h4>
-      <p>LIVE ${num(gw.live && gw.live.mean_rate, 3)} (${gw.live ? gw.live.games : 0} games) · STALE ${num(gw.stale && gw.stale.mean_rate, 3)} (${gw.stale ? gw.stale.games : 0} games)</p>
-    </div>
-    <div>
-      <h4>FIXED AGE BANDS <span class="muted">· boundaries fixed a-priori, never optimized</span></h4>
-      <table class="ev-table"><thead><tr><th>age</th><th>N</th><th>games</th><th>combined</th><th>OVER</th><th>UNDER</th></tr></thead><tbody>${bandRows || '<tr><td colspan=6>—</td></tr>'}</tbody></table>
-      <h4>CHECKPOINT CONTROL <span class="muted">· LIVE vs STALE per checkpoint</span></h4>
-      <table class="ev-table"><thead><tr><th>cp</th><th>N</th><th>LIVE</th><th>STALE</th><th>median age</th></tr></thead><tbody>${cpRows || '<tr><td colspan=5>—</td></tr>'}</tbody></table>
-      <h4>CHRONOLOGICAL CONTROL</h4>
-      <table class="ev-table"><thead><tr><th>date</th><th>games</th><th>LIVE</th><th>STALE</th></tr></thead><tbody>${blRows || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
-      <h4>MARKET FORECAST ERROR BY AGE <span class="muted">· mfe = final − line · retrospective OUTCOME diagnostic</span></h4>
-      <table class="ev-table"><thead><tr><th>age</th><th>N</th><th>mean mfe</th><th>mean |mfe|</th><th>over share</th></tr></thead><tbody>${mfeRows || '<tr><td colspan=5>—</td></tr>'}</tbody></table>
-    </div>
-    <div>
-      <h4>RESIDUAL × AGE — OVER <span class="muted">· win rate (N) · fixed bands, never optimized</span></h4>
-      ${rbaTable("OVER")}
-      <h4>RESIDUAL × AGE — UNDER</h4>
-      ${rbaTable("UNDER")}
-    </div>`;
-}
-
-async function refreshFreshness() {
-  try {
-    const resp = await fetch(API_FRESH);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    renderFreshness(await resp.json());
-  } catch (err) {
-    const grid = $("freshGrid");
-    if (grid) grid.innerHTML = `<div class="empty">Freshness audit unavailable (${esc(String(err))})</div>`;
-  }
-}
-
-$("freshToggle").addEventListener("click", () => {
-  const body = $("freshBody");
-  const open = body.hidden;
-  body.hidden = !open;
-  $("freshToggle").setAttribute("aria-expanded", String(open));
-  $("freshToggle").classList.toggle("open", open);
-  if (open) {
-    refreshFreshness();
-    if (!freshTimer) freshTimer = setInterval(refreshFreshness, 60000);
-  } else if (freshTimer) {
-    clearInterval(freshTimer);
-    freshTimer = null;
-  }
-});
-
-/* ── RESIDUAL × MARKET-STATE VALIDATION (read-only) ── */
-
-const API_IVAL = "/api/v4/scorecard/interaction-validation";
-let ivalTimer = null;
-
-function ivalGridTable(grid, side, mags) {
-  const g = (grid || {})[side] || {};
-  const ages = Object.keys(g);
-  if (!ages.length) return '<p class="muted">no data</p>';
-  const head = `<tr><th>mag\\age</th>${ages.map((a) => `<th>${esc(a)}</th>`).join("")}</tr>`;
-  const body = (mags || []).map((m) => {
-    const cells = ages.map((a) => {
-      const c = (g[a] || []).find((x) => x.mag === m);
-      if (!c || !c.n) return "–";
-      const tag = c.status === "exploratory" ? "*" : "";
-      return `${num(c.win_rate, 2)}${tag} (${c.n})`;
-    });
-    return `<tr><td>${esc(m)}</td>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
-  }).join("");
-  return `<table class="ev-table"><thead>${head}</thead><tbody>${body}</tbody></table><p class="muted">* exploratory (N&lt;30) · otherwise evaluable</p>`;
-}
-
-function renderIval(payload) {
-  const grid = $("ivalGrid");
-  if (!grid) return;
-  if (!payload || !payload.population) {
-    grid.innerHTML = '<div class="empty">Interaction validation unavailable</div>';
-    return;
-  }
-  const pop = payload.population;
-  const summ = (payload.grid && payload.grid.summary) || {};
-  const so = payload.stale_over_mechanism || {};
-  const fu = payload.fresh_under_mechanism || {};
-  const gw = payload.game_weighted || {};
-  const base = payload.baselines || {};
-  const flags = payload.discovery_flags || {};
-  const flagRows = Object.entries(flags)
-    .map(([k, v]) => {
-      const c = v.cell || {};
-      const d = v.discovery || {};
-      return `<tr><td>${esc(k)}</td><td>${c.n ?? "–"}</td><td>${num(c.win_rate, 3)}</td><td>[${num(c.wilson_lo, 3)}, ${num(c.wilson_hi, 3)}]</td><td>${(v.persistence || {}).persistent_blocks ?? "–"}</td><td>${(v.persistence || {}).half_replication ? "yes" : "no"}</td><td>${esc(d.label || "")}</td></tr>`;
-    }).join("");
-  const soMags = Object.entries(so.by_magnitude || {})
-    .map(([m, c]) => `<tr><td>${esc(m)}</td><td>${c.n}</td><td>${num(c.win_rate, 3)}</td><td>[${num(c.wilson_lo, 3)}, ${num(c.wilson_hi, 3)}]</td></tr>`).join("");
-  const fuMags = Object.entries(fu.by_magnitude || {})
-    .map(([m, c]) => `<tr><td>${esc(m)}</td><td>${c.n}</td><td>${num(c.win_rate, 3)}</td><td>[${num(c.wilson_lo, 3)}, ${num(c.wilson_hi, 3)}]</td></tr>`).join("");
-  const mfeRows = ((payload.mfe_by_interaction || {}).cells || [])
-    .map((c) => `<tr><td>${esc(c.side)} ${esc(c.mag)} @${esc(c.age)}</td><td>${c.n}</td><td>${num(c.mean_mfe, 2)}</td><td>${num(c.mean_abs_mfe, 2)}</td></tr>`).join("");
-  grid.innerHTML = `
-    <div>
-      <h4>POPULATION <span class="muted">· rows ${pop.rows} · games ${pop.games} · cells ${summ.cells_total} (${summ.cells_evaluable} evaluable / ${summ.cells_exploratory} exploratory)</span></h4>
-      <h4>PRE-REGISTERED DISCOVERY FLAGS <span class="muted">· criteria a-d · never an edge claim</span></h4>
-      <table class="ev-table"><thead><tr><th>cell</th><th>N</th><th>rate</th><th>Wilson 95%</th><th>persist blocks</th><th>split-half</th><th>label</th></tr></thead><tbody>${flagRows || '<tr><td colspan=7>—</td></tr>'}</tbody></table>
-      <h4>BASELINES <span class="muted">· diagnostic</span></h4>
-      <p>raw direction ${num(base.raw_direction, 3)} · always-OVER ${num(base.always_over, 3)} · always-UNDER ${num(base.always_under, 3)} · age-only ${num(base.age_only_diagnostic, 3)}</p>
-      <h4>GAME-WEIGHTED EFFECTS <span class="muted">· per-game rate first</span></h4>
-      <p>stale-OVER: ckpt ${num(gw.stale_over && gw.stale_over.checkpoint_weighted_rate, 3)} / game ${num(gw.stale_over && gw.stale_over.game_weighted_rate, 3)} (${gw.stale_over ? gw.stale_over.games : 0} games) · fresh-UNDER: ckpt ${num(gw.fresh_under && gw.fresh_under.checkpoint_weighted_rate, 3)} / game ${num(gw.fresh_under && gw.fresh_under.game_weighted_rate, 3)} (${gw.fresh_under ? gw.fresh_under.games : 0} games)</p>
-    </div>
-    <div>
-      <h4>GRID — OVER <span class="muted">· residual magnitude × market age · every cell reported</span></h4>
-      ${ivalGridTable(payload.grid && payload.grid.grid, "OVER", payload.grid && payload.grid.mags)}
-      <h4>GRID — UNDER</h4>
-      ${ivalGridTable(payload.grid && payload.grid.grid, "UNDER", payload.grid && payload.grid.mags)}
-      <h4>STALE-OVER MAGNITUDE GRADIENT (&gt;300s) <span class="muted">· low-vs-high contrast: ${esc(JSON.stringify(so.low_vs_high_contrast && Object.fromEntries(Object.entries(so.low_vs_high_contrast).map(([k, v]) => [k, v.win_rate])) || {}))}</span></h4>
-      <table class="ev-table"><thead><tr><th>mag</th><th>N</th><th>rate</th><th>Wilson 95%</th></tr></thead><tbody>${soMags || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
-      <h4>FRESH-UNDER MAGNITUDE TABLE (0-5s)</h4>
-      <table class="ev-table"><thead><tr><th>mag</th><th>N</th><th>rate</th><th>Wilson 95%</th></tr></thead><tbody>${fuMags || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
-      <h4>MFE BY INTERACTION CELL <span class="muted">· retrospective OUTCOME diagnostic</span></h4>
-      <table class="ev-table"><thead><tr><th>cell</th><th>N</th><th>mean MFE</th><th>mean |MFE|</th></tr></thead><tbody>${mfeRows || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
-    </div>`;
-}
-
-async function refreshIval() {
-  try {
-    const resp = await fetch(API_IVAL);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    renderIval(await resp.json());
-  } catch (err) {
-    const grid = $("ivalGrid");
-    if (grid) grid.innerHTML = `<div class="empty">Interaction validation unavailable (${esc(String(err))})</div>`;
-  }
-}
-
-$("ivalToggle").addEventListener("click", () => {
-  const body = $("ivalBody");
-  const open = body.hidden;
-  body.hidden = !open;
-  $("ivalToggle").setAttribute("aria-expanded", String(open));
-  $("ivalToggle").classList.toggle("open", open);
-  if (open) {
-    refreshIval();
-    if (!ivalTimer) ivalTimer = setInterval(refreshIval, 60000);
-  } else if (ivalTimer) {
-    clearInterval(ivalTimer);
-    ivalTimer = null;
-  }
-});
-
-/* ── PROSPECTIVE CONFIRMATION — FROZEN SPEC (read-only) ── */
-
-const API_CONF = "/api/v4/scorecard/prospective-confirmation";
-let confTimer = null;
-
-function confCellTable(cells) {
-  const rows = (cells || []).map((c) => {
-    const pe = c.pass_evaluation || {};
-    const checks = pe.checks || {};
-    const ok = (b) => (b ? "✓" : "✗");
-    return `<tr><td>${esc(c.side)} ${esc(c.mag)} @${esc(c.age)}</td><td>${c.n}</td><td>${c.games}</td><td>${num(c.win_rate, 3)}</td><td>[${num(c.wilson_lo, 3)}, ${num(c.wilson_hi, 3)}]</td><td>${ok(checks.n_ge_30)} ${ok(checks.rate_ge_060)} ${ok(checks.wilson_lo_gt_050)}</td><td>${pe.passed ? "PASS" : "—"}</td></tr>`;
-  }).join("");
-  return `<table class="ev-table"><thead><tr><th>cell</th><th>N</th><th>games</th><th>rate</th><th>Wilson 95%</th><th>n≥30 · rate≥.60 · wlo&gt;.50</th><th>verdict</th></tr></thead><tbody>${rows || '<tr><td colspan=7>—</td></tr>'}</tbody></table>`;
-}
-
-function renderConf(payload) {
-  const grid = $("confGrid");
-  if (!grid) return;
-  if (!payload || !payload.status) {
-    grid.innerHTML = '<div class="empty">Prospective confirmation unavailable</div>';
-    return;
-  }
-  const A = payload.A_discovery || {};
-  const B = payload.B_historical_validation || {};
-  const C = payload.C_prospective || {};
-  const ta = payload.terminology_audit || {};
-  const blocks = (B.chronological_blocks || [])
-    .map((b) => `<tr><td>${esc(b.block)}</td><td>${b.n}</td><td>${b.games}</td><td>${num(b.raw_accuracy, 3)}</td></tr>`).join("");
-  grid.innerHTML = `
-    <div>
-      <h4>TERMINOLOGY AUDIT <span class="muted">· chronological split within history is NOT prospective</span></h4>
-      <p class="muted">${esc(ta.note || "")}</p>
-      <h4>FREEZE GATE <span class="muted">· spec integrity enforced by sha256</span></h4>
-      <p>CONFIRMATION_FREEZE_TIMESTAMP <strong>${esc(payload.CONFIRMATION_FREEZE_TIMESTAMP || "")}</strong> · spec sha256 <code>${esc((payload.spec_sha256 || "").slice(0, 16))}…</code> intact=${payload.spec_intact ? "yes" : "NO"}</p>
-      <h4>A — HISTORICAL / DISCOVERY <span class="muted">· rows ${A.n_rows ?? 0} · games ${A.n_games ?? 0}</span></h4>
-      ${confCellTable((A.nominated_cells_in_A || []).map((c) => ({ ...c, pass_evaluation: { passed: false, checks: {} } })))}
-      <h4>B — HISTORICAL WALK-FORWARD <span class="muted">· NOT prospective · excluded from verdict</span></h4>
-      <table class="ev-table"><thead><tr><th>block</th><th>N</th><th>games</th><th>raw accuracy</th></tr></thead><tbody>${blocks || '<tr><td colspan=4>—</td></tr>'}</tbody></table>
-      <h4>C — PROSPECTIVE POST-FREEZE <span class="muted">· rows ${C.n_rows ?? 0} · games ${C.n_games ?? 0} · ONLY C contributes to the verdict</span></h4>
-      ${confCellTable(C.nominated_cells)}
-      <h4>STATUS</h4>
-      <p><strong>${esc(payload.status)}</strong>${payload.status === "AWAITING_PROSPECTIVE_DATA" ? ' — no post-freeze observations exist yet; no result manufactured; frozen spec untouched while waiting.' : ""}</p>
-    </div>`;
-}
-
-async function refreshConf() {
-  try {
-    const resp = await fetch(API_CONF);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    renderConf(await resp.json());
-  } catch (err) {
-    const grid = $("confGrid");
-    if (grid) grid.innerHTML = `<div class="empty">Prospective confirmation unavailable (${esc(String(err))})</div>`;
-  }
-}
-
-$("confToggle").addEventListener("click", () => {
-  const body = $("confBody");
-  const open = body.hidden;
-  body.hidden = !open;
-  $("confToggle").setAttribute("aria-expanded", String(open));
-  $("confToggle").classList.toggle("open", open);
-  if (open) {
-    refreshConf();
-    if (!confTimer) confTimer = setInterval(refreshConf, 60000);
-  } else if (confTimer) {
-    clearInterval(confTimer);
-    confTimer = null;
-  }
-});
-
 /* ── Wiring ──────────────────────────────────────────────── */
 
 function syncLiveToggle(total, visible) {
@@ -1599,6 +1307,10 @@ function syncLiveToggle(total, visible) {
   btn.dataset.livefilter = on ? "live" : "all";
   const cnt = $("liveCount");
   if (cnt) cnt.textContent = on ? `showing ${visible} live · hidden ${total - visible}` : "";
+  const sub = $("liveHeadSub");
+  if (sub) sub.textContent = on
+    ? "clean post-epoch observations only · live games shown"
+    : "clean post-epoch observations only · ended/stale included (SHOW ALL)";
 }
 
 $("filters").addEventListener("click", (ev) => {
@@ -1625,5 +1337,703 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !$("modalBackdrop").hidden) closeModal();
 });
 
+/* ── HISTORICAL / RESEARCH — top-level collapse ─────────────────
+   One control for the whole research/audit block.  Collapsed by
+   default (persisted); each inner section keeps its own independent
+   toggle and default-collapsed body.  Nothing here changes data — it
+   only controls visibility of research/audit material. */
+function applyAuditPref() {
+  const body = $("auditBody");
+  const btn = $("auditToggle");
+  if (!body || !btn) return;
+  const collapsed = prefGet(PREF.HISTORICAL, true);
+  body.hidden = collapsed;
+  btn.classList.toggle("open", !collapsed);
+  btn.setAttribute("aria-expanded", String(!collapsed));
+}
+if ($("auditToggle")) {
+  $("auditToggle").addEventListener("click", () => {
+    const body = $("auditBody");
+    const open = body.hidden; // true → currently collapsed → expand
+    body.hidden = !open;
+    $("auditToggle").classList.toggle("open", open);
+    $("auditToggle").setAttribute("aria-expanded", String(open));
+    prefSet(PREF.HISTORICAL, !open); // stored as "collapsed"
+  });
+}
+applyAuditPref();
+
 refresh();
 setInterval(refresh, POLL_MS);
+
+/* ═══════════════════════════════════════════════════════════════
+   GAME-LEVEL SCORECARD — progressive Market vs Fair per CLEAN
+   COMPLETED game (frontend-only).
+
+   Data: candidates come from the /api/v4/live payload already in
+   state.games (a game is eligible when status=="ended" and
+   quality_status!=="INVALID" — the backend game_quality gate is the
+   single source of truth, never re-derived here).  Progressive rows
+   come from /api/v4/game/{id}.market_vs_fair[] — the frozen
+   per-checkpoint record (checkpoint_pct 10→100, live_market_line,
+   blm_fair_value, signed market_vs_fair, market_status, outcome,
+   actual_final_total).  Nothing is computed that changes methodology:
+   Market−Fair, direction, freshness and settlement are displayed as
+   the payload reports them; MISSING lines stay MISSING (never
+   substituted); Under/Over outcomes remain separate directional
+   results and are never compared as competing predictions.
+   ═══════════════════════════════════════════════════════════════ */
+let gsTimer = null;
+const gs = {
+  details: new Map(),   // game_id -> {detail, fetched_at}
+  charts: new Map(),    // game_id -> Chart (per-game Market−Fair progression spark)
+  loaded: 0,            // candidates whose detail fetch has resolved this pass
+  need: 0,
+};
+const GS_DETAIL_TTL_ROWS = 300e3;   // 5 min — frozen rows are immutable
+const GS_DETAIL_TTL_NOROWS = 120e3; // 2 min — may finalize (rows appear at finalize batch)
+
+function gsCandidates() {
+  // Clean-completed candidates: ended + not flagged INVALID by the backend gate.
+  return (state.games || []).filter((g) => g.status === "ended" && g.quality_status !== "INVALID");
+}
+
+function gsNeedsFetch(gameId) {
+  const d = gs.details.get(gameId);
+  if (!d) return true;
+  const hasRows = (d.detail.market_vs_fair || []).length > 0;
+  const ttl = hasRows ? GS_DETAIL_TTL_ROWS : GS_DETAIL_TTL_NOROWS;
+  return (Date.now() - d.fetched_at) > ttl;
+}
+
+async function gsFetchDetail(gameId) {
+  const resp = await fetch(API_GAME(gameId));
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+function gsCache(gameId, detail) {
+  gs.details.set(gameId, { detail, fetched_at: Date.now() });
+}
+
+function gsDropGame(gameId) {
+  const ch = gs.charts.get(gameId);
+  if (ch) { try { ch.destroy(); } catch (_) {} gs.charts.delete(gameId); }
+  gs.details.delete(gameId);
+  const el = document.getElementById("gs-game-" + CSS.escape(gameId));
+  if (el) el.remove();
+}
+
+function gsOutcomeShort(o) {
+  if (o === "UNDER_WIN") return "U WIN";
+  if (o === "OVER_WIN") return "O WIN";
+  if (o === "UNDER_LOSS") return "U LOSS";
+  if (o === "OVER_LOSS") return "O LOSS";
+  return o || "–";
+}
+
+function gsOutcomeCls(o) {
+  return o && o.endsWith("_WIN") ? "win" : o && o.endsWith("_LOSS") ? "loss" : "void";
+}
+
+function gsDiffCell(r) {
+  const mf = r.market_vs_fair;
+  if (mf == null || r.live_market_line == null) {
+    return `<td class="gs-diff zero">–<span class="gs-dir">no line</span></td>`;
+  }
+  const cls = mf > 0 ? "pos" : mf < 0 ? "neg" : "zero";
+  const dir = mf > 0 ? "▲ MKT&gt;FAIR" : mf < 0 ? "▼ MKT&lt;FAIR" : "= FAIR";
+  return `<td class="gs-diff ${cls}">${sig(mf)}<span class="gs-dir">${dir}</span></td>`;
+}
+
+function gsRowHTML(r, classification) {
+  const dim = r.live_market_line == null ? " gs-row-dim" : "";
+  const out = r.outcome ? `<span class="gs-out ${gsOutcomeCls(r.outcome)}">${esc(gsOutcomeShort(r.outcome))}</span>` : "–";
+  // Terminal exclusion (directive): a terminal checkpoint keeps its
+  // settlement outcome but is explicitly excluded from predictive
+  // validation — settlement display and research eligibility stay distinct.
+  const pflag = r.terminal
+    ? ` <span class="st st-stale" title="${esc(r.predictive_validation || "PREDICTIVE VALIDATION: EXCLUDED")} · ${esc(r.exclusion_reason || "TERMINAL CHECKPOINT")}">SETTLEMENT ONLY</span>`
+    : "";
+  return `<tr class="${dim}">
+    <td class="gs-pct">${obsPctLabel(r)}${cpStateHTML(r, classification)}</td>
+    <td class="sc-num">${num(r.live_market_line, 1)}</td>
+    <td class="sc-num">${num(r.blm_fair_value, 1)}</td>
+    ${gsDiffCell(r)}
+    <td>${r.market_status == null ? "–" : `<span class="st ${evStatusCls(r.market_status)}">${esc(r.market_status)}</span>`}</td>
+    <td>${out}${pflag}</td>
+  </tr>`;
+}
+
+function gsTableBody(rows, classification) {
+  return rows.map((r) => gsRowHTML(r, classification)).join("");
+}
+
+function gsChartHTML(g, rows) {
+  if (!hasChart() || rows.length < 2) return "";
+  const diffs = rows.map((r) => r.market_vs_fair);
+  if (diffs.every((v) => v == null)) return "";
+  return `<div class="gs-chart"><canvas id="gs-spark-${CSS.escape(g.game_id)}"></canvas></div>`;
+}
+
+function gsRenderChart(gameId, rows) {
+  const cv = document.getElementById("gs-spark-" + CSS.escape(gameId));
+  if (!cv || !hasChart()) return;
+  const old = gs.charts.get(gameId);
+  if (old) { try { old.destroy(); } catch (_) {} }
+  const labels = rows.map((r) => (r.checkpoint_pct != null ? r.checkpoint_pct + "%" : ""));
+  const diff = rows.map((r) => r.market_vs_fair);
+  const zero = rows.map(() => 0);
+  const ch = new Chart(cv.getContext("2d"), {
+    type: "line",
+    data: { labels, datasets: [
+      { label: "M−F", data: diff, borderColor: ChartColor.cyan || "#22d3ee",
+        backgroundColor: "rgba(34,211,238,0.08)", fill: true, borderWidth: 1.5,
+        pointRadius: 1.5, pointHoverRadius: 3, tension: 0.15, spanGaps: false },
+      { label: "fair", data: zero, borderColor: "#46546b", borderWidth: 1,
+        pointRadius: 0, borderDash: [3, 3], fill: false },
+    ] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { enabled: true, callbacks: { title: (it) => labels[it[0].dataIndex], label: (it) => `M−F ${it.parsed.y}` } } },
+      scales: { x: { display: false }, y: { display: false } },
+    },
+  });
+  gs.charts.set(gameId, ch);
+}
+
+function gsGameHTML(g, detail) {
+  const rows = (detail.market_vs_fair || []).slice();
+  if (!rows.length) return "";
+  const last = rows[rows.length - 1];
+  const bearing = rows.filter((r) => r.live_market_line != null).length;
+  const liveRows = rows.filter((r) => r.market_status === "LIVE").length;
+  const mkt = detail.market || {};
+  const open = (rows[0] && rows[0].opening_line) ?? mkt.opening_line;
+  const close = mkt.closing_line ?? (last && last.closing_line);
+  const actual = last && last.actual_final_total;
+  const outcome = last && last.outcome;
+  const pct = last ? obsPctLabel(last) : null;
+  const endedAt = rows.length ? rows[rows.length - 1].checkpoint_timestamp : g.last_update;
+  const resLine = outcome && actual != null && last.live_market_line != null
+    ? `<span class="gs-res">RESULT <b>${esc(gsOutcomeShort(outcome))}</b> · actual <b>${num(actual, 0)}</b> vs market <b>${num(last.live_market_line, 1)}</b> @${pct} · M−F <b class="${last.market_vs_fair > 0 ? "pos" : last.market_vs_fair < 0 ? "neg" : ""}">${sig(last.market_vs_fair)}</b></span>`
+    : `<span class="gs-res">RESULT <b>${esc(gsOutcomeShort(outcome))}</b> @${pct}</span>`;
+  return `<div class="gs-head">
+      <span class="cat-badge ${esc(g.classification || "UNKNOWN")}">${esc(g.classification || "UNKNOWN")}</span>
+      <span class="pill gs-clean" title="ended + not flagged INVALID by the backend quality gate">CLEAN COMPLETED</span>
+      <span class="gs-teams">${esc(g.home_team)} vs ${esc(g.away_team)}
+        <span class="gs-gid">${esc(g.game_id)} · ended ${fmtTime(endedAt)}</span></span>
+    </div>
+    <div class="gs-body">
+      <table class="sc-table gs-table">
+        <thead><tr><th>Prog</th><th>Market</th><th>Fair</th><th>M−F</th><th>Fresh</th><th>Settlement</th></tr></thead>
+        <tbody>${gsTableBody(rows, g.classification)}</tbody>
+      </table>
+      ${gsChartHTML(g, rows)}
+      <div class="gs-foot">
+        <span>line-bearing <b>${bearing}/${rows.length}</b></span>
+        <span>LIVE <b>${liveRows}</b></span>
+        ${open != null ? `<span>open <b>${num(open, 1)}</b></span>` : ""}
+        ${close != null ? `<span>close <b>${num(close, 1)}</b></span>` : ""}
+        ${resLine}
+      </div>
+    </div>`;
+}
+
+function gsMeta(cand, included, noRecord, pending) {
+  const invalid = (state.games || []).filter((g) => g.status === "ended" && g.quality_status === "INVALID").length;
+  const live = (state.games || []).filter((g) => g.status !== "ended").length;
+  const parts = [];
+  parts.push(`<span class="pill gs-clean">CLEAN COMPLETED · ${included}</span>`);
+  parts.push(`<span class="pill muted">ended candidates ${cand.length}</span>`);
+  parts.push(`<span class="pill muted">no frozen record / finalizing ${noRecord}</span>`);
+  if (pending) parts.push(`<span class="pill muted">loading ${pending}…</span>`);
+  parts.push(`<span class="pill muted" title="excluded by the backend quality gate (game_quality INVALID)">INVALID excluded ${invalid}</span>`);
+  parts.push(`<span class="pill muted" title="not completed — excluded from this scorecard">live ${live}</span>`);
+  return parts.join("");
+}
+
+function gsRender(cand) {
+  const grid = $("gsGrid");
+  if (!grid) return;
+  const meta = $("gsMeta");
+  const done = [];
+  let included = 0, noRecord = 0, pending = 0;
+  for (const g of cand) {
+    const d = gs.details.get(g.game_id);
+    if (!d) { pending++; continue; }
+    const rows = (d.detail.market_vs_fair || []).filter((r) => r.checkpoint_pct != null);
+    if (!rows.length) { noRecord++; continue; }
+    included++;
+    let el = document.getElementById("gs-game-" + CSS.escape(g.game_id));
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "gs-game-" + CSS.escape(g.game_id);
+      el.className = "sc-block gs-game";
+      grid.appendChild(el);
+    }
+    const html = gsGameHTML(g, d.detail);
+    if (el.dataset.sig !== html) {
+      el.dataset.sig = html;
+      el.innerHTML = html;
+      gsRenderChart(g.game_id, rows);
+    } else {
+      // chart canvas survives only if innerHTML untouched — already rendered
+    }
+    done.push(g);
+  }
+  // keep DOM order aligned with the (recency-sorted) candidate order
+  for (const g of done) {
+    const el = document.getElementById("gs-game-" + CSS.escape(g.game_id));
+    if (el) grid.appendChild(el);
+  }
+  // The static "loading…" placeholder in index.html is only meaningful before the
+  // first render — drop it once we own the grid (blocks append incrementally).
+  const ph = grid.querySelector(":scope > .empty");
+  if (ph) ph.remove();
+  if (!included && !pending && !noRecord && !cand.length) {
+    grid.innerHTML = `<div class="empty">No clean completed games in the current window.</div>`;
+  } else if (!included && !pending && noRecord > 0) {
+    grid.innerHTML = `<div class="empty">Ended games in this window are still finalizing frozen per-checkpoint records — none to show yet.</div>`;
+  }
+  if (meta) meta.innerHTML = gsMeta(cand, included, noRecord, pending);
+}
+
+async function gsRefresh() {
+  const cand = gsCandidates();
+  // prune games that left the live window (bounded to the recent set)
+  const ids = new Set(cand.map((g) => g.game_id));
+  for (const id of [...gs.details.keys()]) if (!ids.has(id)) gsDropGame(id);
+  const need = cand.filter((g) => gsNeedsFetch(g.game_id));
+  gs.need = need.length;
+  gs.loaded = 0;
+  gsRender(cand);
+  while (need.length) {
+    const batch = need.splice(0, 6);
+    await Promise.all(batch.map(async (g) => {
+      try {
+        const detail = await gsFetchDetail(g.game_id);
+        gsCache(g.game_id, detail);
+      } catch (err) {
+        // transient — drop nothing; next refresh retries
+        console.error("game scorecard detail failed", g.game_id, err.message);
+      } finally {
+        gs.loaded++;
+        gsRender(cand);
+      }
+    }));
+    if (need.length) await new Promise((r) => setTimeout(r, 60));
+  }
+  gsRender(cand);
+}
+
+$("gsToggle").addEventListener("click", () => {
+  const body = $("gsBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("gsToggle").setAttribute("aria-expanded", String(open));
+  $("gsToggle").classList.toggle("open", open);
+  if (open) {
+    gsRefresh();
+    if (!gsTimer) gsTimer = setInterval(gsRefresh, 60000);
+  } else if (gsTimer) {
+    clearInterval(gsTimer);
+    gsTimer = null;
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════
+   RESEARCH / CALIBRATION — MARKET ↔ TRAJECTORY DEVIATION (Phase 2)
+
+   Empirical deviation instrument, research-only (never part of the live
+   predictive surface).  Charts per selected clean game:
+     A  market implied total  vs  observational (pace) projected total
+     B  residual = live line − projected trajectory, over game time
+     C  z-score = residual standardized by its bucket's PRIOR residuals
+   Maturity (EXPLORATORY / PROVISIONAL / ESTABLISHED) is an operational
+   label on the bucket size N — shown but never implied as statistical
+   significance.  No Over/Under/edge/probability/recommendation mapping
+   exists anywhere in this surface.
+   ═══════════════════════════════════════════════════════════════ */
+const API_GAME_DEV = (id) => `/api/v4/game/${encodeURIComponent(id)}/deviation`;
+let devTimer = null;
+const devCharts = {};
+let devPickedGameId = null;
+
+function devCleanGames() {
+  return (state.games || [])
+    .filter((g) => g.quality_status !== "INVALID")
+    .sort((a, b) => String(b.last_update || "").localeCompare(String(a.last_update || "")));
+}
+
+function devFillPicker() {
+  const sel = $("devGame");
+  if (!sel) return;
+  const games = devCleanGames();
+  const keep = devPickedGameId && [...sel.options].some((o) => o.value === devPickedGameId)
+    ? devPickedGameId : null;
+  const cur = keep || (games[0] && games[0].game_id) || "";
+  sel.innerHTML = games.length
+    ? games.map((g) => `<option value="${esc(g.game_id)}">`
+        + `${esc(g.home_team)} vs ${esc(g.away_team)} · ${esc(g.game_id)} · `
+        + `${g.live ? "LIVE" : g.status === "ended" ? "ENDED" : "STALE"}`
+        + `</option>`).join("")
+    : `<option value="">no clean games in window</option>`;
+  if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  devPickedGameId = sel.value;
+  return sel.value;
+}
+
+function devDestroy() {
+  for (const k in devCharts) {
+    if (devCharts[k]) { try { devCharts[k].destroy(); } catch (_) {} }
+  }
+  for (const k in devCharts) delete devCharts[k];
+}
+
+function devDraw(canvasId, labels, datasets, yLabel) {
+  const cv = document.getElementById(canvasId);
+  if (!cv) return;
+  const old = devCharts[canvasId];
+  if (old) { try { old.destroy(); } catch (_) {} }
+  if (!hasChart()) {
+    cv.replaceWith(Object.assign(document.createElement("div"),
+      { textContent: "Chart.js unavailable — CDN blocked" }));
+    return;
+  }
+  const options = baseChartOpts(yLabel);
+  options.interaction = { mode: "index", intersect: false };
+  options.scales.x.maxTicksLimit = 12;
+  devCharts[canvasId] = new Chart(cv.getContext("2d"), {
+    type: "line",
+    data: { labels, datasets: datasets.map((d) => Object.assign({
+      pointRadius: 0, pointHoverRadius: 3, tension: 0.15, spanGaps: true,
+    }, d)) },
+    options,
+  });
+}
+
+/* ── CHECKPOINTS — ALL CLEAN OBSERVATIONS table (research) ─────
+   Every deviation row rendered with its full stored field set.  The
+   table body is populated even when the section is collapsed (collapse
+   only hides it) so no checkpoint data is ever "removed". */
+function devRenderCheckpoints(d) {
+  const body = $("devCheckpointsBody");
+  if (!body) return;
+  const series = d.series || [];
+  if (!series.length) {
+    body.innerHTML = `<tr><td colspan="15" class="muted">No clean checkpoints for this game yet.</td></tr>`;
+    return;
+  }
+  const score = (s) => {
+    if (s.home_score != null && s.away_score != null) {
+      return `${num(s.home_score, 0)}–${num(s.away_score, 0)}`;
+    }
+    return s.current_total_points != null ? `Σ ${num(s.current_total_points, 0)}` : "–";
+  };
+  body.innerHTML = series.map((s) => {
+    const z = s.z_score != null ? num(s.z_score, 2) : "–";
+    const st = s.benchmark_status || "–";
+    const stCls = st === "ESTABLISHED" ? "estb" : st === "PROVISIONAL" ? "prov" : "expl";
+    return `<tr>`
+      + `<td>${s.elapsed_game_minutes != null ? num(s.elapsed_game_minutes, 1) + "m" : fmtTime(s.captured_at)}</td>`
+      + `<td>${esc(s.clock ?? "–")}</td>`
+      + `<td>${esc(s.period_label ?? "–")}</td>`
+      + `<td>${esc(score(s))}</td>`
+      + `<td>${s.live_total_line != null ? num(s.live_total_line, 1) : "–"}</td>`
+      + `<td>${s.actual_pts_per_min != null ? num(s.actual_pts_per_min, 2) : "–"}</td>`
+      + `<td>${s.required_pts_per_min != null ? num(s.required_pts_per_min, 2) : "–"}</td>`
+      + `<td>${s.pace_gap != null ? sig(s.pace_gap) : "–"}</td>`
+      + `<td>${s.projected_final_total != null ? num(s.projected_final_total, 1) : "–"}</td>`
+      + `<td>${s.market_trajectory_residual != null ? sig(s.market_trajectory_residual) : "–"}</td>`
+      + `<td>${s.benchmark_n != null ? s.benchmark_n : "–"}</td>`
+      + `<td>${s.benchmark_mean != null ? num(s.benchmark_mean, 2) : "–"}</td>`
+      + `<td>${s.benchmark_std != null ? num(s.benchmark_std, 2) : "–"}</td>`
+      + `<td>${z}</td>`
+      + `<td><span class="${stCls}">${esc(st)}</span></td>`
+      + `</tr>`;
+  }).join("");
+}
+
+// constant reference line (0 / ±1 / ±2 …) for residual & z plots
+const devConstLine = (labels, val, color, dash, width, label) => ({
+  label, data: labels.map(() => val), borderColor: color,
+  borderDash: dash || [3, 3], borderWidth: width || 1, fill: false,
+  pointRadius: 0, tension: 0,
+});
+
+function devRender(d) {
+  const ann = $("devAnn");
+  const buckets = $("devBuckets");
+  const series = d.series || [];
+  devRenderCheckpoints(d);
+  const labels = series.map((s) =>
+    s.elapsed_game_minutes != null ? num(s.elapsed_game_minutes, 1) + "m" : fmtTime(s.captured_at));
+  const col = (k) => series.map((s) => (s[k] != null ? s[k] : null));
+  const market = col("live_total_line");
+  const traj = col("projected_final_total");
+  const resid = col("market_trajectory_residual");
+  const z = col("z_score");
+
+  if (!series.length) {
+    devDestroy();
+    ann.innerHTML = `<span class="muted">No deviation rows yet for this game — residuals need VALID clean observations carrying a live line AND a projected trajectory.</span>`;
+    if (buckets) buckets.innerHTML = "";
+    return;
+  }
+
+  // A · market implied total vs observational trajectory over game time
+  devDraw("devChartA", labels, [
+    { label: "Market implied total", data: market, borderColor: "#fbbf24",
+      borderDash: [6, 4], fill: false },
+    { label: "Projected trajectory (pace)", data: traj, borderColor: "#34d399",
+      backgroundColor: "rgba(52,211,153,.06)", fill: true },
+  ], "Implied final total");
+  // B · signed market − trajectory residual over game time
+  devDraw("devChartB", labels, [
+    devConstLine(labels, 0, "#46546b", [2, 2], 1, "zero"),
+    { label: "Market − trajectory residual", data: resid, borderColor: "#22d3ee",
+      backgroundColor: "rgba(34,211,238,.08)", fill: true },
+  ], "residual = live line − projected total");
+  // C · z-score over game time with ±1 / ±2 reference bands
+  devDraw("devChartC", labels, [
+    devConstLine(labels, 0, "#46546b", [2, 2], 1, "z=0"),
+    devConstLine(labels, 1, "#6b7a90", [2, 2], 0.7, "+1σ"),
+    devConstLine(labels, -1, "#6b7a90", [2, 2], 0.7, "−1σ"),
+    devConstLine(labels, 2, "#8b9ab0", [4, 3], 0.7, "+2σ"),
+    devConstLine(labels, -2, "#8b9ab0", [4, 3], 0.7, "−2σ"),
+    { label: "Z-score", data: z, borderColor: "#eaf2ff",
+      backgroundColor: "rgba(234,242,255,.08)", fill: true },
+  ], "Z-score (vs prior residuals in bucket)");
+
+  // annotation — the current observation's z with its stored bucket snapshot
+  const last = series[series.length - 1];
+  const zTxt = last.z_score != null
+    ? `<b>z = ${num(last.z_score, 2)}</b>` : `<b>z = n/a</b>`;
+  const statusCls = last.benchmark_status === "ESTABLISHED" ? "estb"
+    : last.benchmark_status === "PROVISIONAL" ? "prov" : "expl";
+  ann.innerHTML =
+    `<span style="margin-right:14px">${zTxt}`
+    + ` <span class="muted">· N = ${last.benchmark_n ?? "–"} prior residuals in bucket</span></span>`
+    + `<span class="muted" style="margin-right:14px">μ = ${num(last.benchmark_mean, 2)}</span>`
+    + `<span class="muted" style="margin-right:14px">σ = ${num(last.benchmark_std, 2)}</span>`
+    + `<span style="margin-right:14px">STATUS = <b class="${statusCls}">${esc(last.benchmark_status || "–")}</b>`
+    + ` <span class="muted" style="font-size:10px">(bucket maturity label, not significance)</span></span>`
+    + `<span class="muted">· residual ${sig(last.market_trajectory_residual)} @ ${num(last.elapsed_game_minutes, 1)} min · ${fmtTime(last.captured_at)}</span>`
+    + `<div class="muted" style="margin-top:4px;font-size:11px">z is descriptive — standardized residual vs the bucket's prior empirical distribution. No O/U / edge / probability mapping.</div>`;
+
+  // benchmark maturity chips for this game's league buckets
+  if (buckets) {
+    buckets.innerHTML = (d.buckets || []).map((b) =>
+      `<span class="pill muted" title="eligible residuals in this league+quarter bucket (N is bucket size, not total observations)">`
+      + `${esc(b.benchmark_key)} · N=<b>${b.n}</b> · μ=${num(b.mean, 2)} · σ=${num(b.std, 2)} · `
+      + `[${num(b.min, 1)}, ${num(b.max, 1)}] · <b>${esc(b.status)}</b></span>`
+    ).join("") || `<span class="muted">no benchmark buckets yet</span>`;
+  }
+}
+
+async function devLoad() {
+  const sel = $("devGame");
+  const gid = sel ? sel.value : "";
+  const ann = $("devAnn");
+  if (!gid) {
+    devDestroy();
+    if (ann) ann.innerHTML = `<span class="muted">Select a clean game to load its deviation research series.</span>`;
+    return;
+  }
+  try {
+    const resp = await fetch(API_GAME_DEV(gid));
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const d = await resp.json();
+    devRender(d);
+    $("devSub").textContent =
+      `${d.classification || "—"} · ${d.total} residual rows · ${(d.buckets || []).length} benchmark buckets`;
+  } catch (err) {
+    devDestroy();
+    if (ann) ann.innerHTML = `<span class="muted">Deviation data unavailable: ${esc(err.message)}</span>`;
+  }
+}
+
+$("devToggle").addEventListener("click", () => {
+  const body = $("devBody");
+  const open = body.hidden;
+  body.hidden = !open;
+  $("devToggle").setAttribute("aria-expanded", String(open));
+  $("devToggle").classList.toggle("open", open);
+  if (open) {
+    devFillPicker();
+    devLoad();
+    if (!devTimer) devTimer = setInterval(() => { devFillPicker(); devLoad(); }, 60000);
+  } else if (devTimer) {
+    clearInterval(devTimer);
+    devTimer = null;
+    devDestroy();
+  }
+});
+if ($("devGame")) {
+  $("devGame").addEventListener("change", devLoad);
+}
+if ($("devRefresh")) {
+  $("devRefresh").addEventListener("click", () => { devFillPicker(); devLoad(); });
+}
+// Research subsections are collapsible, never removable: collapse only hides
+// the section — every checkpoint row / chart stays in the DOM and the user's
+// collapse preference persists across reloads.
+bindCollapsible($("cpDetails"), PREF.CHECKPOINTS);
+bindCollapsible($("mtDetails"), PREF.MARKET_TRAJ);
+bindCollapsible($("dzDetails"), PREF.DEVIATION_Z);
+bindCollapsible($("valDetails"), PREF.VALIDATION);
+applyResearchPrefs();
+
+function applyResearchPrefs() {
+  // defaults: CHECKPOINTS collapsed (rows still rendered), the two chart
+  // groups + validation open — detailed research one click away, never gone.
+  const defs = [["cpDetails", PREF.CHECKPOINTS, true],
+                ["mtDetails", PREF.MARKET_TRAJ, false],
+                ["dzDetails", PREF.DEVIATION_Z, false],
+                ["valDetails", PREF.VALIDATION, false]];
+  for (const [id, key, dfltCollapsed] of defs) {
+    const det = $(id);
+    if (det) {
+      det.open = !prefGet(key, dfltCollapsed);
+      setSectionLabel(det);
+    }
+  }
+}
+
+/* ── VALIDATION — WHAT HAPPENED NEXT (retrospective research) ──────
+   Read-only aggregate over the deviation dataset: does the market-
+   vs-trajectory deviation relate to what subsequently happened?
+   Research only — no predictive claim until out-of-sample validation. */
+const API_VALIDATION = "/api/v4/deviation/validation";
+const valCharts = {};
+
+function valDestroy() {
+  for (const k in valCharts) {
+    if (valCharts[k]) { try { valCharts[k].destroy(); } catch (_) {} }
+  }
+  for (const k in valCharts) delete valCharts[k];
+}
+
+function valScatter(canvasId, points, xLabel, yLabel) {
+  const cv = document.getElementById(canvasId);
+  if (!cv) return;
+  const old = valCharts[canvasId];
+  if (old) { try { old.destroy(); } catch (_) {} }
+  if (!hasChart()) {
+    cv.replaceWith(Object.assign(document.createElement("div"),
+      { textContent: "Chart.js unavailable — CDN blocked" }));
+    return;
+  }
+  const options = baseChartOpts(yLabel);
+  options.plugins.legend.display = false;
+  options.scales.x.title = { display: true, text: xLabel, color: ChartColor.tick, font: { size: 9 } };
+  valCharts[canvasId] = new Chart(cv.getContext("2d"), {
+    type: "scatter",
+    data: { datasets: [{ data: points.map((p) => ({ x: p[0], y: p[1] })),
+      borderColor: "#22d3ee", backgroundColor: "rgba(34,211,238,.35)",
+      pointRadius: 2, pointHoverRadius: 4, showLine: false }] },
+    options,
+  });
+}
+
+function valTable(title, head, rows) {
+  if (!rows.length) return "";
+  return `<div class="sc-block sc-wide" style="margin-bottom:10px">
+    <h4>${esc(title)}</h4>
+    <table class="sc-table">
+      <tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr>
+      ${rows.join("")}
+    </table>
+  </div>`;
+}
+
+function valRender(d) {
+  const ann = $("valAnn");
+  const chips = $("valChips");
+  if (!d || !d.n_gated_rows) {
+    valDestroy();
+    if (ann) ann.innerHTML = `<span class="muted">No gated deviation observations yet — validation appears once residuals accumulate.</span>`;
+    if (chips) chips.innerHTML = "";
+    $("valTables").innerHTML = "";
+    return;
+  }
+  const cr = (c) => (c && c.n ? `r=${num(c.r, 3)} <span class="muted">(n=${c.n})</span>` : `<span class="muted">r=n/a</span>`);
+  const corr = d.correlations || {};
+  if (ann) {
+    const tp = d.terminal_population || {};
+    ann.innerHTML =
+      `<b>gated rows ${d.n_gated_rows}</b> · subsequent outcome ${d.n_with_subsequent} · settlement ${d.n_with_settlement}`
+      + ` · non-VALID excluded <b>${d.n_excluded_non_valid ?? 0}</b>`
+      + (d.n_terminal_excluded != null
+        ? ` · terminal excluded <b>${d.n_terminal_excluded}</b> · predictive-eligible <b>${d.n_predictive_eligible ?? d.n_gated_rows}</b> (clean obs: ${tp.clean_observations_total ?? "–"} total / ${tp.clean_observations_terminal ?? "–"} terminal)`
+        : "")
+      + `<div class="muted" style="margin-top:4px;font-size:11px">monotonicity: <b>${esc(d.monotonicity && d.monotonicity.assessment || "–")}</b> · retrospective only, not predictive · terminal checkpoints = settlement/audit only, never research evidence</div>`;
+  }
+  if (chips) {
+    chips.innerHTML = [
+      `<span class="pill muted">res→Δpace ${cr(corr.residual_vs_subsequent_pace)}</span>`,
+      `<span class="pill muted">z→Δpace ${cr(corr.z_vs_subsequent_pace)}</span>`,
+      `<span class="pill muted">res→settle err ${cr(corr.residual_vs_settlement)}</span>`,
+      `<span class="pill muted">z→settle err ${cr(corr.z_vs_settlement)}</span>`,
+      `<span class="pill muted">|res|→|Δpace| ${cr(corr.abs_residual_vs_abs_subseq_pace)}</span>`,
+    ].join("");
+  }
+  const row = (b, ks) => `<tr>${ks.map((k) => `<td class="sc-num">${b[k] ?? "–"}</td>`).join("")}</tr>`;
+  const tables = [];
+  tables.push(valTable("SIGN BUCKETS — residual sign vs what happened next",
+    ["Bucket", "N", "mean Δpace", "mean Δline", "mean settle err"],
+    (d.sign_buckets || []).map((b) =>
+      `<tr><td>${esc(b.bucket)}</td><td class="sc-num">${b.n}</td>`
+      + `<td class="sc-num">${num(b.mean_subsequent_pace_change, 3)}</td>`
+      + `<td class="sc-num">${num(b.mean_subsequent_live_line_change, 3)}</td>`
+      + `<td class="sc-num">${num(b.mean_settlement_error, 3)}</td></tr>`)));
+  tables.push(valTable("MAGNITUDE BINS — |residual| vs what happened next",
+    ["Bin", "N", "mean |residual|", "mean Δpace", "mean settle err"],
+    (d.magnitude_buckets || []).map((b) =>
+      `<tr><td>${esc(b.bin)}</td><td class="sc-num">${b.n}</td>`
+      + `<td class="sc-num">${num(b.mean_abs_residual, 2)}</td>`
+      + `<td class="sc-num">${num(b.mean_subsequent_pace_change, 3)}</td>`
+      + `<td class="sc-num">${num(b.mean_settlement_error, 3)}</td></tr>`)));
+  tables.push(valTable("BY CONTEXT — classification | period (N≥8)",
+    ["Key", "N", "r(res→Δpace)", "mean Δpace"],
+    (d.by_context || []).filter((b) => !b.sample_too_small).map((b) =>
+      `<tr><td>${esc(b.key)}</td><td class="sc-num">${b.n}</td>`
+      + `<td class="sc-num">${num(b.r, 3)}</td>`
+      + `<td class="sc-num">${num(b.mean_subsequent_pace_change, 3)}</td></tr>`)));
+  tables.push(valTable("STABILITY ACROSS GAME TIME — progress buckets",
+    ["Bucket", "N", "r(res→Δpace)", "mean Δpace"],
+    (d.by_progress || []).map((b) =>
+      `<tr><td>${esc(b.bucket)}</td><td class="sc-num">${b.n}</td>`
+      + `<td class="sc-num">${num(b.r, 3)}</td>`
+      + `<td class="sc-num">${num(b.mean_subsequent_pace_change, 3)}</td></tr>`)));
+  $("valTables").innerHTML = tables.join("");
+  valScatter("valChartA", d.scatter && d.scatter.residual_vs_subseq_pace || [],
+    "market−trajectory residual", "subsequent pace change");
+  valScatter("valChartB", d.scatter && d.scatter.z_vs_subseq_pace || [],
+    "z-score", "subsequent pace change");
+}
+
+async function valLoad() {
+  const ann = $("valAnn");
+  try {
+    const resp = await fetch(API_VALIDATION);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    valRender(await resp.json());
+  } catch (err) {
+    valDestroy();
+    if (ann) ann.innerHTML = `<span class="muted">Validation unavailable: ${esc(err.message)}</span>`;
+  }
+}
+
+const valDetails = document.querySelector("#valDetails");
+if (valDetails) {
+  valDetails.addEventListener("toggle", () => {
+    const sum = valDetails.querySelector(":scope > summary");
+    if (sum) {
+      sum.textContent = valDetails.open
+        ? "VALIDATION — WHAT HAPPENED NEXT ▾" : "VALIDATION — WHAT HAPPENED NEXT ▸";
+    }
+    if (valDetails.open) valLoad();
+  });
+}

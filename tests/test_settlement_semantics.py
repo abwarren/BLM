@@ -302,8 +302,15 @@ class TestDiagnosticSelectionVsOutcome:
         con = sqlite3.connect(str(db))
         con.row_factory = sqlite3.Row
         con.executescript("""
+            CREATE TABLE games (
+                source_game_id TEXT PRIMARY KEY,
+                first_seen_at TEXT NOT NULL);
+            INSERT INTO games (source_game_id, first_seen_at) VALUES
+              ('g1', '2026-09-05T06:00:00.000000Z'),
+              ('g2', '2026-09-05T06:00:00.000000Z');
             CREATE TABLE prediction_scores (
                 prediction_id INTEGER PRIMARY KEY,
+                source_game_id TEXT,
                 model_total REAL, market_total REAL, actual_total REAL,
                 total_error REAL, market_error REAL, model_beat_market INTEGER,
                 ou_prediction INTEGER, ou_result INTEGER, ou_correct INTEGER,
@@ -311,8 +318,8 @@ class TestDiagnosticSelectionVsOutcome:
             -- (1) BLM OVER pick (190>170), actual OVER (180>170)
             -- (2) BLM UNDER pick (150<170), actual OVER (180>170)
             INSERT INTO prediction_scores VALUES
-              (1, 190, 170, 180,  10, -10, 1,  1,  1, 1, 0),
-              (2, 150, 170, 180, -30, -10, 0, -1,  1, 0, 0);
+              (1, 'g1', 190, 170, 180,  10, -10, 1,  1,  1, 1, 0),
+              (2, 'g2', 150, 170, 180, -30, -10, 0, -1,  1, 0, 0);
         """)
         try:
             out = _market_compare_sql(con)

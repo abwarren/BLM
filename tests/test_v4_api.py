@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 import blm_v4.api as v4api
 from blm_v4.api import router as v4_router
+from blm_v4.clean_boundary import CLEAN_DATA_EPOCH
 from blm_v4.models import MarketObservation, PokerBetGame, utcnow_iso
 from blm_v4.storage import PokerBetStore
 
@@ -51,6 +52,9 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(v4api, "STATE_FILE", tmp_path / "collector_state.json")
     st = PokerBetStore(db)
     now = _now()
+    # /api/v4/live is the CLEAN post-epoch view: every fixture game must
+    # have started at/after the clean-data epoch or it never appears.
+    epoch_dt = datetime.fromisoformat(CLEAN_DATA_EPOCH.replace("Z", "+00:00"))
 
     def add_game(gid: str, cls: str, home: str, away: str,
                  first: datetime, last: datetime):
@@ -103,10 +107,10 @@ def store(tmp_path, monkeypatch):
     betual(now - timedelta(minutes=1), 16, 18, 2, "03:00", 216.5, -2.5, 2.0, 1.75)
     betual(now - timedelta(seconds=5), 22, 24, 2, "01:00", 216.5, -2.5, 2.0, 1.75)
 
-    # Stale game (ended yesterday) — must NOT be live
+    # Stale game (clean-era, finished long ago) — must NOT be live
     stale = add_game("3001", "BETUAL_NBA", "Old Team Virtual", "Ancient Rivals Virtual",
-                     now - timedelta(days=1), now - timedelta(hours=20))
-    stale(now - timedelta(days=1), 80, 90, 4, "00:30", 200.0, -10.0, 3.0, 1.35)
+                     epoch_dt + timedelta(minutes=2), epoch_dt + timedelta(minutes=5))
+    stale(epoch_dt + timedelta(minutes=1), 80, 90, 4, "00:30", 200.0, -10.0, 3.0, 1.35)
 
     # Reconciliations for the two live games
     st.record_reconciliation("1001", "CYBER_2K26", "1001", "dallas-mavericks-cyber-minnesota-timberwolves-cyber",
@@ -165,29 +169,29 @@ def test_dashboard_live_only_toggle_present(client):
 
 
 def test_dashboard_nonlive_market_not_presented_as_current(client):
-    """M007-M7: an ended/stale game's historical market line must NEVER be
-    presented as the current live line with a live trading edge.
-
-    Requirement (for !live or stale):
-      Current Live Line: —
-      Last observed: 157.5 @ HH:MM:SSZ · ENDED
-      BLM (historical): 157.0
-      Edge: —  (suppressed — no live signal against a non-current line)
-    """
+    """Descriptive-only: an ended/stale game's historical market line is
+    labeled 'Last observed' (with ENDED/STALE) and is NEVER presented as a
+    current live line — and no model comparison exists at all."""
     js = client.get("/static/dashboard.js").text
     assert "Last observed" in js          # historical line explicitly labeled
-    assert "BLM (historical)" in js       # no "live prediction" claim when ended
     assert "liveLine" in js               # current line only when live + fresh
-    assert "liveEdge" in js               # edge only ever vs the current live line
+    # predictive/model comparison UI is gone from the live card
+    assert "Market vs Model" not in js
+    assert "Model Total" not in js
+    assert "liveEdge" not in js
+    assert "BLM (historical)" not in js
 
 
 def test_dashboard_modal_does_not_show_live_edge_for_nonlive(client):
-    """M007-M7: the detail MODAL must also suppress the live edge for
-    ended/stale games — same defect class as the card.  The old unguarded
-    modal edge computed against total_line regardless of live status."""
+    """The detail MODAL is descriptive-only: non-live markets are labeled
+    'Last observed', and no model-vs-market edge formula remains anywhere
+    in the render path."""
     js = client.get("/static/dashboard.js").text
-    assert "tEdge = mkt.total_line != null && mdl.expected_total != null" not in js
     assert "Last observed" in js  # modal labels non-live market as historical
+    assert "tEdge" not in js
+    assert "Total edge" not in js
+    assert "Model total" not in js
+    assert "expected_total" not in js
 
 
 def test_dashboard_production_ui_has_no_raw_debug(client):
@@ -253,30 +257,29 @@ def test_live_marks_fresh_vs_stale(client):
     assert by_id["3001"]["live"] is False
 
 
-def test_live_model_fields(client):
+def test_live_descriptive_only_no_model_fields(client):
+    """Prediction generation is frozen: /api/v4/live live-state objects are
+    descriptive only — no model expected-total / win-probability /
+    confidence / signals / trap / edge fields are emitted (a backend
+    change, not a frontend hide)."""
     games = client.get("/api/v4/live").json()["games"]
     cyber = next(g for g in games if g["game_id"] == "1001")
-    mdl = cyber["model"]
-    for key in ("win_probability", "confidence", "expected_total",
-                "expected_margin", "home_projection", "away_projection", "pace"):
-        assert key in mdl, f"missing model.{key}"
-    assert 0 <= mdl["win_probability"] <= 1
-    assert 0 <= mdl["confidence"] <= 1
+    for forbidden in ("model", "signals", "win_probability", "expected_total",
+                      "expected_margin", "home_projection", "away_projection",
+                      "confidence", "trap_meter", "edge", "fair"):
+        assert forbidden not in cyber, f"live-state object must not expose {forbidden!r}"
     assert cyber["momentum"]["direction"] in ("up", "down", "flat")
-    assert "active" in cyber["signals"]
-    assert "dead_market" in cyber["signals"]
     assert cyber["market"]["total_line"] == 224.5
     assert cyber["market_efficiency"] is not None
     assert len(cyber["history"]) == 4  # actual stored snapshots, no fabrication
-    # history contains only real snapshots
     assert all("t" in h and "home" in h for h in cyber["history"])
-    # derived series present for model-history charts (additive keys)
+    # descriptive series only: observed scoring-rate index + pace, never
+    # a probability / model expected total
     last = cyber["history"][-1]
-    for key in ("combined", "win_prob", "momentum_score", "momentum_direction",
-                "confidence", "expected_total"):
+    for key in ("combined", "momentum_score", "momentum_direction"):
         assert key in last, f"missing history.{key}"
-    assert 0 <= last["win_prob"] <= 1
-    assert 0 <= last["confidence"] <= 1
+    for forbidden in ("win_prob", "confidence", "expected_total"):
+        assert forbidden not in last, f"history series must not expose {forbidden!r}"
     assert 0 <= last["momentum_score"] <= 100
 
 

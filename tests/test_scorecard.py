@@ -476,6 +476,12 @@ def _sample_scores_conn(tmp_path):
     conn.row_factory = sqlite3.Row
     conn.executescript(SCORECARD_SCHEMA)
     conn.executescript("""
+        CREATE TABLE games (
+            source_game_id TEXT PRIMARY KEY,
+            first_seen_at TEXT NOT NULL);
+        INSERT INTO games (source_game_id, first_seen_at) VALUES
+          ('9001', '2026-09-05T06:00:00.000000Z'),
+          ('9002', '2026-09-05T06:00:00.000000Z');
         INSERT INTO predictions (id, source_game_id, classification, model_version,
             checkpoint, predicted_at, source_snapshot_at, projected_home,
             projected_away, projected_total, market_total, valid)
@@ -689,6 +695,14 @@ def test_m008_ou_hit_rate_excludes_pushes(tmp_path):
     conn.executescript(SCORECARD_SCHEMA)
     # 3 decided rows (2 hits, 1 miss) + 1 push row
     conn.executescript("""
+        CREATE TABLE games (
+            source_game_id TEXT PRIMARY KEY,
+            first_seen_at TEXT NOT NULL);
+        INSERT INTO games (source_game_id, first_seen_at) VALUES
+          ('9101', '2026-09-05T06:00:00.000000Z'),
+          ('9102', '2026-09-05T06:00:00.000000Z'),
+          ('9103', '2026-09-05T06:00:00.000000Z'),
+          ('9104', '2026-09-05T06:00:00.000000Z');
         INSERT INTO predictions (id, source_game_id, classification, model_version,
             checkpoint, predicted_at, source_snapshot_at, projected_home,
             projected_away, projected_total, market_total, valid)
@@ -1069,7 +1083,8 @@ def test_market_total_survives_list_stubs(tmp_path, monkeypatch):
     card = _analyze_game(dict(game), rows, datetime.now(timezone.utc))
     mkt = card["market"]
     assert mkt["total_line"] == 189.5          # last real line, not None
-    assert card["model"]["expected_total"] is not None
+    # prediction generation is frozen — no model block on the live state
+    assert "model" not in card and "signals" not in card
     assert card["market_momentum"] == 2.0      # 189.5 - 187.5 (market rows only)
 
     # scorecard: market_total at a stub checkpoint = nearest prior real line
@@ -1168,10 +1183,11 @@ def test_projection_floor_one_team_only():
 
 
 def test_api_card_parity_with_projection():
-    """api.py must NOT re-implement the model: the dashboard card's model
-    block is exactly projection.project() (single source of truth), and the
-    score shown on the card is the same snapshot the projection was built
-    from."""
+    """api.py must NOT re-implement the model: the live-state object is
+    descriptive-only (prediction generation frozen), so its observed
+    market total is exactly projection.project()'s single-source
+    market_total for the same rows, and the score shown on the card is the
+    same snapshot the projection would be built from."""
     from blm_v4.api import _analyze_game
     rows = _proj_rows(
         [(40, 45), (52, 58), (61, 66), (73, 79), (88, 92), (98, 103), (109, 114)],
@@ -1185,12 +1201,12 @@ def test_api_card_parity_with_projection():
             "home_team": "Boston Celtics Virtual", "away_team": "Sacramento Kings Virtual",
             "status": "live", "last_seen_at": rows[-1]["captured_at"], "id": 1}
     card = _analyze_game(dict(game), rows, datetime.now(timezone.utc))
-    m = card["model"]
-    assert m["home_projection"] == p["home_projection"]
-    assert m["away_projection"] == p["away_projection"]
-    assert m["expected_total"] == p["expected_total"]
-    assert m["expected_margin"] == p["expected_margin"]
-    assert m["pace"] == p["pace"]
+    # no model block / no predictive outputs on the live-state object
+    for forbidden in ("model", "signals", "expected_total", "win_probability",
+                      "confidence", "home_projection", "edge"):
+        assert forbidden not in card, f"live-state must not expose {forbidden!r}"
+    # the reported observed market total matches the single project() source
+    assert card["market"]["total_line"] == p["market_total"]
     assert card["home_score"] == 109 and card["away_score"] == 114
 
 
@@ -1331,10 +1347,10 @@ def test_market_history_skips_fragment_and_invalid(tmp_path, monkeypatch):
                                           (86, 84, "00:30"), (92, 88, "00:15")]):
         _snap(st, gid_db, "9702", "BETUAL_NBA",
               t0 + timedelta(seconds=20 * i), hs, as_, 4, clock, 185.0)
-    # invalid: score regression (away 6 -> 5)
+    # invalid: genuine score regression (>4pt tolerance: away 6 -> 0)
     gid_db2 = _add_game(st, "9703", "BETUAL_NBA", "H", "A", status="ended")
     t0b = datetime.now(timezone.utc) - timedelta(minutes=20)
-    snaps = [(0, 0, 1, "09:00"), (8, 6, 1, "06:00"), (10, 5, 1, "03:00"),
+    snaps = [(0, 0, 1, "09:00"), (8, 6, 1, "06:00"), (10, 0, 1, "03:00"),
              (24, 20, 1, "00:00"), (30, 26, 2, "09:00"), (40, 34, 2, "06:00"),
              (52, 42, 2, "03:00"), (60, 50, 2, "00:00"), (66, 58, 3, "09:00"),
              (76, 66, 3, "06:00"), (82, 72, 3, "03:00"), (86, 78, 3, "00:00"),

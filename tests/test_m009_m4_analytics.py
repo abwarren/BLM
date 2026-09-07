@@ -151,8 +151,11 @@ def test_time_of_day_segmentation(sc):
     am_hour = datetime(2026, 1, 1, 3, 15, tzinfo=timezone.utc).astimezone(tz).hour
     pm_hour = datetime(2026, 1, 1, 15, 45, tzinfo=timezone.utc).astimezone(tz).hour
     hours = {h["hour"]: h for h in tod["hours"]}
-    assert hours[am_hour]["n"] >= 10          # G-AM's 10 checkpoints
-    assert hours[pm_hour]["n"] >= 10          # G-PM's 10 checkpoints
+    # TERMINAL EXCLUSION (directive): each game contributes its 10-90%
+    # checkpoints (9) — the 100% checkpoint is terminal = settlement/audit
+    # only and no longer inflates any research population.
+    assert hours[am_hour]["n"] >= 9           # G-AM's 10-90% checkpoints
+    assert hours[pm_hour]["n"] >= 9           # G-PM's 10-90% checkpoints
     for h in hours.values():
         for key in ("n", "over_n", "under_n", "push_n", "blm_win_rate",
                     "market_win_rate", "avg_diff"):
@@ -163,8 +166,8 @@ def test_time_of_day_segmentation(sc):
                    if am_hour >= int(b.split("-")[0]) and am_hour < int(b.split("-")[1]))
     pm_band = next(b for b in band_labels
                    if pm_hour >= int(b.split("-")[0]) and pm_hour < int(b.split("-")[1]))
-    assert bands[am_band]["n"] >= 10
-    assert bands[pm_band]["n"] >= 10
+    assert bands[am_band]["n"] >= 9
+    assert bands[pm_band]["n"] >= 9
     assert tod["band_def"]  # the configurable band definition is reported
 
 

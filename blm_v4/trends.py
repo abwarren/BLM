@@ -20,6 +20,13 @@ import sqlite3
 from statistics import median
 from typing import Any, Optional
 
+from blm_v4.clean_boundary import CLEAN_DATA_EPOCH
+
+# Clean-data boundary: trend analytics are CLEAN games only (started at/
+# after the clean epoch).  Pre-epoch rows remain in market_history for
+# audit; they never enter current analytical views.
+_CLEAN_G = f"g.first_seen_at >= '{CLEAN_DATA_EPOCH}'"
+
 DEFAULT_ANALYTICS_TZ = "Africa/Johannesburg"
 
 # (start_hour, end_hour) inclusive, local time — analytical views ONLY.
@@ -92,10 +99,12 @@ def _bucket_report(rows: list[sqlite3.Row]) -> dict[str, Any]:
 def market_performance(conn: sqlite3.Connection) -> dict[str, Any]:
     """OVER/UNDER/PUSH vs OLVC and vs CLV across all clean games."""
     rows = conn.execute(
-        """SELECT outcome_olvc, outcome_clv,
+        f"""SELECT outcome_olvc, outcome_clv,
                   opening_total_edge, closing_total_edge
-           FROM market_history
-           WHERE opening_total IS NOT NULL OR closing_total IS NOT NULL"""
+           FROM market_history mh
+           JOIN games g ON g.source_game_id = mh.source_game_id
+           WHERE {_CLEAN_G}
+             AND (opening_total IS NOT NULL OR closing_total IS NOT NULL)"""
     ).fetchall()
     return {
         "olvc": _side_stats(
@@ -110,9 +119,11 @@ def market_performance(conn: sqlite3.Connection) -> dict[str, Any]:
 def time_of_day(conn: sqlite3.Connection) -> dict[str, Any]:
     """Hourly + grouped time-of-day buckets (local analytics timezone)."""
     rows = conn.execute(
-        """SELECT started_hour, outcome_olvc, outcome_clv,
+        f"""SELECT started_hour, outcome_olvc, outcome_clv,
                   opening_total_edge, closing_total_edge
-           FROM market_history"""
+           FROM market_history mh
+           JOIN games g ON g.source_game_id = mh.source_game_id
+           WHERE {_CLEAN_G}"""
     ).fetchall()
     hourly = []
     for h in range(24):
@@ -134,9 +145,11 @@ def time_of_day(conn: sqlite3.Connection) -> dict[str, Any]:
 def market_movement(conn: sqlite3.Connection) -> dict[str, Any]:
     """Opening->closing line movement and final results by direction."""
     rows = conn.execute(
-        """SELECT total_line_move, market_move, outcome_clv
-           FROM market_history
-           WHERE opening_total IS NOT NULL AND closing_total IS NOT NULL"""
+        f"""SELECT total_line_move, market_move, outcome_clv
+           FROM market_history mh
+           JOIN games g ON g.source_game_id = mh.source_game_id
+           WHERE {_CLEAN_G}
+             AND opening_total IS NOT NULL AND closing_total IS NOT NULL"""
     ).fetchall()
     moves = [r["total_line_move"] for r in rows
              if r["total_line_move"] is not None]
@@ -161,15 +174,23 @@ def market_movement(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def model_vs_market(conn: sqlite3.Connection) -> dict[str, Any]:
     """Model edge + directional hit rate vs the market, clean games only,
-    split by model version and checkpoint."""
+    split by model version and checkpoint.
+
+    TERMINAL EXCLUSION (directive): this is a research metric — terminal
+    rows (explicit stamp or DERIVED from the source prediction's game-
+    time fields) contribute 0 to every numerator and denominator here.
+    """
+    from blm_v4.scorecard import _scores_terminal_expr  # local: avoid cycle
+    s_term = f"{_scores_terminal_expr(conn, 'ps')} = 0"
     rows = conn.execute(
-        """SELECT ps.model_version, p.checkpoint, ps.model_total,
+        f"""SELECT ps.model_version, p.checkpoint, ps.model_total,
                   ps.market_total, ps.ou_prediction, ps.ou_correct,
                   ps.model_beat_market
            FROM prediction_scores ps
            JOIN predictions p ON p.id = ps.prediction_id
            JOIN market_history mh ON mh.source_game_id = ps.source_game_id
-           WHERE ps.market_total IS NOT NULL"""
+           JOIN games g ON g.source_game_id = ps.source_game_id
+           WHERE ps.market_total IS NOT NULL AND {s_term} AND {_CLEAN_G}"""
     ).fetchall()
     versions: dict[str, Any] = {}
     for r in rows:

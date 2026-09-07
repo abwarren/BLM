@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
@@ -127,13 +128,28 @@ def main() -> None:
         app.state._scheduler_task = task
 
         # ── Projection accuracy scorecard (persisted, quality-gated) ──
+        # The scorecard run is a long synchronous SQLite workload (1-3 min
+        # over blm_pokerbet.db, per-section write transactions).  Running
+        # it inline on the event loop starved /api/v2/* responses (16-40s+
+        # timeouts), the 20s snapshot scheduler (missed ticks), and the V1
+        # Playwright thread (GIL), while its long write-lock windows locked
+        # the V4 collector out of the same DB ("database is locked" storms
+        # that made the collector relaunch healthy browsers).  Run it in a
+        # worker thread: the event loop stays responsive and the V4
+        # collector's busy-timeout can wait out the lock windows.
         async def _scorecard_loop():
             from blm_v4.scorecard import Scorecard
             sc = Scorecard(root / "blm_pokerbet.db")
             while True:
                 try:
-                    stats = sc.run()
-                    logger.info("scorecard_run", **stats)
+                    t0 = time.monotonic()
+                    logger.info("scorecard_run_start")
+                    stats = await asyncio.to_thread(sc.run)
+                    logger.info(
+                        "scorecard_run",
+                        elapsed_s=round(time.monotonic() - t0, 1),
+                        **stats,
+                    )
                 except Exception:
                     logger.exception("scorecard_run_failed")
                 await asyncio.sleep(60)

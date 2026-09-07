@@ -113,6 +113,22 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .sc-num { font-family: var(--mono); text-align: right; color: #eaf2ff; }
 
 
+/* ── Live view header + HISTORICAL / AUDIT separation ───── */
+.live-head { display: flex; align-items: baseline; gap: 10px; padding: 2px 18px 10px; flex-wrap: wrap; }
+.live-title { font-family: var(--mono); font-size: 12px; font-weight: 800; letter-spacing: 2px; color: var(--cyan); }
+.audit-area { border-top: 1px dashed var(--border2); margin-top: 4px; padding-top: 14px; }
+.audit-head { display: flex; align-items: baseline; gap: 10px; padding: 0 18px 10px; flex-wrap: wrap; }
+.audit-title { font-family: var(--mono); font-size: 12px; font-weight: 800; letter-spacing: 2px; color: var(--orange); }
+.audit-sub { font-size: 11px; color: var(--dim); }
+/* top-level HISTORICAL / RESEARCH collapsible section */
+.audit-toggle { margin-bottom: 0; }
+.audit-toggle .scorecard-title { color: var(--orange); }
+.audit-body { padding-top: 12px; }
+/* hide native <details> markers — sections draw their own ▸/▾ arrows */
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::marker { content: ""; }
+
 /* ── Game grid ──────────────────────────────────────────── */
 .grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
@@ -175,6 +191,21 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .vs { color: var(--dim); font-family: var(--mono); font-size: 12px; }
 .game-meta { display: flex; gap: 12px; justify-content: center; padding: 4px 14px 8px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .game-meta .period { color: var(--text); font-weight: 700; }
+/* clean-data boundary: deterministic pace state on LIVE cards (actual
+   Pts/Min vs required to reach the live line) — never a probability */
+.pace-strip {
+  display: flex; gap: 10px; justify-content: center; align-items: baseline;
+  padding: 2px 14px 8px; font-family: var(--mono); font-size: 11px; color: var(--text);
+}
+.pace-strip .pace-item b { color: var(--text); }
+.pace-strip .pace-item b.pos { color: var(--green); }
+.pace-strip .pace-item b.neg { color: var(--red); }
+/* clean-data boundary: LEGACY / pre-clean partition warning */
+.legacy-banner {
+  margin: 0 14px 10px; border: 1px solid #7c3a12; border-radius: 6px;
+  background: #2a1607; color: var(--orange); padding: 8px 12px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 1px;
+}
 
 /* win probability */
 .winprob { padding: 0 14px 10px; }
@@ -185,6 +216,53 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .winprob-bar span { font-family: var(--mono); font-size: 10px; font-weight: 800; color: #04121a; padding: 0 4px; text-shadow: 0 0 3px rgba(255,255,255,.35); }
 .winprob-legend { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; margin-top: 3px; color: var(--muted); }
 .winprob-legend b { color: var(--text); }
+
+/* live market panel (descriptive — observed line + freshness only) */
+.live-market {
+  margin: 0 14px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel2); padding: 6px 12px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.live-market-label { font-size: 9px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; }
+.live-market-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 12px; flex-wrap: wrap; }
+.lm-line b { font-size: 15px; font-weight: 800; color: #eaf2ff; }
+.lm-sub { font-size: 10px; font-family: var(--mono); }
+
+/* observed pace trend (descriptive measurements — no confidence) */
+.pace-trend {
+  display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+  padding: 0 14px 8px; font-family: var(--mono); font-size: 11px; color: var(--muted);
+}
+.pt-dir { font-weight: 800; letter-spacing: 1.5px; }
+.pt-dir.up { color: var(--green); }
+.pt-dir.down { color: var(--red); }
+.pt-dir.flat { color: var(--muted); }
+.pt-item b { color: var(--text); }
+.pt-item b.pos { color: var(--green); }
+.pt-item b.neg { color: var(--red); }
+
+/* card-level collapsible sections — CHARTS (sparkline) & DETAILS */
+.card-charts {
+  margin: 0 14px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel2); overflow: hidden;
+}
+.card-charts summary {
+  cursor: pointer; font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  color: var(--dim); user-select: none; padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.card-charts summary:hover { color: var(--cyan); }
+.card-charts .spark { padding: 8px 14px 4px; }
+.card-details {
+  margin: 0 14px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel2); padding: 6px 12px;
+}
+.card-details summary { cursor: pointer; font-family: var(--mono); font-size: 10px; letter-spacing: 1px; color: var(--dim); user-select: none; }
+.card-details summary:hover { color: var(--cyan); }
+.cd-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-top: 6px; font-family: var(--mono); font-size: 11px; }
+.cd-item { display: flex; justify-content: space-between; gap: 6px; }
+.cd-k { color: var(--muted); font-size: 9px; letter-spacing: 1px; text-transform: uppercase; white-space: nowrap; }
+.cd-v { color: var(--text); text-align: right; }
 
 /* stats rows */
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; padding: 6px 14px 10px; }
@@ -323,6 +401,15 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .big { font-size: 26px; font-weight: 800; font-family: var(--mono); }
 .big.pos { color: var(--green); } .big.neg { color: var(--red); }
 
+.m-wide { grid-column: 1/-1; }
+
+/* modal-level collapsible sections — CHARTS & DETAILS */
+.m-details, .m-chart-toggle { margin-top: 14px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+.m-details summary, .m-chart-toggle summary { cursor: pointer; font-family: var(--mono); font-size: 11px; letter-spacing: 1.5px; color: var(--dim); user-select: none; }
+.m-details summary:hover, .m-chart-toggle summary:hover { color: var(--amber); }
+.m-details > *:not(summary) { margin-top: 10px; }
+.m-chart-toggle .m-charts { margin-top: 10px; }
+
 .timeline { margin-top: 14px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; max-height: 320px; overflow-y: auto; }
 .timeline h4 { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; margin-bottom: 8px; }
 .tl-item { display: flex; gap: 12px; font-family: var(--mono); font-size: 12px; padding: 3px 0; border-bottom: 1px dashed #16202e; }
@@ -367,3 +454,64 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .st-live { color: var(--green); border-color: #14532d; }
 .st-stale { color: var(--orange); border-color: #7c3a12; }
 .st-missing { color: var(--muted); border-color: var(--border2); }
+
+/* ═══════════ GAME-LEVEL SCORECARD — progressive Market vs Fair per clean completed game ═══════════ */
+.gs-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 18px 10px; }
+.gs-meta .pill { font-size: 10px; letter-spacing: 0.5px; }
+
+/* ── Research / calibration — market ↔ trajectory deviation ── */
+.dev-ann {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; font-size: 12px; margin-bottom: 10px; color: var(--text);
+}
+.dev-ann .muted { font-size: 11px; }
+.dev-ann b.expl { color: var(--dim); }
+.dev-ann b.prov { color: var(--amber); }
+.dev-ann b.estb { color: var(--green); }
+.dev-buckets {
+  display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px;
+}
+.dev-buckets .pill { font-size: 10px; letter-spacing: .5px; }
+.dev-buckets .pill b { color: #eaf2ff; }
+.dev-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.dev-single { grid-template-columns: 1fr; }
+.dev-scroll { max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.dev-scroll .sc-table th { position: sticky; top: 0; background: var(--panel2); z-index: 1; }
+.dev-scroll .sc-table td, .dev-scroll .sc-table th { white-space: nowrap; padding: 4px 9px; }
+.dev-chart {
+  background: var(--panel2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px;
+}
+.dev-chart.full { grid-column: 1/-1; }
+.dev-chart h4 {
+  font-size: 10px; letter-spacing: 1.5px; color: var(--muted);
+  text-transform: uppercase; margin-bottom: 6px;
+}
+.dev-canvas { position: relative; }
+.dev-chart canvas { width: 100%; height: 220px; }
+.gs-clean { color: var(--green); border-color: #14532d; background: #052e1c; font-weight: 800; }
+.gs-game { padding: 0; overflow: hidden; }
+.gs-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 10px 12px 8px; border-bottom: 1px solid var(--border); }
+.gs-teams { font-weight: 700; font-size: 13px; color: #eaf2ff; margin-right: auto; }
+.gs-teams .gs-gid { font-weight: 400; font-size: 10px; color: var(--dim); font-family: var(--mono); }
+.gs-body { padding: 8px 12px 10px; }
+.gs-table { font-size: 11.5px; }
+.gs-table th { font-size: 9px; }
+.gs-table td { padding: 2px 7px; }
+.gs-pct { color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+.gs-diff { font-family: var(--mono); font-weight: 800; font-size: 13px; text-align: right; white-space: nowrap; }
+.gs-diff.pos { color: var(--green); }
+.gs-diff.neg { color: var(--red); }
+.gs-diff.zero { color: var(--muted); font-weight: 400; }
+.gs-diff .gs-dir { display: block; font-size: 8.5px; font-weight: 600; letter-spacing: 0.5px; opacity: 0.85; }
+.gs-out { font-size: 10.5px; font-family: var(--mono); white-space: nowrap; }
+.gs-out.win { color: var(--green); }
+.gs-out.loss { color: var(--red); }
+.gs-out.void { color: var(--muted); }
+.gs-row-dim td { color: var(--dim); opacity: 0.7; }
+.gs-foot { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); font-size: 11px; color: var(--muted); }
+.gs-foot b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+.gs-foot .gs-res { margin-left: auto; font-size: 11.5px; }
+.gs-chart { height: 54px; margin-top: 6px; }
+.gs-foot b.pos { color: var(--green); }
+.gs-foot b.neg { color: var(--red); }

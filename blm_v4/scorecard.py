@@ -46,8 +46,138 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from blm_v4.api import _detect_signals, _momentum
-from blm_v4.projection import FULL_GAME_MINUTES, MODEL_VERSION, clock_minutes, project
+from blm_v4.clean_boundary import (CLEAN_DATA_EPOCH, clean_games_where,
+                                   clean_games_subq)
+from blm_v4.projection import (MODEL_VERSION, clock_minutes, duration_for,
+                               project)
+from blm_v4.terminal_eligibility import (TERMINAL_EXCLUSION_REASON,
+                                         eligibility_state,
+                                         is_terminal_checkpoint)
 from blm_v4.trends import analytics_tz
+
+# ── Clean-data boundary (frontend isolation) ──────────────────────────
+# Statistical/metrics views aggregate ONLY the CLEAN population (games
+# whose first observation is at/after the clean epoch).  Pre-epoch rows
+# remain in the operational DB for audit/reference through explicit
+# legacy paths only.  These are READ-side filters — the writer logic,
+# quality gates and formulas are untouched.
+_CLEAN_SCORES_WHERE = clean_games_where("prediction_scores")
+_CLEAN_S_WHERE = clean_games_where("s")  # prediction_scores aliased as s
+_CLEAN_PREDS_WHERE = clean_games_where("predictions")
+_CLEAN_GAMES_SUBQ = clean_games_subq()
+
+# ── Terminal predicate fragments (legacy-schema aware) ────────────────
+# Directive §5: a MISSING terminal column is NOT evidence of zero terminal
+# rows.  When the stamp column exists, the explicit stamp decides
+# (COALESCE backfills pre-stamp rows); when it does not, terminal status
+# is DERIVED from the authoritative game-time/progress fields that exist
+# on every schema generation — never silently treated as eligible.
+
+
+def _derived_terminal_scores(conn, alias: str = "") -> str:
+    """DERIVED terminal predicate for prediction_scores rows.
+
+    A scored row is terminal when its source prediction was taken at the
+    game's final state.  Derivation (best available evidence first):
+      1. the source prediction's own progress/elapsed (progress >= 1.0
+         or elapsed >= full classification duration),
+      2. the source snapshot's game-time evidence (Q4 period-over
+         sentinel / finished label / ended status) — when the snapshots
+         table exists in this database,
+      3. the row's own denormalized final-total identity is NOT evidence
+         of terminality (every scored row carries the final total).
+    """
+    c = f"{alias}." if alias else ""
+    has_preds = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='predictions'"
+    ).fetchone() is not None
+    if not has_preds:
+        # No predictions table in this database: derivation is impossible
+        # (no underlying fields to classify from) — the row's own stamp
+        # remains the only terminal evidence.  This only occurs in
+        # degenerate/minimal schemas; real databases always have it.
+        return "0"
+    snap_clause = ""
+    has_snaps = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshots'"
+    ).fetchone() is not None
+    if has_snaps:
+        snap_clause = """
+               OR EXISTS (
+                   SELECT 1 FROM snapshots ds
+                   WHERE ds.captured_at = dp.source_snapshot_at
+                     AND (LOWER(COALESCE(ds.game_status, '')) IN
+                          ('ended', 'finished', 'full time', 'ft',
+                           'complete', 'completed')
+                          OR LOWER(COALESCE(ds.period_label, '')) LIKE '%full time%'
+                          OR LOWER(COALESCE(ds.period_label, '')) LIKE '%finished%'
+                          OR LOWER(COALESCE(ds.period_label, '')) LIKE '%end of match%'
+                          OR LOWER(COALESCE(ds.period_label, '')) LIKE '%match ended%'
+                          OR (COALESCE(ds.quarter, 0) >= 4
+                              AND TRIM(COALESCE(ds.clock, ''))
+                                  IN ('00:00', '0:00', '21:00'))))"""
+    return f"""EXISTS (
+        SELECT 1 FROM predictions dp
+        WHERE dp.id = {c}prediction_id
+          AND (COALESCE(dp.progress, 0) >= 1.0
+               OR (dp.elapsed_minutes IS NOT NULL
+                   AND dp.elapsed_minutes >= CASE COALESCE(dp.classification, '')
+                       WHEN 'CYBER_2K26' THEN 48.0 ELSE 40.0 END){snap_clause}))"""
+
+
+def _scores_terminal_expr(conn, alias: str = "") -> str:
+    """Full terminal classifier for prediction_scores: the EXPLICIT stamp
+    when present (legacy rows NULL -> derived), otherwise DERIVED from
+    game-time evidence.  Use inside COALESCE(...) = 1 / = 0 tests."""
+    c = f"{alias}." if alias else ""
+    scol = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(prediction_scores)")}
+    stamp = (f"{c}terminal" if "terminal" in scol else "NULL")
+    derived = _derived_terminal_scores(conn, alias)
+    return f"COALESCE({stamp}, CASE WHEN {derived} THEN 1 ELSE 0 END)"
+
+
+def _preds_terminal_expr(conn, alias: str = "p") -> str:
+    """Full terminal classifier for predictions: the EXPLICIT stamp when
+    the column exists (NULL -> derived from the row's own game-time
+    fields), otherwise DERIVED only (progress/elapsed).  Column-aware so
+    legacy databases (and read-only connections to them) work unchanged."""
+    c = f"{alias}." if alias else ""
+    pcols = {r["name"] for r in conn.execute("PRAGMA table_info(predictions)")}
+    stamp = (f"{c}terminal" if "terminal" in pcols
+             else "CASE WHEN COALESCE("
+                  f"{c}progress, 0) >= 1.0 OR ({c}elapsed_minutes IS NOT NULL "
+                  f"AND {c}elapsed_minutes >= CASE "
+                  f"COALESCE({c}classification, '') "
+                  "WHEN 'CYBER_2K26' THEN 48.0 ELSE 40.0 END) "
+                  "THEN 1 ELSE 0 END")
+    return (f"COALESCE({stamp}, "
+            f"CASE WHEN COALESCE({c}progress, 0) >= 1.0 "
+            f"OR ({c}elapsed_minutes IS NOT NULL "
+            f"AND {c}elapsed_minutes >= CASE COALESCE({c}classification, '') "
+            f"WHEN 'CYBER_2K26' THEN 48.0 ELSE 40.0 END) "
+            f"THEN 1 ELSE 0 END)")
+
+
+# ── Prediction-generation freeze (clean-data accumulation) ────────────
+# HARD FREEZE ON PREDICTION GENERATION: while clean data accumulates the
+# live pipeline must NOT create, rebase, or score classic prediction
+# records (predictions / prediction_scores — checkpoint + fixed-% rows,
+# O/U selections, accuracy scoring).  Historical rows already stored are
+# left untouched (never rewritten, never backfilled, never recalculated).
+# Descriptive data collection, settlement (game_results), market-history
+# and checkpoint market-vs-fair observation rows all continue.  Frozen by
+# default; only a SEPARATE directive that authorizes
+# statistical/predictive modelling may re-enable it (BLM_PREDICTION_FREEZE=0
+# + service restart).
+FREEZE_REASON = ("prediction generation frozen — clean-data accumulation "
+                 "phase (no new/rebased/scored predictions until a separate "
+                 "directive authorizes statistical modelling)")
+
+
+def _prediction_freeze_active() -> bool:
+    """True when classic prediction generation is frozen (default)."""
+    return os.environ.get("BLM_PREDICTION_FREEZE", "1") != "0"
 
 SCORECARD_SCHEMA = """
 CREATE TABLE IF NOT EXISTS predictions (
@@ -71,6 +201,13 @@ CREATE TABLE IF NOT EXISTS predictions (
     projected_total   REAL,
     market_total      REAL,
     valid             INTEGER NOT NULL DEFAULT 1,  -- 0 = malformed, never scored
+    -- Terminal-checkpoint eligibility: a prediction taken from the game's
+    -- final snapshot (progress 1.0 / full classification duration) is
+    -- SETTLEMENT/AUDIT ONLY — predictive_eligible=0, never scored into
+    -- research statistics.
+    terminal          INTEGER,
+    predictive_eligible INTEGER,
+    exclusion_reason  TEXT,
     UNIQUE(source_game_id, checkpoint, model_version)
 );
 
@@ -116,6 +253,11 @@ CREATE TABLE IF NOT EXISTS prediction_scores (
     ou_correct        INTEGER,  -- 1/0, NULL when no valid market
     scored_at         TEXT NOT NULL,
     fragment          INTEGER NOT NULL DEFAULT 0,  -- 1 = incomplete history (diagnostics only)
+    -- Denormalized from predictions at scoring time: terminal rows are
+    -- settlement/audit only and are excluded from every research read.
+    terminal          INTEGER,
+    predictive_eligible INTEGER,
+    exclusion_reason  TEXT,
     UNIQUE(prediction_id)
 );
 
@@ -195,6 +337,15 @@ CREATE TABLE IF NOT EXISTS checkpoint_market (
     momentum_strength     REAL,               -- 0..3 strength (weak..extreme)
     false_momentum        INTEGER,            -- 0/1 — burst with no line response
     false_momentum_confidence REAL,           -- 0..1 signal confidence
+    -- Terminal-checkpoint eligibility (directive: TERMINAL = SETTLEMENT /
+    -- AUDIT ONLY).  terminal=1 rows are RETAINED for settlement/audit/
+    -- reconstruction but are predictive_eligible=0: they contribute 0 to
+    -- every research statistic (accuracy, win rate, calibration,
+    -- reliability bins, directional performance, interaction,
+    -- chronological blocks, game-weighted performance).
+    terminal              INTEGER,            -- 1 = end-of-game observation
+    predictive_eligible   INTEGER,            -- 0 when terminal (never research)
+    exclusion_reason      TEXT,               -- 'TERMINAL CHECKPOINT' when terminal
     model_version         TEXT NOT NULL,
     recorded_at           TEXT NOT NULL,
     frozen                INTEGER NOT NULL DEFAULT 1,
@@ -214,6 +365,175 @@ _ensure_cm_COLS = (
     ("false_momentum", "INTEGER"),
     ("false_momentum_confidence", "REAL"),
 )
+
+# Terminal-checkpoint eligibility columns (directive): stamp + backfill,
+# idempotent.  Existing rows keep their recorded values (never rewritten
+# by a later model build) — the stamp adds eligibility state only.
+_CM_ELIGIBILITY_COLS = (
+    ("terminal", "INTEGER"),
+    ("predictive_eligible", "INTEGER"),
+    ("exclusion_reason", "TEXT"),
+)
+_PRED_ELIGIBILITY_COLS = (
+    ("terminal", "INTEGER"),
+    ("predictive_eligible", "INTEGER"),
+    ("exclusion_reason", "TEXT"),
+)
+
+# Terminal rows whose SOURCE snapshot itself was the end of the game
+# (finished label / ended status / Q4 period-over sentinel) — catches a
+# pct10..pct90 checkpoint that selected the terminal snapshot.
+_SNAPSHOT_TERMINAL_EXISTS_SQL = """EXISTS (
+    SELECT 1 FROM snapshots s JOIN games g ON g.id = s.game_id
+    WHERE g.source_game_id = {alias}.source_game_id
+      AND s.captured_at = {alias}.{ts_col}
+      AND (LOWER(COALESCE(s.game_status, '')) IN
+           ('ended', 'finished', 'full time', 'ft', 'complete', 'completed')
+           OR LOWER(COALESCE(s.period_label, '')) LIKE '%full time%'
+           OR LOWER(COALESCE(s.period_label, '')) LIKE '%finished%'
+           OR LOWER(COALESCE(s.period_label, '')) LIKE '%end of match%'
+           OR LOWER(COALESCE(s.period_label, '')) LIKE '%match ended%'
+           OR (COALESCE(s.quarter, 0) >= 4
+               AND TRIM(COALESCE(s.clock, '')) IN ('00:00', '0:00', '21:00'))))"""
+
+
+def _ensure_eligibility_columns(conn) -> None:
+    """Idempotent terminal-eligibility migration: add the stamp columns to
+    checkpoint_market / predictions / prediction_scores and backfill
+    existing rows from their recorded game-time evidence (deterministic —
+    repeated execution classifies identically).  Rows are NEVER deleted.
+    """
+    full_expr = ("CASE COALESCE({c}.classification, '') "
+                 "WHEN 'CYBER_2K26' THEN 48.0 ELSE 40.0 END")
+    # ── checkpoint_market ──────────────────────────────────────────
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(checkpoint_market)")}
+    for name, decl in _CM_ELIGIBILITY_COLS:
+        if name not in cols:
+            conn.execute(
+                f"ALTER TABLE checkpoint_market ADD COLUMN {name} {decl}")
+    if "terminal" in cols:
+        pass  # legacy table already migrated
+    if True:  # backfill runs unconditionally; only NULL rows are touched
+        snap_term = _SNAPSHOT_TERMINAL_EXISTS_SQL.format(
+            alias="checkpoint_market", ts_col="checkpoint_timestamp")
+        # Per-frame contradiction guard — identical semantics to
+        # terminal_eligibility.terminal_basis: recorded game-time evidence
+        # (elapsed/progress) beats a status flag, so a row whose own game
+        # time proves it is NOT the end of the game is never stamped
+        # terminal, whatever the snapshot's status says.
+        guard_exprs = []
+        if "elapsed_minutes" in cols:
+            guard_exprs.append(
+                "(checkpoint_market.elapsed_minutes IS NOT NULL AND "
+                "checkpoint_market.elapsed_minutes < "
+                + full_expr.format(c="checkpoint_market") + ")")
+        if "progress" in cols:
+            guard_exprs.append(
+                "(checkpoint_market.progress IS NOT NULL AND "
+                "checkpoint_market.progress < 1.0)")
+        not_ended = " OR ".join(guard_exprs) if guard_exprs else "0"
+        elapsed_full = (
+            "(checkpoint_market.elapsed_minutes IS NOT NULL AND "
+            "checkpoint_market.elapsed_minutes >= "
+            + full_expr.format(c="checkpoint_market") + ")"
+            if "elapsed_minutes" in cols else "0")
+        # BUCKET-INDEPENDENCE (directive): the pct100 bucket name is NOT
+        # terminal evidence — a 39.25/40.00 (98.1%) snapshot frozen into
+        # the pct100 bucket is NON-TERMINAL.  Terminality for pre-stamp
+        # rows is derived ONLY from the row's own game-time evidence
+        # (elapsed >= full duration, progress >= 1.0, or the source
+        # snapshot's finished label / Q4 period-over sentinel / ended
+        # state with no contradicting game-time field).
+        conn.execute(
+            f"""UPDATE checkpoint_market
+                SET terminal = 1, predictive_eligible = 0,
+                    exclusion_reason = '{TERMINAL_EXCLUSION_REASON}'
+                WHERE terminal IS NULL AND (
+                    ({snap_term} AND NOT ({not_ended}))
+                    OR {elapsed_full})""")
+        conn.execute(
+            """UPDATE checkpoint_market
+               SET terminal = 0, predictive_eligible = 1
+               WHERE terminal IS NULL""")
+        # ── STALE-STAMP REPAIR (label-semantics directive) ──────────
+        # Rows stamped terminal=1 by the superseded bucket rule (a game's
+        # final snapshot was forced into the pct100 bucket and stamped
+        # terminal by the BUCKET, not by its game time — e.g. 39.25/40.00
+        # = 98.1%) are reconciled with the authoritative derivation: the
+        # row's own recorded game time, contradicted by no per-frame end
+        # evidence in its source snapshot (finished label / Q4 period-over
+        # sentinel), proves the observation is NOT the end of the game.
+        # A status flag never outranks contradicting game-time evidence.
+        # Idempotent: re-running reconciles the same rows identically.
+        conn.execute(
+            f"""UPDATE checkpoint_market
+                SET terminal = 0, predictive_eligible = 1,
+                    exclusion_reason = NULL
+                WHERE terminal = 1
+                  AND ((checkpoint_market.elapsed_minutes IS NOT NULL
+                        AND checkpoint_market.elapsed_minutes <
+                            {full_expr.format(c='checkpoint_market')})
+                       OR (checkpoint_market.progress IS NOT NULL
+                           AND checkpoint_market.progress < 1.0))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM snapshots s
+                      JOIN games g ON g.id = s.game_id
+                      WHERE g.source_game_id =
+                                checkpoint_market.source_game_id
+                        AND s.captured_at =
+                                checkpoint_market.checkpoint_timestamp
+                        AND (LOWER(COALESCE(s.period_label, ''))
+                                 LIKE '%full time%'
+                             OR LOWER(COALESCE(s.period_label, ''))
+                                 LIKE '%finished%'
+                             OR LOWER(COALESCE(s.period_label, ''))
+                                 LIKE '%end of match%'
+                             OR LOWER(COALESCE(s.period_label, ''))
+                                 LIKE '%match ended%'
+                             OR (COALESCE(s.quarter, 0) >= 4
+                                 AND TRIM(COALESCE(s.clock, '')) IN
+                                     ('00:00', '0:00', '21:00'))))""")
+    # ── predictions ────────────────────────────────────────────────
+    pcols = {r["name"] for r in conn.execute("PRAGMA table_info(predictions)")}
+    for name, decl in _PRED_ELIGIBILITY_COLS:
+        if name not in pcols:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {name} {decl}")
+    psnap = _SNAPSHOT_TERMINAL_EXISTS_SQL.format(
+        alias="predictions", ts_col="source_snapshot_at")
+    pguard = ("(predictions.progress IS NOT NULL AND predictions.progress < 1.0)"
+              if "progress" in pcols else "0")
+    conn.execute(
+        f"""UPDATE predictions
+            SET terminal = 1, predictive_eligible = 0,
+                exclusion_reason = '{TERMINAL_EXCLUSION_REASON}'
+            WHERE terminal IS NULL AND (
+                COALESCE(progress, 0) >= 1.0
+                OR ({psnap} AND NOT ({pguard})))""")
+    conn.execute(
+        """UPDATE predictions
+           SET terminal = 0, predictive_eligible = 1
+           WHERE terminal IS NULL""")
+    # ── prediction_scores (denormalized from predictions) ──────────
+    scolcols = {r["name"] for r in conn.execute(
+        "PRAGMA table_info(prediction_scores)")}
+    for name, decl in _PRED_ELIGIBILITY_COLS:
+        if name not in scolcols:
+            conn.execute(
+                f"ALTER TABLE prediction_scores ADD COLUMN {name} {decl}")
+    conn.execute(
+        f"""UPDATE prediction_scores
+            SET terminal = 1, predictive_eligible = 0,
+                exclusion_reason = '{TERMINAL_EXCLUSION_REASON}'
+            WHERE terminal IS NULL AND prediction_id IN (
+                SELECT p.id FROM predictions p
+                WHERE COALESCE(p.terminal,
+                               CASE WHEN COALESCE(p.progress, 0) >= 1.0
+                                    THEN 1 ELSE 0 END) = 1)""")
+    conn.execute(
+        """UPDATE prediction_scores
+           SET terminal = COALESCE(terminal, 0),
+               predictive_eligible = COALESCE(predictive_eligible, 1)
+           WHERE terminal IS NULL OR predictive_eligible IS NULL""")
 
 
 def _ensure_cm_columns(conn) -> None:
@@ -254,15 +574,17 @@ def _is_final_label(period_label: Optional[str]) -> bool:
 
 
 def _checkpoint_for(quarter: Optional[int], clock: Optional[str],
-                    period_label: Optional[str] = None) -> Optional[str]:
+                    period_label: Optional[str] = None,
+                    classification: Optional[str] = None) -> Optional[str]:
     q = quarter
     if q is None:
         q = _period_quarter(period_label)
     if q is None or q < 1:
         return None
+    q_min, full = duration_for(classification)
     if q >= 4:
-        el = clock_minutes(q, clock)
-        if el is not None and el >= 38.0:  # Q4 with <= 2:00 left (40-min game)
+        el = clock_minutes(q, clock, q_min)
+        if el is not None and el >= full - 2.0:  # Q4 with <= 2:00 left
             return "final"
         return "q4"
     return f"q{q}"
@@ -430,15 +752,16 @@ def _progress_of(r: dict) -> Optional[float]:
     if q is None:
         q = _period_quarter(r.get("period_label"))
     # "Half End"/"Half Time" snapshots sit at the half-time boundary:
-    # 20 elapsed minutes (half the game), regardless of the clock display
-    # (the virtual clock shows the 12:00 sentinel there too).
+    # half the game regardless of the clock display (the virtual clock
+    # shows the period-length sentinel there too).
     label = (r.get("period_label") or "").lower()
+    q_min, full = duration_for(r.get("classification"))
     if q == 2 and label.startswith("half"):
-        return round(FULL_GAME_MINUTES / 2.0 / FULL_GAME_MINUTES, 4)
-    el = clock_minutes(q, r.get("clock"))
+        return round(full / 2.0 / full, 4)
+    el = clock_minutes(q, r.get("clock"), q_min)
     if el is None:
         return None
-    return round(min(1.0, max(0.0, el / FULL_GAME_MINUTES)), 4)
+    return round(min(1.0, max(0.0, el / full)), 4)
 
 
 def _outcome_vs_line(final_total: Optional[int], line: Optional[float]) -> Optional[str]:
@@ -556,6 +879,15 @@ def _market_move_toward_blm(olv: Optional[float], clv: Optional[float],
     return "UNCHANGED"
 
 
+# A score dip at or below this many points on one snapshot is treated as a
+# transient event-view/render glitch (the slow event page can display a
+# stale scoreboard 1-4 pts behind the live state).  Above this -> INVALID.
+TRANSIENT_REGRESSION_MAX = 4
+# Valid rows allowed to recover to >= the pre-glitch level before a small
+# dip is treated as a sustained regression -> INVALID.
+GLITCH_RECOVERY_ROWS = 5
+
+
 def _snapshot_history_quality(rows: list[dict]) -> tuple[str, str]:
     """Validate a game's snapshot history for scoreability.
 
@@ -566,6 +898,11 @@ def _snapshot_history_quality(rows: list[dict]) -> tuple[str, str]:
     Checks (in order): ordering, identity, score monotonicity, no
     impossible transitions, classification consistency.  A single bad
     snapshot poisons the whole game — it must not inflate accuracy.
+
+    Transient-regression tolerance: a score dip of <= TRANSIENT_REGRESSION_MAX
+    points (a stale event-view render) is skipped and the scan continues
+    from the last valid pre-glitch state, provided the scores recover to
+    >= the pre-glitch level within GLITCH_RECOVERY_ROWS valid rows.
     """
     if not rows:
         return "INVALID", "no snapshots"
@@ -593,16 +930,49 @@ def _snapshot_history_quality(rows: list[dict]) -> tuple[str, str]:
     #    gap is a legitimate fast game, while 50+ pts in under 90s is
     #    physically impossible = foreign/contaminated state (observed:
     #    the lobby-attribution jumps of 55-108 pts in 9-12s ticks).
+    #    A regression of <= TRANSIENT_REGRESSION_MAX points on one
+    #    snapshot is a transient event-view/render glitch (the slow event
+    #    page can display a stale scoreboard 1-4 pts behind the live state
+    #    for a row or two — every one of the 64 poisoning dips observed
+    #    across the 62 INVALID games was an event-view row of 1-4 pts,
+    #    never identity contamination).  The offending snapshot is SKIPPED
+    #    and the monotonic scan continues from the last valid pre-glitch
+    #    state; the game stays VALID only if the scores recover to >= the
+    #    pre-glitch level within GLITCH_RECOVERY_ROWS valid rows, otherwise
+    #    the regression is sustained and the game is INVALID (unchanged).
     last = None
     last_ts = None
+    baseline = None         # pre-glitch (home, away) that must be re-attained
+    recovery_budget = 0     # valid rows left to recover before INVALID
     for r in rows:
         hs, as_ = r.get("home_score"), r.get("away_score")
         if hs is None or as_ is None:
             continue
         if last is not None:
             lh, la = last
-            if hs < lh or as_ < la:
-                return "INVALID", "score regression (contamination?)"
+            down_h = lh - hs   # > 0  => home score went DOWN
+            down_a = la - as_  # > 0  => away score went DOWN
+            if down_h > 0 or down_a > 0:
+                # any side dropping beyond tolerance = genuine regression
+                if (down_h > TRANSIENT_REGRESSION_MAX
+                        or down_a > TRANSIENT_REGRESSION_MAX):
+                    return "INVALID", "score regression (contamination?)"
+                # small dip: transient-glitch candidate — skip this snapshot
+                if baseline is None:
+                    baseline = last
+                    recovery_budget = GLITCH_RECOVERY_ROWS
+                recovery_budget -= 1
+                if recovery_budget <= 0:
+                    return "INVALID", "sustained score regression"
+                last_ts = r.get("captured_at")   # time passes; state does not
+                continue
+            if baseline is not None:
+                if hs >= baseline[0] and as_ >= baseline[1]:
+                    baseline = None               # recovered — resume normal
+                else:
+                    recovery_budget -= 1
+                    if recovery_budget <= 0:
+                        return "INVALID", "sustained score regression"
             if hs - lh > 50 or as_ - la > 50:
                 gap_sec = None
                 if last_ts:
@@ -617,6 +987,10 @@ def _snapshot_history_quality(rows: list[dict]) -> tuple[str, str]:
                     return "INVALID", "impossible score jump"
         last = (hs, as_)
         last_ts = r.get("captured_at")
+    # A dip still awaiting recovery when the history ends is unresolved:
+    # the terminal state cannot be trusted (a stale final read) — INVALID.
+    if baseline is not None:
+        return "INVALID", "unrecovered score regression"
     return "OK", ""
 
 
@@ -661,6 +1035,10 @@ class Scorecard:
                                               WHERE q.source_game_id = g.source_game_id
                                                 AND q.status = 'INVALID'))
                         THEN 0 ELSE 1 END""")
+                # Terminal-checkpoint eligibility migration (directive):
+                # stamp + backfill terminal / predictive_eligible on the
+                # research tables — idempotent, rows never deleted.
+                _ensure_eligibility_columns(conn)
                 conn.commit()
             finally:
                 conn.close()
@@ -678,7 +1056,15 @@ class Scorecard:
         final-result leakage — snapshots are immutable inputs) and
         upserts, so the stored table always reflects the current model
         version definition and the scorecard never measures a dead build.
+
+        HARD FREEZE: while prediction generation is frozen this phase is
+        a no-op — no rows are created and existing rows are never
+        rewritten.  Historical prediction records stay byte-identical.
         """
+        if _prediction_freeze_active():
+            return {"checked": 0, "recorded": 0, "rebased": 0,
+                    "skipped_no_checkpoint": 0, "frozen": True,
+                    "reason": FREEZE_REASON}
         stats = {"checked": 0, "recorded": 0, "rebased": 0,
                  "skipped_no_checkpoint": 0}
         with self._lock:
@@ -688,6 +1074,13 @@ class Scorecard:
                     "SELECT id, source_game_id, classification FROM games"
                 ).fetchall()
                 for g in games:
+                    # Release the SQLite write lock after the previous game:
+                    # the write tx opened by _record_game must not stay open
+                    # across all ~2,040 games (that continuous 100s+ window
+                    # is what starved the V4 collector).  Committing per
+                    # game keeps each game's checkpoints atomic together and
+                    # is a cheap no-op when the previous game wrote nothing.
+                    conn.commit()
                     stats["checked"] += 1
                     rows = conn.execute(
                         "SELECT * FROM snapshots WHERE game_id=? ORDER BY captured_at ASC",
@@ -715,7 +1108,7 @@ class Scorecard:
         seen: set[str] = set()
         for i, r in enumerate(rows):
             cp = _checkpoint_for(r.get("quarter"), r.get("clock"),
-                                 r.get("period_label"))
+                                 r.get("period_label"), r.get("classification"))
             if cp is None or cp in seen:
                 continue
             seen.add(cp)
@@ -735,6 +1128,18 @@ class Scorecard:
                 continue
             combined = (proj["home_score"] or 0) + (proj["away_score"] or 0) \
                 if proj["home_score"] is not None else None
+            # Terminal eligibility: a checkpoint whose snapshot shows the
+            # end of the game (full duration reached, Q4 period-over
+            # sentinel, finished label) is settlement/audit only.
+            terminal, pelig, reason = eligibility_state(
+                classification=g["classification"],
+                elapsed_minutes=proj["elapsed_minutes"],
+                progress=proj["progress"],
+                quarter=r.get("quarter"),
+                clock=r.get("clock"),
+                period_label=r.get("period_label"),
+                game_status=r.get("game_status"),
+            )
             cur = conn.execute(
                 "SELECT projected_total FROM predictions "
                 "WHERE source_game_id=? AND checkpoint=? AND model_version=?",
@@ -745,8 +1150,10 @@ class Scorecard:
                     source_game_id, classification, model_version, checkpoint,
                     quarter, predicted_at, source_snapshot_at, elapsed_minutes,
                     progress, home_score, away_score, combined,
-                    projected_home, projected_away, projected_total, market_total, valid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    projected_home, projected_away, projected_total, market_total, valid,
+                    terminal, predictive_eligible, exclusion_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+                        ?, ?, ?)
                 ON CONFLICT(source_game_id, checkpoint, model_version) DO UPDATE SET
                     classification = excluded.classification,
                     quarter = excluded.quarter,
@@ -760,7 +1167,10 @@ class Scorecard:
                     projected_away = excluded.projected_away,
                     projected_total = excluded.projected_total,
                     market_total = excluded.market_total,
-                    valid = 1""",
+                    valid = 1,
+                    terminal = excluded.terminal,
+                    predictive_eligible = excluded.predictive_eligible,
+                    exclusion_reason = excluded.exclusion_reason""",
                 (
                     g["source_game_id"], g["classification"], MODEL_VERSION, cp,
                     r.get("quarter"), _utcnow(), r["captured_at"],
@@ -768,6 +1178,7 @@ class Scorecard:
                     proj["home_score"], proj["away_score"], combined,
                     proj["home_projection"], proj["away_projection"],
                     proj["expected_total"], last_line,
+                    1 if terminal else 0, 1 if pelig else 0, reason,
                 ),
             )
             if cur is None:
@@ -785,7 +1196,14 @@ class Scorecard:
         game time is closest to the target (within MAX_DISTANCE_PCT) and
         record the projection from snapshots up to and including it —
         exactly the prediction that was available at that moment.
+
+        HARD FREEZE: a no-op while prediction generation is frozen (no
+        new rows, no rebase of existing rows).
         """
+        if _prediction_freeze_active():
+            return {"checked": 0, "recorded": 0,
+                    "skipped_no_snapshot": 0, "skipped_tolerance": 0,
+                    "frozen": True, "reason": FREEZE_REASON}
         stats = {"checked": 0, "recorded": 0,
                  "skipped_no_snapshot": 0, "skipped_tolerance": 0}
         with self._lock:
@@ -795,6 +1213,9 @@ class Scorecard:
                     "SELECT id, source_game_id, classification FROM games"
                 ).fetchall()
                 for g in games:
+                    # Per-game commit — see record_predictions: never hold
+                    # the write tx across the whole games table.
+                    conn.commit()
                     stats["checked"] += 1
                     rows = [dict(r) for r in conn.execute(
                         "SELECT * FROM snapshots WHERE game_id=? ORDER BY captured_at ASC",
@@ -841,6 +1262,17 @@ class Scorecard:
                 continue
             combined = ((proj["home_score"] or 0) + (proj["away_score"] or 0)
                         if proj["home_score"] is not None else None)
+            # Terminal eligibility: a fixed checkpoint whose snapshot shows
+            # the end of the game is settlement/audit only.
+            terminal, pelig, reason = eligibility_state(
+                classification=g["classification"],
+                elapsed_minutes=proj["elapsed_minutes"],
+                progress=proj["progress"],
+                quarter=r.get("quarter"),
+                clock=r.get("clock"),
+                period_label=r.get("period_label"),
+                game_status=r.get("game_status"),
+            )
             cur = conn.execute(
                 "SELECT projected_total FROM predictions "
                 "WHERE source_game_id=? AND checkpoint=? AND model_version=?",
@@ -852,8 +1284,10 @@ class Scorecard:
                     checkpoint_percent, distance_pct, quarter, predicted_at,
                     source_snapshot_at, elapsed_minutes, progress,
                     home_score, away_score, combined,
-                    projected_home, projected_away, projected_total, market_total, valid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    projected_home, projected_away, projected_total, market_total, valid,
+                    terminal, predictive_eligible, exclusion_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+                        ?, ?, ?)
                 ON CONFLICT(source_game_id, checkpoint, model_version) DO UPDATE SET
                     classification = excluded.classification,
                     checkpoint_percent = excluded.checkpoint_percent,
@@ -869,7 +1303,10 @@ class Scorecard:
                     projected_away = excluded.projected_away,
                     projected_total = excluded.projected_total,
                     market_total = excluded.market_total,
-                    valid = 1""",
+                    valid = 1,
+                    terminal = excluded.terminal,
+                    predictive_eligible = excluded.predictive_eligible,
+                    exclusion_reason = excluded.exclusion_reason""",
                 (
                     g["source_game_id"], g["classification"], MODEL_VERSION, cp_key,
                     target, dist_pct, r.get("quarter"), _utcnow(), r["captured_at"],
@@ -877,6 +1314,7 @@ class Scorecard:
                     proj["home_score"], proj["away_score"], combined,
                     proj["home_projection"], proj["away_projection"],
                     proj["expected_total"], line,
+                    1 if terminal else 0, 1 if pelig else 0, reason,
                 ),
             )
             n += 1
@@ -899,6 +1337,10 @@ class Scorecard:
                     "SELECT id, source_game_id, classification, status FROM games"
                 ).fetchall()
                 for g in games:
+                    # Per-game commit: release the write lock taken by the
+                    # previous ended game's result/quality upserts instead of
+                    # holding one tx across every game in the table.
+                    conn.commit()
                     if g["status"] != "ended":
                         continue
                     stats["checked"] += 1
@@ -994,11 +1436,12 @@ class Scorecard:
         # otherwise the game was lost mid-quarter and the score isn't final.
         p4 = period.startswith("4th") or (quarter is not None and quarter >= 4)
         if p4:
-            el = clock_minutes(4, clock) if clock else None
+            q_min, full = duration_for(last.get("classification"))
+            el = clock_minutes(4, clock, q_min) if clock else None
             if el is None:
-                el = clock_minutes(quarter if quarter is not None else 4, clock)
+                el = clock_minutes(quarter if quarter is not None else 4, clock, q_min)
             if clock in ("00:00", "0:00", "") or (
-                    el is not None and el >= FULL_GAME_MINUTES - 2.0):
+                    el is not None and el >= full - 2.0):
                 return "OK", int(fh), int(fa)
             # Unparseable clock (mm > 12) = the panel's "21:00" sentinel for
             # a finished period.  A clean, monotonic history whose last row
@@ -1015,8 +1458,23 @@ class Scorecard:
     def score_all(self) -> dict[str, int]:
         """Compute error metrics for every unscored prediction of games
         with an OK final result.  Predictions whose source snapshot is at
-        or after the result are rejected (never look-ahead)."""
-        stats = {"scored": 0, "rejected": 0}
+        or after the result are rejected (never look-ahead).
+
+        TERMINAL ELIGIBILITY (directive): a prediction taken at the game's
+        terminal state (terminal=1, e.g. the final snapshot) is
+        SETTLEMENT/AUDIT ONLY — it is never scored, so it contributes
+        exactly 0 to accuracy / market-compare / any research statistic.
+        The terminal row stays stored on predictions (and stays visible in
+        the game-detail audit table) with its settlement outcome intact.
+
+        HARD FREEZE: a no-op while prediction generation is frozen — no
+        prediction_scores rows are created or re-written (O/U selections
+        and accuracy scoring stay frozen with the prediction rows).
+        """
+        if _prediction_freeze_active():
+            return {"scored": 0, "rejected": 0, "terminal_excluded": 0,
+                    "frozen": True, "reason": FREEZE_REASON}
+        stats = {"scored": 0, "rejected": 0, "terminal_excluded": 0}
         with self._lock:
             conn = self._connect()
             try:
@@ -1039,12 +1497,29 @@ class Scorecard:
                     """SELECT p.id AS pid, p.source_game_id, p.classification,
                               p.model_version, p.projected_home, p.projected_away,
                               p.projected_total, p.market_total, p.source_snapshot_at,
+                              COALESCE(p.terminal,
+                                       CASE WHEN COALESCE(p.progress, 0) >= 1.0
+                                            THEN 1 ELSE 0 END) AS p_terminal,
                               r.final_home, r.final_away, r.final_total, r.result_at
                        FROM predictions p
                        JOIN game_results r ON r.source_game_id = p.source_game_id
                        WHERE r.final_result_status = 'OK' AND p.valid = 1"""
                 ).fetchall()
+                n_scored = 0
                 for r in rows:
+                    # Batch-commit: score_all re-upserts the full OK-game
+                    # prediction history (~24k rows) every run.  Per-row
+                    # commits would add thousands of WAL fsyncs; committing
+                    # every 100 rows bounds the write-lock window to ~100
+                    # single-statement upserts (tens of ms) — far under the
+                    # collector's 90s busy_timeout, with negligible overhead.
+                    if n_scored and n_scored % 100 == 0:
+                        conn.commit()
+                    if r["p_terminal"]:
+                        # TERMINAL = settlement/audit only: never enters
+                        # predictive validation (accuracy/O-U/etc.).
+                        stats["terminal_excluded"] += 1
+                        continue
                     if r["source_snapshot_at"] >= r["result_at"]:
                         stats["rejected"] += 1
                         continue
@@ -1057,13 +1532,16 @@ class Scorecard:
                             abs_home_error, abs_away_error, abs_total_error, total_pct_error,
                             model_total, market_total, actual_total,
                             market_error, model_beat_market,
-                            ou_prediction, ou_result, ou_correct, scored_at, fragment)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ou_prediction, ou_result, ou_correct, scored_at, fragment,
+                            terminal, predictive_eligible, exclusion_reason)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                0, 1, NULL)
                         ON CONFLICT(prediction_id) DO UPDATE SET
                             fragment = excluded.fragment""",
                         self._score_row(r) + (fragment,),
                     )
                     stats["scored"] += 1
+                    n_scored += 1
                 conn.commit()
             finally:
                 conn.close()
@@ -1127,6 +1605,9 @@ class Scorecard:
                        WHERE r.final_result_status = 'OK'"""
                 ).fetchall()
                 for r in rows:
+                    # Per-game commit: release the write lock after each
+                    # market_history upsert (see record_predictions).
+                    conn.commit()
                     n, starts_q1 = comp.get(r["source_game_id"], (0, 0))
                     if not (n >= 15 and starts_q1):
                         stats["skipped_fragment"] += 1
@@ -1269,6 +1750,9 @@ class Scorecard:
                         WHERE r.final_result_status = 'OK'"""
                 ).fetchall()
                 for g in games:
+                    # Per-game commit: release the write lock after each
+                    # game's checkpoint_market rows (see record_predictions).
+                    conn.commit()
                     stats["checked"] += 1
                     if not (g["n"] >= 15 and g["starts_q1"] and not g["bad_quality"]):
                         stats["skipped_ineligible"] += 1
@@ -1292,7 +1776,7 @@ class Scorecard:
                                 olv: Optional[float], clv: Optional[float]) -> int:
         """Record all checkpoints for one game: pct10..pct90 (closest
         snapshot within ±5pp, same selection as the fixed checkpoints)
-        plus the terminal pct100 (the game's final snapshot)."""
+        plus the pct100 checkpoint (the game's final snapshot)."""
         n = 0
         actual = g["final_total"]
         for pct in FIXED_CHECKPOINT_PCTS:
@@ -1318,13 +1802,44 @@ class Scorecard:
     def _write_checkpoint_row(self, conn, g, rows: list[dict], idx: int,
                               pct: int, olv: Optional[float],
                               clv: Optional[float], actual: Optional[int]) -> int:
-        """Compute and freeze ONE checkpoint row (insert-once semantics)."""
+        """Compute and freeze ONE checkpoint row (insert-once semantics).
+
+        Terminal eligibility (directive): the row is TERMINAL when the
+        checkpoint observation represents the end of the game — decided
+        ONLY from the snapshot's authoritative game-time evidence
+        (finished label, full classification duration, progress 1.0, Q4
+        period-over sentinels, ended state with no contradicting
+        game-time field).  The pct100 checkpoint BUCKET is a grouping
+        label only: it names the game's final captured snapshot but can
+        never determine terminal status — a 39.25/40.00 (98.1%) final
+        snapshot is NON-TERMINAL.  Terminal rows stay STORED
+        (settlement/audit) with predictive_eligible=0 + exclusion_reason;
+        they are excluded from every research aggregation by the readers.
+        """
         r = rows[idx]
         live, market_ts = _frozen_market_obs(conn, g["source_game_id"], rows, idx)
         proj = project(rows[: idx + 1], live)
         fair = proj["expected_total"]
         if fair is None:
             return 0
+        # ── terminal eligibility state (authoritative predicate) ────
+        # Per-SNAPSHOT game-time evidence ONLY, for every checkpoint
+        # including pct100 (directive: a checkpoint bucket/rounding
+        # operation can NEVER determine terminal status).  The pct100
+        # bucket names the game's final captured snapshot, but that
+        # snapshot's own elapsed/total decides: 39.25/40.00 (98.1%) is
+        # NON-TERMINAL; 40.00/40.00 (100.0%), a finished label, a Q4
+        # period-over sentinel, or an ended state with no contradicting
+        # game-time evidence is TERMINAL.
+        terminal, pelig, reason = eligibility_state(
+            classification=g["classification"],
+            elapsed_minutes=proj["elapsed_minutes"],
+            progress=proj["progress"],
+            quarter=r.get("quarter"),
+            clock=r.get("clock"),
+            period_label=r.get("period_label"),
+            game_status=r.get("game_status"),
+        )
         mvf = round(live - fair, 2) if live is not None else None
         # M009-M4: momentum state at the checkpoint — computed from the
         # snapshots AT-OR-BEFORE it (no look-ahead), sharing the API's
@@ -1344,8 +1859,9 @@ class Scorecard:
                 blm_vs_olv, blm_vs_clv, olv_to_clv, market_move_toward_blm,
                 outcome, momentum_state, momentum_strength, false_momentum,
                 false_momentum_confidence,
+                terminal, predictive_eligible, exclusion_reason,
                 model_version, recorded_at, frozen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
             (
                 g["source_game_id"], g["classification"], pct,
                 r["captured_at"], r.get("quarter"), proj["progress"],
@@ -1359,6 +1875,7 @@ class Scorecard:
                 _checkpoint_outcome(fair, live, actual),
                 mom_state, mom["strength"],
                 1 if fm["active"] else 0, fm["confidence"],
+                1 if terminal else 0, 1 if pelig else 0, reason,
                 MODEL_VERSION, _utcnow(),
             ),
         )
@@ -1367,6 +1884,7 @@ class Scorecard:
     # ── Run all phases ─────────────────────────────────────────────
 
     def run(self) -> dict[str, Any]:
+        frozen = _prediction_freeze_active()
         rec = self.record_predictions()
         fx = self.record_fixed_checkpoints()
         res = self.capture_results()
@@ -1374,7 +1892,9 @@ class Scorecard:
         mkt = self.record_market_history()
         cm = self.record_checkpoint_market()
         return {"recorded": rec, "fixed": fx, "results": res,
-                "scored": sco, "market": mkt, "checkpoint_market": cm}
+                "scored": sco, "market": mkt, "checkpoint_market": cm,
+                "prediction_freeze": frozen,
+                "prediction_freeze_reason": FREEZE_REASON if frozen else None}
 
     # ── Read API (used by /api/v4/scorecard) ───────────────────────
 
@@ -1421,7 +1941,7 @@ class Scorecard:
         conn = self._connect()
         try:
             rows = conn.execute(
-                """SELECT s.source_game_id, s.classification, s.model_version,
+                f"""SELECT s.source_game_id, s.classification, s.model_version,
                           s.model_total, s.market_total, s.actual_total,
                           s.total_error, s.abs_total_error, s.ou_prediction,
                           s.ou_result, s.ou_correct, s.scored_at, s.fragment,
@@ -1430,7 +1950,8 @@ class Scorecard:
                           p.progress, p.source_snapshot_at
                    FROM prediction_scores s
                    JOIN predictions p ON p.id = s.prediction_id
-                   LEFT JOIN games g ON g.source_game_id = s.source_game_id
+                   JOIN games g ON g.source_game_id = s.source_game_id
+                   WHERE g.first_seen_at >= '{CLEAN_DATA_EPOCH}'
                    ORDER BY s.scored_at DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
@@ -1454,7 +1975,7 @@ class Scorecard:
     @staticmethod
     def _eligible_games_sql(conn, limit: int = 200) -> list[dict[str, Any]]:
         rows = conn.execute(
-            """SELECT g.source_game_id, g.home_team, g.away_team,
+            f"""SELECT g.source_game_id, g.home_team, g.away_team,
                       COALESCE(q.status, '-') AS quality_status,
                       r.final_result_status AS result_status,
                       r.final_home, r.final_away, r.final_total,
@@ -1474,7 +1995,8 @@ class Scorecard:
                FROM games g
                LEFT JOIN game_results r ON r.source_game_id = g.source_game_id
                LEFT JOIN game_quality q ON q.source_game_id = g.source_game_id
-               WHERE r.source_game_id IS NOT NULL OR q.source_game_id IS NOT NULL
+               WHERE (r.source_game_id IS NOT NULL OR q.source_game_id IS NOT NULL)
+                 AND g.first_seen_at >= '{CLEAN_DATA_EPOCH}'
                ORDER BY g.source_game_id DESC LIMIT ?""",
             (limit,),
         ).fetchall()
@@ -1570,6 +2092,14 @@ WHERE r.final_result_status = 'OK'
                   WHERE q.source_game_id = cm.source_game_id
                     AND q.status = 'INVALID')"""
 
+# Clean-data boundary: headline analytics use the CLEAN partition only
+# (games started at/after the clean epoch).  The LEGACY variant is the
+# audit path (explicit quality=legacy request), never a default.
+_CM_ELIGIBLE_SQL_CLEAN = _CM_ELIGIBLE_SQL + \
+    f" AND g.first_seen_at >= '{CLEAN_DATA_EPOCH}'"
+_CM_ELIGIBLE_SQL_LEGACY = _CM_ELIGIBLE_SQL + \
+    f" AND g.first_seen_at < '{CLEAN_DATA_EPOCH}'"
+
 
 def _market_vs_fair_sql(conn) -> dict[str, Any]:
     """M009-M2 (REFINED) — MARKET VS FAIR: the PRIMARY scorecard section.
@@ -1606,20 +2136,38 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
                     WHERE s.game_id = g.id) AS game_start
             FROM checkpoint_market cm
             JOIN games g ON g.source_game_id = cm.source_game_id
-            {_CM_ELIGIBLE_SQL}
+            {_CM_ELIGIBLE_SQL_CLEAN}
             ORDER BY cm.source_game_id, cm.checkpoint_pct""")]
     # NOTE: no early return on an empty `rows` — when the table has rows
     # but NONE are eligible (logical exclusion), the per-checkpoint
     # skeleton (10..100%) must still be returned with honest N=0 rather
     # than vanish.  The missing-table case is handled by `has` above.
 
+    # ── terminal-eligibility partition (directive) ─────────────────
+    # research = non-terminal rows only; audit/display = all eligible
+    # rows (terminal rows keep their settlement outcome in games[]).
+    research_rows = [r for r in rows if int(r.get("terminal") or 0) == 0]
+
     def _round2(x):
         return round(x, 2) if x is not None else None
 
     # ── per-checkpoint aggregation ────────────────────────────────
+    # TERMINAL EXCLUSION (directive): the research aggregates below are
+    # computed ONLY over non-terminal rows — terminal rows are absent
+    # from every numerator AND denominator (accuracy, win rates,
+    # signal/OUTCOME counts, freshness/reliability bins).  They remain
+    # visible in games[] (settlement/audit display) with their explicit
+    # exclusion state.
     checkpoints: list[dict[str, Any]] = []
     for pct in range(10, 101, 10):
-        crows = [r for r in rows if r["checkpoint_pct"] == pct]
+        all_crows = [r for r in rows if r["checkpoint_pct"] == pct]
+        # research population: non-terminal rows only (TERMINAL =
+        # SETTLEMENT/AUDIT ONLY — absent from every numerator AND
+        # denominator; they remain visible in games[] with their
+        # settlement outcome + exclusion state)
+        crows = [r for r in all_crows
+                 if int(r.get("terminal") or 0) == 0]
+        n_terminal = len(all_crows) - len(crows)
         mrows = [r for r in crows if r["live_market_line"] is not None]
         n = len(mrows)
         mfs = [r["market_vs_fair"] for r in mrows]
@@ -1646,6 +2194,8 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
             "checkpoint_pct": pct,
             "n": n,
             "n_fair": len(crows),
+            "n_terminal": n_terminal,            # excluded (audit-only rows)
+            "predictive_eligible": len(crows),
             "n_live": n_live,                    # M009-M3: freshness split
             "n_stale": n_stale,
             "n_missing": len(crows) - n_live - n_stale,
@@ -1730,6 +2280,17 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
             "signal": r["signal"],
             "actual": r["actual_final_total"],
             "outcome": r["outcome"],
+            # recorded game-state basis (NULL for pre-fix rows — never
+            # backfilled); the reader recomputes live state separately
+            "progress": r["progress"],
+            "elapsed_minutes": r["elapsed_minutes"],
+            # Terminal eligibility state (directive section 3): a terminal
+            # row keeps its settlement outcome (e.g. U WIN) while carrying
+            # PREDICTIVE VALIDATION: EXCLUDED / REASON: TERMINAL CHECKPOINT.
+            "terminal": 1 if int(r.get("terminal") or 0) else 0,
+            "predictive_eligible": 0 if int(r.get("terminal") or 0) else 1,
+            "exclusion_reason": (TERMINAL_EXCLUSION_REASON
+                                 if int(r.get("terminal") or 0) else None),
         })
     for g in games.values():
         g["outcome_olv"] = _outcome_vs_line(g["final_total"], g["olv"])
@@ -1741,7 +2302,7 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
         b: {"bucket": b, "n": 0, "n_live": 0, "n_stale": 0,
             "under_win": 0, "over_win": 0, "avg_abs_mf": [], "avg_age": []}
         for b in buckets}
-    for r in rows:
+    for r in research_rows:   # terminal rows excluded (reliability bins)
         st = _market_status(r.get("market_timestamp"),
                             r.get("checkpoint_timestamp"))
         if st is None or st == "MISSING":
@@ -1774,7 +2335,7 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
     hours: dict[int, dict[str, Any]] = {
         h: {"hour": h, "n": 0, "over_n": 0, "under_n": 0, "push_n": 0,
             "blm_win": 0, "blm_loss": 0, "diffs": []} for h in range(24)}
-    for r in rows:
+    for r in research_rows:   # terminal rows excluded (win-rate numerator+denominator)
         hour = _local_hour(r.get("game_start") or r.get("first_seen_at"))
         if hour is None:
             continue
@@ -1831,7 +2392,7 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
           ("10-15", 10, 15), ("15-20", 15, 20), ("20+", 20, None)]
     MIN_BAND_SAMPLE = int(os.environ.get("BLM_MIN_BAND_SAMPLE", "30"))
     edges: dict[tuple[str, str], dict[str, Any]] = {}
-    for r in rows:
+    for r in research_rows:   # terminal rows excluded (directional performance)
         line, fair = r.get("live_market_line"), r.get("blm_fair_value")
         if line is None or fair is None:
             continue
@@ -1907,36 +2468,55 @@ def _market_vs_fair_sql(conn) -> dict[str, Any]:
                         "band_def": TOD_BANDS_DEF},
         "edge_buckets": edge_buckets,
         "edge_bucket_min_sample": MIN_BAND_SAMPLE,
+        # Terminal exclusion accounting (directive section 6): the research
+        # aggregates above demonstrably exclude the terminal rows.
+        "terminal_exclusion": {
+            "rule": ("TERMINAL = SETTLEMENT/AUDIT ONLY; NON-TERMINAL = "
+                     "PREDICTIVE RESEARCH ELIGIBLE"),
+            "all_rows": len(rows),
+            "terminal_rows": len(rows) - len(research_rows),
+            "predictive_eligible_rows": len(research_rows),
+        },
     }
 
 
 def _summary_sql(conn) -> dict[str, Any]:
     # Headline metrics: FULL histories only (fragment = 0).  Fragment games
     # (short or mid-game capture) are scored for diagnostics but excluded —
-    # their errors are capture artifacts, not model accuracy.
-    total = _per_version_metrics(conn, "fragment = 0", ())
-    home = _per_version_metrics(conn, "home_error IS NOT NULL AND fragment = 0", ())
-    away = _per_version_metrics(conn, "away_error IS NOT NULL AND fragment = 0", ())
+    # their errors are capture artifacts, not model accuracy.  Clean-data
+    # boundary: CLEAN games only (pre-epoch rows are audit data).
+    # Terminal eligibility (directive): terminal rows contribute 0 to every
+    # research metric — excluded from numerator AND denominator.  The
+    # classifier is stamp+derived: an explicit terminal stamp decides, and
+    # legacy rows without the stamp are DERIVED from game-time evidence
+    # (a missing column is never treated as eligible-by-default).
+    s_term = f"{_scores_terminal_expr(conn)} = 0"
+    clean = f" AND {_CLEAN_SCORES_WHERE} AND {s_term}"
+    total = _per_version_metrics(conn, f"fragment = 0{clean}", ())
+    home = _per_version_metrics(conn, f"home_error IS NOT NULL AND fragment = 0{clean}", ())
+    away = _per_version_metrics(conn, f"away_error IS NOT NULL AND fragment = 0{clean}", ())
     # home/away MAE + bias per version
     for ver in total:
+        if not isinstance(ver, str):
+            continue
         hs = [x["abs_home_error"] for x in conn.execute(
             "SELECT abs_home_error FROM prediction_scores "
-            "WHERE model_version=? AND home_error IS NOT NULL AND fragment = 0",
+            f"WHERE model_version=? AND home_error IS NOT NULL AND fragment = 0{clean}",
             (ver,),
         ).fetchall()]
         hb = [x["home_error"] for x in conn.execute(
             "SELECT home_error FROM prediction_scores "
-            "WHERE model_version=? AND home_error IS NOT NULL AND fragment = 0",
+            f"WHERE model_version=? AND home_error IS NOT NULL AND fragment = 0{clean}",
             (ver,),
         ).fetchall()]
         as_ = [x["abs_away_error"] for x in conn.execute(
             "SELECT abs_away_error FROM prediction_scores "
-            "WHERE model_version=? AND away_error IS NOT NULL AND fragment = 0",
+            f"WHERE model_version=? AND away_error IS NOT NULL AND fragment = 0{clean}",
             (ver,),
         ).fetchall()]
         ab = [x["away_error"] for x in conn.execute(
             "SELECT away_error FROM prediction_scores "
-            "WHERE model_version=? AND away_error IS NOT NULL AND fragment = 0",
+            f"WHERE model_version=? AND away_error IS NOT NULL AND fragment = 0{clean}",
             (ver,),
         ).fetchall()]
         total[ver]["home_mae"] = round(statistics.mean(hs), 2) if hs else None
@@ -1944,46 +2524,110 @@ def _summary_sql(conn) -> dict[str, Any]:
         total[ver]["away_mae"] = round(statistics.mean(as_), 2) if as_ else None
         total[ver]["away_bias"] = round(statistics.mean(ab), 2) if ab else None
         ok = conn.execute(
-            "SELECT COUNT(*) c FROM game_results WHERE final_result_status='OK'"
+            f"SELECT COUNT(*) c FROM game_results "
+            f"WHERE final_result_status='OK' AND source_game_id IN {_CLEAN_GAMES_SUBQ}"
         ).fetchone()["c"]
         unk = conn.execute(
-            "SELECT COUNT(*) c FROM game_results WHERE final_result_status='UNKNOWN'"
+            f"SELECT COUNT(*) c FROM game_results "
+            f"WHERE final_result_status='UNKNOWN' AND source_game_id IN {_CLEAN_GAMES_SUBQ}"
         ).fetchone()["c"]
         total[ver]["completed_games"] = ok
         total[ver]["unscored_ended_games"] = unk
+    # ── terminal-eligibility populations (directive section 6) ───────
+    # Exposed on every summary so the headline can never silently re-admit
+    # terminal rows: ALL vs TERMINAL vs NON-TERMINAL vs PREDICTIVE-ELIGIBLE
+    # (non-terminal == predictive-eligible by definition).
+    def _pop(sql: str) -> int:
+        try:
+            return conn.execute(sql).fetchone()["c"]
+        except Exception:
+            return -1
+    # The clean-games WHERE fragments hardcode an unaliased table name
+    # (e.g. "predictions.source_game_id IN (...)"), so these counters use
+    # the bare table (no alias) — alias-free queries stay valid.
+    # p_term USE (directive §4): the predictions-sourced population counters
+    # below classify rows with the full stamp+derived terminal predicate.
+    p_term = _preds_terminal_expr(conn, "")
+    total["_terminal_eligibility"] = {
+        "rule": ("TERMINAL = SETTLEMENT/AUDIT ONLY; NON-TERMINAL = "
+                 "PREDICTIVE RESEARCH ELIGIBLE"),
+        "all_checkpoints": _pop(
+            f"SELECT COUNT(*) c FROM predictions WHERE {_CLEAN_PREDS_WHERE}"),
+        "terminal_checkpoints": _pop(
+            f"""SELECT COUNT(*) c FROM predictions
+                WHERE {_CLEAN_PREDS_WHERE} AND {p_term} = 1"""),
+        "non_terminal_checkpoints": _pop(
+            f"""SELECT COUNT(*) c FROM predictions
+                WHERE {_CLEAN_PREDS_WHERE} AND {p_term} = 0"""),
+        "predictive_eligible_checkpoints": _pop(
+            f"""SELECT COUNT(*) c FROM predictions
+                WHERE {_CLEAN_PREDS_WHERE} AND {p_term} = 0"""),
+        "explicit_terminal_stamped": _pop(
+            f"""SELECT COUNT(*) c FROM predictions
+                WHERE {_CLEAN_PREDS_WHERE} AND terminal = 1"""),
+        "derived_terminal_unstamped": _pop(
+            f"""SELECT COUNT(*) c FROM predictions
+                WHERE {_CLEAN_PREDS_WHERE} AND terminal IS NULL
+                AND {p_term} = 1"""),
+        "all_scored_rows": _pop(
+            "SELECT COUNT(*) c FROM prediction_scores"),
+        "terminal_scored_rows": _pop(
+            f"""SELECT COUNT(*) c FROM prediction_scores
+                WHERE {_scores_terminal_expr(conn)} = 1"""),
+        "terminal_in_headline": _pop(
+            f"""SELECT COUNT(*) c FROM prediction_scores
+                WHERE fragment = 0 AND {_CLEAN_SCORES_WHERE}
+                AND {_scores_terminal_expr(conn)} = 1"""),
+        "all_cm_rows": _pop(
+            "SELECT COUNT(*) c FROM checkpoint_market"),
+        "terminal_cm_rows": _pop(
+            """SELECT COUNT(*) c FROM checkpoint_market
+               WHERE COALESCE(terminal, 0) = 1"""),
+        "predictive_eligible_cm_rows": _pop(
+            """SELECT COUNT(*) c FROM checkpoint_market
+               WHERE COALESCE(terminal, 0) = 0"""),
+    }
     # data-quality: four DISTINCT concepts — recorded predictions vs
     # completed games vs valid scored games vs invalid/excluded.  These
     # must never be conflated (an INVALID game's predictions exist and
     # are recorded, but the game is excluded; fragment games are scored
-    # for diagnostics only).
+    # for diagnostics only).  Clean-data boundary: CLEAN games only.
     total["_quality"] = {
         "recorded_predictions": conn.execute(
-            "SELECT COUNT(*) c FROM predictions").fetchone()["c"],
+            f"SELECT COUNT(*) c FROM predictions WHERE {_CLEAN_PREDS_WHERE}"
+        ).fetchone()["c"],
         "headline_predictions": conn.execute(
-            "SELECT COUNT(*) c FROM prediction_scores "
-            "WHERE fragment = 0").fetchone()["c"],
+            f"SELECT COUNT(*) c FROM prediction_scores "
+            f"WHERE fragment = 0{clean}").fetchone()["c"],
         "completed_games": conn.execute(
-            "SELECT COUNT(*) c FROM game_results "
-            "WHERE final_result_status='OK'").fetchone()["c"],
+            f"SELECT COUNT(*) c FROM game_results "
+            f"WHERE final_result_status='OK' AND source_game_id IN {_CLEAN_GAMES_SUBQ}"
+        ).fetchone()["c"],
         "valid_scored_games": conn.execute(
-            "SELECT COUNT(DISTINCT source_game_id) c FROM prediction_scores "
-            "WHERE fragment = 0").fetchone()["c"],
+            f"SELECT COUNT(DISTINCT source_game_id) c FROM prediction_scores "
+            f"WHERE fragment = 0{clean}").fetchone()["c"],
         "valid": conn.execute(
-            "SELECT COUNT(*) c FROM game_results r "
-            "WHERE r.final_result_status='OK' AND NOT EXISTS ("
+            f"SELECT COUNT(*) c FROM game_results r "
+            f"WHERE r.final_result_status='OK' AND r.source_game_id IN {_CLEAN_GAMES_SUBQ} "
+            "AND NOT EXISTS ("
             "  SELECT 1 FROM game_quality q "
             "  WHERE q.source_game_id = r.source_game_id AND q.status='INVALID')"
         ).fetchone()["c"],
-        "invalid": conn.execute("SELECT COUNT(*) c FROM game_quality WHERE status='INVALID'").fetchone()["c"],
-        "excluded_games": conn.execute("SELECT COUNT(*) c FROM game_results WHERE final_result_status!='OK'").fetchone()["c"],
+        "invalid": conn.execute(
+            f"SELECT COUNT(*) c FROM game_quality WHERE status='INVALID' "
+            f"AND source_game_id IN {_CLEAN_GAMES_SUBQ}").fetchone()["c"],
+        "excluded_games": conn.execute(
+            f"SELECT COUNT(*) c FROM game_results WHERE final_result_status!='OK' "
+            f"AND source_game_id IN {_CLEAN_GAMES_SUBQ}").fetchone()["c"],
         "excluded_reasons": {r["reason"]: r["c"] for r in conn.execute(
-            "SELECT reason, COUNT(*) c FROM game_quality WHERE status='INVALID' GROUP BY reason")},
+            f"SELECT reason, COUNT(*) c FROM game_quality WHERE status='INVALID' "
+            f"AND source_game_id IN {_CLEAN_GAMES_SUBQ} GROUP BY reason")},
     }
-    # fragment diagnostics — NEVER headline accuracy
+    # fragment diagnostics — NEVER headline accuracy (clean games only)
     frag = conn.execute(
-        """SELECT COUNT(DISTINCT source_game_id) games, COUNT(*) n,
+        f"""SELECT COUNT(DISTINCT source_game_id) games, COUNT(*) n,
                   AVG(abs_total_error) mae, AVG(total_pct_error) mape
-           FROM prediction_scores WHERE fragment = 1"""
+           FROM prediction_scores WHERE fragment = 1{clean}"""
     ).fetchone()
     total["_fragments"] = {
         "excluded_from_headline": True,
@@ -1996,14 +2640,23 @@ def _summary_sql(conn) -> dict[str, Any]:
 
 
 def _fixed_checkpoints_sql(conn) -> list[dict[str, Any]]:
-    """MAE + count per fixed game-completion checkpoint (10%..90%)."""
+    """MAE + count per fixed game-completion checkpoint (10%..90%).
+
+    Terminal eligibility: terminal predictions (source snapshot = the
+    game's final state) contribute 0 — excluded from n and MAE.  The
+    classifier is stamp+derived (legacy unstamped rows are derived from
+    their source prediction's game-time fields).
+    """
+    p_term = f"{_preds_terminal_expr(conn, 'p')} = 0"
     out = []
     for pct in FIXED_CHECKPOINT_PCTS:
         cp = f"pct{pct}"
         rows = conn.execute(
-            """SELECT s.abs_total_error FROM prediction_scores s
+            f"""SELECT s.abs_total_error FROM prediction_scores s
                JOIN predictions p ON p.id = s.prediction_id
-               WHERE p.checkpoint = ? AND s.fragment = 0""",
+               WHERE p.checkpoint = ? AND s.fragment = 0
+                 AND {p_term}
+                 AND {_CLEAN_S_WHERE}""",
             (cp,),
         ).fetchall()
         errs = [r["abs_total_error"] for r in rows]
@@ -2018,15 +2671,24 @@ def _fixed_checkpoints_sql(conn) -> list[dict[str, Any]]:
 
 
 def _by_progress_sql(conn) -> list[dict[str, Any]]:
-    """Banded accuracy by game progress: 0-10, 10-25, 25-50, 50-75, 75-90, 90-100%."""
+    """Banded accuracy by game progress: 0-10, 10-25, 25-50, 50-75, 75-90, 90-100%.
+
+    Terminal eligibility: rows whose source snapshot is the game's final
+    state are settlement/audit only — excluded from every band (the
+    90-100% band keeps genuinely non-terminal late-game rows).  Stamp+
+    derived classification (legacy unstamped rows included in the gate).
+    """
+    p_term = f"{_preds_terminal_expr(conn, 'p')} = 0"
     bands = [(0.0, 0.10), (0.10, 0.25), (0.25, 0.50), (0.50, 0.75), (0.75, 0.90), (0.90, 1.01)]
     out = []
     for lo, hi in bands:
         rows = conn.execute(
-            """SELECT s.abs_total_error FROM prediction_scores s
+            f"""SELECT s.abs_total_error FROM prediction_scores s
                JOIN predictions p ON p.id = s.prediction_id
                WHERE p.progress IS NOT NULL AND p.progress >= ? AND p.progress < ?
-                 AND s.fragment = 0""",
+                 AND s.fragment = 0
+                 AND {p_term}
+                 AND {_CLEAN_S_WHERE}""",
             (lo, hi),
         ).fetchall()
         errs = [r["abs_total_error"] for r in rows]
@@ -2047,11 +2709,19 @@ def _market_compare_sql(conn) -> dict[str, Any]:
     checkpoint, never the closing line).  BLM error = abs(BLM - actual);
     Market error = abs(market - actual).  Every rate carries explicit
     numerator + denominator; O/U accounting names the line type.
+
+    Terminal eligibility: terminal rows contribute 0 (excluded from
+    every numerator and denominator).  Stamp+derived classification:
+    legacy unstamped scored rows are derived terminal from their source
+    prediction's game-time fields — never eligible-by-default.
     """
+    s_term = f"{_scores_terminal_expr(conn)} = 0"
     rows = conn.execute(
-        """SELECT model_total, market_total, actual_total, total_error,
+        f"""SELECT model_total, market_total, actual_total, total_error,
                   market_error, model_beat_market, ou_prediction, ou_result, ou_correct
-           FROM prediction_scores WHERE market_total IS NOT NULL AND fragment = 0""",
+           FROM prediction_scores WHERE market_total IS NOT NULL AND fragment = 0
+             AND {s_term}
+             AND {_CLEAN_SCORES_WHERE}""",
     ).fetchall()
     rows = [dict(r) for r in rows]
     n = len(rows)

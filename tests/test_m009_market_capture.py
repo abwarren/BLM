@@ -194,6 +194,10 @@ class _FakePage:
     def wait_for_selector(self, *a, **k) -> bool:
         return True
 
+    def evaluate(self, *a, **k):
+        # lobby rows present — the comp-lobby guard passes without nav
+        return 3
+
     def inner_text(self, *a, **k) -> str:
         return "fake event-view body text (parse is monkeypatched)"
 
@@ -367,7 +371,7 @@ def test_length_raw_json_heuristic_pins_snapshot_kinds(tmp_path):
 def test_market_refresh_constant_is_480s():
     """Pin the documented per-game market refresh window."""
     assert MARKET_REFRESH_S == 480
-    assert MARKET_BATCH == 1  # one event view per tick
+    assert MARKET_BATCH == 2  # up to two event views per slow run
 
 
 def test_refresh_window_skips_game_captured_recently(tmp_path, monkeypatch):
@@ -406,10 +410,26 @@ def test_refresh_window_captures_game_due_for_refresh(tmp_path, monkeypatch):
 
 
 def test_refresh_window_boundary_at_480s(tmp_path, monkeypatch):
-    """Exact boundary of the skip condition (< MARKET_REFRESH_S):
-    age 479.9s → skipped (fresh); age 480.0s → due (captured)."""
-    # 479.9s — inside the window → skip
+    """Exact boundary of the skip condition (< MARKET_REFRESH_S) for a
+    game that ALREADY has a market line (not early-priority): age 479.9s
+    → skipped (fresh); age 480.0s → due (captured)."""
+    # Seed a market line so the game is NOT early-priority (never-line).
+    def _seed_line(st):
+        gid_db = _add_game(st, "30741757", home="Oklahoma City Thunder Cyber",
+                           away="San Antonio Spurs Cyber")
+        conn = st._connect()
+        conn.execute(
+            "INSERT INTO market_observations (source_game_id, market_type, "
+            "market_name, line_value, captured_at) VALUES (?, 'MatchTotal', "
+            "'Total Points', 189.5, '2026-08-31T00:00:00.000Z')",
+            ("30741757",))
+        conn.commit()
+        conn.close()
+        return gid_db
+
+    # 479.9s — inside the window → skip (game already has a line)
     st1 = PokerBetStore(tmp_path / "a.db")
+    _seed_line(st1)
     c1, game1, page1, clicks1 = _freshness_harness(st1, monkeypatch)
     c1._last_market_at[game1.source_game_id] = "2026-08-31T00:00:00.000Z"
     monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 479.9)
@@ -418,12 +438,48 @@ def test_refresh_window_boundary_at_480s(tmp_path, monkeypatch):
 
     # 480.0s — exactly at the window edge → due for refresh
     st2 = PokerBetStore(tmp_path / "b.db")
+    _seed_line(st2)
     c2, game2, page2, clicks2 = _freshness_harness(st2, monkeypatch)
     c2._last_market_at[game2.source_game_id] = "2026-08-31T00:00:00.000Z"
     monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 480.0)
     c2._capture_slow_market()
     assert clicks2 == [game2.source_game_id]
     assert len(st2.get_snapshots(game2.source_game_id)) == 1
+
+
+def test_never_line_game_prioritized_over_freshness_gate(tmp_path, monkeypatch):
+    """Early-checkpoint priority: a game with NO market line yet is
+    captured even when its last event-view capture is well inside the
+    480s window (age 100s < 480s) — the uniform refresh gate must not
+    starve young games' first line capture."""
+    st = PokerBetStore(tmp_path / "blm.db")
+    c, game, page, clicks = _freshness_harness(st, monkeypatch)
+    # no market line seeded → never-line
+    c._last_market_at[game.source_game_id] = _iso(_now() - timedelta(seconds=100))
+    monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 100.0)
+
+    c._capture_slow_market()
+
+    assert clicks == [game.source_game_id]       # visited despite age < 480s
+    snaps = st.get_snapshots(game.source_game_id)
+    assert len(snaps) == 1
+    assert snaps[0]["total_line"] == 189.5       # first line captured
+    assert c.stats["snapshots"] == 1
+
+
+def test_never_line_game_just_captured_not_hot_looped(tmp_path, monkeypatch):
+    """A never-line game captured within the last 15s is NOT re-captured
+    on the next slow run (the anti-hot-loop guard) — it stays queued but
+    skipped until the freshness window passes or another game is due."""
+    st = PokerBetStore(tmp_path / "blm.db")
+    c, game, page, clicks = _freshness_harness(st, monkeypatch)
+    c._last_market_at[game.source_game_id] = _iso(_now())  # just captured
+    monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 2.0)
+
+    c._capture_slow_market()
+
+    assert clicks == []                          # skipped — captured 2s ago
+    assert st.get_snapshots(game.source_game_id) == []
 
 
 # ═══════════════════════════════════════════════════════════════════
