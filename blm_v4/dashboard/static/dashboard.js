@@ -37,6 +37,8 @@ const state = {
   modalGameId: null,
   modalDetailOk: null,     // detail-endpoint liveness for the open modal (null = pending)
   modalCharts: {},
+  modalZText: null,        // cached PACE Z readout across header re-renders
+  modalGapText: null,      // cached SCORE − LINE readout across header re-renders
   hideNonLive: true,       // default view: LIVE games only
 };
 
@@ -245,7 +247,7 @@ function renderScorecard(d) {
     if (games.length) {
       html.push(`<div class="sc-block sc-wide">
         <h4>GAME-LEVEL SCORECARD <span class="muted">· progressive Market vs Fair per clean completed game</span></h4>
-        ${games.map((g) => `<details class="mvf-game" style="margin:4px 0">
+        ${games.map((g) => `<details class="mvf-game">
           <summary>${esc(g.home_team || "")} vs ${esc(g.away_team || "")} · OLV ${g.olv ?? "–"} · CLV ${g.clv ?? "–"} · Final ${g.final_total ?? "–"} · vs OLV ${g.outcome_olv ?? "–"} · vs CLV ${g.outcome_clv ?? "–"}</summary>
           <table class="sc-table">
             <tr><th>%</th><th>Market</th><th>BLM Fair</th><th>M-F</th><th>Signal</th><th>Actual</th><th>Outcome</th></tr>
@@ -1031,6 +1033,8 @@ function openModal(gameId) {
   if (!$("modalBackdrop").hidden) return; // already open — keep current view
   state.modalGameId = gameId;
   state.modalDetailOk = null;
+  state.modalZText = null; // fresh game — readout awaits its own fetch
+  state.modalGapText = null; // fresh game — gap readout awaits its own fetch
   $("modalBackdrop").hidden = false;
   document.body.style.overflow = "hidden";
   // render immediately from the live payload (never an empty overlay)
@@ -1058,6 +1062,10 @@ function modalPanel(title, inner) {
 function renderModal(g) {
   const mkt = g.market || {}, p = g.projector || {};
   const invalid = g.quality_status === "INVALID";
+  // score_line_gap readout cache — lives across re-renders between
+  // detail polls (same contract as state.modalZText), so the header
+  // readout never flickers to n/a mid-poll.  Set in renderModalCharts.
+  if (state.modalGapText === undefined) state.modalGapText = null;
   const full = fullMin(g);
   const isLive = g.live === true;
   // modal section state from the persisted prefs — CHARTS visible,
@@ -1073,6 +1081,18 @@ function renderModal(g) {
   const liveLine = isLive && mstatus === "LIVE" ? line : null;
   const lastObs = liveLine == null && line != null ? line : null;
   const statusWord = g.status === "ended" ? "ENDED" : "STALE";
+  // LIVE score-vs-line gap (directive: SCORE − LIVE LINE = ±X).  Computed
+  // ONLY when the shown line is genuinely current (game live + fresh);
+  // a stale/last-observed line never gets a live gap — it is not current
+  // and must not be presented as such.  Pure arithmetic: current combined
+  // score − observed line; the API's market.score_line_gap is the same
+  // simple difference (used as fallback); no model value enters this.
+  const liveScore = (g.home_score != null && g.away_score != null)
+    ? g.home_score + g.away_score : null;
+  const gapVal = (liveLine != null && liveScore != null)
+    ? Number((liveScore - liveLine).toFixed(1)) : (liveScore != null ? mkt.score_line_gap : null);
+  const gapTxt = (gapVal != null && (liveLine != null || mkt.score_line_gap != null))
+    ? `${gapVal > 0 ? "+" : ""}${num(gapVal, 1)}` : "–";
   const freshTxt = mstatus == null ? "" : `${mstatus} ${mstatus === "MISSING" ? "—" : fmtAgeExact(age)}`;
   const signed = (v) => v == null ? "–" : (v > 0 ? "+" : "") + num(v, 2);
   const pace = (w) => p["recent_pace_" + w + "m"] != null ? num(p["recent_pace_" + w + "m"], 2) : "–";
@@ -1116,6 +1136,7 @@ function renderModal(g) {
   // so the 5-second refresh updates the series in place instead of
   // rebuilding — the chart never blinks out of the expanded game view.
   const prevCanvas = !invalid ? document.getElementById("mcTotal") : null;
+  const prevZCanvas = !invalid ? document.getElementById("mcZ") : null;
   $("modalBody").innerHTML = `
     ${g.data_quality === "LEGACY" ? `<div class="legacy-banner">LEGACY / PRE-CLEAN GAME — started before the clean-data epoch (${esc(String(g.data_epoch || "").slice(0, 19))}Z). Current state below uses post-epoch observations only; full pre-clean history is available via the audit path.</div>` : ""}
     <div class="m-hero">
@@ -1136,11 +1157,14 @@ function renderModal(g) {
     ${invalid ? "" : `<details class="m-chart-toggle" ${chartsOpen ? "open" : ""}>
       <summary data-label="CHARTS">CHARTS ${chartsOpen ? "▾" : "▸"}</summary>
       <div class="m-charts">
-        <div class="m-chart m-chart-full"><h4>SCORE vs LIVE LINE — MARKET MOVEMENT</h4><div class="chart-box"><canvas id="mcTotal"></canvas></div></div>
+        <div class="m-chart m-chart-full"><div class="m-chart-head"><h4>SCORE vs LIVE LINE — MARKET MOVEMENT</h4><div class="z-readout" id="gapReadout">${esc(state.modalGapText || "SCORE − LINE = –")}</div></div><div class="chart-box"><canvas id="mcTotal"></canvas></div></div>
+        <div class="m-chart m-chart-z"><div class="m-chart-head"><h4>PACE Z-SCORE</h4><div class="z-readout" id="zPanelReadout">${esc(state.modalZText || "z = n/a")}</div></div><div class="chart-box chart-box-z"><canvas id="mcZ"></canvas></div></div>
       </div>
     </details>`}
     <div class="m-panels">
       ${modalPanel("Game State", `
+        <div class="m-row"><span class="k">Provider</span><span class="v">${esc(g.provider || "–")}</span></div>
+        <div class="m-row"><span class="k">Competition</span><span class="v">${esc(g.competition_slug || "–")}</span></div>
         <div class="m-row"><span class="k">Score</span><span class="v">${g.home_score ?? "–"} – ${g.away_score ?? "–"}</span></div>
         <div class="m-row"><span class="k">Period</span><span class="v">${esc(g.period_label || (g.quarter ? "Q" + g.quarter : "–"))}</span></div>
         <div class="m-row"><span class="k">Clock</span><span class="v">${esc(g.clock || "–")}</span></div>
@@ -1150,6 +1174,7 @@ function renderModal(g) {
       `)}
       ${modalPanel("Live Market", `
         <div class="m-row"><span class="k">${liveLine != null ? "Live total" : (lastObs != null ? "Last observed" : "Live total")}</span><span class="v">${num(line, 1)}${lastObs != null ? ` <span class="muted" style="font-size:10px">@ ${((mkt.total_line_at || p.market_captured_at) || "").slice(11, 19)}Z · ${statusWord}</span>` : ""}</span></div>
+        <div class="m-row"><span class="k">Score − line</span><span class="v ${gapVal > 0 ? "pos" : gapVal < 0 ? "neg" : ""}">SCORE ${liveScore != null ? liveScore : "–"} − LINE ${line != null ? num(line, 1) : "–"} = ${gapTxt}</span></div>
         <div class="m-row"><span class="k">Line freshness</span><span class="v">${freshTxt ? `<span class="st ${mstatus === "LIVE" ? "st-live" : mstatus === "STALE" ? "st-stale" : "st-missing"}">${esc(freshTxt)}</span>` : "–"}</span></div>
         <div class="m-row"><span class="k">Line age</span><span class="v">${age != null ? fmtAgeExact(age) : "–"}</span></div>
         <div class="m-row"><span class="k">Market source</span><span class="v">${esc(mkt.market_source || "–")}</span></div>
@@ -1207,6 +1232,15 @@ function renderModal(g) {
       if (fresh) fresh.replaceWith(prevCanvas);
     }
   }
+  // Same preservation for the Z-SCORE panel canvas: the fast path updates
+  // its Chart instance in place, so this node must survive re-renders too.
+  if (prevZCanvas) {
+    const zBox = $("modalBody").querySelector(".chart-box-z");
+    if (zBox) {
+      const freshZ = zBox.querySelector("canvas");
+      if (freshZ) freshZ.replaceWith(prevZCanvas);
+    }
+  }
   bindCollapsible($("modalBody").querySelector(".m-chart-toggle"), PREF.CHARTS);
   bindCollapsible($("modalBody").querySelector(".m-details"), PREF.GAME_DETAILS);
   // Fire-and-forget is fine, but failures must surface — a silent no-chart
@@ -1234,6 +1268,31 @@ function baseChartOpts(yLabel) {
   };
 }
 
+// Draws the Z=0 reference line across the plot area — the neutral gap
+// marker that makes signed Z movement (toward/away from zero) readable.
+// An inline plugin (not grid ticks) so the zero line is always drawn,
+// regardless of tick generation.
+const zZeroLine = {
+  id: "zZeroLine",
+  afterDatasetsDraw(chart) {
+    const s = chart.scales.y; // Z panel uses its own default y scale
+    if (!s) return;
+    const y = s.getPixelForValue(0);
+    if (!Number.isFinite(y)) return;
+    const { left, right } = chart.chartArea;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = "rgba(167,139,250,.5)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(right, y);
+    ctx.stroke();
+    ctx.restore();
+  },
+};
+
 async function renderModalCharts(g) {
   // INVALID games render no charts — gated (null) by renderModal.
   if (!g) {
@@ -1257,18 +1316,38 @@ async function renderModalCharts(g) {
   // no fabricated lines: gaps stay gaps (spanGaps:false), stale/missing
   // lines never substitute for live ones.
   const h = g.history || [];
-  let dev = null, lines = null;
-  // Both series are fetched in parallel — the deviation store and the
-  // observed market-line history are independent authoritative sources.
-  const [devRes, linesRes] = await Promise.allSettled([
-    fetch(API_GAME_DEV(g.game_id)).then((r) => (r.ok ? r.json() : null)),
+  // Score-vs-line readout computed IMMEDIATELY from the detail payload's
+  // history — BEFORE the async series fetches — so the header shows the
+  // gap the moment the modal opens (the /deviation series fetch can take
+  // seconds under load; the readout must never wait on it).  The same
+  // values are used by the chart build below.  Current combined score
+  // minus the freshest observed line: pure arithmetic, no model value
+  // enters this readout.
+  const scoreSeries = h.map((s) => s.combined).filter((v) => v != null);
+  const curScore = scoreSeries.length ? scoreSeries[scoreSeries.length - 1] : null;
+  const lineSeriesVals = h.map((s) => s.total_line).filter((v) => v != null);
+  const curLine = lineSeriesVals.length
+    ? lineSeriesVals[lineSeriesVals.length - 1] : null;
+  const gapVal = (curScore != null && curLine != null)
+    ? Number((curScore - curLine).toFixed(1)) : null;
+  state.modalGapText = (curScore != null && curLine != null)
+    ? `SCORE ${curScore} − LINE ${num(curLine, 1)} = ${gapVal > 0 ? "+" : ""}${num(gapVal, 1)}`
+    : "SCORE − LINE = –";
+  const gapEl = document.getElementById("gapReadout");
+  if (gapEl) gapEl.textContent = state.modalGapText;
+  let pz = null, lines = null;
+  // Both series are fetched in parallel — the PACE Z store (authoritative
+  // pace-benchmark layer) and the observed market-line history are
+  // independent authoritative sources.
+  const [pzRes, linesRes] = await Promise.allSettled([
+    fetch(API_GAME_PACE_Z(g.game_id)).then((r) => (r.ok ? r.json() : null)),
     fetch(API_GAME_LINES(g.game_id)).then((r) => (r.ok ? r.json() : null)),
   ]);
-  if (devRes.status === "fulfilled") dev = devRes.value;
+  if (pzRes.status === "fulfilled") pz = pzRes.value;
   if (linesRes.status === "fulfilled") lines = linesRes.value;
   // a failed fetch is not fatal — the chart renders from history alone
   if (state.modalGameId !== g.game_id) return; // modal switched games mid-fetch
-  const series = (dev && dev.series) || [];
+  const series = (pz && pz.series) || [];
   const lineObs = (lines && lines.observations) || [];
   // epoch-ms x placement; unparseable timestamps are dropped (never guessed)
   const tMs = (iso) => { const ms = Date.parse(iso); return Number.isFinite(ms) ? ms : null; };
@@ -1292,18 +1371,43 @@ async function renderModalCharts(g) {
     lineData.push({ x, y: o.line_value });
     prevT = x;
   }
-  // Trajectory / residual / Z — the authoritative stored values from the
-  // deviation layer (benchmark-standardized; the frontend never computes
-  // z).  A missing value stays missing (null → gap), never substituted.
-  const devPts = (key) => series.map((s) => {
-    const x = tMs(s.captured_at);
-    return x == null ? null : { x, y: s[key] };
-  }).filter(Boolean);
-  // Current Z readout — the authoritative stored z_score of the latest
-  // eligible deviation observation (never computed in the frontend).
-  const last = series.length ? series[series.length - 1] : null;
-  const zTxt = last ? (last.z_score != null ? `z = ${num(last.z_score, 2)}`
-    : "z = n/a") : "z = n/a";
+  // PACE Z-SCORE panel series — the authoritative STORED pace z from the
+  // benchmark layer (GET /pace-z): actual pace vs the strictly-prior
+  // historical population at (provider, competition, period, progress).
+  // The frontend never computes z and never derives it from the live line
+  // or the score-vs-line gap.  EVERY kept point is preceded by an explicit
+  // null break when a previous point exists: non-adjacent stored
+  // observations render as visible gaps — nothing is carried forward,
+  // interpolated, or substituted.
+  const zData = [];
+  {
+    let zPrevT = null;
+    for (const s of series) {
+      const x = tMs(s.captured_at);
+      if (x == null || s.z == null) continue;
+      if (zPrevT != null && x !== zPrevT) zData.push({ x: zPrevT, y: null });
+      zData.push({ x, y: s.z });
+      zPrevT = x;
+    }
+  }
+  const lastZ = series.map((s) => s.z).filter((z) => z != null).pop();
+  const zTxt = (lastZ != null
+    ? `z = ${lastZ > 0 ? "+" : ""}${num(lastZ, 2)}`
+    : "z = n/a");
+  // benchmark provenance — read straight from the authoritative payload
+  // (sample size, historical mean/σ, competition partition); never invented
+  const zMeta = (pz && pz.n != null)
+    ? `N=${pz.n}` +
+      (pz.mean_pace != null ? ` · μ=${num(pz.mean_pace, 3)} pts/min` : "") +
+      (pz.std_pace != null ? ` · σ=${num(pz.std_pace, 3)}` : "") +
+      (pz.provider && pz.competition ? ` · ${pz.provider}/${pz.competition}` : "")
+    : null;
+  const zReadout = zMeta ? `${zTxt} · ${zMeta}` : zTxt;
+  // Score-vs-line readout cache (lives across re-renders between polls,
+  // like the Z cache): the plain arithmetic gap at the CURRENT state —
+  // current combined score minus the observed live line.  The newest
+  // (gap readout already computed synchronously pre-fetch above — the
+  // history snapshot does not change mid-render)
   const opts = baseChartOpts("Points / line");
   // Wall-clock x axis WITHOUT the Chart.js time scale: no date adapter is
   // loaded (CDN core only), so a `type:"time"` scale would throw at
@@ -1316,21 +1420,37 @@ async function renderModalCharts(g) {
       callback: (v) => fmtTime(new Date(v).toISOString()) },
     grid: { color: ChartColor.grid },
   };
-  // residual + Z keep their own scales — plotted as stored, never
-  // rescaled into the points axis
-  opts.scales.y2 = { display: false };
-  opts.scales.y3 = { display: false };
-  // Z readout on the chart itself — the authoritative stored z_score of
-  // the latest eligible deviation observation, or n/a when none exists
-  opts.plugins.title = {
-    display: true, text: `Z-SCORE GAP · ${zTxt}`,
-    color: ChartColor.tick, font: { size: 10, family: "monospace" }, padding: 2,
-  };
   const mk = (id) => document.getElementById(id);
   const scoreData = h.map((s) => { const x = tMs(s.t); return x == null ? null : { x, y: s.combined }; });
-  const trajData = devPts("projected_final_total");
-  const residData = devPts("market_trajectory_residual");
-  const zData = devPts("z_score");
+  // Z-SCORE panel options — its OWN compact chart (never a hidden dataset
+  // on the score/line chart): symmetric Y around the zero reference,
+  // sign-explicit ticks, bounds from the stored z values (presentation
+  // range only; no z math here), same game-time axis as the primary
+  // chart so the two measurements read side by side.
+  const zAbs = zData.map((p) => Math.abs(p.y)).filter(Number.isFinite);
+  const zBound = Math.max(1, (zAbs.length ? Math.max(...zAbs) : 1) * 1.1);
+  const zOpts = {
+    responsive: true, maintainAspectRatio: false,
+    animation: false,
+    interaction: { mode: "nearest", intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: { backgroundColor: "#0d1420", borderColor: "#26374d", borderWidth: 1,
+        titleColor: "#eaf2ff", bodyColor: "#d7e1f0" },
+    },
+    scales: {
+      x: { type: "linear",
+        ticks: { color: ChartColor.tick, maxTicksLimit: 8, font: { size: 9, family: "monospace" },
+          callback: (v) => fmtTime(new Date(v).toISOString()) },
+        grid: { color: ChartColor.grid } },
+      y: { min: -zBound, max: zBound,
+        title: { display: true, text: "PACE Z", color: "#a78bfa", font: { size: 9 } },
+        ticks: { color: "#a78bfa", font: { size: 9, family: "monospace" }, maxTicksLimit: 5,
+          callback: (v) => (v > 0 ? "+" : "") + Number(v).toFixed(1) },
+        grid: { color: ChartColor.grid },
+        border: { display: false } },
+    },
+  };
   // Fast path — renderModal re-attaches the same canvas node, so a live
   // chart for this game is updated in place: the plotted series refresh
   // and the chart never blinks out during the fetch window.
@@ -1338,12 +1458,38 @@ async function renderModalCharts(g) {
   if (prev && prev.$gameId === g.game_id && prev.canvas && prev.canvas.isConnected) {
     prev.data.datasets[0].data = scoreData;
     prev.data.datasets[1].data = lineData;
-    prev.data.datasets[2].data = trajData;
-    prev.data.datasets[3].data = residData;
-    prev.data.datasets[4].data = zData;
-    prev.options.plugins.title.text = `Z-SCORE GAP · ${zTxt}`;
-    prev.$devCount = series.length;
     prev.update("none");
+    const prevZ = state.modalCharts.z;
+    if (prevZ && prevZ.$gameId === g.game_id && prevZ.canvas && prevZ.canvas.isConnected) {
+      prevZ.data.datasets[0].data = zData;
+      prevZ.options.scales.y.min = -zBound;
+      prevZ.options.scales.y.max = zBound;
+      prevZ.update("none");
+    } else {
+      // Z canvas lost (first render or node replaced) — rebuild it from
+      // the already-fetched series; never leave the panel dark.
+      if (prevZ) { try { prevZ.destroy(); } catch (_) {} }
+      const zCanvasNow = mk("mcZ");
+      if (zCanvasNow) {
+        const staleZ = Chart.getChart(zCanvasNow);
+        if (staleZ) staleZ.destroy();
+        state.modalCharts.z = new Chart(zCanvasNow, {
+          type: "line",
+          plugins: [zZeroLine],
+          data: { datasets: [
+            { label: "PACE Z (stored benchmark)", data: zData,
+              borderColor: "#a78bfa", borderWidth: 2, pointRadius: 2,
+              pointHoverRadius: 4, tension: .15, spanGaps: false },
+          ]},
+          options: zOpts,
+        });
+        state.modalCharts.z.$gameId = g.game_id;
+      }
+    }
+    const zEl = document.getElementById("zPanelReadout");
+    if (zEl) zEl.textContent = zReadout;
+    state.modalZText = zTxt; // cache across re-renders, like the gap readout
+    prev.$devCount = series.length;
     return;
   }
   for (const k in state.modalCharts) {
@@ -1363,22 +1509,30 @@ async function renderModalCharts(g) {
       // B · every valid observed live line, exact timestamps, movement as-is
       { label: "Live O/U line", data: lineData, borderColor: ChartColor.market,
         pointRadius: 1.5, pointHoverRadius: 3, tension: 0, spanGaps: false },
-      // C · BLM trajectory (stored projected final total)
-      { label: "BLM trajectory (projected final total)", data: trajData,
-        borderColor: "#34d399", backgroundColor: "rgba(52,211,153,.06)",
-        fill: false, pointRadius: 1.5, pointHoverRadius: 3, tension: .15, spanGaps: false },
-      // D · market − trajectory residual (stored, signed)
-      { label: "Market − trajectory residual", data: residData,
-        borderColor: "#22d3ee", pointRadius: 1.5, pointHoverRadius: 3,
-        tension: .15, spanGaps: false, yAxisID: "y2" },
-      // E · Z-score (authoritative stored value, signed) on its own scale
-      { label: "Z-score", data: zData,
-        borderColor: "#eaf2ff", borderDash: [2, 3], pointRadius: 1.5,
-        pointHoverRadius: 3, tension: .15, spanGaps: false, yAxisID: "y3" },
     ]},
     options: opts,
   });
   state.modalCharts.total.$gameId = g.game_id;
+  // Z-SCORE panel — its own visible chart immediately below the primary
+  // one: authoritative stored z observations on the same game-time axis,
+  // zero reference drawn by the zZeroLine plugin, missing values as gaps.
+  const zCanvas = mk("mcZ");
+  const staleZ = Chart.getChart(zCanvas); // never build over a live instance
+  if (staleZ) staleZ.destroy();
+  state.modalCharts.z = new Chart(zCanvas, {
+    type: "line",
+    plugins: [zZeroLine],
+    data: { datasets: [
+      { label: "PACE Z (stored benchmark)", data: zData,
+        borderColor: "#a78bfa", borderWidth: 2, pointRadius: 2,
+        pointHoverRadius: 4, tension: .15, spanGaps: false },
+    ]},
+    options: zOpts,
+  });
+  state.modalCharts.z.$gameId = g.game_id;
+  const zEl = document.getElementById("zPanelReadout");
+  if (zEl) zEl.textContent = zReadout;
+  state.modalZText = zReadout;
   state.modalCharts.total.$devCount = series.length;
 }
 
@@ -1791,6 +1945,7 @@ $("gsToggle").addEventListener("click", () => {
    exists anywhere in this surface.
    ═══════════════════════════════════════════════════════════════ */
 const API_GAME_DEV = (id) => `/api/v4/game/${encodeURIComponent(id)}/deviation`;
+const API_GAME_PACE_Z = (id) => `/api/v4/game/${encodeURIComponent(id)}/pace-z`;
 let devTimer = null;
 const devCharts = {};
 let devPickedGameId = null;

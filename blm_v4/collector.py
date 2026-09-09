@@ -98,19 +98,36 @@ TICK_DEFAULT = 10.0
 # tick leave the SPA on blank views (observed: empty-team parses).  So
 # capture up to MARKET_BATCH event views per slow run (proven path),
 # bounded by per-game MARKET_REFRESH freshness.
-MARKET_BATCH = 2
-MARKET_REFRESH_S = 480
+# MARKET_BATCH 2 -> 3 (2026-09-09): each slow run is bounded work; three
+# visits raise the rotation capacity from ~2 games/80s to ~3 games/50s
+# (EVENT_VIEW_EVERY_N 3 -> 2 below), shrinking the worst-case rotation
+# span for a ~40-game cohort from ~25min to ~11min.  Verified live that
+# the fast score cadence stays well inside ACTIVE_GAME_STALENESS_S=180.
+MARKET_BATCH = 3
+# Per-game market refresh gate — MUST stay below the 300s freshness
+# threshold (pace_projector.FRESH_LINE_SECONDS): a line captured on one
+# visit has to still be inside the LIVE window when the next visit is
+# due, so the rotation can refresh it before the dashboard flips the
+# game to STALE.  480 violated that (480 > 300): a game visited just
+# before its line aged out stayed un-refreshed for another 480s.
+# 240 = half the threshold: even one missed slot still leaves a
+# re-visit inside the LIVE window.  NOTE the gate is capacity-limited,
+# not a guarantee: one slow page covers ~3 games/50s, so a 40-game
+# cohort rotates in ~11min — genuinely stale-market stretches remain
+# possible and are reported honestly (see market_collection in the
+# collector state file).
+MARKET_REFRESH_S = 240
 # STEP 2: the slow (full event-view) path runs on its OWN page, gated to
 # once every N fast ticks — decoupled from the score poll's page/state.
-# Real cycles run ~36s (browser work dominates), so N=3 ≈ one event-view
-# run every ~2 min; each run captures up to MARKET_BATCH games.  With
-# ~30 tracked games that bounds a full rotation to ~15 min — the honest
-# single-browser limit for one-thread WS subscription coverage (the
-# eu-swarm feed only pushes the OPEN event's markets).  The attempt
-# still runs synchronously inside that tick (a ~6-20s overrun that the
+# N=2 (was 3): one event-view run every ~2 fast cycles (~50s observed);
+# each run captures up to MARKET_BATCH games.  With ~40 tracked games
+# that bounds a full rotation to ~11 min — the honest single-browser
+# limit for one-thread WS subscription coverage (the eu-swarm feed only
+# pushes the OPEN event's markets).  The attempt still runs
+# synchronously inside that tick (a ~6-20s overrun that the
 # target-boundary scheduler absorbs), so the score poll cadence on the
 # other ticks is untouched; full async decoupling is future work.
-EVENT_VIEW_EVERY_N = 3
+EVENT_VIEW_EVERY_N = 2
 # In-memory tick-timing ring (instrumentation): keep ~24h of samples at
 # the 10s tick, then drop the oldest — a daemon must never grow without
 # bound.  The summary is exposed via the collector state payload.
@@ -119,6 +136,16 @@ TICK_STATS_MAX = 8640
 # this window — the feed pushes every price change, so movements still land,
 # but a game that stays flat is not spammed into the DB every second.
 WS_MARKET_DEDUP_S = 30.0
+
+# Repeated-visit backoff (2026-09-09): with the gate armed only by an
+# OBSERVED market (attempt != observation), a persistently failing game
+# would otherwise be retried every slow run and consume the whole
+# MARKET_BATCH.  After MARKET_ATTEMPT_STREAK_BACKOFF consecutive failed
+# attempts, a game is retried at most once per MARKET_ATTEMPT_BACKOFF_S
+# — bounded retry, still always in rotation (never removed), streak and
+# attempts visible in the collector state payload.
+MARKET_ATTEMPT_BACKOFF_S = 60.0
+MARKET_ATTEMPT_STREAK_BACKOFF = 3
 
 # Resilience: the BetConstruct SPA slowly degrades in long-lived sessions
 # (the live-panel tree stops hydrating even though a fresh browser renders
@@ -317,6 +344,20 @@ class PokerBetCollector:
         }
         self._market_queue: list[str] = []   # round-robin of source_game_ids
         self._last_market_at: dict[str, str] = {}  # gid -> last event-view capture ts
+        # Diagnostic separation of ATTEMPT vs OBSERVATION (2026-09-09):
+        # _last_market_at arms the refresh gate only when a visit actually
+        # OBSERVED a market (persisted snapshot/WS bridge).  An attempt
+        # that came back empty (parse failure, unverified view, lobby
+        # down) must not re-arm the gate — otherwise a broken game is
+        # skipped for a whole window with nothing observed.  Attempts are
+        # tracked separately for monitoring only.
+        self._last_market_attempt_at: dict[str, str] = {}
+        self._attempt_streak: dict[str, int] = {}
+        self._market_stats = {
+            "attempts": 0, "observed": 0, "failed": 0,
+            "skipped_fresh": 0, "skipped_fresh_arms": 0,
+            "skipped_backoff": 0,
+        }
         self._instances: dict[str, str] = {}  # base game_id -> current instance id
         self._running = False
         self._browser: Optional[Browser] = None
@@ -490,10 +531,25 @@ class PokerBetCollector:
             "reconciliations": self.stats["reconciliations"],
             "errors": self.stats["errors"],
             "tick_timing": _tick_timing_summary(self._tick_stats),
+            # market-rotation diagnostics: ATTEMPT vs OBSERVED MARKET — a
+            # served request is not a fresh observation; only "observed"
+            # re-arms the freshness gate.  Per-game streaks expose
+            # persistently failing games (bounded-backoff retries).
+            "market_collection": {
+                **self._market_stats,
+                "queue_len": len(self._market_queue),
+                "gate_seconds": MARKET_REFRESH_S,
+                "streaks_over_backoff": sum(
+                    1 for v in self._attempt_streak.values()
+                    if v >= MARKET_ATTEMPT_STREAK_BACKOFF),
+            },
             # crash/restart recovery: persist tracked games so a restart
             # does NOT trigger a full re-resolution storm (each new-game
             # resolve is a ~6s event-view nav that blocks the fast tick).
             "tracked_games": self._tracked_serializable(),
+            "last_market_at": dict(self._last_market_at),
+            "last_market_attempt_at": dict(self._last_market_attempt_at),
+            "market_attempt_streaks": dict(self._attempt_streak),
         }
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -556,6 +612,20 @@ class PokerBetCollector:
             if g.source_game_id not in self._market_queue and g.source_url:
                 self._market_queue.append(g.source_game_id)
             n += 1
+        # Market-rotation recovery: an empty _last_market_at after a
+        # restart re-opens every game's refresh gate simultaneously —
+        # the rotation then hammers games whose line is already fresh
+        # while starved games wait (the 2026-09-09 02:45Z restart left
+        # 29/40 active games without any line until each was re-visited).
+        # Restoring the per-game capture/attempt timestamps (and streaks)
+        # keeps the rotation order and gates continuous across restarts.
+        try:
+            self._last_market_at.update(raw.get("last_market_at") or {})
+            self._last_market_attempt_at.update(
+                raw.get("last_market_attempt_at") or {})
+            self._attempt_streak.update(raw.get("market_attempt_streaks") or {})
+        except Exception:
+            logger.warning("market rotation state restore failed")
         if n:
             logger.info("restored %d tracked games from state", n)
         return n
@@ -1510,20 +1580,35 @@ class PokerBetCollector:
             last = self._last_market_at.get(gid)
             # Early-checkpoint priority: a game that has NEVER had a
             # verified market total line is not-yet-covered — visit it
-            # regardless of the 480s freshness gate (unless we captured it
+            # regardless of the freshness gate (unless we captured it
             # within the last few seconds).  This gets young games their
             # first line at the earliest possible checkpoint.
             if gid in never_line:
                 if last and _ts_age_s(last) < 15:
+                    self._market_stats["skipped_fresh_arms"] += 1
                     continue  # just visited; avoid a hot loop
             elif last and _ts_age_s(last) < MARKET_REFRESH_S:
-                continue  # fresh enough — leave room for others
+                # Fresh-observation gate: armed ONLY by an actual observed
+                # market capture (attempt != observation).  While the
+                # gate is open (no successful observation yet) the game
+                # is retried every slow run instead of being skipped for
+                # a whole window with a broken/failed feed.
+                self._market_stats["skipped_fresh"] += 1
+                continue  # fresh OBSERVATION — leave room for others
+            self._market_stats["attempts"] += 1
+            last_attempt = self._last_market_attempt_at.get(gid)
+            if (last_attempt and _ts_age_s(last_attempt) < MARKET_ATTEMPT_BACKOFF_S
+                    and self._attempt_streak.get(gid, 0)
+                    >= MARKET_ATTEMPT_STREAK_BACKOFF):
+                self._market_stats["skipped_backoff"] += 1
+                continue  # failing repeatedly — bounded retry, still queued
             game = self._find_tracked(gid)
             if game is None or not game.source_url:
                 continue
             cls = Classification(game.classification)
             logger.info("slow event view for game %s", gid)
             try:
+                self._last_market_attempt_at[gid] = now
                 # The SPA event route hydrates only from the matching
                 # lobby — a stale event page or foreign lobby makes every
                 # row-click fail, starving whole leagues (CYBER_2K26).
@@ -1531,8 +1616,12 @@ class PokerBetCollector:
                     logger.warning(
                         "slow event view: %s lobby unreachable for %s — skipped",
                         cls.value, gid)
+                    self._market_stats["failed"] += 1
+                    self._attempt_streak[gid] = self._attempt_streak.get(gid, 0) + 1
                     continue
                 if not self._click_tracked_row(page, game):
+                    self._market_stats["failed"] += 1
+                    self._attempt_streak[gid] = self._attempt_streak.get(gid, 0) + 1
                     continue
                 text = page.inner_text("body", timeout=10000)
                 parsed = parse_event_view(text)
@@ -1545,6 +1634,8 @@ class PokerBetCollector:
                     ws_ok = ws_at is not None and _ts_age_s(ws_at) < 10
                     if not ws_ok:
                         self._event_view_failures += 1
+                        self._market_stats["failed"] += 1
+                        self._attempt_streak[gid] = self._attempt_streak.get(gid, 0) + 1
                         logger.warning(
                             "event view unverified for %s (parsed teams %r/%r) — "
                             "skipped (unverified=%d)",
@@ -1553,6 +1644,9 @@ class PokerBetCollector:
                         continue
                     self._event_view_failures = 0
                     self._last_market_at[gid] = now
+                    self._last_market_attempt_at[gid] = now
+                    self._attempt_streak[gid] = 0
+                    self._market_stats["observed"] += 1
                     captured += 1
                     logger.info(
                         "event view unverified for %s but WS bridge captured "
@@ -1561,6 +1655,8 @@ class PokerBetCollector:
                 self._event_view_failures = 0
                 eh, ea = parsed.get("home_score"), parsed.get("away_score")
                 if eh is None or ea is None:
+                    self._market_stats["failed"] += 1
+                    self._attempt_streak[gid] = self._attempt_streak.get(gid, 0) + 1
                     continue
                 prev = self.store.get_snapshots(game.source_game_id, limit=1)
                 prev_tot = None
@@ -1599,9 +1695,13 @@ class PokerBetCollector:
                 self._capture_event_state(page, cls, game, text)
                 captured += 1
                 self._last_market_at[gid] = now
+                self._last_market_attempt_at[gid] = now
+                self._attempt_streak[gid] = 0
             except Exception:
                 logger.error("slow market capture failed:\n%s",
                              traceback.format_exc())
+                self._market_stats["failed"] += 1
+                self._attempt_streak[gid] = self._attempt_streak.get(gid, 0) + 1
             finally:
                 # back to the discovery page for the next slow capture
                 try:

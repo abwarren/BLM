@@ -39,6 +39,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from blm_v4.clean_boundary import (CLEAN, CLEAN_DATA_EPOCH, LEGACY,
                                    game_data_quality, is_clean_ts)
+from blm_v4.live_analytics.league import PROVIDERS
 from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
                                opening_snapshot, project)
 from blm_v4.terminal_eligibility import (is_terminal_checkpoint,
@@ -726,6 +727,21 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     proj = project(rows, total_line if mkt_src == "ws" else None)
     market_total = proj["market_total"]
 
+    # score_line_gap — the LIVE comparison only (directive 2026-09-09):
+    # current combined score minus the observed live O/U line at this
+    # moment.  Pure arithmetic on two OBSERVED values ("market_total" is
+    # the observed line passthrough from project(), never a model output);
+    # no BLM fair / trajectory / residual / z / probability / edge goes
+    # into it.  A negative gap = score below the live line.  The separate
+    # retrospective question (did the FINAL score beat the checkpoint
+    # line?) stays in checkpoint_market / prediction_scores.
+    score_line_gap: Optional[float] = None
+    combined_now = None
+    if home_score is not None and away_score is not None:
+        combined_now = home_score + away_score
+        if market_total is not None:
+            score_line_gap = round(combined_now - market_total, 1)
+
     momentum = _momentum(rows)
 
     market_efficiency = None
@@ -752,6 +768,13 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "game_db_id": game["id"],
         "source": game["source"],
         "classification": game["classification"],
+        # Canonical identity (frozen architecture §8): provider from the
+        # frozen family map, competition from the AUTHORITATIVE source
+        # metadata (slug + numeric id).  The display name (`competition`)
+        # is provenance only — never identity.
+        "provider": PROVIDERS.get(game["classification"]),
+        "competition_slug": game.get("competition_slug") or None,
+        "competition_id": game.get("competition_id") or None,
         "competition": game.get("competition") or "",
         "region": game.get("region") or "",
         "sport": game.get("sport") or "basketball",
@@ -776,6 +799,7 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
             "closing_line": closing_line,
             "closing_line_at": closing_line_at,
             "total_line": market_total,
+            "score_line_gap": score_line_gap,
             "total_line_at": (
                 ws_obs["captured_at"] if mkt_src == "ws" and ws_obs
                 else (mlatest["captured_at"] if mlatest else None)),
@@ -1520,6 +1544,36 @@ def v4_deviation_validation() -> dict:
                 "sign_buckets": [], "magnitude_buckets": [],
                 "correlations": {}, "by_context": [], "by_progress": [],
                 "ungated_comparison": {}, "scatter": {}}
+
+
+@router.get("/game/{game_id}/pace-z")
+def v4_game_pace_z(game_id: str) -> dict:
+    """PACE Z-SCORE for one game — the authoritative descriptive Z of the
+    new architecture.
+
+    z = (actual_pace − μ) / σ against the strictly-PRIOR historical
+    population at the same (provider, competition, period, progress
+    bucket) — never a market-vs-trajectory residual, never derived from
+    the live line or score_line_gap, never computed in the frontend.
+    The game's own observation is excluded; nothing is fabricated when
+    the population is ineligible/degenerate/undersized (z = None plus a
+    benchmark_status)."""
+    try:
+        from blm_v4.live_analytics.service import pace_z_payload
+        conn = sqlite3.connect(f"file:{_db_path()}?mode=ro", uri=True,
+                               timeout=30)
+        try:
+            return pace_z_payload(conn, _db_path().parent
+                                  / "blm_metrics_clean.db", game_id,
+                                  history=120)
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"game_id": game_id, "z": None, "n": 0,
+                "benchmark_status": "unavailable", "error": str(e)[:200],
+                "benchmark_key": None, "mean_pace": None, "std_pace": None,
+                "actual_pace": None, "period": None, "progress_pct": None,
+                "provider": None, "competition": None, "series": []}
 
 
 @router.get("/game/{game_id}/deviation")

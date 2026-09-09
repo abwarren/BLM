@@ -19,10 +19,14 @@ Covers:
      ``markets_json`` '{}'); an event-view snapshot (raw_json ~5.9KB)
      does.  Pins the LENGTH(raw_json) heuristic (<500B = list stub,
      >5000B = event view) documented in the M006 milestone.
-  3. MARKET_REFRESH_S (=480) per-game refresh window — a game captured
-     within the window is skipped by the round-robin queue scan;
-     outside it, captured.  Boundary pinned exactly: age < 480 skip,
-     age == 480 due (``< MARKET_REFRESH_S`` skip condition).
+  3. MARKET_REFRESH_S (=240, strictly below the 300s LIVE/STALE
+     threshold since 2026-09-09) per-game refresh window — a game with
+     a fresh OBSERVED capture inside the window is skipped by the
+     round-robin queue scan; outside it, captured.  Boundary pinned
+     exactly: age < 240 skip, age == 240 due (``< MARKET_REFRESH_S``
+     skip condition).  The gate is armed ONLY by an observed market
+     (a failed attempt never re-arms it) and rotation state survives
+     restarts (section 5 below).
   4. COVERAGE-GAP RED (30741757-class, M007-M8 milestone) — a LIVE game
      with RECENT snapshots but NO recent ``market_observations`` rows
      is flagged by the coverage-audit query; a healthy game (recent
@@ -368,10 +372,14 @@ def test_length_raw_json_heuristic_pins_snapshot_kinds(tmp_path):
 # 3. MARKET_REFRESH_S per-game refresh window
 # ═══════════════════════════════════════════════════════════════════
 
-def test_market_refresh_constant_is_480s():
-    """Pin the documented per-game market refresh window."""
-    assert MARKET_REFRESH_S == 480
-    assert MARKET_BATCH == 2  # up to two event views per slow run
+def test_market_refresh_constant_is_240s():
+    """Pin the per-game market refresh window: strictly below the 300s
+    LIVE/STALE freshness threshold (directive 2026-09-09), with the
+    raised per-run visit budget that keeps the rotation span bounded."""
+    assert MARKET_REFRESH_S == 240
+    assert MARKET_REFRESH_S < 300
+    assert MARKET_BATCH == 3  # up to three event views per slow run
+    assert collector_mod.EVENT_VIEW_EVERY_N <= 2
 
 
 def test_refresh_window_skips_game_captured_recently(tmp_path, monkeypatch):
@@ -409,10 +417,10 @@ def test_refresh_window_captures_game_due_for_refresh(tmp_path, monkeypatch):
     assert c._last_market_at[game.source_game_id] > before
 
 
-def test_refresh_window_boundary_at_480s(tmp_path, monkeypatch):
+def test_refresh_window_boundary_at_240s(tmp_path, monkeypatch):
     """Exact boundary of the skip condition (< MARKET_REFRESH_S) for a
-    game that ALREADY has a market line (not early-priority): age 479.9s
-    → skipped (fresh); age 480.0s → due (captured)."""
+    game that ALREADY has a market line (not early-priority): age 239.9s
+    → skipped (fresh); age 240.0s → due (captured)."""
     # Seed a market line so the game is NOT early-priority (never-line).
     def _seed_line(st):
         gid_db = _add_game(st, "30741757", home="Oklahoma City Thunder Cyber",
@@ -427,21 +435,21 @@ def test_refresh_window_boundary_at_480s(tmp_path, monkeypatch):
         conn.close()
         return gid_db
 
-    # 479.9s — inside the window → skip (game already has a line)
+    # 239.9s — inside the window → skip (game already has a line)
     st1 = PokerBetStore(tmp_path / "a.db")
     _seed_line(st1)
     c1, game1, page1, clicks1 = _freshness_harness(st1, monkeypatch)
     c1._last_market_at[game1.source_game_id] = "2026-08-31T00:00:00.000Z"
-    monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 479.9)
+    monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 239.9)
     c1._capture_slow_market()
     assert clicks1 == [] and st1.get_snapshots(game1.source_game_id) == []
 
-    # 480.0s — exactly at the window edge → due for refresh
+    # 240.0s — exactly at the window edge → due for refresh
     st2 = PokerBetStore(tmp_path / "b.db")
     _seed_line(st2)
     c2, game2, page2, clicks2 = _freshness_harness(st2, monkeypatch)
     c2._last_market_at[game2.source_game_id] = "2026-08-31T00:00:00.000Z"
-    monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 480.0)
+    monkeypatch.setattr(collector_mod, "_ts_age_s", lambda ts: 240.0)
     c2._capture_slow_market()
     assert clicks2 == [game2.source_game_id]
     assert len(st2.get_snapshots(game2.source_game_id)) == 1
