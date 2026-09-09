@@ -146,169 +146,118 @@ def test_live_view_has_no_model_panels(client):
     assert "divergenceHTML" not in js
 
 
-# ── Static: time-of-day label honesty ────────────────────────────────────
-
-def test_tod_label_first_observed_not_start(client):
-    js = _js(client)
-    assert "first-observed hour, local" in js
-    assert "start hour, local" not in js
-    assert "TIME-OF-DAY (first-observed hour, local)" in js
-
-
-# ── Static: missing odds never 50/50 ─────────────────────────────────────
-
-def test_observations_only_no_probability_ui(client):
-    """The live view never renders any probability surface — odds are
-    only exposed as raw observed values under modal Details."""
-    js = _js(client)
-    assert "WIN PROBABILITY" not in js
-    assert "win_probability" not in js
-    assert "MARKET-IMPLIED" not in js
-
-
-# ── Static: exact market age with LIVE/STALE/MISSING ─────────────────────
+# ── Static: market age exact + no trap/signal/dead UI (Z migration) ─────
 
 def test_market_age_exact_and_status_preserved(client):
     js = _js(client)
     assert "fmtAgeExact" in js
     assert 'mstatus === "MISSING" ? "—" : fmtAgeExact(age)' in js
-    # M3 freshness literals untouched (event dataset chips + filters)
+    # M3 freshness literals untouched (market-state badges)
     assert "st-live" in js and "st-stale" in js and "st-missing" in js
     # the card/modal freshness word comes from the M3 threshold helper
     assert "mktStatusWord" in js
     assert "age <= 300" in js
 
 
-# ── Static: false-momentum distinction ───────────────────────────────────
-
 def test_no_trap_signal_ui_in_live_view(client):
-    """Trap/signal renderers are absent from the live view entirely;
-    the frozen checkpoint market history (observed lines only) remains
-    under modal Details ▾."""
+    """Trap/signal renderers are absent from the live view entirely, and
+    the Z migration removed the checkpoint/settlement presentation from
+    the modal as well (terminal semantics remain backend-only)."""
     js = _js(client)
     assert "bull_trap" not in js
     assert "trap_meter" not in js
     assert "False Mom" not in js
-    assert "PREDICTIVE CHECKPOINTS — 10–90% non-terminal observations" in js
-    assert "SETTLEMENT / TERMINAL" in js
-    assert "Market @CP" in js
-    assert "market_at_checkpoint" in js
+    assert "PREDICTIVE CHECKPOINTS" not in js
+    assert "SETTLEMENT / TERMINAL" not in js
+    assert "Market @CP" not in js
+    assert "market_at_checkpoint" not in js
+    assert "momentum" not in js
 
 
 # ── Static: metric labels ────────────────────────────────────────────────
 
 def test_metric_labels_explicit(client):
     js = _js(client)
+    html = _html(client)
     # descriptive measurements are named as measurements
     assert "Pts/Min" in js
     assert "Pace gap" in js
-    assert "Recent pace 1/2/3/5 min" in js
     assert "LIVE TOTAL" in js
-    assert "mkt proximity" in js
-    assert "BLM position win rate" in js   # audit scorecard only
-    # model-interpretation labels are gone from the live view
+    assert "PACE Z-SCORE" in js
+    # old-model labels are gone from the frontend entirely
+    assert "mkt proximity" not in js
+    assert "BLM" not in js
     assert "Model data confidence" not in js
     assert "Market-implied win prob" not in js
     assert '"eff "' not in js
-    html = _html(client)
+    assert "HISTORICAL / RESEARCH" not in html
     assert "SNAPSHOTS (window)" in html
     assert "served games only" in html
-    # HISTORICAL / RESEARCH area present (top-level collapse, per the
-    # collapsible-historical directive) and separated from the live view
-    assert "HISTORICAL / RESEARCH" in html
     assert "LIVE GAMES" in html
 
 
-def test_collapsible_historical_and_details(client):
-    """Collapsible-sections directive: HISTORICAL / RESEARCH collapses as a
-    whole (collapsed by default), the research sub-sections sit inside it
-    with independent toggles, game DETAILS default collapsed, CHARTS stay
-    available, and section state persists to localStorage.  Frontend-only:
-    no deletion, no new prediction logic."""
+def test_collapsible_sections_and_details(client):
+    """Collapsible-sections directive (post-migration): game DETAILS
+    default collapsed, CHARTS stay available, and section state persists
+    to localStorage.  The HISTORICAL / RESEARCH block is gone — the live
+    view carries no research/audit sub-sections."""
     html = _html(client)
     js = _js(client)
-    # top-level HISTORICAL / RESEARCH toggle wraps the research sections
-    assert 'id="auditToggle"' in html
-    assert "HISTORICAL / RESEARCH" in html
-    assert 'id="auditBody" hidden' in html          # collapsed by default
-    # the four research/audit sections live inside the collapsed wrapper
-    for sid in ("scorecardSection", "trendsSection", "eventsSection", "gsSection"):
-        assert sid in html
+    # the HISTORICAL / RESEARCH wrapper no longer exists
+    assert 'id="auditToggle"' not in html
+    assert "HISTORICAL / RESEARCH" not in html
+    for sid in ("scorecardSection", "trendsSection", "eventsSection",
+                "gsSection", "devSection"):
+        assert sid not in html
     # localStorage preference keys with the required defaults
-    assert "blm.historicalResearchCollapsed" in js
-    assert "blm.gameDetailsCollapsed" in js
-    assert "blm.chartsCollapsed" in js
-    assert "prefGet(PREF.HISTORICAL, true)" in js    # collapsed default
+    assert "pz.gameDetailsCollapsed" in js
+    assert "pz.chartsCollapsed" in js
     assert "prefGet(PREF.GAME_DETAILS, true)" in js  # collapsed default
     assert "prefGet(PREF.CHARTS, false)" in js       # visible default
     # cards + detail modal expose CHARTS (open) and DETAILS (collapsed)
     assert "details.card-charts" in js
     assert "details.card-details" in js
-    assert "data-label=\"CHARTS\"" in js
-    assert "data-label=\"DETAILS\"" in js
+    assert 'data-label="CHARTS"' in js
+    assert 'data-label="DETAILS"' in js
     # descriptive defaults stay in the live view
     assert "LIVE GAMES" in html
     assert "Pts/Min" in js
     assert "LIVE TOTAL" in js
 
 
-def test_deviation_research_frontend_present(client):
-    """Phase 2/3 research surface: the deviation charts + the VALIDATION
-    (WHAT HAPPENED NEXT) block exist inside the collapsed research area
-    (never the live predictive view), wired to the research endpoints."""
+def test_deviation_research_frontend_absent(client):
+    """The Phase 2/3 research surface (deviation charts, VALIDATION) is
+    REMOVED from the frontend by the Z migration — the live view is the
+    descriptive pace-Z view and no research/audit block remains."""
     html = _html(client)
     js = _js(client)
-    assert 'id="devSection"' in html
-    assert 'id="devGame"' in html
-    assert 'id="devChartA"' in html and 'id="devChartC"' in html
-    assert 'id="valDetails"' in html
-    assert "VALIDATION — WHAT HAPPENED NEXT" in html
-    assert "API_GAME_DEV" in js
-    assert "API_VALIDATION" in js
-    assert "/deviation/validation" in js
-    # research section lives inside the collapsed HISTORICAL / RESEARCH area
-    assert "auditBody" in html
+    assert 'id="devSection"' not in html
+    assert 'id="devGame"' not in html
+    assert 'id="devChartA"' not in html and 'id="devChartC"' not in html
+    assert 'id="valDetails"' not in html
+    assert "VALIDATION — WHAT HAPPENED NEXT" not in html
+    assert "API_GAME_DEV" not in js
+    assert "API_VALIDATION" not in js
+    assert "/deviation/validation" not in js
+    assert "auditBody" not in html
 
 
-def test_checkpoint_results_present_and_collapsible(client):
-    """UI-correction directive: checkpoint results are RESTORED, not removed.
-    Every clean checkpoint's full field set (clock, period, score, observed /
-    required pace, pace gap, live line, projected trajectory, residual,
-    benchmark N/mean/std, Z-score, maturity) must exist in the DOM; research
-    sub-sections are collapsible and collapsing never deletes the data (rows
-    are rendered into the table body even while the section is hidden)."""
+def test_checkpoint_research_surface_absent(client):
+    """The checkpoint/residual research table (projected trajectory,
+    residual, benchmark Z-of-residual, maturity) is REMOVED from the
+    frontend by the Z migration.  The modal presents the descriptive
+    Z view only; no residual or trajectory field appears in the assets."""
     html = _html(client)
     js = _js(client)
-    # CHECKPOINTS table exists with every required research field as a header
-    assert 'id="devCheckpointsTable"' in html
-    assert 'id="devCheckpointsBody"' in html
-    for header in ("ELAPSED", "CLOCK", "PERIOD", "SCORE", "LIVE O/U LINE",
-                   "OBS PACE", "REQ PACE", "PACE GAP", "PROJECTED TOTAL",
-                   "RESIDUAL", "N", "μ", "σ", "Z", "STATUS"):
-        assert f">{header}<" in html
-    # the table lives inside a collapsible section (CHECKPOINTS), with the
-    # two chart groups and VALIDATION as sibling collapsibles
-    assert 'id="cpDetails"' in html and 'id="mtDetails"' in html
-    assert 'id="dzDetails"' in html and 'id="valDetails"' in html
+    assert 'id="devCheckpointsTable"' not in html
+    assert 'id="devCheckpointsBody"' not in html
+    assert 'id="cpDetails"' not in html and 'id="mtDetails"' not in html
+    assert 'id="dzDetails"' not in html
     for label in ("CHECKPOINTS — ALL CLEAN OBSERVATIONS",
-                  "MARKET ↔ TRAJECTORY", "DEVIATION / Z-SCORE",
-                  "VALIDATION — WHAT HAPPENED NEXT"):
-        assert label in html
-    # rendering is additive: rows go into the tbody whether or not the
-    # section is open — collapse only hides, never deletes
-    assert "devRenderCheckpoints" in js
-    assert "devCheckpointsBody" in js
-    assert "collapsing only hides" in js or "collapse only hides" in js
-    # per-subsection localStorage prefs with the required defaults
-    for key in ("blm.checkpointsCollapsed", "blm.marketTrajectoryCollapsed",
-                "blm.deviationCollapsed", "blm.validationCollapsed"):
-        assert key in js
-    assert '"cpDetails", PREF.CHECKPOINTS, true' in js   # checkpoints collapsed default
-    assert '"mtDetails", PREF.MARKET_TRAJ, false' in js  # charts visible default
-    assert '"dzDetails", PREF.DEVIATION_Z, false' in js
-    assert '"valDetails", PREF.VALIDATION, false' in js
-    # every checkpoint row carries residual + Z + benchmark maturity
-    assert "market_trajectory_residual" in js
-    assert "benchmark_n" in js and "benchmark_std" in js
-    assert "benchmark_status" in js
-    assert "z_score" in js
+                  "MARKET ↔ TRAJECTORY", "DEVIATION / Z-SCORE"):
+        assert label not in html
+    assert "devRenderCheckpoints" not in js
+    assert "market_trajectory_residual" not in js
+    assert "projected_final_total" not in js
+    assert "z_score" not in js
+    assert "residData" not in js

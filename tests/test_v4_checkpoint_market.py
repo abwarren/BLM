@@ -320,13 +320,14 @@ def test_ws_multi_line_batch_freezes_lowest_line(client, db, sc):
     assert cps["q2"]["market_at_checkpoint"] == 160.5
 
 
-def test_dashboard_detail_modal_renders_checkpoint_table(client, sc):
-    """The deployed detail modal must carry the PREDICTIVE checkpoint
-    table columns, with the terminal end state served separately as
-    SETTLEMENT / TERMINAL (never inside the predictive table)."""
+def test_dashboard_detail_modal_has_no_checkpoint_table(client, sc):
+    """Z migration: the deployed detail modal no longer renders the
+    PREDICTIVE checkpoint table or the SETTLEMENT / TERMINAL section —
+    it presents the descriptive pace-Z view.  The API-level checkpoint
+    separation is covered by the payload tests above (unchanged)."""
     js = client.get("/static/dashboard.js").text
-    assert "PREDICTIVE CHECKPOINTS — 10–90% non-terminal observations" in js
-    assert "SETTLEMENT / TERMINAL" in js
-    assert "Market @CP" in js
-    assert "market_at_checkpoint" in js
-    assert "checkpoints_settlement" in js
+    assert "PREDICTIVE CHECKPOINTS" not in js
+    assert "SETTLEMENT / TERMINAL" not in js
+    assert "Market @CP" not in js
+    assert "market_at_checkpoint" not in js
+    assert "checkpoints_settlement" not in js

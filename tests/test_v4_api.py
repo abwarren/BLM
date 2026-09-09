@@ -153,7 +153,7 @@ def client(app):
 def test_dashboard_served_at_root(client):
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "BLM LIVE ANALYTICS" in resp.text
+    assert "PokerBet Live Analytics" in resp.text
     assert "dashboard.js" in resp.text
 
 

@@ -217,13 +217,17 @@ def test_nonterminal_981_final_snapshot_remains_predictive(client, sc):
     assert finals, "non-terminal final checkpoint stays predictive"
 
 
-def test_dashboard_renders_predictive_and_settlement_sections(client, sc):
-    """The deployed modal carries the two separate sections —
-    PREDICTIVE CHECKPOINTS (10–90%) and SETTLEMENT / TERMINAL — and no
-    single mixed table."""
+def test_modal_has_no_checkpoint_or_settlement_sections(client, sc):
+    """The Z migration removed the checkpoint/settlement PRESENTATION from
+    the modal — the deployed game view is the descriptive pace-Z view.
+    The API-level separation (checkpoints vs checkpoints_settlement) is
+    covered by the payload tests above and stays untouched."""
     js = client.get("/static/dashboard.js").text
-    assert "PREDICTIVE CHECKPOINTS — 10–90% non-terminal observations" in js
-    assert "SETTLEMENT / TERMINAL" in js
-    assert "TERMINAL — SETTLEMENT ONLY" in js
-    assert "checkpoints_settlement" in js
-    assert "market_vs_fair_settlement" not in js  # settlement served via checkpoints_settlement rows
+    assert "PREDICTIVE CHECKPOINTS" not in js
+    assert "SETTLEMENT / TERMINAL" not in js
+    assert "TERMINAL — SETTLEMENT ONLY" not in js
+    assert "checkpoints_settlement" not in js
+    assert "checkpoints" not in js
+    # the descriptive replacement surface is present
+    assert "PACE Z-SCORE DEVIATION" in js
+    assert "SCORE vs LIVE LINE — MARKET MOVEMENT" in js
