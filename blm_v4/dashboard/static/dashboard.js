@@ -20,6 +20,13 @@
    chart below it on the same game-time axis.  The view carries only
    observed series and the descriptive pace-Z measurement; nothing
    derived from any other analytical source is presented here.
+
+   A read-only HISTORICAL UNDER-CONDITION layer sits on top of this
+   surface: when the current live state matches fixed findings from
+   settled games (pace gap > +1.5, late Q4 progress, stored pace-z),
+   a badge/panel shows the matching archive statistics and marks the
+   market freshness.  Presentation of past observations only — the
+   frozen descriptive model stays authoritative.
    ═══════════════════════════════════════════════════════════════ */
 "use strict";
 
@@ -116,6 +123,54 @@ const mktStatusWord = (age, hasLine) => {
 };
 const num = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
 const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
+
+/* ── Historical under-condition layer (READ-ONLY PRESENTATION) ──
+   Fixed research findings from the settled-game archive, shown when
+   the CURRENT authoritative live state matches them.  This layer only
+   compares current state against fixed recorded statistics; it makes
+   no forward claim and introduces no model of its own.  Terminology is
+   descriptive: HISTORICAL UNDER CONDITION / CONCENTRATION / PATTERN.
+   Conditions (fixed research results, not tuned parameters):
+     base   pace_gap > +1.5              → 72.7% obs UNDER · 87.3% game
+     strong Q4 + progress>=90 + gap>1.5  → 78.0% · 87.7%
+     high   + stored pace_z < -1         → 85.7% · 89.3%
+   All inputs are the authoritative API values (projector fields and
+   the /pace-z payload); nothing here is recomputed from raw data. */
+/* __PURE_ALERT_BEGIN__ */
+// level selection — consumes ONLY pre-extracted authoritative state:
+//   { hasLine, periodQ, progressPct, paceGap, z }  (z optional: the
+//   live card list carries no z, so card-level never yields "high")
+function histAlertLevel(s) {
+  if (!s || !s.hasLine) return null;               // missing line → no alert
+  if (s.paceGap == null || !(s.paceGap > 1.5)) return null;
+  const late = s.periodQ === "Q4" && s.progressPct != null && s.progressPct >= 90;
+  if (late && s.z != null && s.z < -1) return "high";
+  if (late) return "strong";
+  return "base";
+}
+// documented research z gradient — context only, never an alert trigger
+function zContextBin(z) {
+  if (z == null) return null;
+  if (z < -2) return { range: "z < -2", obs: "65.5%", game: "57.6%", lean: "under" };
+  if (z < -1) return { range: "-2 <= z < -1", obs: "60.6%", game: "55.2%", lean: "under" };
+  if (z < 0) return { range: "-1 <= z < 0", obs: "51.9%", game: "51.1%", lean: "under" };
+  if (z < 1) return { range: "0 <= z < 1", obs: "44.8%", game: "47.6%", lean: "over" };
+  if (z < 2) return { range: "1 <= z < 2", obs: "40.0%", game: "44.7%", lean: "over" };
+  return { range: "z >= 2", obs: "33.4%", game: "41.9%", lean: "over" };
+}
+/* __PURE_ALERT_END__ */
+// fixed archive statistics bound to each level (display values only)
+const HIST_ALERTS = {
+  base: { label: "HISTORICAL UNDER CONDITION",
+    obs: "72.7%", game: "87.3%", n: "1,489" },
+  strong: { label: "STRONG HISTORICAL UNDER CONCENTRATION",
+    obs: "78.0%", game: "87.7%", n: "1,446" },
+  high: { label: "HIGH HISTORICAL UNDER CONCENTRATION",
+    obs: "85.7%", game: "89.3%", n: "363" },
+};
+// CYBER archive result — shown as context with its thin sample flagged
+const CYBER_HIST = { obs: "60.5%", game: "56.6%", n: "50" };
+
 const hasChart = () => typeof Chart !== "undefined";
 const ChartColor = {
   home: "rgba(34,211,238,1)", away: "rgba(251,191,36,1)",
@@ -270,7 +325,7 @@ function gatedNoteHTML(g) {
     <span class="muted">· ${esc(reason)} · historical rows retained for diagnostics</span></div>`;
 }
 
-function cardHTML(g, ui) {
+function cardHTML(g, ui, alertEnter) {
   const invalid = g.quality_status === "INVALID";
   const liveCls = invalid ? "chip-excluded"
     : (g.live ? "chip-live" : (g.status === "ended" ? "chip-ended" : "chip-stale"));
@@ -295,6 +350,7 @@ function cardHTML(g, ui) {
     ${gameStateHTML(g)}
     ${paceStripHTML(g)}
     ${liveMarketHTML(g)}
+    ${histBadgeHTML(g, alertEnter || null)}
     ${invalid ? gatedNoteHTML(g) : ""}
     <details class="card-charts" ${chartsOpen ? "open" : ""}>
       <summary data-label="CHARTS">CHARTS ${chartsOpen ? "▾" : "▸"}</summary>
@@ -408,8 +464,14 @@ function renderCards(payload) {
       card.el.classList.add("flash");
     }
     card.lastScore = nowScore;
+    // historical-condition entry tracking: pulse ONLY on level
+    // transitions (null→base→strong), never on steady 5s refreshes
+    const alLvl = liveAlertOf(g);
+    const entered = (alLvl && card.prevAlert != null && card.prevAlert !== alLvl)
+      ? alLvl : null;
+    card.prevAlert = alLvl;
     // re-render while preserving each card's CHARTS / DETAILS state
-    card.el.innerHTML = cardHTML(g, { detOpen: card.detOpen, chartsOpen: card.chartsOpen });
+    card.el.innerHTML = cardHTML(g, { detOpen: card.detOpen, chartsOpen: card.chartsOpen }, entered);
     bindCardSections(card.el, card);
     if (card.spark) {
       const holder = card.el.querySelector(".spark");
@@ -440,6 +502,7 @@ function openModal(gameId) {
   state.modalZText = null; // fresh game — readout awaits its own fetch
   state.modalGapText = null; // fresh game — gap readout awaits its own fetch
   state.modalZMeta = null; // fresh game — authoritative Z payload awaits its fetch
+  state.modalAlertLevel = null; // fresh game — alert pulse state resets
   $("modalBackdrop").hidden = false;
   document.body.style.overflow = "hidden";
   // render immediately from the live payload (never an empty overlay)
@@ -454,6 +517,7 @@ function closeModal() {
   document.body.style.overflow = "";
   state.modalGameId = null;
   state.modalDetailOk = null;
+  state.modalAlertLevel = null;
   for (const k in state.modalCharts) {
     if (state.modalCharts[k]) state.modalCharts[k].destroy();
   }
@@ -468,6 +532,165 @@ function modalPanel(title, inner) {
 // (sign-explicit).  Formatting only — never recomputed in the browser.
 function zDisplay(z) {
   return z == null ? "n/a" : (z > 0 ? "+" : "") + num(z, 2);
+}
+
+/* ── Historical under-condition presentation ──────────────────
+   Builders below compare CURRENT authoritative state (game payload
+   projector fields + the /pace-z payload) against the FIXED archive
+   findings and render badges/panels.  Pure state→level selection
+   lives in histAlertLevel() above; these functions only format. */
+
+// canonical period Q1..Q4 from the stored period label ("4th Quarter"),
+// numeric quarter fallback; null for Half End / non-quarter states
+function periodQOf(g) {
+  const pl = String(g.period_label || "");
+  const m = /^\s*([1-4])/.exec(pl);
+  if (m) return "Q" + m[1];
+  if (g.quarter != null && g.quarter >= 1 && g.quarter <= 4) return "Q" + g.quarter;
+  return null;
+}
+
+function isCyberGame(g) {
+  return /^CYBER/i.test(String(g.classification || ""))
+    || g.provider === "CYBER"
+    || /cyber/i.test(String(g.competition_slug || ""));
+}
+
+// observed market line + freshness classification (LIVE/STALE/MISSING
+// at the 300s backend threshold) — never re-derived differently
+function liveLineState(g) {
+  const p = g.projector || {}, m = g.market || {};
+  const line = p.live_total_line != null ? p.live_total_line : m.total_line;
+  const age = p.market_age_seconds != null ? p.market_age_seconds : m.total_line_age_s;
+  const mstatus = p.market_status || mktStatusWord(age, line != null);
+  return { line, age, mstatus };
+}
+
+function signedNum(v, d = 2) {
+  return v == null ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(d);
+}
+
+// card-level condition level — the /live list carries no z, so this
+// never escalates past "strong"; the modal re-evaluates with the
+// authoritative stored z from the /pace-z payload.
+function liveAlertOf(g) {
+  if (!g || g.live !== true || g.quality_status === "INVALID") return null;
+  const p = g.projector || {};
+  const st = liveLineState(g);
+  if (st.line == null) return null;
+  return histAlertLevel({ hasLine: true, periodQ: periodQOf(g),
+    progressPct: p.progress_pct, paceGap: p.pace_gap, z: null });
+}
+
+function marketChipHTML(mstatus) {
+  if (mstatus === "STALE") return '<span class="al-chip al-stale">MARKET STALE</span>';
+  if (mstatus === "LIVE") return '<span class="al-chip al-live">MARKET: LIVE</span>';
+  return "";
+}
+
+function cyberNoteHTML(compact) {
+  const note = `CYBER HISTORICAL CONTEXT — observation UNDER ${CYBER_HIST.obs} · `
+    + `equal-game ${CYBER_HIST.game} · settled games ${CYBER_HIST.n}`;
+  return compact
+    ? `${note} · <span class="al-limited">LIMITED SAMPLE</span>`
+    : `${note}<br><span class="al-limited">LIMITED SAMPLE — ${CYBER_HIST.n} SETTLED GAMES</span>`;
+}
+
+// compact card badge — shown while the condition holds, removed the
+// moment it ceases; z is unknown here so only base/strong can appear
+function histBadgeHTML(g, entered) {
+  if (!g || g.live !== true || g.quality_status === "INVALID") return "";
+  const p = g.projector || {};
+  const st = liveLineState(g);
+  if (st.line == null) return "";                     // missing line → no alert
+  const lvl = liveAlertOf(g);
+  const cyber = isCyberGame(g);
+  if (!lvl && !cyber) return "";
+  const meta = lvl ? HIST_ALERTS[lvl] : null;
+  const flash = entered ? " al-in" : "";
+  const head = meta
+    ? `<span class="hb-title al-${lvl}">${meta.label}</span>`
+    : `<span class="hb-title hb-title-ctx">CYBER HISTORICAL CONTEXT</span>`;
+  const stateLine = [];
+  if (p.pace_gap != null) stateLine.push(`pace gap ${signedNum(p.pace_gap, 2)}`);
+  const q = periodQOf(g);
+  if (q && p.progress_pct != null) stateLine.push(`${q} ${num(p.progress_pct, 0)}%`);
+  const histLine = meta
+    ? `<span class="hb-hist">${meta.obs} obs UNDER · ${meta.game} equal-game · N=${meta.n}</span>`
+    : "";
+  const cy = cyber ? `<div class="hb-cyber">${cyberNoteHTML(true)}</div>` : "";
+  return `<div class="hist-badge${lvl ? " al-" + lvl : " al-ctx"}${flash}">`
+    + `<div class="hb-head">${head}${marketChipHTML(st.mstatus)}</div>`
+    + (stateLine.length ? `<div class="hb-state">${stateLine.join(" · ")}</div>` : "")
+    + (histLine ? `<div class="hb-hist">${histLine}</div>` : "")
+    + cy
+    + `</div>`;
+}
+
+// full modal panel — the example presentation: current state rows, the
+// archive statistics of the matched level, stored-z context, CYBER
+// limited-sample note, and the market freshness marker.
+function histPanelHTML(g) {
+  if (!g || g.live !== true || g.quality_status === "INVALID") return "";
+  const p = g.projector || {};
+  const st = liveLineState(g);
+  if (st.line == null) return "";                     // missing line → no alert
+  const zm = state.modalZMeta || {};
+  const lvl = histAlertLevel({ hasLine: true, periodQ: periodQOf(g),
+    progressPct: p.progress_pct, paceGap: p.pace_gap, z: zm.z });
+  const meta = lvl ? HIST_ALERTS[lvl] : null;
+  const cyber = isCyberGame(g);
+  if (!meta && !cyber) return "";
+  const q = periodQOf(g);
+  const rows = [];
+  if (p.pace_gap != null) rows.push(`<div class="al-row"><span class="k">Pace gap</span><span class="v">${signedNum(p.pace_gap, 2)} pts/min</span></div>`);
+  if (zm.z != null) rows.push(`<div class="al-row"><span class="k">Pace Z</span><span class="v">${zDisplay(zm.z)}</span></div>`);
+  if (q && p.progress_pct != null) rows.push(`<div class="al-row"><span class="k">Progress</span><span class="v">${q} · ${num(p.progress_pct, 0)}%</span></div>`);
+  const head = meta
+    ? `<span class="al-title">${meta.label}</span>`
+    : '<span class="al-title al-title-ctx">HISTORICAL CONTEXT</span>';
+  const hist = meta
+    ? `<div class="al-hist"><span class="al-big">HISTORICAL OBSERVATIONS ${meta.obs} UNDER</span>`
+      + `<span class="al-line">Equal-game mean ${meta.game} · Historical game N ${meta.n}</span></div>`
+    : "";
+  const zctx = (zm.z != null) ? (() => {
+    const b = zContextBin(zm.z);
+    const lean = b.lean === "under" ? "UNDER-CONCENTRATED RANGE" : "OVER-CONCENTRATED RANGE";
+    return `<div class="al-zctx"><span class="al-zlean">HISTORICAL CONTEXT: ${lean}</span>`
+      + ` <span class="muted">${b.range}: obs UNDER ${b.obs} · equal-game ${b.game}</span></div>`;
+  })() : "";
+  const cy = cyber ? `<div class="al-cyber">${cyberNoteHTML(false)}</div>` : "";
+  const note = meta
+    ? '<div class="al-note muted">Descriptive statistics from settled games in the archive — observed historical association, not guidance.</div>'
+    : "";
+  return `<div class="hist-panel${lvl ? " al-" + lvl : " al-ctx"}">`
+    + `<div class="al-head">${head}${marketChipHTML(st.mstatus)}</div>`
+    + (rows.length ? `<div class="al-rows">${rows.join("")}</div>` : "")
+    + hist + zctx + cy + note
+    + `</div>`;
+}
+
+// idempotent render into the single modal container; one-shot pulse on
+// level entry/escalation only (never on steady-state refreshes)
+function refreshHistAlert(g) {
+  const box = document.getElementById("histAlertBox");
+  if (!box || !g) return;
+  const html = histPanelHTML(g);
+  const zm = state.modalZMeta || {};
+  const p = g.projector || {};
+  const lvl = histAlertLevel({ hasLine: liveLineState(g).line != null,
+    periodQ: periodQOf(g), progressPct: p.progress_pct,
+    paceGap: p.pace_gap, z: zm.z });
+  const priorLevel = state.modalAlertLevel;
+  state.modalAlertLevel = lvl;
+  if (box.innerHTML === html) return;                 // stable during refresh
+  box.innerHTML = html;
+  const panel = box.firstElementChild;
+  if (panel && lvl && priorLevel !== lvl) {
+    panel.classList.remove("al-in");
+    void panel.offsetWidth;                            // restart the one-shot pulse
+    panel.classList.add("al-in");
+  }
 }
 
 function renderModal(g) {
@@ -572,6 +795,7 @@ function renderModal(g) {
       <div class="z-key muted" id="zStatKey">${zm.benchmark_key ? esc(zm.benchmark_key) : "benchmark: provider|competition|period|progress — prior observations only"}${zm.status ? ` · ${esc(zm.status)}` : ""}</div>
       <div class="z-note muted">z = (actual pace − historical mean) ÷ historical σ — how the current scoring pace compares with the prior actual-pace distribution at the same provider · competition · period · progress state. Descriptive only; the observation never defines its own benchmark.</div>
     </div>
+    <div id="histAlertBox" class="hist-alert-box"></div>
     ${invalid ? "" : `<details class="m-chart-toggle" ${chartsOpen ? "open" : ""}>
       <summary data-label="CHARTS">CHARTS ${chartsOpen ? "▾" : "▸"}</summary>
       <div class="m-charts">
@@ -615,10 +839,17 @@ function renderModal(g) {
   }
   bindCollapsible($("modalBody").querySelector(".m-chart-toggle"), PREF.CHARTS);
   bindCollapsible($("modalBody").querySelector(".m-details"), PREF.GAME_DETAILS);
+  // Historical-condition panel: immediate render from cached state, then
+  // again once the authoritative /pace-z payload lands (charts fetch it).
+  refreshHistAlert(g);
   // Fire-and-forget is fine, but failures must surface — a silent no-chart
   // state is exactly the bug class this view must never ship again.
-  renderModalCharts(invalid ? null : g).catch((err) =>
-    console.error("[PZ] chart render failed:", err));
+  renderModalCharts(invalid ? null : g)
+    .then(() => {
+      if (state.modalGameId === g.game_id) refreshHistAlert(g);
+    })
+    .catch((err) =>
+      console.error("[PZ] chart render failed:", err));
 }
 
 function baseChartOpts(yLabel) {

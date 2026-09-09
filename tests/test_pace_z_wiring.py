@@ -155,6 +155,41 @@ def test_service_unknown_game_is_honest(main_db, clean_db):
     assert payload["series"] == []
 
 
+def test_pace_z_independent_of_market_line(main_db, clean_db):
+    """The authoritative z is PACE vs the historical pace benchmark — a
+    NULL live_total_line / MISSING market must NOT suppress it.  The
+    population rows carry a line; the probe game's rows carry none, and
+    z still resolves (regression: the modal readout must not claim
+    'n/a' merely because the game's market line is missing)."""
+    c = sqlite3.connect(clean_db)
+    c.executescript("""
+        ALTER TABLE clean_projections ADD COLUMN live_total_line REAL;
+        ALTER TABLE clean_projections ADD COLUMN market_status TEXT;
+    """)
+    # population rows: lines present (so the population is line-bearing)
+    c.execute("UPDATE clean_projections SET live_total_line=220.5,"
+              " market_status='LIVE' WHERE source_game_id LIKE 'POP%'")
+    # probe game rows: market line NULL + MISSING (the 30840003#i1 case)
+    c.execute("UPDATE clean_projections SET live_total_line=NULL,"
+              " market_status='MISSING' WHERE source_game_id='30845868'")
+    c.commit()
+    c.close()
+    main = sqlite3.connect(main_db)
+    try:
+        payload = pace_z_payload(main, clean_db, "30845868", history=2)
+    finally:
+        main.close()
+    assert "market_line" not in payload        # pace-only payload: no market key
+    assert "live_total_line" not in payload
+    assert payload["z"] is not None            # authoritative z IS available
+    assert payload["n"] == 40                  # unchanged population
+    assert payload["benchmark_status"] == "ok"
+    assert 1.0 < payload["z"] < 4
+    # the payload is pace-only: no market-derived key may gate it
+    assert payload["actual_pace"] is not None
+    assert payload["mean_pace"] is not None and payload["std_pace"] is not None
+
+
 def test_endpoint_serves_pace_z(client):
     r = client.get("/api/v4/game/30845868/pace-z")
     assert r.status_code == 200

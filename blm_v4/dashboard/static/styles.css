@@ -322,6 +322,59 @@ details > summary::marker { content: ""; }
 @keyframes flash { 0% { background: #1e3a5f; } 100% { background: transparent; } }
 .muted { color: var(--muted); }
 
+/* ── historical under-condition layer ───────────────────────── */
+.hist-alert-box { margin-top: 10px; }
+.hist-alert-box:empty { display: none; }
+.hist-badge {
+  border: 1px solid var(--border2); border-left-width: 3px;
+  border-radius: 6px; padding: 6px 8px; margin: 6px 0 2px;
+  font-size: 10px; line-height: 1.5; background: var(--panel2);
+}
+.hist-panel {
+  border: 1px solid var(--border2); border-left-width: 3px;
+  border-radius: 8px; padding: 10px 12px; margin: 10px 0 2px;
+  background: var(--panel2); font-size: 12px;
+}
+.hist-badge.al-base, .hist-panel.al-base { border-left-color: var(--amber); }
+.hist-badge.al-strong, .hist-panel.al-strong { border-left-color: var(--orange); }
+.hist-badge.al-high, .hist-panel.al-high { border-left-color: var(--red); }
+.hist-badge.al-ctx, .hist-panel.al-ctx { border-left-color: var(--cyan); border-style: dashed; }
+.hb-head, .al-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; flex-wrap: wrap;
+}
+.hb-title, .al-title {
+  font-weight: 800; letter-spacing: .5px; font-size: 10px;
+  color: var(--amber);
+}
+.hb-title.al-strong, .al-title.al-strong { color: var(--orange); }
+.hb-title.al-high, .al-title.al-high { color: var(--red); }
+.hb-title-ctx, .al-title-ctx { color: var(--cyan); }
+.al-chip {
+  font-family: var(--mono); font-size: 9px; font-weight: 700;
+  padding: 1px 6px; border-radius: 3px; border: 1px solid;
+  white-space: nowrap;
+}
+.al-live { color: var(--green); border-color: #14532d; }
+.al-stale { color: var(--orange); border-color: #7c3a12; }
+.hb-state { font-family: var(--mono); font-size: 10px; color: var(--text); margin-top: 3px; }
+.hb-hist { color: var(--muted); font-size: 10px; margin-top: 2px; }
+.hb-cyber, .al-cyber { color: var(--cyan); margin-top: 4px; font-size: 10px; line-height: 1.55; }
+.al-limited { color: var(--orange); font-weight: 700; }
+.al-rows { display: grid; gap: 3px; margin: 6px 0; }
+.al-row { display: flex; justify-content: space-between; font-size: 12px; gap: 10px; }
+.al-hist { display: grid; gap: 2px; margin: 4px 0; }
+.al-big { font-weight: 800; letter-spacing: .5px; font-size: 12px; color: var(--text); }
+.al-line { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+.al-zctx { margin: 5px 0 2px; font-size: 11px; }
+.al-zlean { color: var(--z); font-weight: 700; }
+.al-note { font-size: 10px; margin-top: 6px; }
+.al-in { animation: histPulse 1.2s ease-out; }
+@keyframes histPulse {
+  0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, .55); background: rgba(244, 63, 94, .16); }
+  100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); background: transparent; }
+}
+
 @media (max-width: 640px) {
   .chart-box { height: 300px; }
   .chart-box-z { height: 130px; }

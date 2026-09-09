@@ -435,48 +435,69 @@ class PokerBetCollector:
                     for obs in normalize_observations(payloads, captured):
                         if obs["market_type"] != "MatchTotal":
                             continue
-                        gid = obs["source_game_id"]
-                        last = self._ws_market_last.get((gid, obs["line_value"]))
-                        if last and _ts_age_s(last) < WS_MARKET_DEDUP_S:
-                            continue
-                        self._ws_market_last[(gid, obs["line_value"])] = captured
-                        game = self._find_tracked(gid)
-                        if game is None:
-                            continue
-                        obs["game_id"] = self._game_db_id(game)
-                        try:
-                            self.store.upsert_market_observation(obs)
-                        except Exception:
-                            logger.error(
-                                "market observation persist failed:\n%s",
-                                traceback.format_exc())
-                        # WS → snapshot bridge: the open event's feed is an
-                        # observed capture of THIS game (score/period/line),
-                        # independent of the DOM parse that keeps failing on
-                        # virtual events.  Persist an event-quality snapshot
-                        # (throttled per game) so the live card is complete
-                        # and total_line reaches the API/dashboard even when
-                        # the event-view parse is unverified.
-                        try:
-                            snap = ws_matchtotal_snapshot(game, obs)
-                            last = self._ws_snap_last.get(gid)
-                            if snap is not None and (
-                                    last is None
-                                    or _ts_age_s(last) >= WS_MARKET_DEDUP_S):
-                                if self.store.insert_snapshot(
-                                        self._game_db_id(game), snap):
-                                    self._ws_snap_last[gid] = obs["captured_at"]
-                                    self.stats["snapshots"] += 1
-                                    self._record_clean(game, snap)
-                        except Exception:
-                            logger.error("ws snapshot bridge failed:\n%s",
-                                         traceback.format_exc())
+                        self._ingest_ws_observation(obs)
                 except Exception:
                     # a malformed frame must never kill the collector
                     logger.debug("ws market frame error: %s",
                                  traceback.format_exc())
             ws.on("framereceived", on_frame)
         page.on("websocket", on_ws)
+
+    def _ingest_ws_observation(self, obs: dict) -> None:
+        """Persist one eu-swarm MatchTotal observation + its snapshot bridge.
+
+        The feed keys frames to the event's BASE id while a live virtual
+        replay is tracked as the current #iN instance — resolve through
+        the SAME base → self._instances mapping the score/resolve path
+        uses (never a second resolution system), then store the
+        observation under the CURRENT instance id so it can never
+        contaminate the completed first sim.  Unknown frames (no tracked
+        game and no current instance) are safely ignored.  Dedup and the
+        WS → snapshot bridge semantics are unchanged.
+        """
+        gid = obs["source_game_id"]
+        last = self._ws_market_last.get((gid, obs["line_value"]))
+        if last and _ts_age_s(last) < WS_MARKET_DEDUP_S:
+            return
+        self._ws_market_last[(gid, obs["line_value"])] = obs["captured_at"]
+        game = self._find_tracked(gid)
+        if game is None:
+            cur = self._instances.get(gid)      # base -> current instance
+            if cur:
+                game = self._find_tracked(cur)
+        if game is None:
+            return
+        # current-instance identity: never write a base-keyed frame back
+        # onto the completed base game
+        obs["source_game_id"] = game.source_game_id
+        obs["game_id"] = self._game_db_id(game)
+        try:
+            self.store.upsert_market_observation(obs)
+        except Exception:
+            logger.error(
+                "market observation persist failed:\n%s",
+                traceback.format_exc())
+        # WS → snapshot bridge: the open event's feed is an
+        # observed capture of THIS game (score/period/line),
+        # independent of the DOM parse that keeps failing on
+        # virtual events.  Persist an event-quality snapshot
+        # (throttled per game) so the live card is complete
+        # and total_line reaches the API/dashboard even when
+        # the event-view parse is unverified.
+        try:
+            snap = ws_matchtotal_snapshot(game, obs)
+            last = self._ws_snap_last.get(gid)
+            if snap is not None and (
+                    last is None
+                    or _ts_age_s(last) >= WS_MARKET_DEDUP_S):
+                if self.store.insert_snapshot(
+                        self._game_db_id(game), snap):
+                    self._ws_snap_last[gid] = obs["captured_at"]
+                    self.stats["snapshots"] += 1
+                    self._record_clean(game, snap)
+        except Exception:
+            logger.error("ws snapshot bridge failed:\n%s",
+                         traceback.format_exc())
 
     def _fresh_context(self, reason: str) -> Page:
         """New context/page in the same browser (SPA state is per-context)."""
