@@ -162,10 +162,13 @@ def _history(main_conn: sqlite3.Connection, side: sqlite3.Connection,
 
     Each point is the FULL authoritative computation at its own T:
     strictly-prior population (captured_at < T, own row excluded by id,
-    same-game rows excluded), recomputed read-time from immutable rows
-    (cache bypassed — no writes, no reuse across points).  The current
-    observation can never enter its own benchmark; future observations
-    are structurally unreachable (cutoff = the point's own captured_at)."""
+    same-game rows excluded), computed from immutable rows and cached
+    under the point's exact (key, cutoff, id) — a cache hit can never
+    leak a later observation into an earlier T because the population is
+    strictly bounded by the point's own cutoff and the cache key
+    includes that cutoff.  The current observation can never enter its
+    own benchmark; future observations are structurally unreachable
+    (cutoff = the point's own captured_at)."""
     if limit <= 0:
         return []
     g = main_conn.execute(
@@ -195,7 +198,7 @@ def _history(main_conn: sqlite3.Connection, side: sqlite3.Connection,
                      reg.competition, r["progress_pct"], r["captured_at"],
                      cutoff_observation_id=int(r["id"]),
                      exclude_game_id=str(source_game_id),
-                     period_label=r["period_label"], use_cache=False,
+                     period_label=r["period_label"], use_cache=True,
                      _qualifier="clean")
         out.append({"captured_at": r["captured_at"],
                     "z": res.z, "actual_pace": r["actual_pts_per_min"],

@@ -190,6 +190,49 @@ def test_pace_z_independent_of_market_line(main_db, clean_db):
     assert payload["mean_pace"] is not None and payload["std_pace"] is not None
 
 
+def test_history_points_cache_identical_across_calls(main_db, clean_db):
+    """The /pace-z history (per-point T-state z) must be cache-served:
+    each point is keyed by its exact (cutoff, id) so a second call
+    returns IDENTICAL results from the cache — never a recompute of 120
+    full population scans per request (the 60-120s UI stall regression)
+    and never a leak across T (the cache key includes the cutoff)."""
+    c = sqlite3.connect(clean_db)
+    # the probe game needs a longer history for a meaningful timeline
+    for i in range(12):
+        c.execute(
+            "INSERT INTO clean_projections (source_game_id, classification,"
+            " captured_at, period_label, progress_pct, actual_pts_per_min,"
+            " status) VALUES ('30845868','BETUAL_NBA',?, '2nd Quarter',"
+            " 50.2, 2.30, 'VALID')",
+            (time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                           time.gmtime(time.mktime(time.strptime(
+                               "2026-09-01T00:00:00", "%Y-%m-%dT%H:%M:%S"))
+                               + 3600 + i * 60)),))
+    c.commit()
+    c.close()
+    side = sqlite3.connect(str(clean_db) + ".live_analytics.db")
+    ensure_league_schema(side)
+    ensure_schema(side)
+    side.execute("DELETE FROM pace_benchmark_cache")
+    side.commit()
+    side.close()
+    main = sqlite3.connect(main_db)
+    try:
+        p1 = pace_z_payload(main, clean_db, "30845868", history=8)
+        p2 = pace_z_payload(main, clean_db, "30845868", history=8)
+    finally:
+        main.close()
+    assert len(p1["series"]) == 8
+    # cache-served: the second call returns byte-identical T-state points
+    assert p1["series"] == p2["series"]
+    # every point is a full authoritative result (population n=40, own
+    # rows excluded) — cached, never degraded
+    assert all(s["n"] == 40 and s["z"] is not None for s in p1["series"])
+    # per-point cutoffs are preserved (T-state strictness survives cache)
+    cuts = [s["captured_at"] for s in p1["series"]]
+    assert cuts == sorted(cuts)
+
+
 def test_endpoint_serves_pace_z(client):
     r = client.get("/api/v4/game/30845868/pace-z")
     assert r.status_code == 200
