@@ -33,6 +33,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote
 
 from playwright.sync_api import Browser, Page, sync_playwright
 
@@ -136,6 +137,75 @@ TICK_STATS_MAX = 8640
 # this window — the feed pushes every price change, so movements still land,
 # but a game that stays flat is not spammed into the DB every second.
 WS_MARKET_DEDUP_S = 30.0
+
+# ── LIVE market freshness target (2026-09-10) ────────────────────────
+# Requirement: every ACTIVE live game's SCRAPED market data is refreshed
+# at ~30s.  The event-view rotation alone cannot deliver that — one
+# sequential visit costs ~6-20s and the round-robin period for ~47 games
+# measured ~20 min (mean tick cycle 36.7s x EVENT_VIEW_EVERY_N=2 x
+# MARKET_BATCH=3).  The eu-swarm feed is per-SUBSCRIBED-EVENT, but the
+# socket is authenticated once per page, so ONE socket holds market
+# subscriptions for MANY games at once (verified live 2026-09-10: a
+# second subscribe on the same socket delivered another game's
+# MatchTotal).  This layer subscribes the fast page's swarm socket to
+# every active game -> continuous per-game pushes, no navigation.
+LIVE_MARKET_FRESH_TARGET_S = 30.0
+# Re-send a game's subscription this often, so an expiring server-side
+# subscription can never let an active game fall below target.
+WS_SUB_REFRESH_S = 20.0
+# Safety valve: cap games subscribed per sync pass (0 = no cap).
+WS_SUB_MAX_GAMES = 0
+# A game counts as ACTIVE in the freshness report only while the collector
+# is still collecting it (lobby sighting or market observation inside the
+# window).  A tracked game that has gone quiet longer than this is
+# "dormant" — its age measures bookkeeping lag for an instance that has
+# ended, not provider freshness — so it is reported separately instead of
+# inflating the percentiles.
+ACTIVE_GAME_WINDOW_S = 300.0
+
+# Injected into every context BEFORE page scripts: keep a handle to the
+# authenticated eu-swarm WebSocket so market subscriptions can be added
+# for any game.  Static constants are preserved (app code compares
+# readyState against WebSocket.OPEN).
+_WS_CAPTURE_JS = """
+(function () {
+  try {
+    var Orig = WebSocket;
+    function Patched(url, protocols) {
+      var ws = (protocols === undefined) ? new Orig(url) : new Orig(url, protocols);
+      try { if (String(url).indexOf('swarm') >= 0) { window.__blmSwarm = ws; } } catch (e) {}
+      return ws;
+    }
+    Patched.prototype = Orig.prototype;
+    ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(function (k) {
+      try { Patched[k] = Orig[k]; } catch (e) {}
+    });
+    window.WebSocket = Patched;
+  } catch (e) {}
+})();
+"""
+
+# The SPA's own single-event market request shape (captured from the live
+# client).  Only `where.game.id` differs per game — the server pushes the
+# full market tree (incl. MatchTotal) for every subscribed game.
+_WS_SUBSCRIBE_WHAT: dict[str, Any] = {
+    "sport": ["name"],
+    "region": ["name"],
+    "competition": ["name", "id"],
+    "game": ["id", "stats", "info", "is_neutral_venue", "add_info_name",
+             "text_info", "markets_count", "type", "start_ts",
+             "is_stat_available", "team1_id", "team1_name", "team2_id",
+             "team2_name", "last_event", "live_events", "match_length",
+             "sport_alias", "sportcast_id", "region_alias", "is_blocked",
+             "show_type", "game_number"],
+    "market": ["id", "group_id", "group_name", "group_order", "type",
+               "name_template", "sequence", "point_sequence", "market_type",
+               "base", "name", "order", "display_key", "col_count",
+               "express_id", "extra_info", "cashout", "is_new",
+               "available_for_betbuilder", "has_early_payout"],
+    "event": ["id", "type_1", "price", "name", "base", "home_value",
+              "away_value", "display_column", "order", "type_id"],
+}
 
 # Repeated-visit backoff (2026-09-09): with the gate armed only by an
 # OBSERVED market (attempt != observation), a persistently failing game
@@ -279,6 +349,7 @@ def _tick_timing_summary(stats: dict[str, deque]) -> dict[str, Any]:
         "mean_sleep_ms": _mean_ms("sleep"),
         "mean_cycle_ms": _mean_ms("cycle"),
         "last_event_ms": round(ev[-1] * 1000.0, 1) if ev else None,
+        "mean_sub_ms": _mean_ms("sub"),
     }
 
 
@@ -358,6 +429,13 @@ class PokerBetCollector:
             "skipped_fresh": 0, "skipped_fresh_arms": 0,
             "skipped_backoff": 0,
         }
+        # Bounded per-tick duration ring (work/sleep/cycle + the slow
+        # event-view pass + the market-subscription pass), summarized into
+        # the state payload.  Lives here, not in start(), so EVERY entry
+        # point that drives _tick (--once, run_once, tests) has it.
+        self._tick_stats: dict[str, deque] = {
+            key: deque(maxlen=TICK_STATS_MAX)
+            for key in ("work", "sleep", "cycle", "event", "sub")}
         self._instances: dict[str, str] = {}  # base game_id -> current instance id
         self._running = False
         self._browser: Optional[Browser] = None
@@ -373,6 +451,15 @@ class PokerBetCollector:
         self._event_view_failures = 0         # consecutive unverified event views
         self._ws_market_last: dict[tuple[str, Optional[float]], str] = {}
         self._ws_snap_last: dict[str, str] = {}  # gid -> last bridge snapshot ts
+        # LIVE market subscriptions (see LIVE_MARKET_FRESH_TARGET_S):
+        # gid -> last subscribe ts.  ONE authenticated swarm socket holds
+        # a market subscription per active game, so the feed pushes every
+        # game's MatchTotal continuously instead of the slow rotation
+        # visiting ~3 games per slow run.
+        self._market_sub: dict[str, str] = {}
+        self._market_sub_stats = {
+            "passed": 0, "sent": 0, "games": 0, "errors": 0,
+        }
         self._browser_started_at = 0.0
         self._started_at_iso = utcnow_iso()
         self._last_success_iso = ""
@@ -394,6 +481,20 @@ class PokerBetCollector:
             "extra_http_headers": {"Accept-Language": "en-ZA,en;q=0.9"},
         }
 
+    def _new_context(self, browser: Browser):
+        """A context with the swarm-socket capture hook installed.
+
+        Every context (fast page, slow page, rotated) gets the hook so a
+        market subscription can be added to its authenticated socket.
+        """
+        context = browser.new_context(**self._session_options())
+        try:
+            context.add_init_script(_WS_CAPTURE_JS)
+        except Exception:
+            logger.error("ws capture hook install failed:\n%s",
+                         traceback.format_exc())
+        return context
+
     def _new_session(self) -> Page:
         """Launch a fresh browser + context + page, land on the discovery page."""
         assert self._pw is not None, "sync_playwright scope not active"
@@ -401,7 +502,7 @@ class PokerBetCollector:
             headless=self.headless,
             args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
         )
-        context = browser.new_context(**self._session_options())
+        context = self._new_context(browser)
         page = context.new_page()
         self._browser = browser
         self._browser_started_at = time.monotonic()
@@ -473,6 +574,11 @@ class PokerBetCollector:
         obs["game_id"] = self._game_db_id(game)
         try:
             self.store.upsert_market_observation(obs)
+            # A pushed MatchTotal IS an observed market: arm the freshness
+            # gate (and the freshness report) so the event-view rotation
+            # never spends a visit re-fetching a game the socket already
+            # covers.  Same key the slow path uses (tracked instance id).
+            self._last_market_at[game.source_game_id] = obs["captured_at"]
         except Exception:
             logger.error(
                 "market observation persist failed:\n%s",
@@ -499,12 +605,173 @@ class PokerBetCollector:
             logger.error("ws snapshot bridge failed:\n%s",
                          traceback.format_exc())
 
+    # ── LIVE market subscriptions (30s freshness) ────────────────
+
+    def _active_games(self, window_s: Optional[float] = None) -> list[PokerBetGame]:
+        """Tracked games that are not ended — the freshness universe.
+
+        With ``window_s``, only games the collector is STILL collecting
+        (lobby sighting or market observation inside the window) are
+        returned; see ACTIVE_GAME_WINDOW_S.
+        """
+        out: list[PokerBetGame] = []
+        for games in self._tracked.values():
+            for g in games.values():
+                if g is None or getattr(g, "status", "") == "ended":
+                    continue
+                if not g.source_game_id:
+                    continue
+                if window_s is not None:
+                    seen = (_ts_age_s(g.last_seen_at) if g.last_seen_at
+                            else float("inf"))
+                    obs = self._last_market_at.get(g.source_game_id)
+                    obs_age = _ts_age_s(obs) if obs else float("inf")
+                    if min(seen, obs_age) > window_s:
+                        continue
+                out.append(g)
+        return out
+
+    def _market_subscribe_msg(self, game: PokerBetGame) -> Optional[str]:
+        """The SPA's own market `get … subscribe:true` for ONE game.
+
+        Only `where.game.id` differs per game — the same shape the live
+        client sends when an event view opens, so the server pushes that
+        game's full market tree (incl. MatchTotal) on the shared socket.
+        Subscriptions are keyed to the event BASE id (the feed's own key),
+        never a derived #iN instance id.
+        """
+        try:
+            gid = int(self._base_id(game.source_game_id))
+        except (TypeError, ValueError):
+            return None
+        where: dict[str, Any] = {"game": {"id": gid},
+                                 "sport": {"alias": "Basketball"}}
+        region = unquote((game.region or "").strip())
+        if not region:
+            region = unquote(DEFAULT_REGIONS.get(game.classification, ""))
+        if region:
+            where["region"] = {"alias": region}
+        try:
+            comp = int(game.competition_id) if game.competition_id else None
+        except (TypeError, ValueError):
+            comp = None
+        if comp is not None:
+            where["competition"] = {"id": comp}
+        return json.dumps({
+            "command": "get",
+            "params": {"source": "betting", "what": _WS_SUBSCRIBE_WHAT,
+                       "where": where, "subscribe": True},
+            "rid": "blmsub-%s" % gid,
+        })
+
+    def _sync_market_subscriptions(self, page: Optional[Page]) -> None:
+        """Keep a market subscription for EVERY active game on the fast
+        page's authenticated swarm socket.
+
+        This is the ~30s freshness mechanism.  The event-view rotation is
+        capacity-bound (a few games per slow run), so market age was
+        bounded by the round-robin period; a per-game subscription makes
+        the feed PUSH each game's MatchTotal continuously, so the bound
+        becomes the push cadence.  One evaluate call per pass; ingestion
+        happens in the existing WS frame handler (unchanged semantics).
+        """
+        if page is None:
+            return
+        games = self._active_games()
+        if WS_SUB_MAX_GAMES and len(games) > WS_SUB_MAX_GAMES:
+            games = games[:WS_SUB_MAX_GAMES]
+        batch: list[tuple[str, str]] = []
+        for g in games:
+            last = self._market_sub.get(g.source_game_id)
+            if last is not None and _ts_age_s(last) < WS_SUB_REFRESH_S:
+                continue
+            msg = self._market_subscribe_msg(g)
+            if msg:
+                batch.append((g.source_game_id, msg))
+        if not batch:
+            return
+        try:
+            sent = page.evaluate(
+                """(msgs) => {
+                    const s = window.__blmSwarm;
+                    if (!s || s.readyState !== 1) return -1;
+                    let n = 0;
+                    for (const m of msgs) { try { s.send(m); n++; } catch (e) {} }
+                    return n;
+                }""", [m for _, m in batch])
+        except Exception:
+            self._market_sub_stats["errors"] += 1
+            return
+        if sent is None or sent < 0:
+            return                      # socket not open yet — retry next tick
+        now = utcnow_iso()
+        for gid, _ in batch:
+            self._market_sub[gid] = now
+        self._market_sub_stats["passed"] += 1
+        self._market_sub_stats["sent"] += int(sent)
+        self._market_sub_stats["games"] = len(games)
+
+    def _freshness_summary(self) -> dict[str, Any]:
+        """Age of the last OBSERVED market per ACTIVE game.
+
+        Distinguishes the three cadences the operator must not conflate:
+          - collection cadence  -> `subscription_refresh_s` (this layer)
+          - market observation  -> the age percentiles below
+          - frontend polling    -> the dashboard's own POLL_MS
+        An age is the persisted observation time, never a fabricated or
+        carried-forward value; a game with no observation is reported as
+        `never_observed`, never as fresh.  Percentiles cover games the
+        collector is still collecting; dormant tracked entries are counted
+        separately so they cannot masquerade as provider staleness.
+        """
+        tracked = self._active_games()
+        active = self._active_games(ACTIVE_GAME_WINDOW_S)
+        ages: list[Optional[float]] = []
+        for g in active:
+            ts = self._last_market_at.get(g.source_game_id)
+            ages.append(_ts_age_s(ts) if ts else None)
+        known = sorted(a for a in ages if a is not None)
+        n_known = len(known)
+
+        def _pc(p: float) -> Optional[float]:
+            if not n_known:
+                return None
+            return round(known[min(n_known - 1, int(n_known * p))], 1)
+
+        def _share(pred) -> Optional[float]:
+            if not n_known:
+                return None
+            return round(100.0 * sum(1 for a in known if pred(a)) / n_known, 1)
+
+        return {
+            "target_s": LIVE_MARKET_FRESH_TARGET_S,
+            "collection_cadence_s": WS_SUB_REFRESH_S,
+            "active_window_s": ACTIVE_GAME_WINDOW_S,
+            "tracked_games": len(tracked),
+            "dormant_games": len(tracked) - len(active),
+            "active_games": len(ages),
+            "with_market": n_known,
+            "never_observed": len(ages) - n_known,
+            "median_age_s": _pc(0.5),
+            "p95_age_s": _pc(0.95),
+            "max_age_s": round(known[-1], 1) if n_known else None,
+            "pct_le_target": _share(lambda a: a <= LIVE_MARKET_FRESH_TARGET_S),
+            "pct_gt_target": _share(lambda a: a > LIVE_MARKET_FRESH_TARGET_S),
+            "pct_gt_60": _share(lambda a: a > 60),
+            "pct_gt_120": _share(lambda a: a > 120),
+            "subscriptions": {
+                **self._market_sub_stats,
+                "subscribed_now": sum(
+                    1 for g in tracked if g.source_game_id in self._market_sub),
+            },
+        }
+
     def _fresh_context(self, reason: str) -> Page:
         """New context/page in the same browser (SPA state is per-context)."""
         try:
             if self._browser is None:
                 return self._relaunch(reason)
-            context = self._browser.new_context(**self._session_options())
+            context = self._new_context(self._browser)
             page = context.new_page()
             self._empty_ticks = 0
             self._ensure_discovery_page(page)
@@ -552,6 +819,9 @@ class PokerBetCollector:
             "reconciliations": self.stats["reconciliations"],
             "errors": self.stats["errors"],
             "tick_timing": _tick_timing_summary(self._tick_stats),
+            # LIVE freshness: collection cadence vs observation age are
+            # reported separately (see _freshness_summary).
+            "market_freshness": self._freshness_summary(),
             # market-rotation diagnostics: ATTEMPT vs OBSERVED MARKET — a
             # served request is not a fresh observation; only "observed"
             # re-arms the freshness gate.  Per-game streaks expose
@@ -664,9 +934,6 @@ class PokerBetCollector:
         # no catch-up burst, no overlap).  Timing is a bounded ring
         # (TICK_STATS_MAX ≈ 24h @10s) summarized into the state payload.
         self._next_tick_target = 0.0
-        self._tick_stats: dict[str, deque] = {
-            key: deque(maxlen=TICK_STATS_MAX)
-            for key in ("work", "sleep", "cycle", "event")}
         # restart recovery: restore tracked games so a crash/restart does
         # not force a full re-resolution storm in the fast path
         self._restore_tracked()
@@ -865,6 +1132,18 @@ class PokerBetCollector:
                     self._wait_panel(page)
                 else:
                     self._store_list_snapshot(game, row, cls)
+
+        # 2b. LIVE market freshness — keep a market subscription for
+        #     EVERY active game on the fast page's authenticated socket
+        #     so the feed pushes each game's MatchTotal continuously
+        #     (target LIVE_MARKET_FRESH_TARGET_S).  Cheap: one evaluate.
+        t0 = time.monotonic()
+        try:
+            self._sync_market_subscriptions(page)
+        except Exception:
+            logger.error("market subscription sync error:\n%s",
+                         traceback.format_exc())
+        self._tick_stats["sub"].append(time.monotonic() - t0)
 
         # 3. Slow path — round-robin full event-view capture, DECOUPLED.
         #    Runs on its own page (self._slow_page) on a coarse cadence
@@ -1543,7 +1822,7 @@ class PokerBetCollector:
             if self._pw is None or self._browser is None:
                 return
             context = self._browser.contexts[0] if self._browser.contexts \
-                else self._browser.new_context(**self._session_options())
+                else self._new_context(self._browser)
             page = context.new_page()
             self._slow_page = page
             self._slow_browser_started_at = time.monotonic()
