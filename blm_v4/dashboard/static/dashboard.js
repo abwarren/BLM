@@ -62,6 +62,7 @@ const state = {
 const PREF = {
   GAME_DETAILS: "pz.gameDetailsCollapsed",
   CHARTS: "pz.chartsCollapsed",
+  ALERT_AUDIO: "pz.alertAudioEnabled",
 };
 const prefGet = (key, dflt) => {
   try {
@@ -177,6 +178,114 @@ const HIST_ALERTS = {
 // CYBER archive result — shown as READ-ONLY context with its thin sample
 // flagged; it is deliberately NOT an alert level (no CYBER tier exists).
 const CYBER_HIST = { obs: "59.3%", game: "56.5%", n: "84" };
+
+/* ── AUDIO alerts — sound ONLY on an alert ENTRY or ESCALATION ──
+   A short cue sounds exactly when the UNDER condition RISES: the
+   transition the existing alertEscalation() already defines (none→Lx
+   entry, or Lx→Ly escalation with a higher rank).  A steady condition,
+   a repeat of an unchanged level and every downgrade stay SILENT, so
+   the cue can never fire on a 5-second poll or a plain re-render.
+
+   Cues are synthesised with the Web Audio API — no audio files, no CDN,
+   no network request, no asset that can go missing.  Three clearly
+   distinguishable cues: base = one tone, strong = two, high = three.
+
+   Browser autoplay policy is respected, never bypassed: the shared
+   AudioContext is built lazily on the dashboard's first user gesture
+   (or when AUDIO is switched on) and is never retried on a poll.  AUDIO
+   defaults to OFF and only plays once explicitly enabled; the visual
+   alert is completely independent of it. */
+/* __PURE_AUDIO_BEGIN__ */
+const ALERT_CUES = {
+  base:   [523.25],                       // one tone
+  strong: [659.25, 880],                  // two tones
+  high:   [783.99, 987.77, 1318.51],      // three tones, highest priority
+};
+// One poll can enter/escalate several games at once.  Sound at most one
+// cue per coalescing window — the first rise, plus any higher rise inside
+// it — then hold silence for the rest of the window, so a burst of
+// simultaneous entries can never stack into a continuous alarm while
+// every genuine rise still sounds.
+const AUDIO_COALESCE_MS = 400;
+// pure decision: (window, level, now, rank) → { play, win }
+//   play = level to sound (or null to stay silent)
+//   win  = the coalescing window to remember for the next call
+function audioWindowUpdate(win, level, now, rank) {
+  const r = rank[level] || 0;
+  if (!r) return { play: null, win };
+  if (win && now < win.until && r <= win.best) return { play: null, win };
+  return { play: level, win: { until: now + AUDIO_COALESCE_MS, best: r } };
+}
+/* __PURE_AUDIO_END__ */
+
+let audioCtx = null;
+let audioReady = false;      // context running — unlocked by a user gesture
+let audioWindow = null;      // coalescing window state
+
+// shared AudioContext, built lazily: a context created before any gesture
+// stays suspended anyway, so it is never constructed at page load
+function audioContext() {
+  if (audioCtx) return audioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try { audioCtx = new AC(); } catch (_) { audioCtx = null; }
+  return audioCtx;
+}
+// resume the context — only ever called from a user gesture, never a poll
+function unlockAudio() {
+  const ctx = audioContext();
+  if (!ctx) { audioReady = false; return; }
+  if (ctx.state === "running") { audioReady = true; return; }
+  ctx.resume().then(
+    () => { audioReady = audioCtx.state === "running"; syncAudioButton(); },
+    () => { audioReady = false; syncAudioButton(); });
+}
+function audioEnabled() {
+  try { return localStorage.getItem(PREF.ALERT_AUDIO) === "1"; } catch (_) { return false; }
+}
+// synthesise one cue — short tones with a click-free gain envelope
+function playAlertCue(level) {
+  const ctx = audioContext();
+  if (!ctx || ctx.state !== "running") return;   // locked → silent, no retry
+  const tones = ALERT_CUES[level];
+  if (!tones) return;
+  let t = ctx.currentTime + 0.02;
+  for (const freq of tones) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(freq, t);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.2, t + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.18);
+    t += 0.2;
+  }
+}
+// the SINGLE entry point, called wherever alertEscalation() returns a
+// level (card badge and modal panel) — the transition source of truth
+function alertAudio(level) {
+  if (!level || !audioEnabled()) return;
+  const upd = audioWindowUpdate(audioWindow, level, Date.now(), ALERT_RANK);
+  audioWindow = upd.win;
+  if (upd.play) playAlertCue(upd.play);
+}
+function syncAudioButton() {
+  const btn = $("audioToggle");
+  if (!btn) return;
+  const on = audioEnabled();
+  const locked = on && !audioReady;
+  btn.classList.toggle("on", on);
+  btn.classList.toggle("locked", locked);
+  btn.dataset.audio = on ? "on" : "off";
+  btn.textContent = on ? "AUDIO ON" : "AUDIO OFF";
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  btn.title = !on ? "Alert audio off — click to enable"
+    : locked ? "Alert audio on — click anywhere to activate sound"
+    : "Alert audio on — click to silence";
+}
 
 const hasChart = () => typeof Chart !== "undefined";
 const ChartColor = {
@@ -482,6 +591,7 @@ function renderCards(payload) {
     const alLvl = liveAlertOf(g);
     const entered = alertEscalation(card.prevAlert, alLvl);
     card.prevAlert = alLvl;
+    if (entered) alertAudio(entered);
     // re-render while preserving each card's CHARTS / DETAILS state
     card.el.innerHTML = cardHTML(g, { detOpen: card.detOpen, chartsOpen: card.chartsOpen }, entered);
     bindCardSections(card.el, card);
@@ -708,11 +818,13 @@ function refreshHistAlert(g) {
   if (box.innerHTML === html) return;                 // stable during refresh
   box.innerHTML = html;
   const panel = box.firstElementChild;
-  if (panel && alertEscalation(priorLevel, lvl)) {
+  const rose = alertEscalation(priorLevel, lvl);
+  if (panel && rose) {
     panel.classList.remove("al-in");
     void panel.offsetWidth;                            // restart the one-shot pulse
     panel.classList.add("al-in");
   }
+  if (rose) alertAudio(rose);                          // same transition → same cue
 }
 
 function renderModal(g) {
@@ -1252,6 +1364,26 @@ $("modalBackdrop").addEventListener("click", (ev) => {
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !$("modalBackdrop").hidden) closeModal();
 });
+
+/* AUDIO control — OFF by default.  Switching it on is the explicit user
+   gesture that also unlocks the shared AudioContext.  The context is armed
+   from a user gesture so a later alert can sound; it is never created or
+   resumed from the polling loop. */
+$("audioToggle").addEventListener("click", () => {
+  const on = !audioEnabled();
+  try { localStorage.setItem(PREF.ALERT_AUDIO, on ? "1" : "0"); } catch (_) {}
+  audioWindow = null;                     // fresh coalescing window per switch
+  if (on) unlockAudio();
+  syncAudioButton();
+});
+syncAudioButton();
+
+// Arm the context from a user gesture.  A single attempt must not strand a
+// context the browser chose to leave suspended, so each gesture retries
+// until it is running — and only a gesture, never the poll, can do this.
+const armAudio = () => { if (!audioReady) unlockAudio(); };
+["pointerdown", "keydown", "touchstart"].forEach((ev) =>
+  window.addEventListener(ev, armAudio, { passive: true }));
 
 refresh();
 setInterval(refresh, POLL_MS);

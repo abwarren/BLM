@@ -52,6 +52,24 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
   white-space: nowrap;
 }
 .pill.muted { color: var(--muted); }
+
+/* AUDIO alert control — compact header toggle.  Off by default (browser
+   autoplay policy); green once alert audio is switched on, amber if it is
+   on but the audio context has not been unlocked by a gesture yet. */
+.audio-toggle {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
+  padding: 4px 10px; border-radius: 20px; cursor: pointer;
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border2);
+}
+.audio-toggle:hover { color: var(--text); border-color: var(--amber); }
+.audio-toggle.on {
+  color: #04121a; background: var(--green); border-color: var(--green);
+  font-weight: 700;
+}
+.audio-toggle.on.locked {
+  color: #1a1204; background: var(--amber); border-color: var(--amber);
+}
 .live-pill { border-color: #0f3d2e; }
 .live-pill.ok { color: var(--green); border-color: #14532d; background: #052e1c; }
 .live-pill.bad { color: var(--red); border-color: #7f1d1d; background: #2d0a0a; }
