@@ -124,22 +124,28 @@ const mktStatusWord = (age, hasLine) => {
 const num = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
 const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
 
-/* ── Historical under-condition layer (READ-ONLY PRESENTATION) ──
-   Fixed research findings from the settled-game archive, shown when
+/* ── UNDER-condition layer (READ-ONLY PRESENTATION) ──
+   Fixed UNDER research findings from the settled-game archive, shown when
    the CURRENT authoritative live state matches them.  This layer only
-   compares current state against fixed recorded statistics; it makes
-   no forward claim and introduces no model of its own.  Terminology is
-   descriptive: HISTORICAL UNDER CONDITION / CONCENTRATION / PATTERN.
-   Conditions (fixed research results, not tuned parameters):
-     base   pace_gap > +1.5              → 72.7% obs UNDER · 87.3% game
-     strong Q4 + progress>=90 + gap>1.5  → 78.0% · 87.7%
-     high   + stored pace_z < -1         → 85.7% · 89.3%
-   All inputs are the authoritative API values (projector fields and
-   the /pace-z payload); nothing here is recomputed from raw data. */
+   compares current state against fixed recorded statistics; it makes no
+   forward claim and introduces no model of its own.  Terminology is
+   descriptive: UNDER CONDITION / observation UNDER rate.
+   The pace-gap condition is LOAD-BEARING; a z value NEVER fires on its
+   own.  Conditions (fixed results, not tuned parameters — shown as
+   observation UNDER rate / mean per-game UNDER rate / settled games):
+     base   pace_gap > +1.5              → 72.65% / 87.31% / 1,489
+     strong + Q4 + progress >= 90        → 78.01% / 87.71% / 1,446
+     high   + pace_z < -1                → 85.74% / 89.27% /   363
+   All inputs are the authoritative API values (projector fields, period,
+   progress and the /pace-z payload); nothing is recomputed in the browser.
+   UNDER only — no opposite-direction alert and no mirrored condition. */
 /* __PURE_ALERT_BEGIN__ */
-// level selection — consumes ONLY pre-extracted authoritative state:
-//   { hasLine, periodQ, progressPct, paceGap, z }  (z optional: the
-//   live card list carries no z, so card-level never yields "high")
+// UNDER level selection — consumes ONLY pre-extracted authoritative
+// state: { hasLine, periodQ, progressPct, paceGap, z }  (z optional: the
+// live card list carries no z, so the card path cannot reach the
+// z-dependent levels until the modal's /pace-z payload lands).
+// pace_gap > 1.5 is the load-bearing gate; z is only ever a qualifier
+// on top of it and can never raise an alert by itself.
 function histAlertLevel(s) {
   if (!s || !s.hasLine) return null;               // missing line → no alert
   if (s.paceGap == null || !(s.paceGap > 1.5)) return null;
@@ -148,28 +154,29 @@ function histAlertLevel(s) {
   if (late) return "strong";
   return "base";
 }
-// documented research z gradient — context only, never an alert trigger
-function zContextBin(z) {
-  if (z == null) return null;
-  if (z < -2) return { range: "z < -2", obs: "65.5%", game: "57.6%", lean: "under" };
-  if (z < -1) return { range: "-2 <= z < -1", obs: "60.6%", game: "55.2%", lean: "under" };
-  if (z < 0) return { range: "-1 <= z < 0", obs: "51.9%", game: "51.1%", lean: "under" };
-  if (z < 1) return { range: "0 <= z < 1", obs: "44.8%", game: "47.6%", lean: "over" };
-  if (z < 2) return { range: "1 <= z < 2", obs: "40.0%", game: "44.7%", lean: "over" };
-  return { range: "z >= 2", obs: "33.4%", game: "41.9%", lean: "over" };
+// pulse decision — the attention treatment fires ONLY when the level
+// RISES (entry none→Lx or an escalation Lx→Ly with rank Ly>Lx).  Steady
+// state and downgrades re-render without any pulse; returns the new level
+// when it should pulse, else null.
+const ALERT_RANK = { base: 1, strong: 2, high: 3 };
+function alertEscalation(prevLvl, nextLvl) {
+  if (!nextLvl) return null;
+  const rPrev = prevLvl ? (ALERT_RANK[prevLvl] || 0) : 0;
+  return (ALERT_RANK[nextLvl] || 0) > rPrev ? nextLvl : null;
 }
 /* __PURE_ALERT_END__ */
-// fixed archive statistics bound to each level (display values only)
+// fixed archive statistics bound to each UNDER level (display values only)
 const HIST_ALERTS = {
-  base: { label: "HISTORICAL UNDER CONDITION",
-    obs: "72.7%", game: "87.3%", n: "1,489" },
-  strong: { label: "STRONG HISTORICAL UNDER CONCENTRATION",
-    obs: "78.0%", game: "87.7%", n: "1,446" },
-  high: { label: "HIGH HISTORICAL UNDER CONCENTRATION",
-    obs: "85.7%", game: "89.3%", n: "363" },
+  base: { label: "UNDER CONDITION",
+    obs: "72.65%", game: "87.31%", n: "1,489" },
+  strong: { label: "UNDER ALERT — STRONG",
+    obs: "78.01%", game: "87.71%", n: "1,446" },
+  high: { label: "UNDER ALERT — VERY STRONG",
+    obs: "85.74%", game: "89.27%", n: "363" },
 };
-// CYBER archive result — shown as context with its thin sample flagged
-const CYBER_HIST = { obs: "60.5%", game: "56.6%", n: "50" };
+// CYBER archive result — shown as READ-ONLY context with its thin sample
+// flagged; it is deliberately NOT an alert level (no CYBER tier exists).
+const CYBER_HIST = { obs: "59.3%", game: "56.5%", n: "84" };
 
 const hasChart = () => typeof Chart !== "undefined";
 const ChartColor = {
@@ -469,11 +476,11 @@ function renderCards(payload) {
       card.el.classList.add("flash");
     }
     card.lastScore = nowScore;
-    // historical-condition entry tracking: pulse ONLY on level
-    // transitions (null→base→strong), never on steady 5s refreshes
+    // historical-condition entry tracking: pulse ONLY on level entry /
+    // escalation (null→base→strong), never on steady 5s refreshes and
+    // never on downgrades (strong→base renders the weaker badge silently)
     const alLvl = liveAlertOf(g);
-    const entered = (alLvl && card.prevAlert != null && card.prevAlert !== alLvl)
-      ? alLvl : null;
+    const entered = alertEscalation(card.prevAlert, alLvl);
     card.prevAlert = alLvl;
     // re-render while preserving each card's CHARTS / DETAILS state
     card.el.innerHTML = cardHTML(g, { detOpen: card.detOpen, chartsOpen: card.chartsOpen }, entered);
@@ -632,9 +639,10 @@ function histBadgeHTML(g, entered) {
     + `</div>`;
 }
 
-// full modal panel — the example presentation: current state rows, the
-// archive statistics of the matched level, stored-z context, CYBER
-// limited-sample note, and the market freshness marker.
+// full modal UNDER panel — the prominent, unmistakable presentation:
+// every CURRENT authoritative live indicator (pace gap, pace Z, period,
+// progress), the canonical competition, the matched level's fixed archive
+// statistics and the market freshness marker.  UNDER only.
 function histPanelHTML(g) {
   if (!g || g.live !== true || g.quality_status === "INVALID") return "";
   const p = g.projector || {};
@@ -647,31 +655,40 @@ function histPanelHTML(g) {
   const cyber = isCyberGame(g);
   if (!meta && !cyber) return "";
   const q = periodQOf(g);
+  const score = (g.home_score != null && g.away_score != null)
+    ? g.home_score + g.away_score : null;
+  const slg = (score != null && st.line != null)
+    ? Number((score - st.line).toFixed(1)) : null;
+  // every current indicator, from authoritative values only (never recomputed)
   const rows = [];
-  if (p.pace_gap != null) rows.push(`<div class="al-row"><span class="k">Pace gap</span><span class="v">${signedNum(p.pace_gap, 2)} pts/min</span></div>`);
-  if (zm.z != null) rows.push(`<div class="al-row"><span class="k">Pace Z</span><span class="v">${zDisplay(zm.z)}</span></div>`);
-  if (q && p.progress_pct != null) rows.push(`<div class="al-row"><span class="k">Progress</span><span class="v">${q} · ${num(p.progress_pct, 0)}%</span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Live line</span><span class="v">${num(st.line, 1)}</span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Score</span><span class="v">${score != null ? score : "–"}</span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Score − line</span><span class="v">${signedNum(slg, 1)}</span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Actual pace</span><span class="v">${num(p.actual_pts_per_min, 2)} <span class="u">pts/min</span></span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Required pace</span><span class="v">${num(p.required_pts_per_min, 2)} <span class="u">pts/min</span></span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Pace gap</span><span class="v">${signedNum(p.pace_gap, 2)} <span class="u">pts/min</span></span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Pace Z</span><span class="v">${zDisplay(zm.z)}</span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Period</span><span class="v">${esc(q || g.period_label || "–")}</span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Q4</span><span class="v">${q === "Q4" ? "YES" : "NO"}</span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Progress</span><span class="v">${p.progress_pct != null ? num(p.progress_pct, 1) + "%" : "–"}</span></div>`);
+  rows.push(`<div class="al-row"><span class="k">Competition</span><span class="v">${esc(g.competition_slug || g.competition || "–")}</span></div>`);
   const head = meta
     ? `<span class="al-title">${meta.label}</span>`
-    : '<span class="al-title al-title-ctx">HISTORICAL CONTEXT</span>';
+    : '<span class="al-title al-title-ctx">CYBER HISTORICAL CONTEXT</span>';
   const hist = meta
-    ? `<div class="al-hist"><span class="al-big">HISTORICAL OBSERVATIONS ${meta.obs} UNDER</span>`
-      + `<span class="al-line">Equal-game mean ${meta.game} · Historical game N ${meta.n}</span></div>`
+    ? `<div class="al-hist"><span class="al-big">HISTORICAL UNDER CONDITION</span>`
+      + `<span class="al-line"><b>${meta.obs}</b> observation UNDER rate</span>`
+      + `<span class="al-line"><b>${meta.game}</b> mean per-game UNDER rate</span>`
+      + `<span class="al-line"><b>${meta.n}</b> settled games</span></div>`
     : "";
-  const zctx = (zm.z != null) ? (() => {
-    const b = zContextBin(zm.z);
-    const lean = b.lean === "under" ? "UNDER-CONCENTRATED RANGE" : "OVER-CONCENTRATED RANGE";
-    return `<div class="al-zctx"><span class="al-zlean">HISTORICAL CONTEXT: ${lean}</span>`
-      + ` <span class="muted">${b.range}: obs UNDER ${b.obs} · equal-game ${b.game}</span></div>`;
-  })() : "";
   const cy = cyber ? `<div class="al-cyber">${cyberNoteHTML(false)}</div>` : "";
   const note = meta
-    ? '<div class="al-note muted">Descriptive statistics from settled games in the archive — observed historical association, not guidance.</div>'
+    ? '<div class="al-note muted">Historical outcome = final total below this live line in the archive. Observed association only — no forward claim.</div>'
     : "";
-  return `<div class="hist-panel${lvl ? " al-" + lvl : " al-ctx"}">`
+  return `<div class="hist-panel hist-alert${lvl ? " al-" + lvl : " al-ctx"}">`
     + `<div class="al-head">${head}${marketChipHTML(st.mstatus)}</div>`
     + (rows.length ? `<div class="al-rows">${rows.join("")}</div>` : "")
-    + hist + zctx + cy + note
+    + hist + cy + note
     + `</div>`;
 }
 
@@ -691,7 +708,7 @@ function refreshHistAlert(g) {
   if (box.innerHTML === html) return;                 // stable during refresh
   box.innerHTML = html;
   const panel = box.firstElementChild;
-  if (panel && lvl && priorLevel !== lvl) {
+  if (panel && alertEscalation(priorLevel, lvl)) {
     panel.classList.remove("al-in");
     void panel.offsetWidth;                            // restart the one-shot pulse
     panel.classList.add("al-in");
