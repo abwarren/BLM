@@ -202,10 +202,11 @@ def test_dashboard_production_ui_has_no_raw_debug(client):
     assert "rawDrawer" not in html
     assert "rawClose" not in html
     assert "RAW / DEBUG" not in html
-    # filters present
-    assert 'data-filter="CYBER_2K26"' in html
-    assert 'data-filter="BETUAL_NBA"' in html
+    # competition filters present, keyed on the CANONICAL competition ids
     assert 'data-filter=""' in html
+    for cid in ("betual-nba", "betual-kbl", "betual-cba", "betual-tbsl",
+                "betual-euroleague", "cyber-basketball-2k26-matches"):
+        assert f'data-filter="{cid}"' in html, cid
 
 
 def test_dashboard_static_assets(client):

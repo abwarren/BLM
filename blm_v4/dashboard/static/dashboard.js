@@ -424,8 +424,13 @@ function bindCardSections(el, card) {
 
 function renderCards(payload) {
   const grid = $("grid");
+  // Competition filter operates on the CANONICAL competition identifier
+  // carried by each game record (competition_slug from the authoritative
+  // source metadata), never a display alias.  The button's data-filter
+  // value is that identifier; empty = ALL (no filter).  No competition
+  // slug is hard-coded here — the comparison is generic.
   const games = (payload.games || []).filter(
-    (g) => !state.filter || g.classification === state.filter,
+    (g) => !state.filter || g.competition_slug === state.filter,
   );
   const visible = state.hideNonLive
     ? games.filter((g) => g.live === true && g.status !== "ended")
