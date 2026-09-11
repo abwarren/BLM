@@ -169,15 +169,23 @@ def test_cues_generated_no_audio_files_or_cdn(client):
 def test_three_distinguishable_cues(client, tmp_path):
     js = _js(client)
     cues = _run_node(js, tmp_path, "m.ALERT_CUES")
-    assert sorted(cues) == ["base", "high", "strong"]
-    # base 1 tone, strong 2 tones, high 3 tones — ordered, distinct pitches
+    # the four live levels: the three legacy pace-gap tiers PLUS the
+    # primary league/state pace-state condition (which outranks them).
+    assert sorted(cues) == ["base", "high", "pace-state", "strong"]
+    # legacy tiers keep their ordered, distinct pitch counts
     assert len(cues["base"]) == 1
     assert len(cues["strong"]) == 2
     assert len(cues["high"]) == 3
     for lvl, tones in cues.items():
         assert all(isinstance(f, (int, float)) and f > 0 for f in tones), lvl
-    # the three levels are audibly different sequences
-    assert cues["base"] != cues["strong"] != cues["high"]
+    # the primary condition carries the LONGEST cue (top priority) and is
+    # audibly distinct from every legacy tier
+    assert len(cues["pace-state"]) == 4
+    for legacy in ("base", "strong", "high"):
+        assert cues["pace-state"] != cues[legacy], legacy
+    # every level is audibly different from every other level
+    keys = sorted(cues)
+    assert len({tuple(cues[k]) for k in keys}) == len(keys)
     # short cues — a burst of tones can never become a continuous alarm
     assert _run_node(js, tmp_path, "m.AUDIO_COALESCE_MS") == 400
 

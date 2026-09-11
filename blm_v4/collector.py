@@ -16,6 +16,30 @@ Playwright orchestrator that:
      completion, new/disappearing games, duplicate discovery, URL
      changes and transient network failures
 
+FAST / SLOW SPLIT (2026-09-10 — hard 5s live-cycle requirement):
+
+  FAST PATH (the live collection cycle, monotonic deadline scheduler,
+  FAST_TICK_S=5s): lobby panel parse (score / period / clock / progress),
+  list snapshots, WS MatchTotal ingestion (pushed by the feed itself on
+  the socket thread), WS subscription refresh, market-freshness
+  bookkeeping, persistence + the collector heartbeat.  Nothing here may
+  wait on Playwright navigation; a healthy lobby parse is a single
+  page.content() round-trip.
+
+  SLOW PATH (a dedicated WORKER THREAD owning its own sync_playwright
+  scope + its own browser + its own page): event-view navigation, page
+  hydration waits, DOM enrichment, supplementary metadata AND new-game
+  identity resolution (a brand-new game's first durable id — a ~7s row
+  click + navigation that must never sit inside a 5s fast cycle; until
+  resolved the game is tracked provisionally by its panel key and simply
+  has no snapshots yet).  Sync Playwright objects are thread-affine, so
+  the worker owns its browser lifecycle end-to-end; the fast loop and the
+  worker communicate only through thread-safe state (the lock-guarded
+  tracked map, the resolve queue, the round-request event) and the
+  thread-safe SQLite stores.  The fast path NEVER joins or waits on the
+  worker — a 1s, 10s, 60s or hung 130s event-view operation cannot
+  stretch a fast cycle.
+
 Run standalone:  python -m blm_v4.collector [--once] [--tick 20]
 """
 
@@ -29,13 +53,34 @@ import re
 import sqlite3
 import time
 import traceback
+import threading
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote
 
-from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import (
+    Browser,
+    Page,
+    sync_playwright,
+)
+# TargetClosedError is the canonical playwright "page/browser went away"
+# signal.  Recent playwright releases stopped re-exporting it from
+# ``playwright.sync_api`` and keep it in ``playwright._impl._errors``;
+# resolve it from whichever module actually exposes it so the collector
+# import works across playwright versions (and degrade to a private
+# sentinel that never matches rather than breaking import if it is
+# renamed again — the catch sites then simply rely on their fallback
+# Exception handling).
+try:  # playwright >= 1.4x
+    from playwright.sync_api import TargetClosedError
+except ImportError:  # newer releases: not re-exported
+    try:
+        from playwright._impl._errors import TargetClosedError
+    except ImportError:  # pragma: no cover - future rename
+        class TargetClosedError(Exception):
+            """Fallback sentinel if playwright stops exposing the class."""
 
 from blm_v4.classifications import (
     BETUAL_COMPETITION,
@@ -92,7 +137,34 @@ PANEL_WAIT_S = 8.0
 # unchanged when the tick interval changes (3 ticks @20s = 60s; the
 # same 60s must be 6 ticks @10s, never 3).
 ENDED_GRACE_S = 60.0
-TICK_DEFAULT = 10.0
+# ── FAST / SLOW split (2026-09-10 — hard 5s live-cycle requirement) ──
+# The FAST path is the actual live collection cadence: score, period,
+# clock, progress, list snapshots, WS ingestion + subscription refresh,
+# freshness bookkeeping and persistence.  It is scheduled on a monotonic
+# DEADLINE grid (FAST_TICK_S between the START of consecutive fast
+# cycles, measured — never sleep-after-work) and shares NOTHING with the
+# slow event-view path except thread-safe handles (the lock-guarded
+# tracked map, the resolve queue and the SQLite stores).  The fast
+# cadence IS what the 5-second requirement is measured against;
+# TICK_DEFAULT aliases it so the CLI default and the scheduler grid can
+# never drift apart.
+FAST_TICK_S = 5.0
+TICK_DEFAULT = FAST_TICK_S
+# Slow-path worker: ONE daemon thread owning its OWN sync_playwright
+# scope + browser + page (sync Playwright objects are thread-affine —
+# they must never cross threads).  The fast path only PASSES it work
+# requests — never a Playwright object — and never joins or waits on it.
+# The worker wakes ~every 2s, claims pending resolution/rotation work,
+# and a round may take a minute; the fast cadence is unaffected.
+SLOW_WORKER_POLL_S = 2.0
+# New-game identity resolutions attempted per slow round (each is a
+# ~7s row-click + navigation; two per round keeps a wave of new games
+# from starving the market rotation for long).
+RESOLVE_BATCH = 2
+# A provisional (unresolved) game re-requests identity resolution at
+# most this often (the row click can legitimately fail while the SPA
+# hydrates; bounded retry, never a hot loop).
+RESOLVE_RETRY_S = 30.0
 
 # Market data is first-class live data.  The SPA's event view hydrates
 # only via an in-app row click + ~2.5s wait; back-to-back clicks in one
@@ -118,21 +190,22 @@ MARKET_BATCH = 3
 # possible and are reported honestly (see market_collection in the
 # collector state file).
 MARKET_REFRESH_S = 240
-# STEP 2: the slow (full event-view) path runs on its OWN page, gated to
-# once every N fast ticks — decoupled from the score poll's page/state.
-# N=2 (was 3): one event-view run every ~2 fast cycles (~50s observed);
-# each run captures up to MARKET_BATCH games.  With ~40 tracked games
-# that bounds a full rotation to ~11 min — the honest single-browser
-# limit for one-thread WS subscription coverage (the eu-swarm feed only
-# pushes the OPEN event's markets).  The attempt still runs
-# synchronously inside that tick (a ~6-20s overrun that the
-# target-boundary scheduler absorbs), so the score poll cadence on the
-# other ticks is untouched; full async decoupling is future work.
-EVENT_VIEW_EVERY_N = 2
+# STEP 3 (2026-09-10): the slow (full event-view) path runs on its OWN
+# PAGE in its OWN THREAD — fully decoupled from the fast cadence.  The
+# old in-tick gate (EVENT_VIEW_EVERY_N fast ticks between slow runs) is
+# retired: the fast loop now only requests a slow round when the last
+# round STARTED at least EVENT_VIEW_MIN_INTERVAL_S ago, and the slow
+# worker picks it up asynchronously.  A 6–20s (or hung 45s-timeout)
+# event-view operation therefore cannot stretch a fast cycle.  Each slow
+# round still captures up to MARKET_BATCH games, so the rotation capacity
+# is unchanged (~3 games / ~20s round; a 40-game cohort rotates in well
+# under the old ~11 min bound while the fast cadence stays at 5s).
+EVENT_VIEW_MIN_INTERVAL_S = 10.0
 # In-memory tick-timing ring (instrumentation): keep ~24h of samples at
-# the 10s tick, then drop the oldest — a daemon must never grow without
-# bound.  The summary is exposed via the collector state payload.
-TICK_STATS_MAX = 8640
+# the fast cadence, then drop the oldest — a daemon must never grow
+# without bound.  The summary is exposed via the collector state payload.
+# 17280 x 5s = 24h of fast cycles.
+TICK_STATS_MAX = 17280
 # eu-swarm market observations: dedupe identical (game, line) frames within
 # this window — the feed pushes every price change, so movements still land,
 # but a game that stays flat is not spammed into the DB every second.
@@ -329,12 +402,39 @@ def save_comp_ids(comp_ids: dict[str, str]) -> None:
         logger.exception("comp_ids save failed")
 
 
-def _tick_timing_summary(stats: dict[str, deque]) -> dict[str, Any]:
-    """Reduce the bounded tick-timing ring to a small status payload.
+def _percentiles(values: list[float]) -> dict[str, Optional[float]]:
+    """P50/P95/P99/MAX (ms) over a list of DURATION samples (seconds).
 
-    Pure + testable: means over the retained samples (ms), sample count,
-    and the most recent slow event-view duration (ms).  Empty rings yield
-    None means — a just-started collector reports no timing yet.
+    Nearest-rank percentiles on the sorted sample — never an average in
+    disguise.  Empty sample → all None (a just-started collector reports
+    no timing rather than a fabricated zero).
+    """
+    if not values:
+        return {"p50": None, "p95": None, "p99": None, "max": None}
+    vals = sorted(values)
+
+    def _p(q: float) -> float:
+        idx = min(len(vals) - 1, int(round(q * (len(vals) - 1))))
+        return vals[idx] * 1000.0
+
+    return {
+        "p50": round(_p(0.50), 1),
+        "p95": round(_p(0.95), 1),
+        "p99": round(_p(0.99), 1),
+        "max": round(vals[-1] * 1000.0, 1),
+    }
+
+
+def _tick_timing_summary(stats: dict[str, deque]) -> dict[str, Any]:
+    """Reduce the bounded fast-cycle timing ring to a small status payload.
+
+    Pure + testable.  The 5-second requirement is audited from the
+    ACTUAL interval between consecutive fast-cycle STARTS
+    (fast_cycle_interval_ms — start-to-start, never sleep-after-work)
+    plus the split fast_work_ms / slow_event_view_ms / ws_subscription_ms /
+    persistence_ms; every field carries P50/P95/P99/MAX nearest-rank
+    percentiles so an overrun can never hide behind a mean.  The legacy
+    mean_* keys are kept for continuity with existing dashboards.
     """
     def _mean_ms(key: str) -> Optional[float]:
         buf = stats.get(key)
@@ -342,15 +442,20 @@ def _tick_timing_summary(stats: dict[str, deque]) -> dict[str, Any]:
             return None
         return round((sum(buf) / len(buf)) * 1000.0, 1)
 
-    ev = stats.get("event")
-    return {
-        "n": len(stats.get("work", [])),
+    out: dict[str, Any] = {"n": len(stats.get("work", []))}
+    for key in ("fast_cycle_interval_ms", "fast_work_ms",
+                "slow_event_view_ms", "ws_subscription_ms",
+                "persistence_ms"):
+        out[key] = _percentiles(list(stats.get(key, ())))
+    out.update({
         "mean_work_ms": _mean_ms("work"),
         "mean_sleep_ms": _mean_ms("sleep"),
         "mean_cycle_ms": _mean_ms("cycle"),
-        "last_event_ms": round(ev[-1] * 1000.0, 1) if ev else None,
         "mean_sub_ms": _mean_ms("sub"),
-    }
+    })
+    ev = stats.get("event")
+    out["last_event_ms"] = round(ev[-1] * 1000.0, 1) if ev else None
+    return out
 
 
 class PokerBetCollector:
@@ -406,13 +511,24 @@ class PokerBetCollector:
                 traceback.format_exc(),
             )
 
-        # tracked games: classification -> team-key -> PokerBetGame
+        # tracked games: classification -> team-key -> PokerBetGame.
+        # SHARED across the fast thread and the slow worker — every read/
+        # write happens under _track_lock (the dict values themselves are
+        # replaced, never mutated in place, so a reader under the lock
+        # always sees a consistent game object).
+        self._track_lock = threading.RLock()
         self._tracked: dict[str, dict[str, PokerBetGame]] = {
             cls.value: {} for cls in (Classification.CYBER_2K26, Classification.BETUAL_NBA)
         }
         self._unseen_ticks: dict[str, dict[str, int]] = {
             cls.value: {} for cls in (Classification.CYBER_2K26, Classification.BETUAL_NBA)
         }
+        # Provisional games: discovered on the panel but not yet resolved
+        # to a durable event id.  Keyed by the panel key; the slow worker
+        # resolves them (row click -> event URL) off the fast path.
+        self._pending_resolve: dict[str, float] = {}  # panel key -> last attempt (monotonic)
+        self._resolved_ok = 0
+        self._resolve_failures = 0
         self._market_queue: list[str] = []   # round-robin of source_game_ids
         self._last_market_at: dict[str, str] = {}  # gid -> last event-view capture ts
         # Diagnostic separation of ATTEMPT vs OBSERVATION (2026-09-09):
@@ -429,23 +545,39 @@ class PokerBetCollector:
             "skipped_fresh": 0, "skipped_fresh_arms": 0,
             "skipped_backoff": 0,
         }
-        # Bounded per-tick duration ring (work/sleep/cycle + the slow
-        # event-view pass + the market-subscription pass), summarized into
-        # the state payload.  Lives here, not in start(), so EVERY entry
-        # point that drives _tick (--once, run_once, tests) has it.
+        # Bounded per-cycle duration ring (fast-work / slow event-view /
+        # WS-subscription pass + the explicit 5s-requirement metrics),
+        # summarized into the state payload.  Lives here, not in start(),
+        # so EVERY entry point that drives _tick (--once, run_once, tests)
+        # has it.
         self._tick_stats: dict[str, deque] = {
             key: deque(maxlen=TICK_STATS_MAX)
-            for key in ("work", "sleep", "cycle", "event", "sub")}
+            for key in ("work", "sleep", "cycle", "event", "sub",
+                        "fast_cycle_interval_ms", "fast_work_ms",
+                        "slow_event_view_ms", "ws_subscription_ms",
+                        "persistence_ms")}
         self._instances: dict[str, str] = {}  # base game_id -> current instance id
         self._running = False
         self._browser: Optional[Browser] = None
         self._pw: Any = None                  # active sync_playwright scope
-        # STEP 2: separate SLOW event-view page (decoupled from the fast
-        # score poll).  Single browser; the fast page holds the lobby and
-        # the WS market hook; the slow page does the round-robin event-view
-        # navigations so a slow nav never delays the ~10s score cadence.
+        # STEP 3: SLOW event-view worker — its own thread + its own page.
+        # The fast loop never navigates this page and never waits on the
+        # worker: it only requests a round (thread-safe channel) when the
+        # last round STARTED at least EVENT_VIEW_MIN_INTERVAL_S ago.  All
+        # worker state is written by the worker alone.
         self._slow_page: Optional[Page] = None
+        self._slow_pw: Any = None              # worker's own sync_playwright
+        self._slow_browser: Optional[Browser] = None  # worker's OWN browser
         self._slow_browser_started_at: Optional[float] = None
+        self._slow_thread: Optional[threading.Thread] = None
+        self._slow_stop = threading.Event()
+        self._slow_wake = threading.Event()   # a round was requested
+        self._slow_job_pending = False        # fast -> worker round request
+        self._slow_busy = False               # worker mid-round (diagnostics)
+        self._slow_thread_error = ""
+        self._slow_round_started_at: float = 0.0   # monotonic, worker writes
+        self._last_slow_request_at: float = 0.0    # monotonic, fast writes
+        self._slow_worker_started = False
         self._tick_no = 0                     # fast-loop tick counter
         self._empty_ticks = 0                 # consecutive empty-parses
         self._event_view_failures = 0         # consecutive unverified event views
@@ -464,6 +596,14 @@ class PokerBetCollector:
         self._started_at_iso = utcnow_iso()
         self._last_success_iso = ""
         self._last_error_iso = ""
+        self._last_fast_started_at = 0.0      # monotonic (interval metric)
+        self._fast_cycle_started_at_iso = ""  # last fast cycle start (heartbeat payload)
+        self._fast_cycle_completed_at_iso = ""
+        self._fast_cycle_overruns = 0         # cycles whose interval exceeded FAST_TICK_S
+        self._prev_fast_started_at: Optional[float] = None  # interval baseline
+        self._last_tick_page: Optional[Page] = None  # fast page (this process)
+        # slow event-view timing (worker writes, summary reads)
+        self._slow_round_durations: deque = deque(maxlen=TICK_STATS_MAX)
         self.stats = {
             "ticks": 0, "games_seen": 0, "snapshots": 0,
             "games_resolved": 0, "reconciliations": 0, "errors": 0,
@@ -615,20 +755,21 @@ class PokerBetCollector:
         returned; see ACTIVE_GAME_WINDOW_S.
         """
         out: list[PokerBetGame] = []
-        for games in self._tracked.values():
-            for g in games.values():
-                if g is None or getattr(g, "status", "") == "ended":
-                    continue
-                if not g.source_game_id:
-                    continue
-                if window_s is not None:
-                    seen = (_ts_age_s(g.last_seen_at) if g.last_seen_at
-                            else float("inf"))
-                    obs = self._last_market_at.get(g.source_game_id)
-                    obs_age = _ts_age_s(obs) if obs else float("inf")
-                    if min(seen, obs_age) > window_s:
+        with self._track_lock:
+            for games in self._tracked.values():
+                for g in games.values():
+                    if g is None or getattr(g, "status", "") == "ended":
                         continue
-                out.append(g)
+                    if not g.source_game_id:
+                        continue
+                    if window_s is not None:
+                        seen = (_ts_age_s(g.last_seen_at) if g.last_seen_at
+                                else float("inf"))
+                        obs = self._last_market_at.get(g.source_game_id)
+                        obs_age = _ts_age_s(obs) if obs else float("inf")
+                        if min(seen, obs_age) > window_s:
+                            continue
+                    out.append(g)
         return out
 
     def _market_subscribe_msg(self, game: PokerBetGame) -> Optional[str]:
@@ -818,6 +959,30 @@ class PokerBetCollector:
             "games_resolved": self.stats["games_resolved"],
             "reconciliations": self.stats["reconciliations"],
             "errors": self.stats["errors"],
+            # ── FAST-cycle heartbeat (5-second requirement audit) ──
+            # ACTUAL timestamps + intervals of the fast path, never
+            # configured values.  fast_cycle_overruns counts consecutive-
+            # starts intervals that exceeded the FAST_TICK_S grid by more
+            # than 0.5s; slow-path work can never stretch these.
+            "fast_cycle": {
+                "tick_s": self.tick_s,
+                "started_at": self._fast_cycle_started_at_iso,
+                "completed_at": self._fast_cycle_completed_at_iso,
+                "overruns": self._fast_cycle_overruns,
+                "pending_resolve": len(self._pending_resolve),
+            },
+            "slow_worker": {
+                "alive": bool(self._slow_thread is not None
+                              and self._slow_thread.is_alive()),
+                "busy": self._slow_busy,
+                "round_requested": self._slow_job_pending,
+                "last_round_started_at": (
+                    self._slow_round_started_at or None),
+                "rounds": len(self._slow_round_durations),
+                "resolve_ok": self._resolved_ok,
+                "resolve_failures": self._resolve_failures,
+                "error": self._slow_thread_error or None,
+            },
             "tick_timing": _tick_timing_summary(self._tick_stats),
             # LIVE freshness: collection cadence vs observation age are
             # reported separately (see _freshness_summary).
@@ -925,14 +1090,15 @@ class PokerBetCollector:
         if self._running:
             return
         self._running = True
-        # ── True fixed-rate scheduling (STEP 2 clean-data cadence) ──
-        # The tick loop is target-boundary: each cycle aims for the NEXT
-        # tick boundary from the PREVIOUS target, so page/network/parse
-        # latency is absorbed INSIDE the interval instead of stacking on
-        # top of a full sleep.  When work overruns the target, the next
-        # target advances by the interval from the missed one (no sleep,
-        # no catch-up burst, no overlap).  Timing is a bounded ring
-        # (TICK_STATS_MAX ≈ 24h @10s) summarized into the state payload.
+        # ── FAST deadline scheduler (2026-09-10: hard 5s live cadence) ──
+        # The fast loop aims each cycle at the NEXT FAST_TICK_S boundary
+        # from the PREVIOUS target: latency is absorbed INSIDE the
+        # interval and never stacks on top of work, and when work overruns
+        # (a hung page.content()) the next target advances by whole
+        # intervals from the missed one — no sleep-after-work, no catch-up
+        # burst, no overlapping cycles.  The SLOW worker thread (own
+        # sync_playwright scope + browser) is started BEFORE the fast
+        # session so a slow-path failure can never delay fast start-up.
         self._next_tick_target = 0.0
         # restart recovery: restore tracked games so a crash/restart does
         # not force a full re-resolution storm in the fast path
@@ -951,15 +1117,20 @@ class PokerBetCollector:
             except Exception:
                 logger.error("deviation benchmark backfill failed:\n%s",
                              traceback.format_exc())
+        # SLOW worker first: its failures are isolated from the fast loop
+        self._start_slow_worker()
         try:
             with sync_playwright() as pw:
                 self._pw = pw
                 page = self._new_session()
                 while self._running:
                     tick_start = time.monotonic()
+                    self._last_fast_started_at = tick_start
+                    self._fast_cycle_started_at_iso = utcnow_iso()
                     # schedule the NEXT target on the interval grid
                     if self._next_tick_target <= 0.0:
                         self._next_tick_target = tick_start + self.tick_s
+                    prev_started = self._prev_fast_started_at
                     try:
                         page = self._tick(page)
                     except sqlite3.OperationalError as exc:
@@ -974,6 +1145,23 @@ class PokerBetCollector:
                         self.stats["errors"] += 1
                         self._last_error_iso = utcnow_iso()
                         logger.warning("tick db lock — skipping tick: %s", exc)
+                    except TargetClosedError:
+                        # the fast page's tab/browser died (SPA crash, OOM
+                        # killer).  A dead tab is a FAST-path concern only —
+                        # the slow worker owns its own browser and must
+                        # never be dragged down with it.  Relaunch the fast
+                        # session; the loop continues.
+                        self.stats["errors"] += 1
+                        self._last_error_iso = utcnow_iso()
+                        logger.warning("fast page closed — relaunching: %s",
+                                       exc)
+                        try:
+                            page = self._relaunch("fast page closed")
+                        except Exception:
+                            logger.error("relaunch failed, giving up:\n%s",
+                                         traceback.format_exc())
+                            self._running = False
+                            break
                     except Exception:
                         self.stats["errors"] += 1
                         self._last_error_iso = utcnow_iso()
@@ -985,11 +1173,13 @@ class PokerBetCollector:
                                          traceback.format_exc())
                             self._running = False
                             break
+                    self._prev_fast_started_at = tick_start
+                    self._fast_cycle_completed_at_iso = utcnow_iso()
+                    self._last_fast_completed_at = time.monotonic()
                     # SPA sessions degrade over hours — rotate regardless
                     if (time.monotonic() - self._browser_started_at
                             > BROWSER_MAX_LIFETIME_S):
                         page = self._relaunch("browser lifetime cap")
-                    elapsed = time.monotonic() - tick_start
                     # target-boundary sleep: absorb latency, never stack
                     sleep_for = max(0.0, self._next_tick_target - time.monotonic())
                     if sleep_for > 0:
@@ -997,13 +1187,22 @@ class PokerBetCollector:
                     # advance the target by whole intervals past the missed one
                     while self._next_tick_target <= time.monotonic():
                         self._next_tick_target += self.tick_s
-                    self._tick_stats["work"].append(elapsed)
+                    # ACTUAL interval metric: start-to-start (the 5-second
+                    # requirement is measured between consecutive FAST
+                    # cycle STARTS, independently of slow-path duration).
+                    if prev_started is not None:
+                        interval = tick_start - prev_started
+                        self._tick_stats["fast_cycle_interval_ms"].append(
+                            interval)
+                        if interval > self.tick_s + 0.5:
+                            self._fast_cycle_overruns += 1
                     self._tick_stats["sleep"].append(sleep_for)
                     self._tick_stats["cycle"].append(
                         time.monotonic() - tick_start)
         except Exception:
             logger.error("collector crashed:\n%s", traceback.format_exc())
         finally:
+            self._stop_slow_worker()
             if self._browser:
                 try:
                     self._browser.close()
@@ -1013,6 +1212,240 @@ class PokerBetCollector:
 
     def stop(self) -> None:
         self._running = False
+        self._slow_stop.set()
+        self._slow_wake.set()
+
+    # ── SLOW worker (event-view path — own thread, own Playwright) ──
+
+    def _start_slow_worker(self) -> None:
+        """Start the dedicated slow-path worker thread.
+
+        The worker owns its OWN sync_playwright scope and browser: sync
+        Playwright objects are thread-affine and must never cross
+        threads.  Communication with the fast loop is exclusively via
+        thread-safe state: the lock-guarded tracked map, the pending-
+        resolve dict, the round-request flag + Event, and the SQLite
+        stores (each method takes its own connection under a lock).
+        """
+        if self._slow_worker_started:
+            return
+        self._slow_worker_started = True
+        self._slow_thread = threading.Thread(
+            target=self._slow_worker_main, name="blm-slow-worker",
+            daemon=True)
+        self._slow_thread.start()
+        logger.info("slow event-view worker started")
+
+    def _stop_slow_worker(self) -> None:
+        self._slow_stop.set()
+        self._slow_wake.set()
+        t = self._slow_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=10.0)
+
+    def _slow_worker_main(self) -> None:
+        """The slow path's whole lifecycle lives in THIS thread.
+
+        Loop: wake (round requested / resolution pending / stop) → run at
+        most one rotation round + up to RESOLVE_BATCH identity
+        resolutions → sleep until the next wake.  Everything Playwright
+        happens here, on this thread's own browser; a hung 45s-timeout
+        navigation delays only the NEXT round, never the fast cadence.
+        """
+        try:
+            with sync_playwright() as pw:
+                self._slow_pw = pw
+                try:
+                    self._slow_browser = pw.chromium.launch(
+                        headless=self.headless,
+                        args=["--no-sandbox", "--disable-gpu",
+                              "--disable-dev-shm-usage"],
+                    )
+                    self._ensure_slow_page()
+                    logger.info("slow worker browser ready")
+                except Exception:
+                    self._slow_thread_error = traceback.format_exc()
+                    logger.error("slow worker browser launch failed:\n%s",
+                                 traceback.format_exc())
+                while not self._slow_stop.is_set():
+                    woke_for = "idle"
+                    try:
+                        # 1. identity resolutions first (young games need
+                        #    their durable id + first snapshots early)
+                        done = 0
+                        while done < RESOLVE_BATCH:
+                            claim = self._claim_pending_resolve()
+                            if claim is None:
+                                break
+                            woke_for = "resolve"
+                            cls, row = claim
+                            ok = self._resolve_pending_on_worker(cls, row)
+                            if not ok:
+                                self._requeue_resolve(cls, row)
+                            done += 1
+                        # 2. the event-view rotation round (if requested)
+                        if self._slow_job_pending:
+                            self._slow_job_pending = False
+                            woke_for = "round"
+                            t0 = time.monotonic()
+                            self._slow_round_started_at = t0
+                            self._slow_busy = True
+                            try:
+                                self._capture_slow_market()
+                            except TargetClosedError:
+                                # slow page/browser died mid-round: NOT a
+                                # fast-path concern — recreate the slow
+                                # session on the next round.
+                                logger.warning(
+                                    "slow page closed mid-round — recreating")
+                                self._slow_page = None
+                            except Exception:
+                                logger.error(
+                                    "slow event-view capture error:\n%s",
+                                    traceback.format_exc())
+                            finally:
+                                self._slow_busy = False
+                                dur = time.monotonic() - t0
+                                self._slow_round_durations.append(dur)
+                                self._tick_stats["slow_event_view_ms"].append(dur)
+                                self._tick_stats["event"].append(dur)
+                        # slow-browser SPA degradation: rotate independently
+                        if (self._slow_browser_started_at
+                                and time.monotonic()
+                                - self._slow_browser_started_at
+                                > BROWSER_MAX_LIFETIME_S):
+                            self._rotate_slow_browser()
+                    except Exception:
+                        # anything else in the worker must never kill the
+                        # thread — log, brief backoff, continue.
+                        self._slow_thread_error = traceback.format_exc()
+                        logger.error("slow worker loop error:\n%s",
+                                     traceback.format_exc())
+                        self._slow_stop.wait(5.0)
+                        continue
+                    self._slow_wake.wait(SLOW_WORKER_POLL_S)
+                    self._slow_wake.clear()
+        except Exception:
+            self._slow_thread_error = traceback.format_exc()
+            logger.error("slow worker crashed:\n%s", traceback.format_exc())
+        finally:
+            try:
+                if self._slow_browser is not None:
+                    self._slow_browser.close()
+            except Exception:
+                pass
+            logger.info("slow worker exited")
+
+    def _requeue_resolve(self, cls: Classification, row: RowGame) -> None:
+        """Put a failed identity resolution back with a fresh attempt
+        stamp (bounded retry — the fast path re-queues at most once per
+        RESOLVE_RETRY_S and the panel may drop the row at any time)."""
+        with self._track_lock:
+            key = (cls.value, f"{row.home_team}|{row.away_team}")
+            self._pending_resolve[key] = {
+                "queued_at": time.monotonic(),
+                "attempted_at": time.monotonic(),
+                "home": row.home_team, "away": row.away_team,
+                "classification": cls.value,
+            }
+        self._resolve_failures += 1
+
+    def _resolve_pending_on_worker(
+            self, cls: Classification, row: RowGame) -> bool:
+        """Resolve ONE provisional game on the slow worker's page.
+
+        The row click navigates the SLOW page only; the fast page never
+        leaves the lobby.  On success the durable game object is inserted
+        into the tracked map under the lock (the fast path starts list-
+        snapshotting it on its next cycle).
+        """
+        page = self._slow_page
+        if page is None:
+            return False
+        key = f"{row.home_team}|{row.away_team}"
+        try:
+            if not self._ensure_comp_lobby(page, cls):
+                logger.warning("resolve: %s lobby unreachable for %s — retried",
+                               cls.value, key)
+                return False
+            if not self._click_panel_row(page, row):
+                return False
+            url = page.url
+            tax = parse_event_url(url)
+            if not tax:
+                logger.warning("resolve: no event taxonomy after click: %s", url)
+                return False
+            text = page.inner_text("body", timeout=10000)
+            home, away = self._authoritative_teams(row, tax, text)
+            # dedup by durable identity (restart-safe, same as before)
+            with self._track_lock:
+                existing = self._find_tracked(tax["game_id"])
+                if existing is None:
+                    cur = self._instances.get(tax["game_id"])
+                    if cur:
+                        existing = self._find_tracked(cur)
+            if existing is not None:
+                cls_val = existing.classification
+                old_key = f"{existing.home_team}|{existing.away_team}"
+                if (existing.home_team, existing.away_team) != (home, away):
+                    existing.home_team, existing.away_team = home, away
+                    self.store.upsert_game(existing)
+                    logger.info(
+                        "updated teams for %s -> %s vs %s",
+                        tax["game_id"], home, away,
+                    )
+                with self._track_lock:
+                    self._tracked[cls_val].pop(old_key, None)
+                    self._unseen_ticks[cls_val].pop(old_key, None)
+                    new_key = f"{home}|{away}"
+                    self._tracked[cls_val][new_key] = existing
+                    self._unseen_ticks[cls_val][new_key] = 0
+                    if existing.source_game_id not in self._market_queue:
+                        self._market_queue.append(existing.source_game_id)
+            else:
+                game = self._build_game(cls, row, tax, url, home, away)
+                new_id = self._restart_split_suffix(text, tax, game)
+                if new_id:
+                    game.source_game_id = new_id
+                    self._instances[self._base_id(new_id)] = new_id
+                    logger.info(
+                        "restart-safe virtual replay split: %s -> %s",
+                        tax["game_id"], new_id,
+                    )
+                gid = self.store.upsert_game(game)
+                with self._track_lock:
+                    self._tracked[cls.value][f"{home}|{away}"] = game
+                    self._unseen_ticks[cls.value][f"{home}|{away}"] = 0
+                    self._market_queue.append(game.source_game_id)
+                self.stats["games_resolved"] += 1
+                logger.info(
+                    "resolved new %s game %s (%s vs %s) game_id=%s",
+                    cls.value, gid, home, away, tax["game_id"],
+                )
+            # full market snapshot from the event page we're on (the
+            # worker's first verified view of the game)
+            with self._track_lock:
+                game_now = self._tracked[cls.value].get(f"{home}|{away}")
+            if game_now is not None:
+                self._capture_event_state(page, cls, game_now, text)
+            # back to the lobby for the next click
+            self._goto(page, competition_url(cls, self.comp_ids))
+            self._wait_panel(page)
+            self._resolved_ok += 1
+            return True
+        except TargetClosedError:
+            logger.warning("resolve: slow page closed for %s — recreating", key)
+            self._slow_page = None
+            return False
+        except Exception:
+            logger.error("resolve failed for %s:\n%s", key,
+                         traceback.format_exc())
+            return False
+        finally:
+            try:
+                self._wait_panel(page)
+            except Exception:
+                pass
 
     # ── Navigation helpers ───────────────────────────────────────
 
@@ -1074,14 +1507,25 @@ class PokerBetCollector:
         """Legacy single-tick recovery — now superseded by session rotation."""
         return self._relaunch("recover requested")
 
-    # ── Main tick ────────────────────────────────────────────────
+    # ── Main tick (FAST PATH — hard 5s live-cycle requirement) ───
 
     def _tick(self, page: Page) -> Page:
+        """One FAST collection cycle.
+
+        Fast-path contents ONLY: the single lobby ``page.content()``
+        round-trip, list snapshots, WS subscription maintenance, freshness
+        bookkeeping, persistence and the heartbeat.  Identity resolution
+        and every event-view operation run on the SLOW worker thread —
+        the fast path only queues the request and never waits for it, so
+        a 1s / 10s / 60s / 130s slow operation cannot stretch this cycle.
+        """
+        t_tick = time.monotonic()
         self.stats["ticks"] += 1
         self._tick_no += 1
-        logger.info("tick %d start (url=%s)", self.stats["ticks"], page.url)
+        logger.info("fast tick %d start (url=%s)", self.stats["ticks"], page.url)
 
-        # 1. Parse the live panel (all competitions + game rows)
+        # 1. Parse the live panel (the fast path's ONLY Playwright
+        #    round-trip; recovery navigations below are failure-only)
         html = page.content()
         comps = find_relevant_competitions(html)
         if not comps:
@@ -1111,29 +1555,37 @@ class PokerBetCollector:
         seen_keys: dict[str, set[str]] = {
             comp.classification.value: set() for comp in comps
         }
+        to_snapshot: list[tuple[PokerBetGame, RowGame, object]] = []
 
-        # 2. Process games per competition
-        for comp in comps:
-            cls = comp.classification
-            for row in comp.games:
-                key = f"{row.home_team}|{row.away_team}"
-                seen_keys[cls.value].add(key)
-                game = self._tracked[cls.value].get(key)
-                if game is None:
-                    # new game → resolve durable identity via click
-                    resolved = self._resolve_new_game(page, comp, row)
-                    if resolved is None:
-                        continue
-                    game, event_text = resolved
-                    # full market snapshot from the event page we're on
-                    self._capture_event_state(page, cls, game, event_text)
-                    # return to discovery page
-                    self._goto(page, competition_url(cls, self.comp_ids))
-                    self._wait_panel(page)
-                else:
-                    self._store_list_snapshot(game, row, cls)
+        # 2. Snapshot the tracked state under the lock (pure dict reads —
+        #    the worker mutates _tracked concurrently) and queue identity
+        #    resolution for NEW rows.  The fast path NEVER clicks/navigates
+        #    for a new game: resolution happens on the slow worker.
+        with self._track_lock:
+            for comp in comps:
+                cls = comp.classification
+                for row in comp.games:
+                    key = f"{row.home_team}|{row.away_team}"
+                    seen_keys[cls.value].add(key)
+                    game = self._tracked[cls.value].get(key)
+                    if game is None:
+                        self._queue_resolve(cls, row)
+                    else:
+                        to_snapshot.append((game, row, cls))
 
-        # 2b. LIVE market freshness — keep a market subscription for
+        # 3. Persist list-level snapshots (DB work OUTSIDE the track lock;
+        #    _store_list_snapshot re-takes it only around dict mutations)
+        t_persist = time.monotonic()
+        for game, row, cls in to_snapshot:
+            try:
+                self._store_list_snapshot(game, row, cls)
+            except Exception:
+                logger.error("list snapshot failed:\n%s",
+                             traceback.format_exc())
+        self._tick_stats["persistence_ms"].append(
+            time.monotonic() - t_persist)
+
+        # 3b. LIVE market freshness — keep a market subscription for
         #     EVERY active game on the fast page's authenticated socket
         #     so the feed pushes each game's MatchTotal continuously
         #     (target LIVE_MARKET_FRESH_TARGET_S).  Cheap: one evaluate.
@@ -1143,148 +1595,80 @@ class PokerBetCollector:
         except Exception:
             logger.error("market subscription sync error:\n%s",
                          traceback.format_exc())
-        self._tick_stats["sub"].append(time.monotonic() - t0)
+        sub_ms = time.monotonic() - t0
+        self._tick_stats["sub"].append(sub_ms)
+        self._tick_stats["ws_subscription_ms"].append(sub_ms)
 
-        # 3. Slow path — round-robin full event-view capture, DECOUPLED.
-        #    Runs on its own page (self._slow_page) on a coarse cadence
-        #    (EVENT_VIEW_EVERY_N fast ticks), so a slow event-view nav
-        #    (~6s click+load+parse) never delays the ~10s score poll.
-        if self._slow_page is not None and self._tick_no % EVENT_VIEW_EVERY_N == 0:
-            t0 = time.monotonic()
-            try:
-                self._capture_slow_market()
-            except Exception:
-                logger.error("slow event-view capture error:\n%s",
-                             traceback.format_exc())
-            self._tick_stats["event"].append(time.monotonic() - t0)
-        elif self._slow_page is None:
-            # ensure the slow page exists once the browser is up
-            self._ensure_slow_page()
-
-        # 4. Mark unseen games ended
+        # 4. Mark unseen games ended + drop resolve requests for rows that
+        #    vanished (bounded work: one locked pass over the maps)
         self._mark_ended(seen_keys)
+        self._prune_pending_resolve(seen_keys)
+
+        # 5. Request a SLOW round (event-view rotation) when due.  This is
+        #    a flag + event set — never a join, never a wait: the worker
+        #    picks it up on its own thread at its own pace.
+        now_m = time.monotonic()
+        if now_m - self._last_slow_request_at >= EVENT_VIEW_MIN_INTERVAL_S:
+            self._last_slow_request_at = now_m
+            self._slow_job_pending = True
+            self._slow_wake.set()
 
         self.stats["games_seen"] = sum(len(v) for v in self._tracked.values())
         logger.info(
-            "tick %d done: tracked=%d snapshots=%d errors=%d",
-            self.stats["ticks"], self.stats["games_seen"],
-            self.stats["snapshots"], self.stats["errors"],
+            "fast tick %d done in %.2fs: tracked=%d snapshots=%d errors=%d",
+            self.stats["ticks"], time.monotonic() - t_tick,
+            self.stats["games_seen"], self.stats["snapshots"],
+            self.stats["errors"],
         )
         self._write_state(success=True)
+        self._tick_stats["fast_work_ms"].append(time.monotonic() - t_tick)
+        self._tick_stats["work"].append(time.monotonic() - t_tick)
         return page
 
+    # ── Pending identity resolution (fast -> slow worker channel) ──
+
+    def _queue_resolve(self, cls: Classification, row: RowGame) -> None:
+        """Queue a NEW panel row for durable-identity resolution on the
+        slow worker.  Called with _track_lock held (dict-only).  The retry
+        gate (RESOLVE_RETRY_S) makes re-discovery before resolution a
+        bounded no-op, never a hot loop."""
+        key = (cls.value, f"{row.home_team}|{row.away_team}")
+        entry = self._pending_resolve.get(key)
+        now_m = time.monotonic()
+        if entry is not None and (now_m - entry["queued_at"]) < RESOLVE_RETRY_S:
+            return
+        self._pending_resolve[key] = {
+            "queued_at": now_m, "attempted_at": 0.0,
+            "home": row.home_team, "away": row.away_team,
+            "classification": cls.value,
+        }
+        self._slow_wake.set()
+
+    def _prune_pending_resolve(self, seen_keys: dict[str, set[str]]) -> None:
+        """Drop resolve requests whose panel row vanished (dict-only; safe
+        under the lock)."""
+        with self._track_lock:
+            for key in list(self._pending_resolve):
+                if key[1] not in seen_keys.get(key[0], set()):
+                    del self._pending_resolve[key]
+
+    def _claim_pending_resolve(
+            self) -> Optional[tuple[Classification, RowGame]]:
+        """Worker-side claim of ONE pending identity resolution.
+
+        Lock-guarded pop; the claimed entry is re-inserted with a fresh
+        attempt stamp on failure (by the worker) so the fast path's retry
+        gate stays honest, and dropped on success."""
+        with self._track_lock:
+            if not self._pending_resolve:
+                return None
+            key = next(iter(self._pending_resolve))
+            entry = self._pending_resolve.pop(key)
+        cls = Classification(key[0])
+        return cls, RowGame(home_team=entry["home"],
+                            away_team=entry["away"])
+
     # ── Discovery & identity ─────────────────────────────────────
-
-    def _resolve_new_game(
-        self, page: Page, comp, row: RowGame,
-    ) -> Optional[tuple[PokerBetGame, str]]:
-        """Click the game row → read the event-view URL → build identity.
-
-        Returns (PokerBetGame, event_page_text) or None on failure.
-        """
-        try:
-            # find the row element by team names
-            el = page.evaluate(
-                """(names) => {
-                    const rows = document.querySelectorAll('.market-game-section');
-                    for (const r of rows) {
-                        const rnames = [...r.querySelectorAll('.market-game-team-name')]
-                            .map(n => n.textContent.trim());
-                        if (rnames.length >= 2 && rnames[0] === names.home && rnames[1] === names.away) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }""",
-                {"home": row.home_team, "away": row.away_team},
-            )
-            if not el:
-                logger.warning("row not found for %s vs %s", row.home_team, row.away_team)
-                return None
-            page.evaluate(
-                """(names) => {
-                    const rows = document.querySelectorAll('.market-game-section');
-                    for (const r of rows) {
-                        const rnames = [...r.querySelectorAll('.market-game-team-name')]
-                            .map(n => n.textContent.trim());
-                        if (rnames.length >= 2 && rnames[0] === names.home && rnames[1] === names.away) {
-                            r.click();
-                            return;
-                        }
-                    }
-                }""",
-                {"home": row.home_team, "away": row.away_team},
-            )
-            page.wait_for_timeout(2500)
-            url = page.url
-            tax = parse_event_url(url)
-            if not tax:
-                logger.warning("no event taxonomy after click: %s", url)
-                return None
-            text = page.inner_text("body", timeout=10000)
-
-            # Authoritative teams: event-view scoreboard > URL slug > panel row.
-            # The panel row can be STALE during fast game rotation (the row
-            # text lags the actual event), so never trust it alone.
-            home, away = self._authoritative_teams(row, tax, text)
-
-            # Dedup by durable identity (source_game_id): the same event may be
-            # re-discovered from a refreshed row — update, don't duplicate.
-            # Virtual replays: the URL base id maps to the current instance id.
-            existing = self._find_tracked(tax["game_id"])
-            if existing is None:
-                cur = self._instances.get(tax["game_id"])
-                if cur:
-                    existing = self._find_tracked(cur)
-            if existing is not None:
-                cls_val = existing.classification
-                old_key = f"{existing.home_team}|{existing.away_team}"
-                if (existing.home_team, existing.away_team) != (home, away):
-                    existing.home_team, existing.away_team = home, away
-                    self.store.upsert_game(existing)
-                    logger.info(
-                        "updated teams for %s -> %s vs %s",
-                        tax["game_id"], home, away,
-                    )
-                self._tracked[cls_val].pop(old_key, None)
-                self._unseen_ticks[cls_val].pop(old_key, None)
-                new_key = f"{home}|{away}"
-                self._tracked[cls_val][new_key] = existing
-                self._unseen_ticks[cls_val][new_key] = 0
-                if existing.source_game_id not in self._market_queue:
-                    self._market_queue.append(existing.source_game_id)
-                return existing, text
-
-            game = self._build_game(comp, row, tax, url, home, away)
-            # Restart-safe virtual replay identity: after a collector restart
-            # _tracked is empty, so a fixture with existing DB history gets
-            # re-resolved as "new" — if the DB's last snapshot is a finished
-            # game and the observed state is a NEW replay (score drop or
-            # clock regression), start a fresh #iN instance instead of
-            # contaminating the finished row.
-            new_id = self._restart_split_suffix(text, tax, game)
-            if new_id:
-                game.source_game_id = new_id
-                self._instances[self._base_id(new_id)] = new_id
-                logger.info(
-                    "restart-safe virtual replay split: %s -> %s",
-                    tax["game_id"], new_id,
-                )
-            gid = self.store.upsert_game(game)
-            key = f"{home}|{away}"
-            self._tracked[comp.classification.value][key] = game
-            self._unseen_ticks[comp.classification.value][key] = 0
-            self._market_queue.append(game.source_game_id)
-            self.stats["games_resolved"] += 1
-            logger.info(
-                "resolved new %s game %s (%s vs %s) game_id=%s",
-                comp.classification.value, gid, home, away,
-                tax["game_id"],
-            )
-            return game, text
-        except Exception:
-            logger.error("resolve failed:\n%s", traceback.format_exc())
-            return None
 
     def _restart_split_suffix(self, text: str, tax: dict,
                               game: PokerBetGame) -> Optional[str]:
@@ -1360,9 +1744,9 @@ class PokerBetCollector:
         return home, away
 
     def _build_game(
-        self, comp, row: RowGame, tax: dict, url: str, home: str, away: str,
+        self, cls: Classification, row: RowGame, tax: dict, url: str,
+        home: str, away: str,
     ) -> PokerBetGame:
-        cls = comp.classification
         return PokerBetGame(
             source=SOURCE_POKERBET,
             source_game_id=tax["game_id"],
@@ -1534,10 +1918,11 @@ class PokerBetCollector:
             self.store.upsert_game(game)
         cls_val = cls.value
         key = f"{game.home_team}|{game.away_team}"
-        self._tracked[cls_val].pop(key, None)
-        self._unseen_ticks[cls_val].pop(key, None)
-        if game.source_game_id in self._market_queue:
-            self._market_queue.remove(game.source_game_id)
+        with self._track_lock:
+            self._tracked[cls_val].pop(key, None)
+            self._unseen_ticks[cls_val].pop(key, None)
+            if game.source_game_id in self._market_queue:
+                self._market_queue.remove(game.source_game_id)
 
         # fresh instance record (same fixture, new identity)
         new_game = game.model_copy(update={
@@ -1547,9 +1932,10 @@ class PokerBetCollector:
             "last_seen_at": utcnow_iso(),
         })
         self.store.upsert_game(new_game)
-        self._tracked[cls_val][key] = new_game
-        self._unseen_ticks[cls_val][key] = 0
-        self._market_queue.append(new_id)
+        with self._track_lock:
+            self._tracked[cls_val][key] = new_game
+            self._unseen_ticks[cls_val][key] = 0
+            self._market_queue.append(new_id)
         self.stats["instances_split"] += 1
         logger.info(
             "virtual replay split: %s -> %s (path=%s signal=%s "
@@ -1597,9 +1983,10 @@ class PokerBetCollector:
         if row_id:
             self.stats["snapshots"] += 1
             self._record_clean(game, obs)
-        self._unseen_ticks[game.classification][
-            f"{row.home_team}|{row.away_team}"
-        ] = 0
+        with self._track_lock:
+            self._unseen_ticks[game.classification][
+                f"{row.home_team}|{row.away_team}"
+            ] = 0
 
     def _record_clean(self, game: PokerBetGame, obs: MarketObservation) -> None:
         """Feed one VALIDATED observation into the clean metrics DB.
@@ -1773,10 +2160,11 @@ class PokerBetCollector:
             self.store.upsert_game(game)
         cls_val = game.classification
         key = f"{game.home_team}|{game.away_team}"
-        self._tracked.get(cls_val, {}).pop(key, None)
-        self._unseen_ticks.get(cls_val, {}).pop(key, None)
-        if game.source_game_id in self._market_queue:
-            self._market_queue.remove(game.source_game_id)
+        with self._track_lock:
+            self._tracked.get(cls_val, {}).pop(key, None)
+            self._unseen_ticks.get(cls_val, {}).pop(key, None)
+            if game.source_game_id in self._market_queue:
+                self._market_queue.remove(game.source_game_id)
         last = self.store.get_snapshots(game.source_game_id, limit=1)
         lr = last[0] if last else {}
         logger.info(
@@ -1814,15 +2202,18 @@ class PokerBetCollector:
         return gids
 
     def _ensure_slow_page(self) -> None:
-        """Create (once) the dedicated SLOW event-view page in the same
-        browser/context as the fast page — so the slow path shares the
-        browser but never the fast page's URL/state.  Both pages attach
-        their own eu-swarm WS hook (raw market feed stays independent)."""
+        """Create the dedicated SLOW event-view page on the WORKER'S OWN
+        browser (sync Playwright objects are thread-affine — the worker
+        thread owns its sync_playwright scope, browser and page end to
+        end, and the fast loop never touches any of them).  The worker
+        page attaches its own eu-swarm WS hook, so a verified event view
+        on this page still bridges WS market frames exactly as before.
+        SLOW-WORKER-ONLY: must be called from the worker thread."""
         try:
-            if self._pw is None or self._browser is None:
+            if self._slow_browser is None:
                 return
-            context = self._browser.contexts[0] if self._browser.contexts \
-                else self._new_context(self._browser)
+            context = self._slow_browser.contexts[0] if self._slow_browser.contexts \
+                else self._new_context(self._slow_browser)
             page = context.new_page()
             self._slow_page = page
             self._slow_browser_started_at = time.monotonic()
@@ -1831,15 +2222,42 @@ class PokerBetCollector:
             self._goto(page, competition_url(
                 Classification.CYBER_2K26, self.comp_ids))
             self._wait_panel(page)
-            logger.info("slow event-view page ready")
+            logger.info("slow event-view page ready (worker browser)")
         except Exception:
             logger.error("slow page init failed:\n%s", traceback.format_exc())
+            self._slow_page = None
+
+    def _rotate_slow_browser(self) -> None:
+        """Worker-side SPA-degradation rotation: close the worker's own
+        browser and build a fresh one.  SLOW-WORKER-ONLY (worker thread)."""
+        logger.warning("rotating slow worker browser (lifetime/SPA cap)")
+        try:
+            if self._slow_browser is not None:
+                self._slow_browser.close()
+        except Exception:
+            pass
+        self._slow_browser = None
+        self._slow_page = None
+        try:
+            assert self._slow_pw is not None
+            self._slow_browser = self._slow_pw.chromium.launch(
+                headless=self.headless,
+                args=["--no-sandbox", "--disable-gpu",
+                      "--disable-dev-shm-usage"],
+            )
+            self._ensure_slow_page()
+        except Exception:
+            logger.error("slow browser rotation failed:\n%s",
+                         traceback.format_exc())
+            self._slow_browser = None
             self._slow_page = None
 
     def _capture_slow_market(self) -> None:
         """Round-robin full event-view capture on the SLOW page — the
         decoupled equivalent of the old in-tick ``_capture_next_market``.
-        Runs once per EVENT_VIEW_EVERY_N fast ticks.  Only the slow page
+        Runs on the WORKER thread whenever the fast path requested a
+        round (EVENT_VIEW_MIN_INTERVAL_S between round REQUESTS).  Only
+        the slow page
         navigates; the fast page stays on the lobby for the score poll.
         ``_capture_event_state``/``_end_game`` may rotate the browser —
         on rotation the slow page is recreated on the next guard.
@@ -2011,7 +2429,7 @@ class PokerBetCollector:
                 except Exception:
                     logger.error("slow return-to-lobby failed:\n%s",
                                  traceback.format_exc())
-                    self._slow_page = None      # recreate on next guard
+                    self._slow_page = None      # worker recreates it
 
     def _ensure_comp_lobby(self, page: Page, cls: Classification) -> bool:
         """Make sure ``page`` shows a live LOBBY containing ``cls`` rows.
@@ -2037,6 +2455,41 @@ class PokerBetCollector:
             return False
         except Exception:
             logger.error("ensure comp lobby failed:\n%s",
+                         traceback.format_exc())
+            return False
+
+    def _click_panel_row(self, page: Page, row: RowGame) -> bool:
+        """Open a PANEL ROW's event view by team names (resolver path).
+
+        The SPA's event-view route only hydrates via an in-app row click;
+        a direct goto of the event-view URL falls back to the lobby.
+        SLOW-WORKER-ONLY (navigates the worker page)."""
+        try:
+            clicked = page.evaluate(
+                """(names) => {
+                    const rows = document.querySelectorAll('.market-game-section');
+                    for (const r of rows) {
+                        const rnames = [...r.querySelectorAll('.market-game-team-name')]
+                            .map(n => n.textContent.trim());
+                        if (rnames.length >= 2 && rnames[0] === names.home
+                                && rnames[1] === names.away) {
+                            r.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                {"home": row.home_team, "away": row.away_team},
+            )
+            if not clicked:
+                logger.warning(
+                    "row not found for %s vs %s — skipping resolve",
+                    row.home_team, row.away_team)
+                return False
+            page.wait_for_timeout(2500)  # event view hydration
+            return True
+        except Exception:
+            logger.error("panel row click failed:\n%s",
                          traceback.format_exc())
             return False
 
@@ -2126,30 +2579,39 @@ class PokerBetCollector:
     # ── Game lifecycle ───────────────────────────────────────────
 
     def _mark_ended(self, seen_keys: dict[str, set[str]]) -> None:
-        for cls_val, games in self._tracked.items():
-            for key, game in list(games.items()):
-                if key in seen_keys.get(cls_val, set()):
-                    self._unseen_ticks[cls_val][key] = 0
-                    continue
-                self._unseen_ticks[cls_val][key] = (
-                    self._unseen_ticks[cls_val].get(key, 0) + 1
-                )
-                if self._unseen_ticks[cls_val][key] >= self._ended_grace_ticks:
-                    if game.status != "ended":
-                        game.status = "ended"
-                        self.store.upsert_game(game)
-                        logger.info("game ended (disappeared): %s", game.source_game_id)
-                        self._finalize_clean(game)
-                    # keep the game record; drop from live tracking
-                    del games[key]
-                    if game.source_game_id in self._market_queue:
-                        self._market_queue.remove(game.source_game_id)
+        """Grace-based end detection (fast path).  DB writes happen
+        OUTSIDE the track lock — only the map mutations are guarded."""
+        with self._track_lock:
+            to_end: list[PokerBetGame] = []
+            for cls_val, games in self._tracked.items():
+                for key, game in list(games.items()):
+                    if key in seen_keys.get(cls_val, set()):
+                        self._unseen_ticks[cls_val][key] = 0
+                        continue
+                    self._unseen_ticks[cls_val][key] = (
+                        self._unseen_ticks[cls_val].get(key, 0) + 1
+                    )
+                    if self._unseen_ticks[cls_val][key] >= self._ended_grace_ticks:
+                        if game.status != "ended":
+                            game.status = "ended"
+                            to_end.append(game)
+                        # keep the game record; drop from live tracking
+                        del games[key]
+                        if game.source_game_id in self._market_queue:
+                            self._market_queue.remove(game.source_game_id)
+        for game in to_end:
+            self.store.upsert_game(game)
+            logger.info("game ended (disappeared): %s", game.source_game_id)
+            self._finalize_clean(game)
 
     def _find_tracked(self, source_game_id: str) -> Optional[PokerBetGame]:
-        for games in self._tracked.values():
-            for game in games.values():
-                if game.source_game_id == source_game_id:
-                    return game
+        """Lock-guarded scan (dict-only) — safe from any thread.  Callers
+        that already hold the lock are fine: RLock re-entrance."""
+        with self._track_lock:
+            for games in self._tracked.values():
+                for game in games.values():
+                    if game.source_game_id == source_game_id:
+                        return game
         return None
 
     def _game_db_id(self, game: PokerBetGame) -> int:

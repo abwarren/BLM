@@ -379,7 +379,12 @@ def test_market_refresh_constant_is_240s():
     assert MARKET_REFRESH_S == 240
     assert MARKET_REFRESH_S < 300
     assert MARKET_BATCH == 3  # up to three event views per slow run
-    assert collector_mod.EVENT_VIEW_EVERY_N <= 2
+    # STEP 3 retired the in-tick EVENT_VIEW_EVERY_N gate (the slow path is
+    # now its own thread + page): the rotation span is bounded by the
+    # wall-time interval between slow-round requests, not a tick count.
+    assert not hasattr(collector_mod, "EVENT_VIEW_EVERY_N")
+    assert 0 < collector_mod.EVENT_VIEW_MIN_INTERVAL_S <= 10.0
+    assert 0 < collector_mod.SLOW_WORKER_POLL_S <= 2.0
 
 
 def test_refresh_window_skips_game_captured_recently(tmp_path, monkeypatch):

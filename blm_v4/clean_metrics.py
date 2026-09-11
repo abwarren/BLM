@@ -230,6 +230,14 @@ CREATE TABLE IF NOT EXISTS clean_projections (
 );
 CREATE INDEX IF NOT EXISTS idx_clean_proj_game_ts
     ON clean_projections(source_game_id, captured_at);
+-- Benchmark-support index: the strictly-prior historical-mean lookup
+-- (provider family + period + 5-point progress bucket + captured_at
+-- cutoff) is evaluated per live observation on the hot /live path.  Without
+-- this it degrades to a full scan of the clean archive (~0.5s per game);
+-- with it the lookup is a bounded index range seek.
+CREATE INDEX IF NOT EXISTS idx_clean_proj_bench
+    ON clean_projections(classification, period_label, progress_pct,
+                         captured_at);
 """
 
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")

@@ -1,0 +1,379 @@
+FORENSIC ANALYSIS — EARLIER-CHECKPOINT LEAGUE/STATE RELATIVE PACE
+generated (UTC): 2026-09-11T16:07:40.168375+00:00
+method: frozen independent audit engine reused VERBATIM (imported,
+never modified): same eligible population, same benchmark key
+provider|canonical competition|Qx|Pnnn, same strictly-prior mean,
+same-game exclusion, same N>=30 maturity gate, same authoritative
+result resolution (prod.game_results OK rows), same UNDER rule
+final<line.  New element ONLY: slicing by exact stored
+remaining_game_minutes checkpoints / continuous windows.
+databases opened READ-ONLY; descriptive statistics only.
+
+population as-of THIS run (live archive grows continuously):
+  clean_projections rows now        : 507615   max captured_at 2026-09-11T16:07:52.830262Z
+  eligible observations (rem>=2.5)  : 235403
+  mature observations (N>=30)       : 231287
+  rows with remaining < 2.5         : 0  (must be 0)
+  REFERENCE frozen snapshot: report generated 2026-09-11T13:05:48Z
+  on an archive of 500,844 rows -> eligible 196,148 / mature 192,042;
+  the difference vs this run is snapshot age, not semantics (identical
+  engine, identical construction).
+
+==============================================================================
+CHECKPOINT 6.00 MINUTES REMAINING — exact stored observations
+==============================================================================
+observations at exactly 6.0 (mature): 2172   games: 1998
+
+A. OVERALL BASELINE @ 6.0
+  observations(decisive)=2172  games=1998  UNDER obs=1140  OVER obs=1032  pushes=0
+  baseline UNDER obs%=52.49   equal-game UNDER%=52.05
+
+B. FOUR-CELL RELATIVE-PACE MATRIX @ 6.0
+  cell A  actual<mean AND required<mean      obs=   903  games=  819  UNDER obs=   472  U%= 52.27  eq-gameU%= 51.40  lift= -0.22pp
+  cell B  actual<mean AND required>=mean  (PRIMARY) obs=   162  games=  160  UNDER obs=   148  U%= 91.36  eq-gameU%= 91.88  lift=+38.87pp
+  cell C  actual>=mean AND required<mean     obs=   136  games=  127  UNDER obs=   105  U%= 77.21  eq-gameU%= 77.56  lift=+24.72pp
+  cell D  actual>=mean AND required>=mean    obs=   971  games=  899  UNDER obs=   415  U%= 42.74  eq-gameU%= 41.88  lift= -9.75pp
+
+C. PRIMARY CELL DETAIL @ 6.0  (actual<mean AND required>=mean)
+  observations=162  games=160  UNDER obs=148
+  observation UNDER%=91.36   equal-game UNDER%=91.88   baseline=52.49   lift vs baseline=+38.87pp
+  mean pace gap (required-actual) = 1.0796
+  mean actual  - state mean       = -0.3647
+  mean required - state mean      = 0.7149
+
+D. COMPETITION BREAKDOWN — PRIMARY CELL @ 6.0 (no pooling)
+  NBA         baseline obs=  771 U%= 52.27   primary obs=   14 games=  14 U%=100.00 eq-gameU%=100.00 lift=+47.73pp  [SAMPLE-THIN]
+  KBL         baseline obs=  350 U%= 48.86   primary obs=   38 games=  37 U%= 89.47 eq-gameU%= 89.19 lift=+40.62pp  [SAMPLE-THIN]
+  CBA         baseline obs=  319 U%= 54.55   primary obs=   40 games=  40 U%= 90.00 eq-gameU%= 90.00 lift=+35.45pp  [SAMPLE-THIN]
+  TBSL        baseline obs=  348 U%= 56.03   primary obs=   32 games=  31 U%= 87.50 eq-gameU%= 90.32 lift=+31.47pp  [SAMPLE-THIN]
+  EUROLEAGUE  baseline obs=  380 U%= 51.32   primary obs=   36 games=  36 U%= 94.44 eq-gameU%= 94.44 lift=+43.13pp  [SAMPLE-THIN]
+  CYBER       baseline obs=    4 U%= 50.00   primary obs=    2 games=   2 U%=100.00 eq-gameU%=100.00 lift=+50.00pp  [SAMPLE-THIN]
+
+==============================================================================
+CHECKPOINT 5.00 MINUTES REMAINING — exact stored observations
+==============================================================================
+observations at exactly 5.0 (mature): 2432   games: 2259
+
+A. OVERALL BASELINE @ 5.0
+  observations(decisive)=2432  games=2259  UNDER obs=1307  OVER obs=1125  pushes=0
+  baseline UNDER obs%=53.74   equal-game UNDER%=53.51
+
+B. FOUR-CELL RELATIVE-PACE MATRIX @ 5.0
+  cell A  actual<mean AND required<mean      obs=  1050  games=  975  UNDER obs=   543  U%= 51.71  eq-gameU%= 52.14  lift= -2.03pp
+  cell B  actual<mean AND required>=mean  (PRIMARY) obs=   217  games=  212  UNDER obs=   208  U%= 95.85  eq-gameU%= 96.23  lift=+42.11pp
+  cell C  actual>=mean AND required<mean     obs=   127  games=  122  UNDER obs=    99  U%= 77.95  eq-gameU%= 78.69  lift=+24.21pp
+  cell D  actual>=mean AND required>=mean    obs=  1038  games=  962  UNDER obs=   457  U%= 44.03  eq-gameU%= 42.46  lift= -9.71pp
+
+C. PRIMARY CELL DETAIL @ 5.0  (actual<mean AND required>=mean)
+  observations=217  games=212  UNDER obs=208
+  observation UNDER%=95.85   equal-game UNDER%=96.23   baseline=53.74   lift vs baseline=+42.11pp
+  mean pace gap (required-actual) = 1.3412
+  mean actual  - state mean       = -0.4078
+  mean required - state mean      = 0.9334
+
+D. COMPETITION BREAKDOWN — PRIMARY CELL @ 5.0 (no pooling)
+  NBA         baseline obs=  956 U%= 52.51   primary obs=   29 games=  27 U%=100.00 eq-gameU%=100.00 lift=+47.49pp  [SAMPLE-THIN]
+  KBL         baseline obs=  366 U%= 51.09   primary obs=   39 games=  38 U%= 92.31 eq-gameU%= 94.74 lift=+41.21pp  [SAMPLE-THIN]
+  CBA         baseline obs=  278 U%= 55.76   primary obs=   39 games=  39 U%= 97.44 eq-gameU%= 97.44 lift=+41.68pp  [SAMPLE-THIN]
+  TBSL        baseline obs=  503 U%= 57.06   primary obs=   79 games=  77 U%= 96.20 eq-gameU%= 96.10 lift=+39.14pp  [SAMPLE-THIN]
+  EUROLEAGUE  baseline obs=  324 U%= 53.09   primary obs=   29 games=  29 U%= 93.10 eq-gameU%= 93.10 lift=+40.02pp  [SAMPLE-THIN]
+  CYBER       baseline obs=    5 U%= 80.00   primary obs=    2 games=   2 U%=100.00 eq-gameU%=100.00 lift=+20.00pp  [SAMPLE-THIN]
+
+==============================================================================
+CHECKPOINT 4.00 MINUTES REMAINING — exact stored observations
+==============================================================================
+observations at exactly 4.0 (mature): 2347   games: 2153
+
+A. OVERALL BASELINE @ 4.0
+  observations(decisive)=2347  games=2153  UNDER obs=1278  OVER obs=1069  pushes=0
+  baseline UNDER obs%=54.45   equal-game UNDER%=53.75
+
+B. FOUR-CELL RELATIVE-PACE MATRIX @ 4.0
+  cell A  actual<mean AND required<mean      obs=   698  games=  638  UNDER obs=   365  U%= 52.29  eq-gameU%= 51.25  lift= -2.16pp
+  cell B  actual<mean AND required>=mean  (PRIMARY) obs=   340  games=  314  UNDER obs=   270  U%= 79.41  eq-gameU%= 79.62  lift=+24.96pp
+  cell C  actual>=mean AND required<mean     obs=   289  games=  272  UNDER obs=   219  U%= 75.78  eq-gameU%= 76.84  lift=+21.33pp
+  cell D  actual>=mean AND required>=mean    obs=  1020  games=  943  UNDER obs=   424  U%= 41.57  eq-gameU%= 40.24  lift=-12.88pp
+
+C. PRIMARY CELL DETAIL @ 4.0  (actual<mean AND required>=mean)
+  observations=340  games=314  UNDER obs=270
+  observation UNDER%=79.41   equal-game UNDER%=79.62   baseline=54.45   lift vs baseline=+24.96pp
+  mean pace gap (required-actual) = 3.0801
+  mean actual  - state mean       = -0.3947
+  mean required - state mean      = 2.6854
+
+D. COMPETITION BREAKDOWN — PRIMARY CELL @ 4.0 (no pooling)
+  NBA         baseline obs=  661 U%= 56.73   primary obs=   31 games=  29 U%=100.00 eq-gameU%=100.00 lift=+43.27pp  [SAMPLE-THIN]
+  KBL         baseline obs=  373 U%= 53.08   primary obs=   58 games=  54 U%= 94.83 eq-gameU%= 94.44 lift=+41.74pp  [SAMPLE-THIN]
+  CBA         baseline obs=  299 U%= 53.18   primary obs=   50 games=  49 U%= 94.00 eq-gameU%= 93.88 lift=+40.82pp  [SAMPLE-THIN]
+  TBSL        baseline obs=  494 U%= 52.83   primary obs=  113 games= 103 U%= 62.83 eq-gameU%= 63.11 lift=+10.00pp
+  EUROLEAGUE  baseline obs=  509 U%= 54.81   primary obs=   82 games=  77 U%= 74.39 eq-gameU%= 75.32 lift=+19.58pp  [SAMPLE-THIN]
+  CYBER       baseline obs=   11 U%= 54.55   primary obs=    6 games=   2 U%= 83.33 eq-gameU%= 50.00 lift=+28.79pp  [SAMPLE-THIN]
+
+==============================================================================
+CHECKPOINT 3.00 MINUTES REMAINING — exact stored observations
+==============================================================================
+observations at exactly 3.0 (mature): 1981   games: 1796
+
+A. OVERALL BASELINE @ 3.0
+  observations(decisive)=1981  games=1796  UNDER obs=1072  OVER obs=909  pushes=0
+  baseline UNDER obs%=54.11   equal-game UNDER%=53.93
+
+B. FOUR-CELL RELATIVE-PACE MATRIX @ 3.0
+  cell A  actual<mean AND required<mean      obs=   604  games=  531  UNDER obs=   301  U%= 49.83  eq-gameU%= 49.62  lift= -4.28pp
+  cell B  actual<mean AND required>=mean  (PRIMARY) obs=   366  games=  338  UNDER obs=   283  U%= 77.32  eq-gameU%= 78.99  lift=+23.21pp
+  cell C  actual>=mean AND required<mean     obs=   258  games=  248  UNDER obs=   203  U%= 78.68  eq-gameU%= 78.63  lift=+24.57pp
+  cell D  actual>=mean AND required>=mean    obs=   753  games=  691  UNDER obs=   285  U%= 37.85  eq-gameU%= 36.18  lift=-16.27pp
+
+C. PRIMARY CELL DETAIL @ 3.0  (actual<mean AND required>=mean)
+  observations=366  games=338  UNDER obs=283
+  observation UNDER%=77.32   equal-game UNDER%=78.99   baseline=54.11   lift vs baseline=+23.21pp
+  mean pace gap (required-actual) = 4.3497
+  mean actual  - state mean       = -0.3938
+  mean required - state mean      = 3.9559
+
+D. COMPETITION BREAKDOWN — PRIMARY CELL @ 3.0 (no pooling)
+  NBA         baseline obs=  540 U%= 53.70   primary obs=   27 games=  27 U%=100.00 eq-gameU%=100.00 lift=+46.30pp  [SAMPLE-THIN]
+  KBL         baseline obs=  200 U%= 49.00   primary obs=   31 games=  30 U%= 96.77 eq-gameU%= 96.67 lift=+47.77pp  [SAMPLE-THIN]
+  CBA         baseline obs=  291 U%= 52.58   primary obs=   45 games=  43 U%= 97.78 eq-gameU%= 97.67 lift=+45.20pp  [SAMPLE-THIN]
+  TBSL        baseline obs=  476 U%= 57.35   primary obs=  155 games= 141 U%= 70.32 eq-gameU%= 71.63 lift=+12.97pp
+  EUROLEAGUE  baseline obs=  466 U%= 54.08   primary obs=  103 games=  94 U%= 66.02 eq-gameU%= 69.15 lift=+11.94pp
+  CYBER       baseline obs=    8 U%= 75.00   primary obs=    5 games=   3 U%=100.00 eq-gameU%=100.00 lift=+25.00pp  [SAMPLE-THIN]
+
+==============================================================================
+CHECKPOINT 2.50 MINUTES REMAINING — exact stored observations
+==============================================================================
+observations at exactly 2.5 (mature): 2158   games: 2001
+
+A. OVERALL BASELINE @ 2.5
+  observations(decisive)=2158  games=2001  UNDER obs=1199  OVER obs=959  pushes=0
+  baseline UNDER obs%=55.56   equal-game UNDER%=55.56
+
+B. FOUR-CELL RELATIVE-PACE MATRIX @ 2.5
+  cell A  actual<mean AND required<mean      obs=   605  games=  552  UNDER obs=   311  U%= 51.40  eq-gameU%= 51.33  lift= -4.16pp
+  cell B  actual<mean AND required>=mean  (PRIMARY) obs=   362  games=  346  UNDER obs=   308  U%= 85.08  eq-gameU%= 85.26  lift=+29.52pp
+  cell C  actual>=mean AND required<mean     obs=   325  games=  305  UNDER obs=   252  U%= 77.54  eq-gameU%= 78.69  lift=+21.98pp
+  cell D  actual>=mean AND required>=mean    obs=   866  games=  812  UNDER obs=   328  U%= 37.88  eq-gameU%= 37.32  lift=-17.69pp
+
+C. PRIMARY CELL DETAIL @ 2.5  (actual<mean AND required>=mean)
+  observations=362  games=346  UNDER obs=308
+  observation UNDER%=85.08   equal-game UNDER%=85.26   baseline=55.56   lift vs baseline=+29.52pp
+  mean pace gap (required-actual) = 4.3789
+  mean actual  - state mean       = -0.4067
+  mean required - state mean      = 3.9722
+
+D. COMPETITION BREAKDOWN — PRIMARY CELL @ 2.5 (no pooling)
+  NBA         baseline obs=  560 U%= 56.25   primary obs=   45 games=  43 U%=100.00 eq-gameU%=100.00 lift=+43.75pp  [SAMPLE-THIN]
+  KBL         baseline obs=  290 U%= 53.45   primary obs=   35 games=  33 U%=100.00 eq-gameU%=100.00 lift=+46.55pp  [SAMPLE-THIN]
+  CBA         baseline obs=  300 U%= 54.33   primary obs=   57 games=  56 U%= 94.74 eq-gameU%= 94.64 lift=+40.40pp  [SAMPLE-THIN]
+  TBSL        baseline obs=  417 U%= 58.75   primary obs=  115 games= 106 U%= 78.26 eq-gameU%= 78.30 lift=+19.51pp
+  EUROLEAGUE  baseline obs=  579 U%= 54.06   primary obs=  107 games= 105 U%= 76.64 eq-gameU%= 77.14 lift=+22.58pp
+  CYBER       baseline obs=   12 U%= 66.67   primary obs=    3 games=   3 U%= 66.67 eq-gameU%= 66.67 lift= +0.00pp  [SAMPLE-THIN]
+
+==============================================================================
+E. CHECKPOINT TREND (chronological; exact stored checkpoints)
+==============================================================================
+   ck     obs  games  baselineU%  primaryU%  eq-gameU%     lift
+ 6.00     162    160       52.49      91.36      91.88 +38.87pp
+ 5.00     217    212       53.74      95.85      96.23 +42.11pp
+ 4.00     340    314       54.45      79.41      79.62 +24.96pp
+ 3.00     366    338       54.11      77.32      78.99 +23.21pp
+ 2.50     362    346       55.56      85.08      85.26 +29.52pp
+(obs/games columns = PRIMARY-CELL support at that checkpoint; baseline columns are the checkpoint's overall rates)
+
+==============================================================================
+F. CONTINUOUS WINDOWS (lo <= remaining < hi; [2.5,3.0) includes 2.5)
+==============================================================================
+
+window >=6.0:
+  baseline  : obs=199349  games=4833  U%=49.59  eq-gameU%=50.31
+  PRIMARY   : obs=14856  games=1188  U%=66.06  eq-gameU%=67.53  lift=+16.47pp
+
+window [5.0,6.0):
+  baseline  : obs=9076  games=4430  U%=53.04  eq-gameU%=52.96
+  PRIMARY   : obs=838  games=489  U%=91.29  eq-gameU%=90.58  lift=+38.25pp
+
+window [4.0,5.0):
+  baseline  : obs=9199  games=4622  U%=54.10  eq-gameU%=53.56
+  PRIMARY   : obs=1132  games=698  U%=84.98  eq-gameU%=82.73  lift=+30.88pp
+
+window [3.0,4.0):
+  baseline  : obs=9052  games=4671  U%=53.31  eq-gameU%=54.08
+  PRIMARY   : obs=1490  games=813  U%=75.64  eq-gameU%=80.41  lift=+22.32pp
+
+window [2.5,3.0):
+  baseline  : obs=4611  games=3510  U%=54.22  eq-gameU%=54.74
+  PRIMARY   : obs=803  games=654  U%=81.20  eq-gameU%=82.26  lift=+26.98pp
+
+==============================================================================
+WHOLE-POPULATION REPRODUCTION CHECK (current archive, all mature)
+==============================================================================
+  current archive PRIMARY cell: obs=19119  games=1620  UNDER%=69.67  eq-gameU%=72.30
+  current archive baseline    : obs=231287  UNDER%=50.14
+  REFERENCE frozen audit (13:05Z snapshot): 17,841 obs / 1,515 games,
+  UNDER 69.75% / equal-game 73.02%, baseline 49.79%.
+  drift vs frozen reference   : 0.08pp  (within the freeze test's 1.0pp tolerance)
+
+
+==============================================================================
+G. ROBUSTNESS — is the primary cell directionally strongest?
+==============================================================================
+
+G.1 per checkpoint (observation-level):
+  ck=6.00: A=52.27 B=91.36 C=77.21 D=42.74  highest=B  B>baseline=True  B>both mirrors=True  B_support=162 obs
+  ck=5.00: A=51.71 B=95.85 C=77.95 D=44.03  highest=B  B>baseline=True  B>both mirrors=True  B_support=217 obs
+  ck=4.00: A=52.29 B=79.41 C=75.78 D=41.57  highest=B  B>baseline=True  B>both mirrors=True  B_support=340 obs
+  ck=3.00: A=49.83 B=77.32 C=78.68 D=37.85  highest=C  B>baseline=True  B>both mirrors=False  B_support=366 obs
+  ck=2.50: A=51.40 B=85.08 C=77.54 D=37.88  highest=B  B>baseline=True  B>both mirrors=True  B_support=362 obs
+
+G.2 per competition x checkpoint (primary cell vs same-competition baseline):
+  ck=6.00 NBA        : primaryU%=100.00 vs baselineU%= 52.27  lift=+47.73pp  obs=   14  [SAMPLE-THIN]
+  ck=6.00 KBL        : primaryU%= 89.47 vs baselineU%= 48.86  lift=+40.62pp  obs=   38  [SAMPLE-THIN]
+  ck=6.00 CBA        : primaryU%= 90.00 vs baselineU%= 54.55  lift=+35.45pp  obs=   40  [SAMPLE-THIN]
+  ck=6.00 TBSL       : primaryU%= 87.50 vs baselineU%= 56.03  lift=+31.47pp  obs=   32  [SAMPLE-THIN]
+  ck=6.00 EUROLEAGUE : primaryU%= 94.44 vs baselineU%= 51.32  lift=+43.13pp  obs=   36  [SAMPLE-THIN]
+  ck=6.00 CYBER      : primaryU%=100.00 vs baselineU%= 50.00  lift=+50.00pp  obs=    2  [SAMPLE-THIN]
+  ck=5.00 NBA        : primaryU%=100.00 vs baselineU%= 52.51  lift=+47.49pp  obs=   29  [SAMPLE-THIN]
+  ck=5.00 KBL        : primaryU%= 92.31 vs baselineU%= 51.09  lift=+41.21pp  obs=   39  [SAMPLE-THIN]
+  ck=5.00 CBA        : primaryU%= 97.44 vs baselineU%= 55.76  lift=+41.68pp  obs=   39  [SAMPLE-THIN]
+  ck=5.00 TBSL       : primaryU%= 96.20 vs baselineU%= 57.06  lift=+39.14pp  obs=   79  [SAMPLE-THIN]
+  ck=5.00 EUROLEAGUE : primaryU%= 93.10 vs baselineU%= 53.09  lift=+40.02pp  obs=   29  [SAMPLE-THIN]
+  ck=5.00 CYBER      : primaryU%=100.00 vs baselineU%= 80.00  lift=+20.00pp  obs=    2  [SAMPLE-THIN]
+  ck=4.00 NBA        : primaryU%=100.00 vs baselineU%= 56.73  lift=+43.27pp  obs=   31  [SAMPLE-THIN]
+  ck=4.00 KBL        : primaryU%= 94.83 vs baselineU%= 53.08  lift=+41.74pp  obs=   58  [SAMPLE-THIN]
+  ck=4.00 CBA        : primaryU%= 94.00 vs baselineU%= 53.18  lift=+40.82pp  obs=   50  [SAMPLE-THIN]
+  ck=4.00 TBSL       : primaryU%= 62.83 vs baselineU%= 52.83  lift=+10.00pp  obs=  113
+  ck=4.00 EUROLEAGUE : primaryU%= 74.39 vs baselineU%= 54.81  lift=+19.58pp  obs=   82  [SAMPLE-THIN]
+  ck=4.00 CYBER      : primaryU%= 83.33 vs baselineU%= 54.55  lift=+28.79pp  obs=    6  [SAMPLE-THIN]
+  ck=3.00 NBA        : primaryU%=100.00 vs baselineU%= 53.70  lift=+46.30pp  obs=   27  [SAMPLE-THIN]
+  ck=3.00 KBL        : primaryU%= 96.77 vs baselineU%= 49.00  lift=+47.77pp  obs=   31  [SAMPLE-THIN]
+  ck=3.00 CBA        : primaryU%= 97.78 vs baselineU%= 52.58  lift=+45.20pp  obs=   45  [SAMPLE-THIN]
+  ck=3.00 TBSL       : primaryU%= 70.32 vs baselineU%= 57.35  lift=+12.97pp  obs=  155
+  ck=3.00 EUROLEAGUE : primaryU%= 66.02 vs baselineU%= 54.08  lift=+11.94pp  obs=  103
+  ck=3.00 CYBER      : primaryU%=100.00 vs baselineU%= 75.00  lift=+25.00pp  obs=    5  [SAMPLE-THIN]
+  ck=2.50 NBA        : primaryU%=100.00 vs baselineU%= 56.25  lift=+43.75pp  obs=   45  [SAMPLE-THIN]
+  ck=2.50 KBL        : primaryU%=100.00 vs baselineU%= 53.45  lift=+46.55pp  obs=   35  [SAMPLE-THIN]
+  ck=2.50 CBA        : primaryU%= 94.74 vs baselineU%= 54.33  lift=+40.40pp  obs=   57  [SAMPLE-THIN]
+  ck=2.50 TBSL       : primaryU%= 78.26 vs baselineU%= 58.75  lift=+19.51pp  obs=  115
+  ck=2.50 EUROLEAGUE : primaryU%= 76.64 vs baselineU%= 54.06  lift=+22.58pp  obs=  107
+  ck=2.50 CYBER      : primaryU%= 66.67 vs baselineU%= 66.67  lift= +0.00pp  obs=    3  [SAMPLE-THIN]
+
+G.3 mirror-cell comparison inside each competition x checkpoint (B vs A and B vs C where populated; support sizes shown because mirror cells can be sample-thin):
+  ck=6.00 NBA        : B>A (100.00 vs 53.64, n=14/343) YES; B>C (100.00 vs 100.00, n=14/7) NO
+  ck=6.00 KBL        : B>A (89.47 vs 42.86, n=38/133) YES; B>C (89.47 vs 71.88, n=38/32) YES
+  ck=6.00 CBA        : B>A (90.00 vs 50.43, n=40/115) YES; B>C (90.00 vs 87.10, n=40/31) YES
+  ck=6.00 TBSL       : B>A (87.50 vs 60.71, n=32/140) YES; B>C (87.50 vs 72.50, n=32/40) YES
+  ck=6.00 EUROLEAGUE : B>A (94.44 vs 51.16, n=36/172) YES; B>C (94.44 vs 79.17, n=36/24) YES
+  ck=6.00 CYBER      : B>C (100.00 vs 0.00, n=2/2) YES
+  ck=5.00 NBA        : B>A (100.00 vs 53.49, n=29/473) YES; B>C (100.00 vs 100.00, n=29/14) NO
+  ck=5.00 KBL        : B>A (92.31 vs 45.14, n=39/144) YES; B>C (92.31 vs 76.00, n=39/25) YES
+  ck=5.00 CBA        : B>A (97.44 vs 52.48, n=39/101) YES; B>C (97.44 vs 78.95, n=39/19) YES
+  ck=5.00 TBSL       : B>A (96.20 vs 49.73, n=79/185) YES; B>C (96.20 vs 74.00, n=79/50) YES
+  ck=5.00 EUROLEAGUE : B>A (93.10 vs 54.11, n=29/146) YES; B>C (93.10 vs 76.47, n=29/17) YES
+  ck=5.00 CYBER      : B>A (100.00 vs 100.00, n=2/1) NO; B>C (100.00 vs 50.00, n=2/2) YES
+  ck=4.00 NBA        : B>A (100.00 vs 57.35, n=31/279) YES; B>C (100.00 vs 100.00, n=31/21) NO
+  ck=4.00 KBL        : B>A (94.83 vs 42.06, n=58/126) YES; B>C (94.83 vs 90.32, n=58/31) YES
+  ck=4.00 CBA        : B>A (94.00 vs 47.83, n=50/92) YES; B>C (94.00 vs 88.00, n=50/25) YES
+  ck=4.00 TBSL       : B>A (62.83 vs 53.27, n=113/107) YES; B>C (62.83 vs 70.97, n=113/93) NO
+  ck=4.00 EUROLEAGUE : B>A (74.39 vs 55.43, n=82/92) YES; B>C (74.39 vs 69.23, n=82/117) YES
+  ck=4.00 CYBER      : B>A (83.33 vs 0.00, n=6/2) YES; B>C (83.33 vs 50.00, n=6/2) YES
+  ck=3.00 NBA        : B>A (100.00 vs 53.76, n=27/266) YES; B>C (100.00 vs 100.00, n=27/13) NO
+  ck=3.00 KBL        : B>A (96.77 vs 42.35, n=31/85) YES; B>C (96.77 vs 100.00, n=31/17) NO
+  ck=3.00 CBA        : B>A (97.78 vs 46.88, n=45/96) YES; B>C (97.78 vs 87.50, n=45/32) YES
+  ck=3.00 TBSL       : B>A (70.32 vs 47.14, n=155/70) YES; B>C (70.32 vs 76.40, n=155/89) NO
+  ck=3.00 EUROLEAGUE : B>A (66.02 vs 50.57, n=103/87) YES; B>C (66.02 vs 73.08, n=103/104) NO
+  ck=3.00 CYBER      : B>C (100.00 vs 33.33, n=5/3) YES
+  ck=2.50 NBA        : B>A (100.00 vs 56.10, n=45/246) YES; B>C (100.00 vs 100.00, n=45/12) NO
+  ck=2.50 KBL        : B>A (100.00 vs 46.73, n=35/107) YES; B>C (100.00 vs 84.85, n=35/33) YES
+  ck=2.50 CBA        : B>A (94.74 vs 41.76, n=57/91) YES; B>C (94.74 vs 88.24, n=57/34) YES
+  ck=2.50 TBSL       : B>A (78.26 vs 48.33, n=115/60) YES; B>C (78.26 vs 72.16, n=115/97) YES
+  ck=2.50 EUROLEAGUE : B>A (76.64 vs 54.08, n=107/98) YES; B>C (76.64 vs 75.86, n=107/145) YES
+  ck=2.50 CYBER      : B>A (66.67 vs 100.00, n=3/3) NO; B>C (66.67 vs 50.00, n=3/4) YES
+
+==============================================================================
+H. TERMINOLOGY
+==============================================================================
+All rates above are DESCRIPTIVE historical frequencies over settled
+games: 'historical UNDER rate', 'observation-level rate', 'equal-game
+rate'.  They are NOT probabilities, predictions, edges, EV, signals or
+betting value, and no such claim is made or implied anywhere in this
+report.
+
+==============================================================================
+I. FROZEN REFERENCE (unchanged)
+==============================================================================
+The frozen full-archive audit (forensic_relative_pace_audit_2026-09-11,
+regression-frozen in tests/test_forensic_relative_pace_freeze.py) stands
+unmodified:
+  primary condition UNDER obs% = 69.75%   equal-game = 73.02%
+  support 17,841 decisive observations / 1,515 games; baseline 49.79%
+  leakage 0/0/0; N>=30 gate verified; same-game exclusion active.
+Nothing in this checkpoint analysis modifies those numbers; every
+checkpoint/window subset above is a slice of that same mature
+population and its per-slice rates are consistent with the frozen
+whole-archive result.
+
+==============================================================================
+CONCLUSIONS (each answer recomputed from this run's own numbers)
+==============================================================================
+
+1. DOES THE PRIMARY RELATIONSHIP EXIST AT 6 MINUTES REMAINING?
+   YES.  At exactly 6.00 min remaining the
+   primary cell shows 91.36% observation UNDER / 91.88% equal-game UNDER
+   over 162 obs / 160 games, against the checkpoint baseline
+   of 52.49% (lift +38.87pp).
+
+2. AT WHAT CHECKPOINT DOES IT FIRST BECOME MATERIALLY ELEVATED (>= +10pp over
+   that checkpoint's own baseline)?
+   Material (>=+10pp) at: 6.00 / 5.00 / 4.00 / 3.00 / 2.50
+   Earliest materially elevated: 6.00 min remaining
+   (6.00 min remaining is the EARLIEST checkpoint analysed — largest
+   remaining time — so the answer is bounded by the checkpoint grid:
+   the association is already material at the earliest measured point.)
+   Lift by checkpoint: 6.00->+38.87pp  5.00->+42.11pp  4.00->+24.96pp  3.00->+23.21pp  2.50->+29.52pp
+
+3. DOES IT STRENGTHEN AS REMAINING TIME DECREASES?  IS IT MONOTONIC?
+   Primary UNDER% by exact checkpoint: 6.00=91.36  5.00=95.85  4.00=79.41  3.00=77.32  2.50=85.08
+   Monotone non-increasing 6.0 -> 2.5 : False
+   Strictly monotone                   : False
+   Highest checkpoint: 5.00   Lowest checkpoint: 3.00
+   Window primary UNDER%: >=6.0=66.06  [5.0,6.0)=91.29  [4.0,5.0)=84.98  [3.0,4.0)=75.64  [2.5,3.0)=81.20
+   → the primary UNDER rate is elevated in EVERY window, but it does
+     NOT fall or rise monotonically with remaining time; the shape is
+     reported as computed above (no monotone claim is made).
+
+4. INDEPENDENT ACROSS COMPETITIONS?
+   See G.2/G.3.  Direction reversals (primary < same-competition
+   baseline): NONE
+   Direction ties: 2.50 CYBER (66.67 vs 66.67, 3 obs)
+   Sample-thin primary cells (<100 obs): 25 of 30 competition x checkpoint slices
+   Positive-lift slices: 29 of 30 populated competition x checkpoint slices.
+   Per-competition (slices populated / slices positive / min lift):
+     NBA          5 /  5 / +43.27pp
+     KBL          5 /  5 / +40.62pp
+     CBA          5 /  5 / +35.45pp
+     TBSL         5 /  5 / +10.00pp
+     EUROLEAGUE   5 /  5 / +11.94pp
+     CYBER        5 /  4 / +0.00pp
+
+5. IS THE FROZEN 69.75% / 73.02% PART OF A BROADER EARLIER-CHECKPOINT
+   PATTERN?
+   >=6.0 min remaining window: primary 66.06% vs baseline 49.59% (lift +16.47pp), 14856 obs / 1188 games.
+   Whole eligible population (this archive): primary 69.67% (frozen reference 69.75%).
+   → the association is present with a positive lift at the earliest
+     checkpoint (6.00) and in the >=6.0-minute window, so the frozen
+     whole-archive figure is NOT an artefact confined to the last
+     minutes.  It is also NOT uniform: the 4–6 minute bands run
+     materially higher than the >=6-minute stratum, so the frozen
+     aggregate is a blend of stronger and milder sub-populations.
+
+6. IS THE EFFECT PRIMARILY A LATE-GAME PHENOMENON?
+   NO.  The primary condition already carries a positive lift at
+   >=6.0 minutes remaining (numbers above), so it is not confined
+   to the closing minutes.  It is, however, non-monotone: the
+   strongest relative lifts sit in the 4–6 minute region rather
+   than at the 2.5-minute floor.
+
+All figures above are DESCRIPTIVE historical frequencies over settled
+games.  No probability, prediction, edge, EV, staking or betting claim
+is made or implied anywhere in this report.
+REPORT SAVED TO: /home/ubuntu/BLM/forensic_earlier_checkpoint_relative_pace_2026-09-11.txt

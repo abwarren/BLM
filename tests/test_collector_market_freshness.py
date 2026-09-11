@@ -96,7 +96,15 @@ def test_rotation_constants_untouched():
     # the historical rotation tuning is pinned elsewhere and must not move
     assert collector_mod.MARKET_REFRESH_S == 240
     assert collector_mod.MARKET_BATCH == 3
-    assert collector_mod.EVENT_VIEW_EVERY_N <= 2
+    # STEP 3 retired the in-tick EVENT_VIEW_EVERY_N gate: the slow path now
+    # runs on its own thread + page, so the rotation cadence is bounded in
+    # WALL TIME (a slow round is requested at least every
+    # EVENT_VIEW_MIN_INTERVAL_S) rather than by a fast-tick count.  The old
+    # bar — a slow round at least every ~2 fast ticks — is preserved as the
+    # equivalent (and tighter) wall-clock bound.
+    assert not hasattr(collector_mod, "EVENT_VIEW_EVERY_N")
+    assert 0 < collector_mod.EVENT_VIEW_MIN_INTERVAL_S <= 10.0
+    assert 0 < collector_mod.SLOW_WORKER_POLL_S <= 2.0
 
 
 # ── subscription message shape ───────────────────────────────────────

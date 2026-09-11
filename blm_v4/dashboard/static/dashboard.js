@@ -38,6 +38,7 @@ const API_GAME = (id) => `/api/v4/game/${encodeURIComponent(id)}`;
 // market_observations rows the collector writes; no fabrication).
 const API_GAME_LINES = (id) => `/api/v4/game/${encodeURIComponent(id)}/market-lines`;
 const API_GAME_PACE_Z = (id) => `/api/v4/game/${encodeURIComponent(id)}/pace-z`;
+const API_GAME_HIST_CTX = (id) => `/api/v4/game/${encodeURIComponent(id)}/historical-context`;
 
 const state = {
   filter: "",
@@ -126,27 +127,38 @@ const num = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
 const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
 
 /* ── UNDER-condition layer (READ-ONLY PRESENTATION) ──
-   Fixed UNDER research findings from the settled-game archive, shown when
-   the CURRENT authoritative live state matches them.  This layer only
-   compares current state against fixed recorded statistics; it makes no
-   forward claim and introduces no model of its own.  Terminology is
-   descriptive: UNDER CONDITION / observation UNDER rate.
-   The pace-gap condition is LOAD-BEARING; a z value NEVER fires on its
-   own.  Conditions (fixed results, not tuned parameters — shown as
-   observation UNDER rate / mean per-game UNDER rate / settled games):
+   TWO descriptive states, both against fixed archive findings:
+
+   PRIMARY (pace-state, frozen forensic audit 2026-09-11 archive): the
+   league/state-relative relationship — actual pace BELOW the observation's
+   own PROVIDER|COMPETITION|PERIOD|PROGRESS historical average AND required
+   pace AT/ABOVE that same average, with remaining_game_minutes >= 2.5
+   (2.50 included) and a mature benchmark (N>=30).  Historical rate:
+   69.75% observation UNDER / 73.02% equal-game / 12,444 obs / 1,515 games.
+   All inputs come from the authoritative /historical-context payload —
+   never recomputed in the browser.
+
+   LEGACY (pace-gap tiers, retained as historical research context):
      base   pace_gap > +1.5              → 72.65% / 87.31% / 1,489
      strong + Q4 + progress >= 90        → 78.01% / 87.71% / 1,446
      high   + pace_z < -1                → 85.74% / 89.27% /   363
-   All inputs are the authoritative API values (projector fields, period,
-   progress and the /pace-z payload); nothing is recomputed in the browser.
-   UNDER only — no opposite-direction alert and no mirrored condition. */
+
+   The pace-state condition drives the alert; the pace-gap tier still
+   renders when it matches but the pace-state condition outranks it.
+   UNDER only — no opposite-direction alert and no forward claim. */
 /* __PURE_ALERT_BEGIN__ */
+// pace-state level: fires from the authoritative /historical-context
+// payload only (under_state + eligible + benchmark_n >= 30).  z is
+// secondary context and never part of the primary condition.
+function paceStateLevel(ctx) {
+  if (!ctx || ctx.status !== "matched" || !ctx.eligible) return null;
+  if (!(ctx.benchmark_n >= 30)) return null;
+  return ctx.under_state ? "pace-state" : null;
+}
 // UNDER level selection — consumes ONLY pre-extracted authoritative
 // state: { hasLine, periodQ, progressPct, paceGap, z }  (z optional: the
 // live card list carries no z, so the card path cannot reach the
 // z-dependent levels until the modal's /pace-z payload lands).
-// pace_gap > 1.5 is the load-bearing gate; z is only ever a qualifier
-// on top of it and can never raise an alert by itself.
 function histAlertLevel(s) {
   if (!s || !s.hasLine) return null;               // missing line → no alert
   if (s.paceGap == null || !(s.paceGap > 1.5)) return null;
@@ -158,8 +170,8 @@ function histAlertLevel(s) {
 // pulse decision — the attention treatment fires ONLY when the level
 // RISES (entry none→Lx or an escalation Lx→Ly with rank Ly>Lx).  Steady
 // state and downgrades re-render without any pulse; returns the new level
-// when it should pulse, else null.
-const ALERT_RANK = { base: 1, strong: 2, high: 3 };
+// when it should pulse, else null.  pace-state outranks the legacy tiers.
+const ALERT_RANK = { base: 1, strong: 2, high: 3, "pace-state": 4 };
 function alertEscalation(prevLvl, nextLvl) {
   if (!nextLvl) return null;
   const rPrev = prevLvl ? (ALERT_RANK[prevLvl] || 0) : 0;
@@ -168,6 +180,8 @@ function alertEscalation(prevLvl, nextLvl) {
 /* __PURE_ALERT_END__ */
 // fixed archive statistics bound to each UNDER level (display values only)
 const HIST_ALERTS = {
+  "pace-state": { label: "UNDER CONDITION — PACE STATE",
+    obs: "69.75%", game: "73.02%", n: "1,515" },
   base: { label: "UNDER CONDITION",
     obs: "72.65%", game: "87.31%", n: "1,489" },
   strong: { label: "UNDER ALERT — STRONG",
@@ -197,6 +211,7 @@ const CYBER_HIST = { obs: "59.3%", game: "56.5%", n: "84" };
    alert is completely independent of it. */
 /* __PURE_AUDIO_BEGIN__ */
 const ALERT_CUES = {
+  "pace-state": [523.25, 659.25, 783.99, 1046.5],  // four tones, top priority
   base:   [523.25],                       // one tone
   strong: [659.25, 880],                  // two tones
   high:   [783.99, 987.77, 1318.51],      // three tones, highest priority
@@ -587,8 +602,12 @@ function renderCards(payload) {
     card.lastScore = nowScore;
     // historical-condition entry tracking: pulse ONLY on level entry /
     // escalation (null→base→strong), never on steady 5s refreshes and
-    // never on downgrades (strong→base renders the weaker badge silently)
-    const alLvl = liveAlertOf(g);
+    // never on downgrades (strong→base renders the weaker badge silently).
+    // The pace-state level (primary condition) outranks the legacy tiers;
+    // it consumes the authoritative /historical-context payload only.
+    const legacyLvl = liveAlertOf(g);
+    const ctxLvl = paceStateLevel(g.historical_context);
+    const alLvl = ctxLvl || legacyLvl;
     const entered = alertEscalation(card.prevAlert, alLvl);
     card.prevAlert = alLvl;
     if (entered) alertAudio(entered);
@@ -718,14 +737,84 @@ function cyberNoteHTML(compact) {
     : `${note}<br><span class="al-limited">LIMITED SAMPLE — ${CYBER_HIST.n} SETTLED GAMES</span>`;
 }
 
+// RELATIVE-PACE CONTEXT — the four values every operator must read, each
+// labelled explicitly, plus the benchmark identity.  Hard requirement:
+// every value comes from the authoritative /historical-context payload
+// (the SAME competition/state-specific benchmark the forensic audit
+// reconciled); the UI never recomputes and never shows a league-wide mean.
+function relPaceHTML(ctx) {
+  if (!ctx || ctx.status !== "matched") return "";
+  const row = (k, v) =>
+    `<div class="al-row"><span class="k">${k}</span>`
+    + `<span class="v">${num(v, 2)} <span class="u">pts/min</span></span></div>`;
+  return `<div class="rp-block">`
+    + `<div class="rp-title">RELATIVE-PACE CONTEXT</div>`
+    + row("ACTUAL PACE", ctx.actual_pace)
+    + row("REQUIRED PACE", ctx.required_pace)
+    + row("HISTORICAL STATE MEAN", ctx.historical_avg_pace)
+    + `<div class="rp-id">PROVIDER: ${esc(ctx.provider || "–")}`
+    + ` · COMPETITION: ${esc(ctx.competition || "–")}`
+    + ` · PERIOD: ${esc(ctx.period || "–")}`
+    + ` · PROGRESS: ${num(ctx.progress_pct, 0)}%`
+    + ` · STATE: ${esc(ctx.state || "–")}`
+    + ` · HISTORICAL N: ${ctx.benchmark_n != null
+        ? Number(ctx.benchmark_n).toLocaleString("en-US") : "–"}</div>`
+    + `</div>`;
+}
+
+// RELATIVE-PACE STATE — each relationship evaluated IN THE PAYLOAD and
+// rendered separately as a literal TRUE/FALSE, followed by the combined
+// verdict.  The operator must never have to infer either relationship
+// from the z value, the pace gap, a colour, or the raw numbers.
+function paceStateHTML(ctx) {
+  if (!ctx || ctx.status !== "matched") return "";
+  const line = (label, ok) =>
+    `<div class="rp-state-line ${ok ? "rp-true" : "rp-false"}">`
+    + `${label} → <b>${ok ? "TRUE" : "FALSE"}</b></div>`;
+  const actualBelow = ctx.actual_below_state_mean === true;
+  const reqAtOrAbove = ctx.required_ge_state_mean === true;
+  const both = ctx.both_conditions_true === true;
+  return `<div class="rp-state">`
+    + `<div class="rp-title">RELATIVE-PACE STATE</div>`
+    + line("ACTUAL &lt; HISTORICAL MEAN — TRUE/FALSE", actualBelow)
+    + line("REQUIRED &ge; HISTORICAL MEAN — TRUE/FALSE", reqAtOrAbove)
+    + `<div class="rp-both ${both ? "rp-true" : "rp-false"}">`
+    + `BOTH CONDITIONS — TRUE/FALSE → <b>${both ? "TRUE" : "FALSE"}</b>`
+    + `</div></div>`;
+}
+
+// HISTORICAL CONTEXT block — shown when BOTH conditions are TRUE: the
+// frozen whole-archive QUALIFYING-cell rates (the primary-cell population
+// the forensic audit froze on 2026-09-11), with the archive baseline
+// alongside.  Server-served display constants, never browser arithmetic,
+// and explicitly labelled historical / descriptive: these are NOT the
+// current game's rate and NOT a forward claim.
+function histContextHTML(ctx) {
+  if (!ctx || ctx.status !== "matched" || !ctx.both_conditions_true) return "";
+  const fmt = (v, d = 2) => (v == null ? "–" : Number(v).toFixed(d) + "%");
+  const ni = (v) => (v == null ? "–" : Number(v).toLocaleString("en-US"));
+  return `<div class="hc-block">`
+    + `<div class="rp-title">HISTORICAL CONTEXT</div>`
+    + `<span class="al-line"><b>${fmt(ctx.qualifying_under_pct)} UNDER</b> — observation rate</span>`
+    + `<span class="al-line"><b>${fmt(ctx.qualifying_equal_game_under_pct)} UNDER</b> — equal-game rate</span>`
+    + `<span class="al-line"><b>${ni(ctx.qualifying_games)}</b> qualifying games</span>`
+    + `<span class="al-line"><b>${ni(ctx.qualifying_observations)}</b> qualifying observations</span>`
+    + `<span class="al-line"><b>${fmt(ctx.archive_baseline_under_pct)}</b> archive baseline</span>`
+    + `<span class="al-line muted">Frozen whole-archive figures `
+    + `(${esc(ctx.frozen_audit_utc || "2026-09-11")} audit) — historical / `
+    + `descriptive only, not this game's rate and not a forward claim.</span>`
+    + `</div>`;
+}
+
 // compact card badge — shown while the condition holds, removed the
-// moment it ceases; z is unknown here so only base/strong can appear
+// moment it ceases; z is unknown here so only base/strong can appear.
+// The pace-state (primary) level outranks the legacy pace-gap tiers.
 function histBadgeHTML(g, entered) {
   if (!g || g.live !== true || g.quality_status === "INVALID") return "";
   const p = g.projector || {};
   const st = liveLineState(g);
   if (st.line == null) return "";                     // missing line → no alert
-  const lvl = liveAlertOf(g);
+  const lvl = paceStateLevel(g.historical_context) || liveAlertOf(g);
   const cyber = isCyberGame(g);
   if (!lvl && !cyber) return "";
   const meta = lvl ? HIST_ALERTS[lvl] : null;
@@ -734,7 +823,15 @@ function histBadgeHTML(g, entered) {
     ? `<span class="hb-title al-${lvl}">${meta.label}</span>`
     : `<span class="hb-title hb-title-ctx">CYBER HISTORICAL CONTEXT</span>`;
   const stateLine = [];
-  if (p.pace_gap != null) stateLine.push(`pace gap ${signedNum(p.pace_gap, 2)}`);
+  const ctx = g.historical_context;
+  if (lvl === "pace-state" && ctx && ctx.status === "matched") {
+    // primary condition: the two league/state-relative relationships shown
+    // as explicit TRUE/FALSE chips (never inferred from the raw numbers)
+    stateLine.push(`actual &lt; mean: ${ctx.actual_below_state_mean === true ? "TRUE" : "FALSE"}`);
+    stateLine.push(`required &ge; mean: ${ctx.required_ge_state_mean === true ? "TRUE" : "FALSE"}`);
+  } else {
+    if (p.pace_gap != null) stateLine.push(`pace gap ${signedNum(p.pace_gap, 2)}`);
+  }
   const q = periodQOf(g);
   if (q && p.progress_pct != null) stateLine.push(`${q} ${num(p.progress_pct, 0)}%`);
   const histLine = meta
@@ -759,11 +856,14 @@ function histPanelHTML(g) {
   const st = liveLineState(g);
   if (st.line == null) return "";                     // missing line → no alert
   const zm = state.modalZMeta || {};
-  const lvl = histAlertLevel({ hasLine: true, periodQ: periodQOf(g),
-    progressPct: p.progress_pct, paceGap: p.pace_gap, z: zm.z });
+  const ctx = g.historical_context;
+  const lvl = paceStateLevel(ctx)
+    || histAlertLevel({ hasLine: true, periodQ: periodQOf(g),
+      progressPct: p.progress_pct, paceGap: p.pace_gap, z: zm.z });
   const meta = lvl ? HIST_ALERTS[lvl] : null;
   const cyber = isCyberGame(g);
-  if (!meta && !cyber) return "";
+  const matched = ctx && ctx.status === "matched";
+  if (!meta && !cyber && !matched) return "";
   const q = periodQOf(g);
   const score = (g.home_score != null && g.away_score != null)
     ? g.home_score + g.away_score : null;
@@ -775,6 +875,9 @@ function histPanelHTML(g) {
   rows.push(`<div class="al-row"><span class="k">Score</span><span class="v">${score != null ? score : "–"}</span></div>`);
   rows.push(`<div class="al-row"><span class="k">Score − line</span><span class="v">${signedNum(slg, 1)}</span></div>`);
   rows.push(`<div class="al-row"><span class="k">Actual pace</span><span class="v">${num(p.actual_pts_per_min, 2)} <span class="u">pts/min</span></span></div>`);
+  if (ctx && ctx.status !== "matched") {
+    rows.push(`<div class="al-row"><span class="k">Historical context</span><span class="v">NO MATURE HISTORICAL CONTEXT</span></div>`);
+  }
   rows.push(`<div class="al-row"><span class="k">Required pace</span><span class="v">${num(p.required_pts_per_min, 2)} <span class="u">pts/min</span></span></div>`);
   rows.push(`<div class="al-row"><span class="k">Pace gap</span><span class="v">${signedNum(p.pace_gap, 2)} <span class="u">pts/min</span></span></div>`);
   rows.push(`<div class="al-row"><span class="k">Pace Z</span><span class="v">${zDisplay(zm.z)}</span></div>`);
@@ -784,21 +887,40 @@ function histPanelHTML(g) {
   rows.push(`<div class="al-row"><span class="k">Competition</span><span class="v">${esc(g.competition_slug || g.competition || "–")}</span></div>`);
   const head = meta
     ? `<span class="al-title">${meta.label}</span>`
-    : '<span class="al-title al-title-ctx">CYBER HISTORICAL CONTEXT</span>';
-  const hist = meta
+    : '<span class="al-title al-title-ctx">RELATIVE-PACE STATE</span>';
+  // RELATIVE-PACE CONTEXT (four values + the two evaluated comparisons +
+  // benchmark identity) and the prominent state indicator — the primary
+  // presentation.  When BOTH conditions are TRUE, the frozen whole-archive
+  // qualifying rates follow (API-served constants, never browser arithmetic).
+  const rp = relPaceHTML(ctx);
+  const ps = paceStateHTML(ctx);
+  const hc = histContextHTML(ctx);
+  // legacy pace-gap tier statistics keep their fixed-constant block; the
+  // pace-state level presents its rates through hc above (one headline).
+  const legacyHist = meta && lvl !== "pace-state"
     ? `<div class="al-hist"><span class="al-big">HISTORICAL UNDER CONDITION</span>`
       + `<span class="al-line"><b>${meta.obs}</b> observation UNDER rate</span>`
       + `<span class="al-line"><b>${meta.game}</b> mean per-game UNDER rate</span>`
       + `<span class="al-line"><b>${meta.n}</b> settled games</span></div>`
     : "";
-  const cy = cyber ? `<div class="al-cyber">${cyberNoteHTML(false)}</div>` : "";
-  const note = meta
-    ? '<div class="al-note muted">Historical outcome = final total below this live line in the archive. Observed association only — no forward claim.</div>'
+  // matched-key settled-population frequencies — explicitly labelled
+  // MATCHED-KEY HINDSIGHT (whole settled population of this benchmark key,
+  // including this game); always secondary, never a substitute for the
+  // frozen qualifying-cell rates above
+  const kh = (matched && ctx.key_hindsight_under_pct != null)
+    ? `<div class="al-note muted">MATCHED-KEY HINDSIGHT — settled population `
+      + `of this provider · competition · period · progress key: `
+      + `${num(ctx.key_hindsight_under_pct, 2)}% UNDER observations · `
+      + `${num(ctx.key_hindsight_equal_game_under_pct, 2)}% equal-game · `
+      + `${ctx.key_hindsight_obs != null
+          ? Number(ctx.key_hindsight_obs).toLocaleString("en-US") : "–"} obs</div>`
     : "";
+  const cy = cyber ? `<div class="al-cyber">${cyberNoteHTML(false)}</div>` : "";
+  const note = '<div class="al-note muted">Historical outcome = final total below this live line in the archive. Observed association only — no forward claim. Benchmark identity is this game\'s own provider · competition · period · progress state — never a league-wide average.</div>';
   return `<div class="hist-panel hist-alert${lvl ? " al-" + lvl : " al-ctx"}">`
     + `<div class="al-head">${head}${marketChipHTML(st.mstatus)}</div>`
     + (rows.length ? `<div class="al-rows">${rows.join("")}</div>` : "")
-    + hist + cy + note
+    + rp + ps + hc + legacyHist + kh + cy + note
     + `</div>`;
 }
 
@@ -810,9 +932,11 @@ function refreshHistAlert(g) {
   const html = histPanelHTML(g);
   const zm = state.modalZMeta || {};
   const p = g.projector || {};
-  const lvl = histAlertLevel({ hasLine: liveLineState(g).line != null,
+  const ctxLvl = paceStateLevel(g.historical_context);
+  const legacyLvl = histAlertLevel({ hasLine: liveLineState(g).line != null,
     periodQ: periodQOf(g), progressPct: p.progress_pct,
     paceGap: p.pace_gap, z: zm.z });
+  const lvl = ctxLvl || legacyLvl;
   const priorLevel = state.modalAlertLevel;
   state.modalAlertLevel = lvl;
   if (box.innerHTML === html) return;                 // stable during refresh
@@ -825,6 +949,27 @@ function refreshHistAlert(g) {
     panel.classList.add("al-in");
   }
   if (rose) alertAudio(rose);                          // same transition → same cue
+}
+
+// explicit no-context panel — shown when the live state is eligible but
+// no mature own-league/state population exists (never a fallback, never
+// a hidden game).  Pure presentation of the authoritative payload.
+function noContextPanelHTML(g) {
+  if (!g || g.live !== true || g.quality_status === "INVALID") return "";
+  const ctx = g.historical_context;
+  if (!ctx || ctx.status !== "no_mature_historical_context") return "";
+  if (ctx.reason === "below_analytical_eligibility") return ""; // <2.5 min: quiet, excluded
+  const reason = {
+    no_clean_observation: "no clean observation yet",
+    competition_unresolved: "competition identity unresolved",
+    insufficient_mature_population: `benchmark N=${ctx.benchmark_n} < 30 at ${ctx.benchmark_key || "own key"}`,
+  }[ctx.reason] || ctx.reason || "no matching mature population";
+  return `<div class="hist-panel hist-alert al-ctx">`
+    + `<div class="al-head"><span class="al-title al-title-ctx">NO MATURE HISTORICAL CONTEXT</span></div>`
+    + `<div class="al-note muted">No mature historical population (N &lt; 30) at this game's own ` 
+    + `provider · competition · period · progress state. ${esc(reason)}. `
+    + `No fallback average is ever substituted.</div>`
+    + `</div>`;
 }
 
 function renderModal(g) {
@@ -930,6 +1075,7 @@ function renderModal(g) {
       <div class="z-note muted">z = (actual pace − historical mean) ÷ historical σ — how the current scoring pace compares with the prior actual-pace distribution at the same provider · competition · period · progress state. Descriptive only; the observation never defines its own benchmark.</div>
     </div>
     <div id="histAlertBox" class="hist-alert-box"></div>
+    <div id="histNoCtxBox" class="hist-alert-box">${noContextPanelHTML(g)}</div>
     ${invalid ? "" : `<details class="m-chart-toggle" ${chartsOpen ? "open" : ""}>
       <summary data-label="CHARTS">CHARTS ${chartsOpen ? "▾" : "▸"}</summary>
       <div class="m-charts">
@@ -1068,16 +1214,26 @@ async function renderModalCharts(g) {
     : "SCORE − LINE = –";
   const gapEl = document.getElementById("gapReadout");
   if (gapEl) gapEl.textContent = state.modalGapText;
-  let pz = null, lines = null;
-  // Both series are fetched in parallel — the PACE Z store (authoritative
-  // pace-benchmark layer) and the observed market-line history are
-  // independent authoritative sources.
-  const [pzRes, linesRes] = await Promise.allSettled([
+  let pz = null, lines = null, hctx = null;
+  // All three series are fetched in parallel — the PACE Z store, the
+  // observed market-line history, and the league/state historical context
+  // are independent authoritative sources.
+  const [pzRes, linesRes, ctxRes] = await Promise.allSettled([
     fetch(API_GAME_PACE_Z(g.game_id)).then((r) => (r.ok ? r.json() : null)),
     fetch(API_GAME_LINES(g.game_id)).then((r) => (r.ok ? r.json() : null)),
+    fetch(API_GAME_HIST_CTX(g.game_id)).then((r) => (r.ok ? r.json() : null)),
   ]);
   if (pzRes.status === "fulfilled") pz = pzRes.value;
   if (linesRes.status === "fulfilled") lines = linesRes.value;
+  if (ctxRes.status === "fulfilled") hctx = ctxRes.value;
+  if (hctx) {
+    g.historical_context = hctx;              // authoritative payload, verbatim
+    const nc = document.getElementById("histNoCtxBox");
+    if (nc) {
+      const nch = noContextPanelHTML(g);
+      if (nc.innerHTML !== nch) nc.innerHTML = nch;   // idempotent
+    }
+  }
   // a failed fetch is not fatal — the chart renders from history alone
   if (state.modalGameId !== g.game_id) return; // modal switched games mid-fetch
   const series = (pz && pz.series) || [];

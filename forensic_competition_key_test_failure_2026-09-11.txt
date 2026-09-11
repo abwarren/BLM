@@ -1,0 +1,142 @@
+FORENSIC INVESTIGATION — test_historical_context.py::
+test_benchmark_key_is_competition_and_state_specific
+generated (UTC): 2026-09-11
+scope: investigation only.  NO application code, test, or database was
+modified.  All DB access read-only (uri mode=ro).
+
+A. ROOT CAUSE
+   Fixture construction (directive option *a*).  The shared test helper
+   `_seed_archive` (tests/test_historical_context.py, ~line 51) generates
+   game ids WITHOUT the competition dimension:
+
+       gid = f"A{i // 2:04d}"          # 2 observations per game
+
+   The failing test seeds TWO competitions through this helper:
+     _seed_archive(c, "betual-nba", ...)   -> games A0000..A0019
+     _seed_archive(c, "betual-kbl", ...)   -> games A0000..A0019  (SAME ids)
+   The KBL seeding then re-registers those same game ids in the competition
+   ledger with INSERT OR REPLACE (helper, ~line 84), clobbering the NBA
+   mapping.  Result, dumped from a byte-exact reproduction of the fixture:
+
+     ledger competition counts after both seeds: [('betual-kbl', 20)]
+     distinct projection game ids: 20   (40 were seeded, two seeds collided)
+     projections rows: BETUAL_NBA = 80  (both competitions share rows' gids)
+
+   refresh_stats then resolves ALL 80 rows through the ledger to kbl and
+   writes exactly one cache key:
+
+     refresh_stats -> {'keys': 1}
+     historical_context_cache -> ('BETUAL|betual-kbl|Q4|P090', n=160, ...)
+     (n=160 = both 40-row seeds merged into one key)
+
+   context_for('LIVE3') correctly resolves provider=BETUAL,
+   competition=betual-nba (via register_game_competition from the games
+   table, which is NOT clobbered) and computes key
+   BETUAL|betual-nba|Q4|P090 — but its prior-only benchmark population
+   (ledger join, competition='betual-nba') is now EMPTY (n=0), so the engine
+   reports no_mature_historical_context and the NBA key never exists in the
+   cache.  The assertion
+       assert "BETUAL|betual-nba|Q4|P090" in keys
+   fails exactly as observed.  The application code path behaved correctly
+   at every step given the (corrupt) fixture data.
+
+   Ruled out: (b) insufficient priors — see D; (c) stale cache — the test
+   builds fresh in-memory DBs; (d) ledger mapping logic — production ledger
+   is correct (see E), the fixture merely overwrote its own rows;
+   (e) progress-bucket classification — 93.75 -> P090 verified in both
+   fixture and production; (f) N>=30 — 40 obs seeded, gate satisfied (the
+   observed n=160 proves the gate was not the blocker); (g) same-game
+   exclusion — irrelevant to the cache key set; (h) prior-only cutoff —
+   LIVE3's captured_at (2026-02-01) is strictly after all seeded rows;
+   (i) no other implementation issue found.
+
+B. EVIDENCE FROM FIXTURES (byte-exact reproduction, /tmp harness)
+   1. seed(nba) then seed(kbl) with the original gid format reproduces the
+      failure exactly: hcc = {BETUAL|betual-kbl|Q4|P090: n=160},
+      refresh_stats {'keys': 1}.
+   2. Seeding the same two competitions with competition-scoped gids
+      (e.g. f"{comp[:4].upper()}{i//2:04d}") yields hcc =
+      {BETUAL|betual-nba|Q4|P090: n=40, BETUAL|betual-kbl|Q4|P090: n=40},
+      refresh_stats {'keys': 2}, and context_for('LIVE3') returns
+      status=matched with benchmark_key BETUAL|betual-nba|Q4|P090 — i.e. the
+      test's invariant holds once the fixture stops colliding.
+   3. Only this multi-competition test is affected: every other test in the
+      file seeds a single competition, so the gid collision never fires.
+   4. History: test_historical_context.py and its module are UNTRACKED
+      (never committed); the failure was present from the first run
+      observed on 2026-09-11, before any file was created during the audit
+      session.  Nothing regressed; the fixture has been stale since it was
+      authored.
+
+C. EVIDENCE FROM PRODUCTION DB (read-only)
+   Q4/P090 populations (status='VALID', rem>=2.5, line present), resolved
+   per-competition through the production ledger:
+     BETUAL|betual-nba|Q4|P090        obs=4227  games=1398
+     BETUAL|betual-euroleague|Q4|P090 obs=3536  games=1170
+     BETUAL|betual-tbsl|Q4|P090       obs=3262  games=954
+     BETUAL|betual-cba|Q4|P090        obs=2276  games=703
+     BETUAL|betual-kbl|Q4|P090        obs=1749  games=639
+     CYBER|cyber-basketball-2k26-...  obs=517   games=104
+     (2,167 obs / 558 games remain ledger-unmapped — the known
+      no_ledger_entry gap already quantified in the forensic audit)
+   Cache presence of the disputed key (production sidecar):
+     historical_context_cache: BETUAL|betual-nba|Q4|P090 n=4139 under%=53.35
+                               BETUAL|betual-kbl|Q4|P090 n=1688 under%=52.07
+                               (both computed 2026-09-10T23:25)
+     pace_benchmark_cache:     BETUAL|betual-nba|Q4|P090: 39 cutoff rows,
+                               prior-only N range 4172..4920
+                               BETUAL|betual-kbl|Q4|P090: 4 cutoff rows,
+                               prior-only N range 2180..2190
+   The NBA key therefore exists, is well-populated, and is isolated from
+   KBL in production.
+
+D. DOES NBA Q4 P090 HAVE A MATURE BENCHMARK POPULATION?  YES.
+   Prior-only N at production cutoffs: 4,172–4,920 (pace_benchmark_cache);
+   hindsight population 4,139; distinct games 1,398.  KBL likewise mature:
+   prior-only N ~2,180–2,190; hindsight 1,688.  Both far above N>=30.
+
+E. IS COMPETITION ISOLATION STILL CORRECT?  YES.
+   The production ledger maps each game to exactly one competition (one row
+   per source_game_id, INSERT OR IGNORE = first assignment wins); cache
+   keys partition by (provider, competition, period, progress bucket); the
+   two Q4|P090 keys carry independent values (53.35% vs 52.07% — a merged
+   population would produce a single key).  Isolation is intact end to end.
+
+F. IS THE FORENSIC FREEZE (69.75% / 73.02%) AFFECTED?  NO.
+   The freeze test re-runs the independent audit pipeline against the
+   production archive with per-competition ledger resolution and passed
+   (11/11) while this fixture bug existed; its numbers derive from
+   production rows, not from this test fixture.  Production isolation
+   (E) is the property the freeze depends on, and it holds.
+
+G. EXACT RECOMMENDED NEXT ACTION (not implemented)
+   Test-side one-line fix in _seed_archive — make game ids
+   competition-scoped so two competitions can coexist in one fixture DB:
+
+       gid = f"{comp[:4].upper()}{i // 2:04d}"   # NBA0000.. / KBL0000..
+
+   (or f"{comp}-{i // 2:04d}").  With distinct ids the ledger keeps both
+   competitions, the cache receives both keys, and BOTH existing assertions
+   pass unmodified.  No assertion weakened, no expected key changed, no
+   application change — the invariant the test pins (competition isolation
+   of the cache) is legitimate; only its fixture precondition was broken.
+   Optional secondary hardening (not required): assert in the helper that a
+   gid is never seeded under two different competitions, so future fixture
+   reuse cannot silently re-clobber the ledger.
+
+   Awaiting explicit instruction before implementing anything.
+
+   ── ADDENDUM (implemented after explicit instruction, same day) ──
+   Applied test-side only, in tests/test_historical_context.py:
+     1. gid = f"{comp}-{i // 2:04d}"  (full competition slug — NOT the
+        proposed comp[:4] form, which truncates both betual-nba and
+        betual-kbl to 'BETU' and would not have separated them; caught
+        by re-running the /tmp harness before editing)
+     2. Hardening guard in the ledger-seeding branch: _seed_archive now
+        asserts that a game id is never (re-)seeded under a different
+        competition, so this corruption class fails loudly at the fixture.
+   Results: tests/test_historical_context.py 7 passed (previously
+   6 passed / 1 failed); guard verified to fire on the exact collision
+   pattern (forced replay); forensic freeze suite + this module together:
+   18 passed.  No assertion weakened, no expected key changed, no
+   application code touched.

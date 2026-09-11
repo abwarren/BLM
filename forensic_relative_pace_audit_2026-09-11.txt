@@ -1,0 +1,632 @@
+FORENSIC AUDIT — LEAGUE/STATE RELATIVE PACE FINDING
+generated (UTC): 2026-09-11T13:05:48.858450+00:00
+independent reconstruction from raw production rows; no caches, no API
+output, no dashboard calculations, no application code imported.
+databases (opened READ-ONLY):
+  CLEAN     /home/ubuntu/BLM/blm_metrics_clean.db
+  ANALYTICS /home/ubuntu/BLM/blm_metrics_clean.db.live_analytics.db
+  PROD      /home/ubuntu/BLM/blm_pokerbet.db
+scope: DESCRIPTIVE ONLY — no betting signals, EV, fair value,
+predictions, staking, probability claims or optimisation.
+==============================================================================
+AUDIT A — DATA INTEGRITY
+==============================================================================
+total clean_projections rows              : 500844
+rows remaining_game_minutes >= 2.5        : 471901
+rows remaining_game_minutes <  2.5        : 28943
+distinct games                            : 6899
+rows missing actual_pts_per_min           : 11790
+rows missing required_pts_per_min         : 198738
+rows missing live_total_line              : 193373
+rows terminal=1                           : 49  (all at remaining=0.0 min / progress=100.0%; with rem>=2.5: 0)
+rows predictive_eligible=1 / =0           : 500795 / 49
+status distribution                       : [('VALID', 500844)]
+rows with final_settled_total populated   : 0  (column unused; authoritative results come from prod.game_results)
+
+analytics competition_ledger games        : 8851  (one row per game)
+   BETUAL / betual-nba / status=classified : 2198 games
+   BETUAL / betual-tbsl / status=classified : 2012 games
+   BETUAL / betual-euroleague / status=classified : 1821 games
+   BETUAL / betual-cba / status=classified : 1088 games
+   BETUAL / betual-kbl / status=classified : 1054 games
+   CYBER / cyber-basketball-2k26-matches / status=classified : 678 games
+games with UNKNOWN/ambiguous ledger row   : 0
+
+prod game_results rows                    : 9385  {'UNKNOWN': 1469, 'OK': 7759, 'INVALID': 157}
+authoritative result rule: game_results.final_result_status='OK' AND
+final_total IS NOT NULL (all OK rows carry a total; INVALID/UNKNOWN
+ignored; one row per game — verified no duplicates).
+
+==============================================================================
+INDEPENDENT ELIGIBLE POPULATION (raw rows, no caches)
+==============================================================================
+rows scanned (remaining_game_minutes >= 2.5) : 471903
+exclusions from scanned rows:
+   missing_required_pace           : 185724
+   no_ledger_entry                 : 46843
+   result_not_OK                   : 30115
+   missing_actual_pace             : 11790
+   unmappable_period_bucket        : 1283
+independent eligible observations          : 196148
+independent eligible games                 : 4605
+eligible observations by provider/competition:
+   BETUAL / betual-nba: 77322
+   BETUAL / betual-tbsl: 34292
+   BETUAL / betual-euroleague: 31058
+   BETUAL / betual-kbl: 23877
+   BETUAL / betual-cba: 21255
+   CYBER / cyber-basketball-2k26-matches: 8344
+push observations (final_total == line)    : 0 (excluded from UNDER/OVER rates; they can never be UNDER or OVER)
+
+==============================================================================
+AUDIT B — INDEPENDENT PRIOR-ONLY BENCHMARK (strictly historical)
+==============================================================================
+method: for each observation at time T, the benchmark population is
+every row of the SAME benchmark key (provider|competition|Qx|Pnnn) with
+captured_at STRICTLY < T (ties excluded), the observation's own row
+excluded (structurally: cap==T), ALL same-game rows excluded, and
+actual_pts_per_min present.  mean/std recomputed from raw rows (prefix
+sums); std = SAMPLE std (n-1).  Benchmark members contribute
+actual_pts_per_min ONLY — no line, no outcome, no final score exists in
+any population.  Membership does NOT require a live line ('actual pace
+history of the league/state'); the audited observation itself must
+carry a live line because required pace needs one.
+
+observations with mature benchmark (N>=30)    : 192042
+observations with 1<=N<30 (immature)          : 3778
+observations with empty prior population      : 328
+benchmark N across mature observations        : min=30 median=1097.0 max=9958
+distinct benchmark keys in eligible scope     : 123
+
+==============================================================================
+AUDIT C — PRIMARY CONDITION (actual<mean AND required>=mean)
+==============================================================================
+eligible observations with mature benchmark: 192042
+
+PRIMARY (B cell: actual<mean AND required>=mean):
+   PRIMARY CONDITION
+     observations(decisive)=17841  games=1515  UNDER obs=12444  OVER obs=5397  pushes=0
+     UNDER obs%=69.75   equal-game UNDER%=73.02   OVER%=30.25   games w/ UNDER-majority=73.33%
+     pace gap (required-actual)    : mean=1.5343 median=1.0660 p10=0.3241 p25=0.5900 p75=1.8087 p90=2.7555 min=0.0012 max=16.4667 n=17841
+     actual  minus benchmark mean  : mean=-0.4469 median=-0.3754 p10=-0.9084 p25=-0.6380 p75=-0.1769 p90=-0.0682 min=-4.3907 max=-0.0000 n=17841
+     required minus benchmark mean : mean=1.0874 median=0.5386 p10=0.0727 p25=0.2015 p75=1.2839 p90=2.2228 min=0.0000 max=16.0048 n=17841
+
+COMPLEMENT (all other mature observations):
+   COMPLEMENT
+     observations(decisive)=174201  games=4565  UNDER obs=83165  OVER obs=91036  pushes=0
+     UNDER obs%=47.74   equal-game UNDER%=50.87   OVER%=52.26   games w/ UNDER-majority=50.49%
+     pace gap (required-actual)    : mean=-1.0305 median=-0.8250 p10=-2.3025 p25=-1.5192 p75=-0.2659 p90=0.1706 min=-74.1258 max=14.3333 n=174201
+     actual  minus benchmark mean  : mean=0.0747 median=0.0815 p10=-0.7315 p25=-0.3235 p75=0.4569 p90=0.8455 min=-15.7895 max=59.4385 n=174201
+     required minus benchmark mean : mean=-0.9558 median=-0.7880 p10=-2.0152 p25=-1.3837 p75=-0.3117 p90=0.0704 min=-16.3370 max=14.7724 n=174201
+
+==============================================================================
+AUDIT D — 2x2 TABLE (complete)
+==============================================================================
+                        required < mean    required >= mean
+actual < mean                  A                    B   <- primary
+actual >= mean                C                    D
+
+   CELL A
+     observations(decisive)=76209  games=2967  UNDER obs=39094  OVER obs=37115  pushes=0
+     UNDER obs%=51.30   equal-game UNDER%=49.53   OVER%=48.70   games w/ UNDER-majority=49.28%
+     pace gap (required-actual)    : mean=-0.6521 median=-0.4677 p10=-1.6648 p25=-1.0205 p75=-0.0429 p90=0.2994 min=-15.4744 max=4.6246 n=76209
+     actual  minus benchmark mean  : mean=-0.5408 median=-0.3884 p10=-1.0388 p25=-0.6939 p75=-0.1790 p90=-0.0712 min=-15.7895 max=-0.0000 n=76209
+     required minus benchmark mean : mean=-1.1929 median=-0.9247 p10=-2.0588 p25=-1.4728 p75=-0.5168 p90=-0.2430 min=-16.3370 max=-0.0000 n=76209
+
+   CELL B
+     observations(decisive)=17841  games=1515  UNDER obs=12444  OVER obs=5397  pushes=0
+     UNDER obs%=69.75   equal-game UNDER%=73.02   OVER%=30.25   games w/ UNDER-majority=73.33%
+     pace gap (required-actual)    : mean=1.5343 median=1.0660 p10=0.3241 p25=0.5900 p75=1.8087 p90=2.7555 min=0.0012 max=16.4667 n=17841
+     actual  minus benchmark mean  : mean=-0.4469 median=-0.3754 p10=-0.9084 p25=-0.6380 p75=-0.1769 p90=-0.0682 min=-4.3907 max=-0.0000 n=17841
+     required minus benchmark mean : mean=1.0874 median=0.5386 p10=0.0727 p25=0.2015 p75=1.2839 p90=2.2228 min=0.0000 max=16.0048 n=17841
+
+   CELL C
+     observations(decisive)=19994  games=1531  UNDER obs=11832  OVER obs=8162  pushes=0
+     UNDER obs%=59.18   equal-game UNDER%=63.41   OVER%=40.82   games w/ UNDER-majority=63.42%
+     pace gap (required-actual)    : mean=0.0925 median=-0.0893 p10=-0.8846 p25=-0.4901 p75=0.3437 p90=1.1598 min=-7.2592 max=14.3333 n=19994
+     actual  minus benchmark mean  : mean=0.5597 median=0.4454 p10=0.0819 p25=0.2060 p75=0.7951 p90=1.1890 min=0.0000 max=7.8767 n=19994
+     required minus benchmark mean : mean=0.6522 median=0.3450 p10=0.0539 p25=0.1453 p75=0.7338 p90=1.4849 min=0.0000 max=14.7724 n=19994
+
+   CELL D
+     observations(decisive)=77998  games=3350  UNDER obs=32239  OVER obs=45759  pushes=0
+     UNDER obs%=41.33   equal-game UNDER%=47.98   OVER%=58.67   games w/ UNDER-majority=46.96%
+     pace gap (required-actual)    : mean=-1.6880 median=-1.3709 p10=-2.8140 p25=-2.0215 p75=-0.8656 p90=-0.5313 min=-74.1258 max=-0.0113 n=77998
+     actual  minus benchmark mean  : mean=0.5516 median=0.3931 p10=0.0714 p25=0.1802 p75=0.6851 p90=1.0246 min=0.0000 max=59.4385 n=77998
+     required minus benchmark mean : mean=-1.1364 median=-0.8834 p10=-2.1637 p25=-1.4694 p75=-0.4353 p90=-0.1857 min=-16.0735 max=-0.0000 n=77998
+
+==============================================================================
+AUDIT E — PER-COMPETITION 2x2 (no pooling)
+==============================================================================
+
+--- BETUAL / betual-cba : 20626 mature observations ---
+   CELL A
+     observations(decisive)=9177  games=378  UNDER obs=4738  OVER obs=4439  pushes=0
+     UNDER obs%=51.63   equal-game UNDER%=48.57   OVER%=48.37   games w/ UNDER-majority=48.41%
+     pace gap (required-actual)    : mean=-0.3777 median=-0.2909 p10=-1.0735 p25=-0.6175 p75=0.0142 p90=0.2954 min=-6.0405 max=2.8739 n=9177
+     actual  minus benchmark mean  : mean=-0.4278 median=-0.3473 p10=-0.8899 p25=-0.5986 p75=-0.1585 p90=-0.0629 min=-3.7626 max=-0.0001 n=9177
+     required minus benchmark mean : mean=-0.8055 median=-0.7026 p10=-1.3674 p25=-0.9938 p75=-0.4484 p90=-0.2484 min=-6.3127 max=-0.0009 n=9177
+   CELL B(primary)
+     observations(decisive)=1463  games=190  UNDER obs=1327  OVER obs=136  pushes=0
+     UNDER obs%=90.70   equal-game UNDER%=81.15   OVER%=9.30   games w/ UNDER-majority=81.05%
+     pace gap (required-actual)    : mean=1.1933 median=0.8854 p10=0.3027 p25=0.5231 p75=1.5466 p90=2.4847 min=0.0012 max=8.6533 n=1463
+     actual  minus benchmark mean  : mean=-0.3971 median=-0.3470 p10=-0.8033 p25=-0.5827 p75=-0.1592 p90=-0.0695 min=-1.3246 max=-0.0006 n=1463
+     required minus benchmark mean : mean=0.7963 median=0.4564 p10=0.0698 p25=0.1884 p75=1.0512 p90=1.9541 min=0.0006 max=8.0779 n=1463
+   CELL C
+     observations(decisive)=1285  games=136  UNDER obs=926  OVER obs=359  pushes=0
+     UNDER obs%=72.06   equal-game UNDER%=68.04   OVER%=27.94   games w/ UNDER-majority=66.91%
+     pace gap (required-actual)    : mean=0.0586 median=-0.0321 p10=-0.7157 p25=-0.3451 p75=0.3198 p90=0.9188 min=-1.3415 max=4.2522 n=1285
+     actual  minus benchmark mean  : mean=0.4029 median=0.3254 p10=0.0679 p25=0.1560 p75=0.5745 p90=0.8836 min=0.0000 max=1.3800 n=1285
+     required minus benchmark mean : mean=0.4615 median=0.2623 p10=0.0325 p25=0.0937 p75=0.5756 p90=1.2146 min=0.0002 max=4.2608 n=1285
+   CELL D
+     observations(decisive)=8701  games=379  UNDER obs=3168  OVER obs=5533  pushes=0
+     UNDER obs%=36.41   equal-game UNDER%=46.04   OVER%=63.59   games w/ UNDER-majority=45.38%
+     pace gap (required-actual)    : mean=-1.2692 median=-1.0638 p10=-2.2194 p25=-1.5571 p75=-0.7225 p90=-0.4785 min=-11.2133 max=-0.0192 n=8701
+     actual  minus benchmark mean  : mean=0.3987 median=0.3179 p10=0.0546 p25=0.1453 p75=0.5771 p90=0.8295 min=0.0000 max=4.1890 n=8701
+     required minus benchmark mean : mean=-0.8705 median=-0.6708 p10=-1.7096 p25=-1.0551 p75=-0.3764 p90=-0.1939 min=-10.7392 max=-0.0008 n=8701
+
+--- BETUAL / betual-euroleague : 30300 mature observations ---
+   CELL A
+     observations(decisive)=8229  games=540  UNDER obs=4447  OVER obs=3782  pushes=0
+     UNDER obs%=54.04   equal-game UNDER%=54.35   OVER%=45.96   games w/ UNDER-majority=53.52%
+     pace gap (required-actual)    : mean=-0.2200 median=-0.1435 p10=-1.0237 p25=-0.5141 p75=0.1682 p90=0.5500 min=-6.1200 max=2.9394 n=8229
+     actual  minus benchmark mean  : mean=-0.4783 median=-0.3799 p10=-1.0291 p25=-0.6985 p75=-0.1666 p90=-0.0644 min=-3.4916 max=-0.0000 n=8229
+     required minus benchmark mean : mean=-0.6983 median=-0.5649 p10=-1.3481 p25=-0.9104 p75=-0.3119 p90=-0.1330 min=-6.4821 max=-0.0000 n=8229
+   CELL B(primary)
+     observations(decisive)=5288  games=400  UNDER obs=3294  OVER obs=1994  pushes=0
+     UNDER obs%=62.29   equal-game UNDER%=67.80   OVER%=37.71   games w/ UNDER-majority=68.00%
+     pace gap (required-actual)    : mean=1.8799 median=1.3400 p10=0.3778 p25=0.7498 p75=2.1167 p90=3.2024 min=0.0100 max=16.4667 n=5288
+     actual  minus benchmark mean  : mean=-0.4603 median=-0.3913 p10=-0.9235 p25=-0.6561 p75=-0.1856 p90=-0.0700 min=-2.9397 max=-0.0000 n=5288
+     required minus benchmark mean : mean=1.4196 median=0.7865 p10=0.0969 p25=0.2725 p75=1.6629 p90=2.6418 min=0.0002 max=16.0048 n=5288
+   CELL C
+     observations(decisive)=6909  games=521  UNDER obs=4011  OVER obs=2898  pushes=0
+     UNDER obs%=58.05   equal-game UNDER%=58.96   OVER%=41.95   games w/ UNDER-majority=59.69%
+     pace gap (required-actual)    : mean=0.2368 median=-0.0682 p10=-0.8988 p25=-0.5091 p75=0.5344 p90=1.5500 min=-5.6711 max=14.3333 n=6909
+     actual  minus benchmark mean  : mean=0.5981 median=0.5024 p10=0.0973 p25=0.2429 p75=0.8497 p90=1.2174 min=0.0000 max=5.9653 n=6909
+     required minus benchmark mean : mean=0.8349 median=0.4157 p10=0.0667 p25=0.1827 p75=0.9535 p90=1.8874 min=0.0001 max=14.7724 n=6909
+   CELL D
+     observations(decisive)=9874  games=709  UNDER obs=3975  OVER obs=5899  pushes=0
+     UNDER obs%=40.26   equal-game UNDER%=47.20   OVER%=59.74   games w/ UNDER-majority=46.26%
+     pace gap (required-actual)    : mean=-1.2041 median=-0.9861 p10=-2.1875 p25=-1.4734 p75=-0.6366 p90=-0.4006 min=-11.3200 max=-0.0172 n=9874
+     actual  minus benchmark mean  : mean=0.4956 median=0.4157 p10=0.0784 p25=0.1978 p75=0.6960 p90=1.0025 min=0.0002 max=7.2848 n=9874
+     required minus benchmark mean : mean=-0.7085 median=-0.4710 p10=-1.5990 p25=-0.8495 p75=-0.2270 p90=-0.0893 min=-10.3978 max=-0.0001 n=9874
+
+--- BETUAL / betual-kbl : 23247 mature observations ---
+   CELL A
+     observations(decisive)=9917  games=405  UNDER obs=4962  OVER obs=4955  pushes=0
+     UNDER obs%=50.04   equal-game UNDER%=47.88   OVER%=49.96   games w/ UNDER-majority=47.41%
+     pace gap (required-actual)    : mean=-0.2782 median=-0.2166 p10=-0.9329 p25=-0.5660 p75=0.1072 p90=0.4227 min=-7.1067 max=2.4429 n=9917
+     actual  minus benchmark mean  : mean=-0.4442 median=-0.3518 p10=-0.9436 p25=-0.6454 p75=-0.1639 p90=-0.0623 min=-3.1247 max=-0.0000 n=9917
+     required minus benchmark mean : mean=-0.7223 median=-0.6270 p10=-1.2663 p25=-0.9104 p75=-0.3710 p90=-0.1796 min=-7.7432 max=-0.0001 n=9917
+   CELL B(primary)
+     observations(decisive)=1799  games=223  UNDER obs=1494  OVER obs=305  pushes=0
+     UNDER obs%=83.05   equal-game UNDER%=74.30   OVER%=16.95   games w/ UNDER-majority=73.99%
+     pace gap (required-actual)    : mean=0.9611 median=0.8106 p10=0.2428 p25=0.4377 p75=1.2668 p90=1.7988 min=0.0137 max=5.9955 n=1799
+     actual  minus benchmark mean  : mean=-0.4129 median=-0.3510 p10=-0.8568 p25=-0.6308 p75=-0.1426 p90=-0.0495 min=-2.2487 max=-0.0002 n=1799
+     required minus benchmark mean : mean=0.5482 median=0.2891 p10=0.0489 p25=0.1352 p75=0.6963 p90=1.3918 min=0.0002 max=5.8855 n=1799
+   CELL C
+     observations(decisive)=1905  games=177  UNDER obs=1157  OVER obs=748  pushes=0
+     UNDER obs%=60.73   equal-game UNDER%=65.92   OVER%=39.27   games w/ UNDER-majority=65.54%
+     pace gap (required-actual)    : mean=-0.1394 median=-0.1558 p10=-0.7848 p25=-0.5426 p75=0.1290 p90=0.5510 min=-2.7554 max=6.4400 n=1905
+     actual  minus benchmark mean  : mean=0.4992 median=0.3982 p10=0.0644 p25=0.1699 p75=0.7295 p90=1.0205 min=0.0002 max=2.9217 n=1905
+     required minus benchmark mean : mean=0.3598 median=0.2139 p10=0.0334 p25=0.0955 p75=0.4436 p90=0.8131 min=0.0001 max=6.6645 n=1905
+   CELL D
+     observations(decisive)=9626  games=429  UNDER obs=3667  OVER obs=5959  pushes=0
+     UNDER obs%=38.09   equal-game UNDER%=45.34   OVER%=61.91   games w/ UNDER-majority=44.06%
+     pace gap (required-actual)    : mean=-1.1724 median=-0.9969 p10=-2.0686 p25=-1.4528 p75=-0.6728 p90=-0.4286 min=-9.3801 max=-0.0113 n=9626
+     actual  minus benchmark mean  : mean=0.4225 median=0.3315 p10=0.0616 p25=0.1514 p75=0.5910 p90=0.8869 min=0.0000 max=3.8783 n=9626
+     required minus benchmark mean : mean=-0.7499 median=-0.5721 p10=-1.5036 p25=-0.9414 p75=-0.3192 p90=-0.1354 min=-9.2057 max=-0.0002 n=9626
+
+--- BETUAL / betual-nba : 76719 mature observations ---
+   CELL A
+     observations(decisive)=37292  games=1043  UNDER obs=19163  OVER obs=18129  pushes=0
+     UNDER obs%=51.39   equal-game UNDER%=47.10   OVER%=48.61   games w/ UNDER-majority=47.08%
+     pace gap (required-actual)    : mean=-1.0664 median=-0.8710 p10=-2.0178 p25=-1.3938 p75=-0.3998 p90=0.0041 min=-15.4744 max=1.7500 n=37292
+     actual  minus benchmark mean  : mean=-0.6464 median=-0.4332 p10=-1.1755 p25=-0.7822 p75=-0.2005 p90=-0.0793 min=-15.7895 max=-0.0000 n=37292
+     required minus benchmark mean : mean=-1.7127 median=-1.3777 p10=-2.4560 p25=-1.8172 p75=-0.9794 p90=-0.6583 min=-16.3370 max=-0.0002 n=37292
+   CELL B(primary)
+     observations(decisive)=977  games=204  UNDER obs=929  OVER obs=48  pushes=0
+     UNDER obs%=95.09   equal-game UNDER%=90.69   OVER%=4.91   games w/ UNDER-majority=90.69%
+     pace gap (required-actual)    : mean=1.3157 median=1.0161 p10=0.3146 p25=0.5833 p75=1.6431 p90=2.6169 min=0.0153 max=10.7297 n=977
+     actual  minus benchmark mean  : mean=-0.5096 median=-0.4409 p10=-1.0649 p25=-0.7272 p75=-0.2134 p90=-0.0847 min=-1.7274 max=-0.0009 n=977
+     required minus benchmark mean : mean=0.8061 median=0.4609 p10=0.0649 p25=0.1719 p75=1.0010 p90=2.0096 min=0.0004 max=9.5779 n=977
+   CELL C
+     observations(decisive)=631  games=135  UNDER obs=510  OVER obs=121  pushes=0
+     UNDER obs%=80.82   equal-game UNDER%=73.83   OVER%=19.18   games w/ UNDER-majority=74.07%
+     pace gap (required-actual)    : mean=0.0340 median=-0.0800 p10=-0.8684 p25=-0.4301 p75=0.2298 p90=1.0529 min=-2.0177 max=4.4657 n=631
+     actual  minus benchmark mean  : mean=0.4686 median=0.3244 p10=0.0580 p25=0.1466 p75=0.6452 p90=1.0741 min=0.0009 max=2.2879 n=631
+     required minus benchmark mean : mean=0.5026 median=0.2113 p10=0.0278 p25=0.0851 p75=0.5243 p90=1.4520 min=0.0004 max=4.7763 n=631
+   CELL D
+     observations(decisive)=37819  games=1052  UNDER obs=16597  OVER obs=21222  pushes=0
+     UNDER obs%=43.89   equal-game UNDER%=50.23   OVER%=56.11   games w/ UNDER-majority=49.05%
+     pace gap (required-actual)    : mean=-2.2190 median=-1.7994 p10=-3.2564 p25=-2.3969 p75=-1.3252 p90=-0.9576 min=-74.1258 max=-0.0400 n=37819
+     actual  minus benchmark mean  : mean=0.6587 median=0.4315 p10=0.0798 p25=0.2043 p75=0.7487 p90=1.1192 min=0.0000 max=59.4385 n=37819
+     required minus benchmark mean : mean=-1.5603 median=-1.2875 p10=-2.5676 p25=-1.7871 p75=-0.8856 p90=-0.5690 min=-16.0735 max=-0.0003 n=37819
+
+--- BETUAL / betual-tbsl : 33553 mature observations ---
+   CELL A
+     observations(decisive)=8751  games=523  UNDER obs=4177  OVER obs=4574  pushes=0
+     UNDER obs%=47.73   equal-game UNDER%=50.97   OVER%=52.27   games w/ UNDER-majority=50.48%
+     pace gap (required-actual)    : mean=-0.2701 median=-0.1793 p10=-1.0311 p25=-0.5476 p75=0.1132 p90=0.4241 min=-6.1733 max=2.8026 n=8751
+     actual  minus benchmark mean  : mean=-0.3863 median=-0.3089 p10=-0.7955 p25=-0.5503 p75=-0.1520 p90=-0.0636 min=-3.5451 max=-0.0001 n=8751
+     required minus benchmark mean : mean=-0.6564 median=-0.5238 p10=-1.3219 p25=-0.8396 p75=-0.2818 p90=-0.1270 min=-6.2597 max=-0.0001 n=8751
+   CELL B(primary)
+     observations(decisive)=6647  games=423  UNDER obs=4140  OVER obs=2507  pushes=0
+     UNDER obs%=62.28   equal-game UNDER%=67.54   OVER%=37.72   games w/ UNDER-majority=68.56%
+     pace gap (required-actual)    : mean=1.7011 median=1.1882 p10=0.3833 p25=0.6750 p75=1.9250 p90=3.0490 min=0.0167 max=15.7733 n=6647
+     actual  minus benchmark mean  : mean=-0.4516 median=-0.3785 p10=-0.9376 p25=-0.6340 p75=-0.1803 p90=-0.0707 min=-2.1757 max=-0.0001 n=6647
+     required minus benchmark mean : mean=1.2495 median=0.6802 p10=0.0963 p25=0.2755 p75=1.3880 p90=2.4664 min=0.0001 max=15.0197 n=6647
+   CELL C
+     observations(decisive)=7743  games=497  UNDER obs=4475  OVER obs=3268  pushes=0
+     UNDER obs%=57.79   equal-game UNDER%=62.40   OVER%=42.21   games w/ UNDER-majority=62.17%
+     pace gap (required-actual)    : mean=0.0881 median=-0.0751 p10=-0.9039 p25=-0.4928 p75=0.3833 p90=1.1095 min=-3.3725 max=11.4000 n=7743
+     actual  minus benchmark mean  : mean=0.5537 median=0.4344 p10=0.0838 p25=0.2087 p75=0.7789 p90=1.1611 min=0.0001 max=3.9847 n=7743
+     required minus benchmark mean : mean=0.6418 median=0.3666 p10=0.0618 p25=0.1577 p75=0.7380 p90=1.3885 min=0.0000 max=11.6205 n=7743
+   CELL D
+     observations(decisive)=10412  games=710  UNDER obs=4092  OVER obs=6320  pushes=0
+     UNDER obs%=39.30   equal-game UNDER%=47.02   OVER%=60.70   games w/ UNDER-majority=45.92%
+     pace gap (required-actual)    : mean=-1.1716 median=-0.9523 p10=-2.1692 p25=-1.4287 p75=-0.6109 p90=-0.3749 min=-9.1067 max=-0.0167 n=10412
+     actual  minus benchmark mean  : mean=0.4769 median=0.3872 p10=0.0711 p25=0.1753 p75=0.6732 p90=0.9921 min=0.0002 max=6.5881 n=10412
+     required minus benchmark mean : mean=-0.6947 median=-0.4257 p10=-1.6421 p25=-0.8328 p75=-0.2011 p90=-0.0860 min=-8.3910 max=-0.0000 n=10412
+
+--- CYBER / cyber-basketball-2k26-matches : 7597 mature observations ---
+   CELL A
+     observations(decisive)=2843  games=78  UNDER obs=1607  OVER obs=1236  pushes=0
+     UNDER obs%=56.52   equal-game UNDER%=52.16   OVER%=43.48   games w/ UNDER-majority=55.13%
+     pace gap (required-actual)    : mean=0.1647 median=0.0697 p10=-0.3351 p25=-0.1077 p75=0.3616 p90=0.6835 min=-3.7627 max=4.6246 n=2843
+     actual  minus benchmark mean  : mean=-0.5133 median=-0.3961 p10=-1.0195 p25=-0.6405 p75=-0.2052 p90=-0.0995 min=-5.3521 max=-0.0004 n=2843
+     required minus benchmark mean : mean=-0.3486 median=-0.3016 p10=-0.7013 p25=-0.5042 p75=-0.1397 p90=-0.0455 min=-3.7956 max=-0.0003 n=2843
+   CELL B(primary)
+     observations(decisive)=1667  games=75  UNDER obs=1260  OVER obs=407  pushes=0
+     UNDER obs%=75.58   equal-game UNDER%=59.23   OVER%=24.42   games w/ UNDER-majority=60.00%
+     pace gap (required-actual)    : mean=0.8187 median=0.6475 p10=0.2362 p25=0.3885 p75=0.9817 p90=1.5606 min=0.0290 max=8.1121 n=1667
+     actual  minus benchmark mean  : mean=-0.4289 median=-0.3251 p10=-0.8616 p25=-0.5955 p75=-0.1734 p90=-0.0808 min=-4.3907 max=-0.0003 n=1667
+     required minus benchmark mean : mean=0.3898 median=0.2125 p10=0.0302 p25=0.0936 p75=0.4284 p90=0.8544 min=0.0000 max=7.7928 n=1667
+   CELL C
+     observations(decisive)=1521  games=65  UNDER obs=753  OVER obs=768  pushes=0
+     UNDER obs%=49.51   equal-game UNDER%=68.76   OVER%=50.49   games w/ UNDER-majority=67.69%
+     pace gap (required-actual)    : mean=-0.1974 median=-0.1866 p10=-0.9423 p25=-0.4891 p75=0.0730 p90=0.3387 min=-7.2592 max=5.7385 n=1521
+     actual  minus benchmark mean  : mean=0.6622 median=0.4769 p10=0.0746 p25=0.1914 p75=1.0122 p90=1.5045 min=0.0001 max=7.8767 n=1521
+     required minus benchmark mean : mean=0.4649 median=0.3070 p10=0.0445 p25=0.1270 p75=0.5456 p90=1.0887 min=0.0002 max=5.7433 n=1521
+   CELL D
+     observations(decisive)=1566  games=71  UNDER obs=740  OVER obs=826  pushes=0
+     UNDER obs%=47.25   equal-game UNDER%=58.27   OVER%=52.75   games w/ UNDER-majority=59.15%
+     pace gap (required-actual)    : mean=-0.8473 median=-0.6280 p10=-1.5426 p25=-0.9641 p75=-0.3460 p90=-0.2269 min=-45.6699 max=-0.0187 n=1566
+     actual  minus benchmark mean  : mean=0.4608 median=0.2415 p10=0.0515 p25=0.1285 p75=0.5368 p90=0.8639 min=0.0000 max=45.3485 n=1566
+     required minus benchmark mean : mean=-0.3866 median=-0.2369 p10=-0.7924 p25=-0.4591 p75=-0.1066 p90=-0.0566 min=-7.5068 max=-0.0003 n=1566
+
+==============================================================================
+AUDIT F — CHECKPOINTS (stored observations near exact remaining minutes)
+==============================================================================
+remaining_game_minutes across eligible population : min=2.5 max=47.92
+rows with remaining < 2.5 in eligible population  : 0  (must be 0)
+mature rows with remaining exactly == 2.5         : 1913  (2.50 is INCLUDED)
+
+band = stored observations with lo <= remaining < lo+1 (no
+interpolation); '==2.5 exact' lists rows at exactly 2.5.
+Table 1 = PRIMARY-CONDITION observations only (actual<mean AND
+required>=mean), as directed.  Table 2 = all mature observations of the
+band, for context.
+
+TABLE 1 — PRIMARY CONDITION
+  checkpoint     obs  games   UNDER%  eq-gameU%  meanAct  meanReq  meanHist  meanAct-avg  meanReq-avg
+-----------------------------------------------------------------------------------------------------
+   [6.0,7.0)     674    404    91.39      89.77   4.0684   5.1354    4.4615      -0.3931       0.6738
+   [5.0,6.0)     804    471    91.54      91.14   4.0694   5.2804    4.4760      -0.4065       0.8044
+   [4.0,5.0)    1085    677    85.44      83.13   4.0129   5.9062    4.4199      -0.4070       1.4862
+   [3.0,4.0)    1440    790    75.62      80.56   3.8740   7.5782    4.2804      -0.4064       3.2978
+   [2.5,3.0)    1510    860    78.94      82.07   3.8934   8.0883    4.2921      -0.3987       3.7962
+ ==2.5 exact     361    345    85.04      85.22   3.9062   8.2942    4.3137      -0.4075       3.9805
+
+TABLE 2 — ALL MATURE (context)
+  checkpoint     obs  games   UNDER%  eq-gameU%  meanAct  meanReq  meanHist  meanAct-avg  meanReq-avg
+-----------------------------------------------------------------------------------------------------
+   [6.0,7.0)    7734   3868    51.45      51.65   4.8609   3.7894    4.8653      -0.0043      -1.0759
+   [5.0,6.0)    8059   3973    52.56      52.36   4.8665   3.7705    4.8658       0.0006      -1.0953
+   [4.0,5.0)    8145   4161    53.19      52.90   4.7721   3.8191    4.7708       0.0013      -0.9516
+   [3.0,4.0)    8113   4258    52.34      53.38   4.7072   4.2492    4.6499       0.0573      -0.4008
+   [2.5,3.0)    7931   4183    53.03      53.38   4.6692   4.3318    4.6163       0.0529      -0.2845
+ ==2.5 exact    1913   1776    54.78      54.78   4.6135   4.2732    4.5450       0.0685      -0.2718
+
+==============================================================================
+AUDIT G — UNDER vs OVER DISTRIBUTIONS (mature, decisive observations)
+==============================================================================
+
+actual pace:
+   UNDER: mean=5.0431 median=4.7353 p10=3.6510 p25=4.1000 p75=5.8462 p90=6.5366 min=0.0000 max=68.0000 n=95609
+   OVER : mean=5.2422 median=4.9552 p10=3.7826 p25=4.2353 p75=6.0414 p90=6.7087 min=0.0000 max=80.0000 n=96433
+
+required pace:
+   UNDER: mean=4.5709 median=4.4667 p10=3.5455 p25=3.9406 p75=5.0857 p90=5.5556 min=0.6000 max=19.8182 n=95609
+   OVER : mean=4.1327 median=4.1613 p10=2.8750 p25=3.5833 p75=4.8701 p90=5.3469 min=-6.2000 max=15.8182 n=96433
+
+historical mean pace:
+   UNDER: mean=5.0902 median=4.5518 p10=3.9873 p25=4.1260 p75=6.0012 p90=6.1786 min=3.5615 max=21.0334 n=95609
+   OVER : mean=5.1433 median=4.5985 p10=3.9878 p25=4.1200 p75=6.0488 p90=6.2808 min=3.3604 max=21.0569 n=96433
+
+actual - historical mean:
+   UNDER: mean=-0.0471 median=-0.0580 p10=-0.8223 p25=-0.4436 p75=0.3362 p90=0.7179 min=-15.7895 max=47.8075 n=95609
+   OVER : mean=0.0989 median=0.0837 p10=-0.6826 p25=-0.3040 p75=0.4785 p90=0.8801 min=-14.8614 max=59.4385 n=96433
+
+required - historical mean:
+   UNDER: mean=-0.5193 median=-0.5263 p10=-1.6475 p25=-1.0983 p75=0.0093 p90=0.6406 min=-16.3370 max=16.0048 n=95609
+   OVER : mean=-1.0106 median=-0.8562 p10=-2.2722 p25=-1.5100 p75=-0.3139 p90=0.1696 min=-16.1288 max=12.0903 n=96433
+
+pace gap (required-actual):
+   UNDER: mean=-0.4722 median=-0.4772 p10=-1.8049 p25=-1.1329 p75=0.1468 p90=0.9028 min=-62.8553 max=16.4667 n=95609
+   OVER : mean=-1.1095 median=-0.9500 p10=-2.6154 p25=-1.7051 p75=-0.3184 p90=0.2800 min=-74.1258 max=12.3283 n=96433
+
+remaining minutes:
+   UNDER: mean=15.5889 median=13.6800 p10=4.5000 p25=8.2500 p75=21.5000 p90=30.0000 min=2.5000 max=47.8300 n=95609
+   OVER : mean=16.1902 median=14.2500 p10=5.0000 p25=8.7500 p75=22.5000 p90=30.2500 min=2.5000 max=47.9200 n=96433
+
+progress %:
+   UNDER: mean=61.4346 median=66.2500 p10=25.0000 p25=47.5000 p75=80.0000 p90=88.7500 min=0.3542 max=94.7917 n=95609
+   OVER : mean=59.8432 median=64.3750 p10=25.0000 p25=44.3750 p75=78.1250 p90=88.1250 min=0.1667 max=94.7917 n=96433
+
+==============================================================================
+AUDIT B2 — BENCHMARK-CONSTRUCTION VARIANTS + ROBUSTNESS (diagnostics)
+==============================================================================
+Purpose: explain HOW the primary-condition rate depends on the benchmark
+construction, and whether it is an artifact of the small-N archive era.
+Variant (i) is the DIRECTED construction (strictly prior, same-game
+excluded).  Variants (ii)/(iii) are DELIBERATE-LEAKAGE diagnostics only
+— they are never used as the audit result.
+
+cell-B (primary) rates under each construction:
+   (i)   prior-only + same-game excluded (DIRECTED) : 17841 obs / 1515 games  UNDER%=69.75  equal-game=73.02
+   (ii)  prior-only, same-game KEPT (leaky diag.)   : 17973 obs / 1518 games  UNDER%=69.78  equal-game=73.00
+   (iii) full-key hindsight mean (leaky diag.)      : 18603 obs / 1547 games  UNDER%=69.72  equal-game=73.23
+   (ii)/(iii) are shown ONLY as diagnostics: the measured rate is
+   essentially invariant to these construction choices (max Δ 0.03pp),
+   so the directed prior-only result is not an artifact of construction.
+
+primary-cell rate by observation date (archive-day vintage):
+          day     obs  games   UNDER%  eq-gameU%
+   2026-09-05    2610    100    58.05      65.13
+   2026-09-06    5811    242    58.03      59.19
+   2026-09-07    2965    316    76.76      75.07
+   2026-09-08    2403    307    88.10      80.78
+   2026-09-09    2079    282    82.20      78.26
+   2026-09-10    1973    268    73.75      71.61
+
+primary-cell rate by benchmark N band (archive-maturity robustness):
+           band     obs  games   UNDER%  eq-gameU%
+        N 30-99     635     78    62.68      68.60
+      N 100-299    4132    274    62.15      59.96
+      N 300-999    7900    739    65.04      65.80
+    N 1000-2999    4728    864    82.72      77.69
+      N >= 3000     446     98    96.19      90.82
+
+2x2 cell ordering vs pace gap (descriptive): mean pace gap and UNDER%
+per cell (all mature, decisive):
+   cell A: n= 76209  mean pace gap= -0.6521  UNDER%=51.30
+   cell B: n= 17841  mean pace gap=  1.5343  UNDER%=69.75
+   cell C: n= 19994  mean pace gap=  0.0925  UNDER%=59.18
+   cell D: n= 77998  mean pace gap= -1.6880  UNDER%=41.33
+   → UNDER% is monotone in the within-observation pace gap
+     (required − actual); the league-relative split partitions the
+     high-gap states (B) from the rest.  Both dimensions carry signal;
+     the audit makes no modelling claim beyond this description.
+
+==============================================================================
+AUDIT H — LEAKAGE TESTS
+==============================================================================
+mature observations                              : 192042
+construction guarantees (enforced inside this audit's own code):
+  1. members have captured_at STRICTLY < T (bisect_left over the sorted
+     key index); same-instant rows excluded — the current observation is
+     structurally unreachable
+  2. later observations have captured_at >= T and are structurally
+     unreachable
+  3. ALL rows of the observation's game are subtracted from the prefix
+     sums (same-game exclusion, absolute)
+  4. member tuples carry (captured_at, game_id, actual_pts_per_min, id)
+     ONLY — no line, no final score, no outcome field exists in any
+     benchmark population; result tables are joined only to the audited
+     observation itself
+  5. terminal rows sit at remaining=0.0 / progress=100 and are excluded
+     from the scanned population by remaining>=2.5, so they cannot enter
+     any benchmark population
+
+empirical spot-verification (explicit member scan of 2000 random mature
+observations):
+   sampled observations                          : 2000
+   benchmarks containing the CURRENT observation : 0  (must be 0)
+   benchmarks containing captured_at >= T rows   : 0  (must be 0)
+   benchmarks containing SAME-GAME rows          : 0  (must be 0)
+
+--- same-game-exclusion sensitivity ---
+observations mature WITH same-game exclusion    : 192042
+observations mature WITHOUT same-game exclusion : 192042
+benchmark means that differ at all              : 148886
+   |mean_without - mean_with| distribution       : mean=0.0062 median=0.0008 p10=0.0001 p25=0.0003 p75=0.0029 p90=0.0108 min=0.0000 max=1.7508 n=148886
+PRIMARY-CONDITION classifications that flip     : 166
+   example: obs=318276 game=30804554 mean_with=4.2421 mean_without=4.2188
+   example: obs=449098 game=30804734 mean_with=4.7851 mean_without=4.6786
+   example: obs=452942 game=30804784 mean_with=4.1154 mean_without=4.0273
+
+==============================================================================
+AUDIT I — CACHE RECONCILIATION (independent numbers computed first)
+==============================================================================
+
+[0] cache freshness vs data
+   pace_benchmark_cache: rows=6664 computed_at range 2026-09-05T08:40:01.056369Z .. 2026-09-10T23:32:43.505967Z
+   historical_context_cache: rows=123 computed_at range 2026-09-10T23:25:48.763353Z .. 2026-09-10T23:25:48.764381Z
+   clean_projections max captured_at      : 2026-09-11T13:06:03.980687Z
+   → the caches are snapshots as of their computed_at; they describe
+     the archive at that moment, NOT the current data.  Reconciliation
+     below rebuilds each cache row's own population AS OF ITS CUTOFF.
+
+[1] pace_benchmark_cache reproduction (independent rebuild with the
+    live z-engine's documented population semantics: status='VALID',
+    actual pace present, ledger-classified (provider+competition+status),
+    exact period label, 5-pt progress bucket, captured_at < cutoff,
+    cutoff row excluded by id, cutoff row's GAME excluded, no line/rem
+    requirement, sample std)
+   cache rows: 6664  distinct keys: 121
+   reproduced EXACTLY (n, mean, std)           : 2677
+   near-matches (|Δn|<=3, |Δmean|<=1e-3)       : 2743 of 3987 mismatches
+   mismatches total                            : 3987
+   empty/ineligible population for cutoff      : 0
+   Δn (rebuilt − cache) distribution           : mean=2.6549 median=2.0000 p10=1.0000 p25=1.0000 p75=3.0000 p90=5.0000 min=1.0000 max=21.0000 n=3987
+   cases where REBUILT n > CACHE n             : 3987  (cache undercounts; benign direction — data/ledger entries added
+   AFTER the cache row was written; leakage would show the OPPOSITE
+   direction, i.e. cache n larger than the strictly-prior rebuild)
+   example key=BETUAL|betual-euroleague|Q2|P040 cutoff=2026-09-09T23:28:35.309585Z cutoff_id=19562067
+      cache    n/mean/std = (3119, 4.354417, 0.676075)
+      rebuilt  n/mean/std = (3120, 4.354323, 0.675987)
+   example key=BETUAL|betual-euroleague|Q1|P020 cutoff=2026-09-09T23:20:50.951670Z cutoff_id=19562062
+      cache    n/mean/std = (3862, 4.654461, 0.892939)
+      rebuilt  n/mean/std = (3864, 4.654117, 0.892872)
+   example key=BETUAL|betual-euroleague|Q1|P020 cutoff=2026-09-09T23:19:53.600018Z cutoff_id=19562061
+      cache    n/mean/std = (3855, 4.653647, 0.892869)
+      rebuilt  n/mean/std = (3856, 4.653383, 0.892903)
+   example key=BETUAL|betual-euroleague|Q1|P015 cutoff=2026-09-09T23:18:14.276505Z cutoff_id=19562059
+      cache    n/mean/std = (3757, 4.657257, 0.971491)
+      rebuilt  n/mean/std = (3758, 4.656949, 0.971545)
+   example key=BETUAL|betual-euroleague|Q1|P005 cutoff=2026-09-09T23:14:21.661452Z cutoff_id=19562056
+      cache    n/mean/std = (3516, 4.820547, 1.463855)
+      rebuilt  n/mean/std = (3517, 4.820086, 1.463901)
+
+[2] historical_context_cache reproduction (independent rebuild from
+    raw rows; cache semantics: n counts pushes, under_n = final<line,
+    equal-game UNDER% = mean over games of per-game UNDER rate)
+   cache rows: 123
+   keys matched          : 8
+   keys mismatched       : 115
+   keys only in cache    : 0
+   keys only independent : 0
+   MISMATCH BETUAL|betual-tbsl|Q2|P035: cache(n=1200,under_n=604,under%=50.33,eg%=51.49) vs indep(n=1242,under=622,under%=50.08,eg%=51.05)
+   MISMATCH BETUAL|betual-tbsl|Q2|P040: cache(n=1339,under_n=680,under%=50.78,eg%=50.85) vs indep(n=1394,under=699,under%=50.14,eg%=50.16)
+   MISMATCH BETUAL|betual-tbsl|Q2|P045: cache(n=1504,under_n=760,under%=50.53,eg%=49.94) vs indep(n=1546,under=776,under%=50.19,eg%=49.45)
+   MISMATCH BETUAL|betual-tbsl|Q3|P050: cache(n=1184,under_n=593,under%=50.08,eg%=50.07) vs indep(n=1247,under=617,under%=49.48,eg%=49.48)
+   MISMATCH BETUAL|betual-tbsl|Q3|P055: cache(n=1501,under_n=766,under%=51.03,eg%=51.41) vs indep(n=1515,under=771,under%=50.89,eg%=51.13)
+   MISMATCH BETUAL|betual-tbsl|Q3|P060: cache(n=2089,under_n=1047,under%=50.12,eg%=51.43) vs indep(n=2143,under=1072,under%=50.02,eg%=51.32)
+   MISMATCH BETUAL|betual-tbsl|Q3|P065: cache(n=2124,under_n=1084,under%=51.04,eg%=51.98) vs indep(n=2172,under=1100,under%=50.64,eg%=51.6)
+   MISMATCH BETUAL|betual-tbsl|Q3|P070: cache(n=2844,under_n=1421,under%=49.96,eg%=50.51) vs indep(n=2915,under=1451,under%=49.78,eg%=50.36)
+   (cache rows are a snapshot as of computed_at — the independent
+    rebuild uses the CURRENT archive, so keys that exist on only one
+    side are expected where data was added after the refresh.)
+
+==============================================================================
+AUDIT J — FINAL FORENSIC VERDICT
+==============================================================================
+
+1. IS THE PRIMARY RELATIONSHIP REAL IN THE RAW DATA?  YES.
+   The independently reconstructed 2x2 (AUDIT D) contains the relationship as
+   a strong descriptive pattern.  Conditioning on required>=mean: cell B
+   (actual<mean) settles UNDER 69.75% vs 59.18% for cell C (actual>=mean); cell B
+   under-rates cell D (actual>=mean, required<mean) by a factor of
+   1.69x.  Conditioning on actual<mean: B 69.75% vs A 51.30%.
+   The all-observation baseline is 49.79% observation-UNDER (equal-game 51.14%).
+   Both directed comparisons agree with the previously reported direction and
+   magnitudes (~70% observation / ~73% equal-game).
+
+2. EXACT INDEPENDENT UNDER RATE (primary, observation-weighted): 69.75%
+   (12444 UNDER / 17841 decisive observations; baseline 49.79%; pushes: 0)
+
+3. EQUAL-GAME UNDER RATE (primary): 73.02%
+   (1515 games equally weighted; 73.33% of them settle UNDER-majority)
+
+4. SUPPORT: 17841 decisive observations / 1515 distinct games carry the primary
+   state (of 192042 mature observations across 4586 games; 9.3% of observations).
+
+5. PER-COMPETITION SUPPORT (cell B, no pooling):
+   BETUAL/betual-cba:  1463 obs /  190 games  UNDER obs%= 90.70  equal-game= 81.15  UNDER-majority games= 81.05%
+   BETUAL/betual-euroleague:  5288 obs /  400 games  UNDER obs%= 62.29  equal-game= 67.80  UNDER-majority games= 68.00%
+   BETUAL/betual-kbl:  1799 obs /  223 games  UNDER obs%= 83.05  equal-game= 74.30  UNDER-majority games= 73.99%
+   BETUAL/betual-nba:   977 obs /  204 games  UNDER obs%= 95.09  equal-game= 90.69  UNDER-majority games= 90.69%
+   BETUAL/betual-tbsl:  6647 obs /  423 games  UNDER obs%= 62.28  equal-game= 67.54  UNDER-majority games= 68.56%
+   CYBER/cyber-basketball-2k26-matches:  1667 obs /   75 games  UNDER obs%= 75.58  equal-game= 59.23  UNDER-majority games= 60.00%
+
+   Every competition supports the relationship with substantial volume.
+   Observation-weighted cell-B UNDER%: BETUAL-nba 95.1, BETUAL-cba 90.7, BETUAL-kbl 83.0, BETUAL-euroleague 62.3, BETUAL-tbsl 62.3, CYBER-basketball-2k26-matches 75.6.  Equal-game weighting —
+   the more honest game-level view — orders BETUAL-nba 90.7, BETUAL-cba 81.2, BETUAL-kbl 74.3, BETUAL-euroleague 67.8, BETUAL-tbsl 67.5, CYBER-basketball-2k26-matches 59.2.  CYBER's
+   observation-vs-game divergence (75.6% vs 59.2%) reflects heavy per-game
+   observation clustering (75 games only).
+
+6. CHECKPOINTS (primary-condition bands, AUDIT F Table 1):
+   [6.0,7.0): 674 obs / 404 games  UNDER%=91.39  equal-game=89.77
+   [5.0,6.0): 804 obs / 471 games  UNDER%=91.54  equal-game=91.14
+   [4.0,5.0): 1085 obs / 677 games  UNDER%=85.44  equal-game=83.13
+   [3.0,4.0): 1440 obs / 790 games  UNDER%=75.62  equal-game=80.56
+   [2.5,3.0): 1510 obs / 860 games  UNDER%=78.94  equal-game=82.07
+   ==2.5 exact: 361 obs / 345 games  UNDER%=85.04  equal-game=85.22
+
+   The primary condition survives every checkpoint 6.0/5.0/4.0/3.0/2.5 with
+   76-92% observation-UNDER (equal-game 81-91%) — all far above the ~50%
+   baseline.  <2.5 is structurally excluded (verified: 0 rows below 2.5;
+   361 primary-condition rows sit exactly at 2.5 and are included).
+
+7. LEAKAGE: NONE FOUND.
+   - Independent reconstruction: explicit member scans of 2,000 random mature
+     observations found 0 current-observation members, 0 same-or-later-
+     timestamp members, 0 same-game members; benchmark member tuples carry
+     actual_pts_per_min ONLY (no line/score/outcome field exists to leak);
+     all 49 terminal rows sit at remaining=0.0 and cannot enter any population.
+   - Production pace_benchmark_cache: rows whose archive did not change since
+     their write reproduce EXACTLY; all mismatched rows show the REBUILT
+     strictly-prior population LARGER than the cached one (Δn median ~2,
+     examples Δn=1..3 with |Δmean|≈1e-3) — the benign direction (rows added
+     AFTER the cache write).  Leakage would show the opposite direction
+     (cache population larger than the strictly-prior rebuild); that never
+     occurs.
+
+
+8. SAME-GAME EXCLUSION: immaterial to the result, essential to the semantics.
+   Removing it changes 148886 of 192042 benchmark means (|Δmean| median
+   0.0008, p90 0.0108, max 1.7508) and flips 166 primary-condition
+   classifications (0.086% of observations).  AUDIT B2 shows the measured
+   rate is essentially unchanged either way (69.75% directed vs
+   69.78% with same-game rows kept), so the finding does not depend on
+   this choice — but exclusion must stay: prior same-game rows carry the
+   game's own pace information and would contaminate a cross-game benchmark.
+
+9. CACHE AGREEMENT:
+   - pace_benchmark_cache: 2677/6664 rows reproduce EXACTLY (n, mean, std);
+     2743 of 3987 mismatches sit within |Δn|<=3 / |Δmean|<=1e-3; the rest are
+     rows written early in the archive era whose populations have since grown.
+     All mismatches are snapshot-age, not semantic, and none show leakage.
+   - historical_context_cache: 8/123 keys reproduce exactly; 115 differ
+     by snapshot age only (cache computed 2026-09-10T23:25:48.764381Z, rebuild uses the current
+     archive).  The cache's own semantics (key-level hindsight rates, pushes
+     counted as non-UNDER, equal-game mean) were reproduced from raw rows
+     first and then compared — mismatches track the archive delta, not a
+     calculation difference.
+   Both caches are consistent with the independent reconstruction within
+   their own stated semantics and snapshot ages.  No audit number reads a
+   cache.
+
+10. WHAT, IF ANYTHING, IS WRONG WITH THE CURRENT IMPLEMENTATION
+    (read-only findings; no code was changed):
+    a. TWO DIFFERENT STATISTICS SHARE ONE HEADLINE.  The per-observation,
+       prior-only primary condition reproduces at ~70% observation-UNDER /
+       ~73% equal-game.  The historical_context_cache rates (~50-55%) are a
+       DIFFERENT statistic — key-level hindsight frequencies over the whole
+       settled population of a bucket — and cannot be presented as the
+       per-observation rate for a live game.  Both are internally correct;
+       any served payload or dashboard copy that lets the hindsight number
+       stand in for the prior-only condition (or vice versa) is misleading.
+    b. historical_context_cache is hindsight by construction: it aggregates
+       ALL settled rows of a bucket, INCLUDING the audited game's own rows,
+       and the module docstring itself acknowledges the hindsight convention.
+       Label it explicitly wherever it is served.
+    c. pace_benchmark_cache rows older than the latest archive refresh no
+       longer reproduce exactly (stale drift, benign direction).  Cutoff-keyed
+       caching prevents leakage, but reconciliation tooling should treat
+       pre-refresh rows as expired rather than authoritative.
+    d. Push conventions differ between the cache (pushes counted as
+       non-UNDER) and decisive-observation rates.  Zero pushes exist in this
+       archive (finals never equalled a .5 line), so the numbers coincide
+       today; the convention should still be stated wherever UNDER% is served.
+    e. 'Half End' period rows (6,427 in clean_projections) have no canonical
+       quarter bucket and are silently excluded from every population; that
+       exclusion is correct but undocumented in served payloads.
+    f. The live z-engine wiring was reviewed read-only and matches the
+       directed semantics (strict captured_at < T, id-based self-exclusion,
+       caller-supplied same-game exclusion, cutoff-keyed cache); no code-
+       level leakage path was found.
+
+KEY NUMBERS: primary UNDER obs%=69.75, equal-game 73.02%, support 17841 obs / 1515 games; baseline UNDER%=49.79; complement UNDER%=47.74.
+
+REPORT SAVED TO: /home/ubuntu/BLM/forensic_relative_pace_audit_2026-09-11.txt

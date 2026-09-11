@@ -357,6 +357,10 @@ details > summary::marker { content: ""; }
 .hist-badge.al-strong, .hist-panel.al-strong { border-left-color: var(--orange); }
 .hist-badge.al-high, .hist-panel.al-high { border-left-color: var(--red); }
 .hist-badge.al-ctx, .hist-panel.al-ctx { border-left-color: var(--cyan); border-style: dashed; }
+/* pace-state — the PRIMARY league/state-relative UNDER condition */
+.hist-badge.al-pace-state, .hist-panel.al-pace-state { border-left-color: var(--green, #34d399); }
+.hist-panel.hist-alert.al-pace-state { background: linear-gradient(180deg, rgba(52,211,153,.10), transparent); }
+.hb-title.al-pace-state, .al-title.al-pace-state { color: var(--green, #34d399); }
 /* UNDER alert panel — deliberately more prominent than any ordinary metric
    block (thicker frame, tinted field, larger title) so it cannot be
    mistaken for a routine readout. */
@@ -409,3 +413,17 @@ details > summary::marker { content: ""; }
   .m-hero { flex-direction: column; align-items: flex-start; }
   .z-big { font-size: 18px; }
 }
+/* ── RELATIVE-PACE CONTEXT / STATE blocks (authoritative payload only) ── */
+.rp-block, .rp-state, .hc-block { display: grid; gap: 2px; margin: 6px 0 4px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: rgba(148, 163, 184, .05); }
+.rp-title { font-weight: 800; letter-spacing: .5px; font-size: 10px; color: var(--muted); }
+.rp-id { color: var(--muted); font-size: 9.5px; font-family: var(--mono); margin-top: 2px; }
+.rp-state-line { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+.rp-state-line.rp-true { color: #34d399; }
+.rp-state-line.rp-false { color: var(--muted); }
+.rp-both { font-family: var(--mono); font-size: 11px; font-weight: 800; margin-top: 2px; }
+.rp-both.rp-true { color: #34d399; }
+.rp-both.rp-false { color: var(--muted); }
+.hc-block { border-color: rgba(245, 158, 11, .5); }
+.hc-block .rp-title { color: #f59e0b; }
+.hc-block .al-big { color: #f59e0b; }
+.hc-block .al-line.muted { color: var(--muted); font-weight: 400; }

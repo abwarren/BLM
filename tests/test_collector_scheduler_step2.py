@@ -1,9 +1,18 @@
-"""STEP 2 scheduler verification — target-boundary cadence math (pytest).
+"""STEP 2/3 scheduler verification — target-boundary cadence math (pytest).
 
 Pure logic tests of the fixed-rate scheduler (no Playwright/browser):
 the collector must aim each tick at the NEXT interval boundary from the
 PREVIOUS target, so latency is absorbed inside the interval and never
 stacks a full sleep on top of work.
+
+STEP 3 (2026-09-10) moved the live cadence to the FAST/SLOW split: the
+fast path runs the hard 5s live cycle (``FAST_TICK_S`` / ``TICK_DEFAULT``)
+and the full event-view path runs on its OWN thread + page, requested at
+most once per ``EVENT_VIEW_MIN_INTERVAL_S``.  The retired
+``EVENT_VIEW_EVERY_N`` in-tick gate is replaced by that interval contract;
+the three tests that pinned the old design below were updated to the new
+architecture — their quality bars (isolation tracks the REAL cadence,
+grace is wall-time, the timing ring is bounded) are unchanged.
 """
 import sqlite3
 import tempfile
@@ -69,29 +78,49 @@ def test_duplicate_timestamp_protection():
 
 
 def test_slow_event_path_isolation():
-    # gate constant imported from source — the isolation math must track
-    # the REAL cadence, not a hardcoded copy of it
+    """STEP 3: the slow event-view path is decoupled from the fast cadence.
+
+    The old in-tick gate (``EVENT_VIEW_EVERY_N`` fast ticks between slow
+    runs) is retired — a slow round runs on its OWN thread + page.  The
+    isolation contract now lives in the constants: the fast cadence is
+    FAST_TICK_S, a slow round is requested at most once per
+    EVENT_VIEW_MIN_INTERVAL_S, and the slow worker polls on its own
+    bounded interval.  Crucially the request interval must never be
+    SHORTER than a fast tick, or a slow round could be requested on
+    consecutive cycles and the fast path would lose its headroom.
+    """
     import blm_v4.collector as C
-    n_fast = C.EVENT_VIEW_EVERY_N * 10
-    n_slow = sum(1 for i in range(1, n_fast + 1) if i % C.EVENT_VIEW_EVERY_N == 0)
-    assert n_slow == 10
+    # the request interval spans at least one full fast cycle
+    assert C.EVENT_VIEW_MIN_INTERVAL_S >= C.FAST_TICK_S
+    # ... and is an exact multiple of the fast cadence (no drift between
+    # the two grids)
+    assert abs(C.EVENT_VIEW_MIN_INTERVAL_S % C.FAST_TICK_S) < 1e-9
+    # the retired in-tick gate is gone (the slow path no longer shares
+    # the fast loop)
+    assert not hasattr(C, "EVENT_VIEW_EVERY_N")
+    # the slow worker wakes on its own bounded poll interval, independent
+    # of the fast cadence
+    assert 0 < C.SLOW_WORKER_POLL_S < C.FAST_TICK_S
 
 
-def test_default_tick_is_10s():
+def test_default_tick_is_fast_cadence():
     # signature default + CLI default both derive from TICK_DEFAULT, so a
-    # cadence change updates one constant, not scattered literals
+    # cadence change updates one constant, not scattered literals.  The
+    # live cadence is the FAST path (hard 5s live-cycle requirement).
     import blm_v4.collector as C
-    assert C.TICK_DEFAULT == 10.0
-    assert inspect.signature(C.PokerBetCollector.__init__).parameters["tick_s"].default == 10.0
+    assert C.TICK_DEFAULT == C.FAST_TICK_S == 5.0
+    assert inspect.signature(C.PokerBetCollector.__init__).parameters["tick_s"].default == 5.0
 
 
 def test_ended_grace_scales_with_tick_interval():
-    """Disappearance tolerance is WALL-TIME (ENDED_GRACE_S), so halving
-    the tick must NOT halve the grace: 10s tick -> 6 ticks (60s), 5s tick
-    -> 12 ticks, 20s tick -> 3 ticks (the pre-STEP-2 behaviour)."""
+    """Disappearance tolerance is WALL-TIME (ENDED_GRACE_S=60s), so the
+    tick-equivalent is derived per instance: 60s -> 6 ticks at a 10s
+    tick, 12 at the 5s live cadence, 3 at 20s (the pre-STEP-2 behaviour)."""
     import blm_v4.collector as C
-    c10 = C.PokerBetCollector(db_path=__import__("tempfile").mkdtemp() + "/t.db")
-    assert c10.tick_s == 10.0 and c10._ended_grace_ticks == 6
+    c_default = C.PokerBetCollector(db_path=__import__("tempfile").mkdtemp() + "/t.db")
+    assert c_default.tick_s == C.FAST_TICK_S and c_default._ended_grace_ticks == 12
+    c10 = C.PokerBetCollector(tick_s=10.0, db_path=__import__("tempfile").mkdtemp() + "/t.db")
+    assert c10._ended_grace_ticks == 6
     c5 = C.PokerBetCollector(tick_s=5.0, db_path=__import__("tempfile").mkdtemp() + "/t.db")
     assert c5._ended_grace_ticks == 12
     c20 = C.PokerBetCollector(tick_s=20.0, db_path=__import__("tempfile").mkdtemp() + "/t.db")

@@ -827,6 +827,16 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "history": history,
         "projector": _projector_live_view(
             _pace_projector_for(game["source_game_id"])),
+        # Historical context is computed ONLY for live games: it is the
+        # only case the dashboard renders (a card badge / detail panel for
+        # a live observation).  Each lookup costs one indexed range scan of
+        # the clean archive, so evaluating it for the whole (mostly ended)
+        # list would multiply the /live latency for output nothing draws.
+        # The dedicated /game/{id}/historical-context route serves it for
+        # any game on demand.
+        "historical_context": (
+            _historical_context_for(game["source_game_id"])
+            if (age is not None and age <= LIVE_AGE_S) else None),
     }
     if with_checkpoints and conn is not None:
         detail["checkpoints"] = _game_checkpoints(conn, game["source_game_id"])
@@ -854,6 +864,57 @@ def _pace_projector_for(source_game_id: str) -> Optional[dict]:
             CleanMetricsStore(clean_path), source_game_id)
     except Exception:
         return None
+
+
+def _historical_context_for(source_game_id: str) -> dict:
+    """League/state-relative historical-context block for a game —
+    failure-isolated, explicit no-context state on any gap.  Cheap: a
+    benchmark-cache lookup plus two indexed queries (see
+    live_analytics/historical_context.py); heavy aggregation is cached
+    per canonical key, never per game per poll."""
+    try:
+        from blm_v4.live_analytics.historical_context import (
+            HistoricalContextEngine,
+        )
+        clean_path = _db_path().parent / "blm_metrics_clean.db"
+        if not clean_path.exists():
+            return {"status": "no_mature_historical_context",
+                    "reason": "no_clean_metrics_database"}
+        eng = _historical_engine_for(clean_path)
+        conn = sqlite3.connect(f"file:{_db_path()}?mode=ro", uri=True,
+                               timeout=30)
+        conn.row_factory = sqlite3.Row
+        try:
+            return eng.context_for(conn, source_game_id)
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"status": "no_mature_historical_context",
+                "reason": "unavailable", "error": str(e)[:200]}
+
+
+def _historical_engine_for(clean_path):
+    """Per-process engine singleton keyed by clean DB path."""
+    global _HIST_ENGINE, _HIST_ENGINE_PATH
+    try:
+        eng = _HIST_ENGINE
+        if eng is not None and _HIST_ENGINE_PATH == clean_path:
+            return eng
+    except NameError:
+        pass
+    eng = _hist_engine_factory()(clean_path)
+    _HIST_ENGINE = eng
+    _HIST_ENGINE_PATH = clean_path
+    return eng
+
+
+def _hist_engine_factory():
+    from blm_v4.live_analytics.historical_context import HistoricalContextEngine
+    return HistoricalContextEngine
+
+
+_HIST_ENGINE = None
+_HIST_ENGINE_PATH = None
 
 
 # Projector keys that describe OBSERVED/trajectory state.  The frozen
@@ -998,6 +1059,14 @@ def _db_stats(conn: sqlite3.Connection, now: datetime) -> dict:
 # ────────────────────────────────────────────────────────────────────────
 
 router = APIRouter(prefix="/api/v4", tags=["blm-v4"])
+
+# Historical-context routes (league/state-relative UNDER context) —
+# registered on the SAME router so the live surface stays unified.
+try:
+    from blm_v4.api_historical_context import register as _register_hist_ctx
+    _register_hist_ctx(router)
+except Exception:  # pragma: no cover - context layer is optional at boot
+    pass
 
 
 @router.get("/status")
