@@ -3,26 +3,33 @@
 The operator must be TOLD, explicitly, for every eligible game with a mature
 historical benchmark:
 
-    ACTUAL PACE            (value)
-    REQUIRED PACE          (value)
-    HISTORICAL STATE MEAN  (value)
+    RELATIVE PACE — HISTORICAL STATE
 
-    ACTUAL < HISTORICAL MEAN — TRUE/FALSE
-    REQUIRED >= HISTORICAL MEAN — TRUE/FALSE
-    BOTH CONDITIONS — TRUE/FALSE
+    Provider / Competition / Period / State    (benchmark identity)
+    Historical N                               (relative-pace benchmark N)
+    Historical μ                               (state mean, pts/min)
+    ACTUAL PACE    <value>   vs mean  ABOVE / BELOW
+    REQUIRED PACE  <value>   vs mean  AT/ABOVE / BELOW
 
-plus the benchmark identity (PROVIDER / COMPETITION / PERIOD / PROGRESS /
-STATE / HISTORICAL N) and — when BOTH conditions are TRUE — the frozen
-whole-archive qualifying historical context (69.75% observation UNDER /
-73.02% equal-game UNDER / 1,515 qualifying games / 12,444 qualifying
-observations / 49.79% archive baseline), labelled historical/descriptive.
+    ACTUAL < MEAN — TRUE/FALSE
+    REQUIRED >= MEAN — TRUE/FALSE
+    BOTH CONDITIONS TRUE — TRUE/FALSE
+
+plus — when BOTH conditions are TRUE — the frozen whole-archive qualifying
+historical context (69.75% observation UNDER / 73.02% equal-game UNDER /
+1,515 qualifying games / 12,444 qualifying observations / 49.79% archive
+baseline), labelled historical/descriptive.
 
 Invariants pinned here:
-  * the browser NEVER recomputes either relationship — it renders the
-    authoritative booleans from the /historical-context payload verbatim
+  * the browser NEVER recomputes either relationship NOR either direction —
+    it renders the authoritative booleans and the server-evaluated labels
+    from the /historical-context payload verbatim
   * each relationship is rendered as its OWN literal TRUE/FALSE line, so no
     quadrant of the 2x2 can be hidden (checked by executing the real
     renderers in Node)
+  * the RELATIVE-PACE HISTORICAL N is its OWN population (state_mean_n) and
+    is NEVER the Z-score benchmark N; the Z population is rendered only in
+    the PACE Z-SCORE panel, labelled Z-SCORE HISTORICAL N
   * the frozen context block appears ONLY when both conditions are TRUE
   * the frozen QUALIFYING rates are never conflated with the matched-key
     hindsight (key_hindsight_*) figures
@@ -103,20 +110,22 @@ def _run_node(js: str, tmp_path: Path, expr: str):
 def test_required_labels_are_present_in_served_js(client):
     js = _js(client)
     for label in (
-        "RELATIVE-PACE CONTEXT",
+        "RELATIVE PACE — HISTORICAL STATE",
         "ACTUAL PACE",
         "REQUIRED PACE",
-        "HISTORICAL STATE MEAN",
-        "RELATIVE-PACE STATE",
-        "ACTUAL &lt; HISTORICAL MEAN — TRUE/FALSE",
-        "REQUIRED &ge; HISTORICAL MEAN — TRUE/FALSE",
-        "BOTH CONDITIONS — TRUE/FALSE",
-        "PROVIDER: ",
-        "COMPETITION: ",
-        "PERIOD: ",
-        "PROGRESS: ",
-        "STATE: ",
-        "HISTORICAL N: ",
+        "Historical N",
+        "Historical μ",
+        "vs mean",
+        "Provider",
+        "Competition",
+        "Period",
+        "State",
+        "ACTUAL &lt; MEAN",
+        "REQUIRED &ge; MEAN",
+        "BOTH CONDITIONS TRUE",
+        "— TRUE/FALSE →",
+        # the Z-score population is labelled distinctly, elsewhere
+        "Z-SCORE HISTORICAL N",
     ):
         assert label in js, label
 
@@ -135,17 +144,22 @@ def test_frozen_historical_context_block_labels_present(client):
 
 
 def test_browser_never_recomputes_the_relationships(client):
-    """The renderers read the payload booleans; they never compare the pace
-    values themselves and never derive the combined flag."""
+    """The renderers read the payload booleans and the server-evaluated
+    directions verbatim; they never compare the pace values themselves and
+    never derive the combined flag."""
     js = _js(client)
     for banned in ("ctx.actual_pace <", "ctx.actual_pace >",
                    "ctx.required_pace >", "ctx.required_pace <",
-                   "ctx.historical_avg_pace <", "ctx.historical_avg_pace >"):
+                   "ctx.historical_avg_pace <", "ctx.historical_avg_pace >",
+                   "ctx.state_mean_pace <", "ctx.state_mean_pace >"):
         assert banned not in js, banned
     # every rendered verdict traces to an authoritative payload field
     assert "ctx.actual_below_state_mean" in js
     assert "ctx.required_ge_state_mean" in js
     assert "ctx.both_conditions_true" in js
+    # ...and every rendered direction to a server-evaluated label
+    assert "ctx.actual_vs_state_mean" in js
+    assert "ctx.required_vs_state_mean" in js
 
 
 def test_context_block_is_gated_on_both_conditions_true(client):
@@ -172,14 +186,27 @@ def test_key_hindsight_never_confused_with_frozen_qualifying_rates(client):
 
 # ── behaviour: each quadrant renders its own literal TRUE/FALSE ─────────
 
-def _payload(a_below, req_ge):
-    return {
+def _payload(a_below, req_ge, state_n=1234, z_n=None):
+    """A matched historical-context payload.  ``state_n`` is the
+    RELATIVE-PACE benchmark N (state_mean_n); ``z_n`` (when given) rides
+    along as a DIFFERENT population's N to prove the block ignores it."""
+    p = {
         "status": "matched", "eligible": True,
         "provider": "BETUAL", "competition": "betual-nba",
         "period": "4th Quarter", "progress_pct": 93.75, "state": "P090",
-        "benchmark_n": 1234, "benchmark_key": "BETUAL|betual-nba|Q4|P090",
+        "benchmark_n": state_n, "benchmark_key": "BETUAL|betual-nba|Q4|P090",
+        # explicit relative-pace / historical state-mean benchmark identity
+        "state_mean_provider": "BETUAL",
+        "state_mean_competition": "betual-nba",
+        "state_mean_period": "Q4",
+        "state_mean_state": "P090",
+        "state_mean_key": "BETUAL|betual-nba|Q4|P090",
+        "state_mean_n": state_n,
+        "state_mean_pace": 4.4,
         "actual_pace": 3.9, "historical_avg_pace": 4.4,
         "required_pace": 5.1,
+        "actual_vs_state_mean": "BELOW" if a_below else "ABOVE",
+        "required_vs_state_mean": "AT/ABOVE" if req_ge else "BELOW",
         "actual_below_state_mean": a_below,
         "required_ge_state_mean": req_ge,
         "both_conditions_true": bool(a_below and req_ge),
@@ -191,12 +218,19 @@ def _payload(a_below, req_ge):
         "frozen_audit_utc": "2026-09-11T13:05:48Z",
         "key_hindsight_under_pct": 48.2,
     }
+    if z_n is not None:
+        p["z_n"] = z_n
+        p["mean_pace"] = 6.769
+        p["std_pace"] = 0.897
+    return p
 
 
-TRUE_L1 = "ACTUAL &lt; HISTORICAL MEAN — TRUE/FALSE → <b>TRUE</b>"
-FALSE_L1 = "ACTUAL &lt; HISTORICAL MEAN — TRUE/FALSE → <b>FALSE</b>"
-TRUE_L2 = "REQUIRED &ge; HISTORICAL MEAN — TRUE/FALSE → <b>TRUE</b>"
-FALSE_L2 = "REQUIRED &ge; HISTORICAL MEAN — TRUE/FALSE → <b>FALSE</b>"
+TRUE_L1 = "ACTUAL &lt; MEAN — TRUE/FALSE → <b>TRUE</b>"
+FALSE_L1 = "ACTUAL &lt; MEAN — TRUE/FALSE → <b>FALSE</b>"
+TRUE_L2 = "REQUIRED &ge; MEAN — TRUE/FALSE → <b>TRUE</b>"
+FALSE_L2 = "REQUIRED &ge; MEAN — TRUE/FALSE → <b>FALSE</b>"
+BOTH_T = "BOTH CONDITIONS TRUE — TRUE/FALSE → <b>TRUE</b>"
+BOTH_F = "BOTH CONDITIONS TRUE — TRUE/FALSE → <b>FALSE</b>"
 
 
 @node
@@ -209,14 +243,28 @@ def test_each_quadrant_is_rendered_separately(client, tmp_path):
                json.dumps(_payload(False, True)),
                json.dumps(_payload(False, False))))
     tt, tf, ft, ff = _run_node(js, tmp_path, expr)
-    assert TRUE_L1 in tt and TRUE_L2 in tt
-    assert "BOTH CONDITIONS — TRUE/FALSE → <b>TRUE</b>" in tt
-    assert TRUE_L1 in tf and FALSE_L2 in tf
-    assert "BOTH CONDITIONS — TRUE/FALSE → <b>FALSE</b>" in tf
-    assert FALSE_L1 in ft and TRUE_L2 in ft
-    assert "BOTH CONDITIONS — TRUE/FALSE → <b>FALSE</b>" in ft
-    assert FALSE_L1 in ff and FALSE_L2 in ff
-    assert "BOTH CONDITIONS — TRUE/FALSE → <b>FALSE</b>" in ff
+    assert TRUE_L1 in tt and TRUE_L2 in tt and BOTH_T in tt
+    assert TRUE_L1 in tf and FALSE_L2 in tf and BOTH_F in tf
+    assert FALSE_L1 in ft and TRUE_L2 in ft and BOTH_F in ft
+    assert FALSE_L1 in ff and FALSE_L2 in ff and BOTH_F in ff
+
+
+@node
+def test_every_quadrant_is_visible_in_the_full_block(client, tmp_path):
+    """The combined RELATIVE PACE — HISTORICAL STATE block must carry all
+    three literal TRUE/FALSE lines for EVERY quadrant — the operator never
+    has to open a second panel or infer a relationship."""
+    for a_below in (True, False):
+        for req_ge in (True, False):
+            js = _js(client)
+            out = _run_node(js, tmp_path, "m.relPaceHTML(%s)"
+                            % json.dumps(_payload(a_below, req_ge)))
+            assert ("ACTUAL &lt; MEAN — TRUE/FALSE → <b>%s</b>"
+                    % ("TRUE" if a_below else "FALSE")) in out
+            assert ("REQUIRED &ge; MEAN — TRUE/FALSE → <b>%s</b>"
+                    % ("TRUE" if req_ge else "FALSE")) in out
+            assert ("BOTH CONDITIONS TRUE — TRUE/FALSE → <b>%s</b>"
+                    % ("TRUE" if (a_below and req_ge) else "FALSE")) in out
 
 
 @node
@@ -244,12 +292,72 @@ def test_identity_line_rendered_from_payload(client, tmp_path):
     js = _js(client)
     out = _run_node(js, tmp_path,
                     "m.relPaceHTML(%s)" % json.dumps(_payload(True, True)))
-    for fragment in ("ACTUAL PACE", "3.90", "REQUIRED PACE", "5.10",
-                     "HISTORICAL STATE MEAN", "4.40",
-                     "PROVIDER: BETUAL", "COMPETITION: betual-nba",
-                     "PERIOD: 4th Quarter", "PROGRESS: 94%",
-                     "STATE: P090", "HISTORICAL N: 1,234"):
+    for fragment in ("RELATIVE PACE — HISTORICAL STATE",
+                     "ACTUAL PACE", "3.900",
+                     "REQUIRED PACE", "5.100",
+                     "Historical N", "1,234",
+                     "Historical μ", "4.400",
+                     "Provider", "BETUAL",
+                     "Competition", "betual-nba",
+                     "Period", "Q4",
+                     "State", "P090",
+                     "vs mean", "BELOW", "AT/ABOVE"):
         assert fragment in out, fragment
+
+
+# ── the relative-pace N is its OWN population, never the Z-score N ──────
+
+def test_relative_block_never_reads_the_z_payload(client):
+    """relPaceHTML must read ONLY the state_mean_* contract.  The Z-score
+    benchmark N lives in a different payload (zm / pz) and must never be
+    rendered in the relative-pace block."""
+    js = _js(client)
+    body = _extract_fn(js, "relPaceHTML")
+    for banned in ("zm.", "pz.", "modalZMeta", "std_pace", "z_n",
+                   "benchmark_n", "historical_avg_pace"):
+        assert banned not in body, banned
+    assert "ctx.state_mean_n" in body
+    assert "ctx.state_mean_pace" in body
+    assert "ctx.state_mean_provider" in body
+    assert "ctx.state_mean_competition" in body
+
+
+@node
+def test_relative_block_renders_state_mean_n_not_a_z_n(client, tmp_path):
+    """Given a payload carrying BOTH a relative-pace N (12,845) and a
+    DIFFERENT Z-score population N (7) with its own μ/σ, the block renders
+    the relative-pace N and neither the Z N nor the Z μ/σ."""
+    js = _js(client)
+    out = _run_node(js, tmp_path, "m.relPaceHTML(%s)"
+                    % json.dumps(_payload(True, True, state_n=12845,
+                                          z_n=7)))
+    assert "12,845" in out                 # relative-pace benchmark N
+    assert "6.769" not in out              # Z historical μ
+    assert "0.897" not in out              # Z historical σ
+
+
+def test_z_score_panel_keeps_its_own_n_separately(client):
+    """The PACE Z-SCORE panel keeps its OWN N — labelled Z-SCORE HISTORICAL
+    N and sourced from the Z payload (zm.n), never from the ctx contract."""
+    js = _js(client)
+    assert "Z-SCORE HISTORICAL N" in js
+    i = js.index("Z-SCORE HISTORICAL N")
+    seg = js[i:i + 200]
+    assert "zm.n" in seg, seg
+    assert "state_mean_n" not in seg, seg
+    # and the Z readout line labels its N as the Z-score population's
+    assert "Z-SCORE N=" in js
+
+
+def test_both_populations_are_labelled_distinctly(client):
+    """The two N's must be unmistakably separate populations in the UI."""
+    js = _js(client)
+    assert "Z-SCORE HISTORICAL N" in js
+    assert "Historical N" in js
+    # the block title names the relative-pace population explicitly
+    assert "RELATIVE PACE — HISTORICAL STATE" in js
+    # an explicit note links the two as separate
+    assert "SEPARATE calculation from the RELATIVE PACE" in js
 
 
 # ── endpoint contract: the authoritative payload drives the above ───────
@@ -279,6 +387,17 @@ def test_historical_context_endpoint_serves_both_flags(tmp_path, monkeypatch):
         assert ctx["competition"] == "betual-nba"
         assert ctx["historical_avg_pace"] == 4.0
         assert ctx["benchmark_n"] >= 30
+        # explicit relative-pace / state-mean benchmark contract
+        assert ctx["state_mean_provider"] == "BETUAL"
+        assert ctx["state_mean_competition"] == "betual-nba"
+        assert ctx["state_mean_period"] == "Q4"
+        assert ctx["state_mean_state"] == "P090"
+        assert ctx["state_mean_n"] == ctx["benchmark_n"]      # documented alias
+        assert ctx["state_mean_pace"] == ctx["historical_avg_pace"]
+        assert ctx["state_mean_key"] == ctx["benchmark_key"]
+    assert tt["actual_vs_state_mean"] == "BELOW"
+    assert tt["required_vs_state_mean"] == "AT/ABOVE"
+    assert tf["required_vs_state_mean"] == "BELOW"
     assert tt["actual_below_state_mean"] is True
     assert tt["required_ge_state_mean"] is True
     assert tt["both_conditions_true"] is True

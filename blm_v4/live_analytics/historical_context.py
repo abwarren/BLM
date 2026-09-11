@@ -13,6 +13,16 @@ progress-bucket) population from the CLEAN archive:
                (provider | competition | period | 5-pt progress bucket),
                via the competition ledger — never a global average, never
                a cross-competition population
+  served as  : the state-mean benchmark identity is exposed EXPLICITLY as
+               state_mean_provider / _competition / _period / _state /
+               _key / _n / _pace.  state_mean_n and state_mean_pace are the
+               actual N and mean of THIS computation.  They are NOT the
+               Z-score benchmark population: both share the benchmark_for
+               definition, but each resolves at its OWN cutoff observation
+               row (the Z path requires a non-null actual pace), so the two
+               N's may legitimately differ and must never be conflated.
+               benchmark_n / historical_avg_pace remain as documented
+               aliases of state_mean_n / state_mean_pace.
   prior only : benchmark statistics for an observation at time T use
                STRICTLY prior observations (captured_at < T, own row
                excluded) for actual-vs-average classification; the
@@ -312,6 +322,26 @@ class HistoricalContextEngine:
                 "progress_pct": row["progress_pct"],
                 "state": _pbucket(row["progress_pct"]),
                 "benchmark_key": bkey, "benchmark_n": n,
+                # ── EXPLICIT relative-pace / historical STATE-MEAN benchmark ──
+                # The benchmark that supplies the state mean the relative-pace
+                # comparison reads.  It is a SEPARATE calculation from the
+                # Z-score benchmark population: both are defined by
+                # benchmark.benchmark_for (same key, strictly prior, own row
+                # and same game excluded) but each resolves at its OWN cutoff
+                # observation row, so the two N's MUST NOT be assumed equal.
+                # (Measured divergence: a game whose latest VALID observation
+                # carries no actual pace — the Z path skips to an older row or
+                # finds none, this path uses the latest row.)  ``state_mean_n``
+                # is always the real N of THIS computation — never copied from
+                # the Z payload, never fabricated when the population is
+                # immature.
+                "state_mean_provider": reg.provider,
+                "state_mean_competition": reg.competition,
+                "state_mean_period": _qbucket(row["period_label"]),
+                "state_mean_state": _pbucket(row["progress_pct"]),
+                "state_mean_key": bkey,
+                "state_mean_n": n,
+                "state_mean_pace": (round(avg, 4) if avg is not None else None),
             }
             if avg is None:
                 return {"status": "no_mature_historical_context", **base,
@@ -355,6 +385,19 @@ class HistoricalContextEngine:
                 "actual_below_state_mean": actual_below,
                 "required_ge_state_mean": required_ge,
                 "both_conditions_true": bool(actual_below and required_ge),
+                # server-evaluated direction of each pace against the state
+                # mean — the browser renders these labels verbatim and never
+                # compares the values itself.  Each label is exactly
+                # consistent with the boolean below it: ACTUAL is "BELOW"
+                # iff actual_below_state_mean, REQUIRED is "AT/ABOVE" iff
+                # required_ge_state_mean (note the asymmetric tie-handling —
+                # strictly below for ACTUAL, at-or-above for REQUIRED).
+                "actual_vs_state_mean": (
+                    None if actual is None
+                    else ("BELOW" if actual < avg else "ABOVE")),
+                "required_vs_state_mean": (
+                    None if required is None
+                    else ("BELOW" if required < avg else "AT/ABOVE")),
                 # matched-key settled population (hindsight, key-level):
                 # labelled as such — NEVER presented as the primary-cell
                 # qualifying rate (two different statistics, see AUDIT J).

@@ -749,50 +749,63 @@ function cyberNoteHTML(compact) {
     : `${note}<br><span class="al-limited">LIMITED SAMPLE — ${CYBER_HIST.n} SETTLED GAMES</span>`;
 }
 
-// RELATIVE-PACE CONTEXT — the four values every operator must read, each
-// labelled explicitly, plus the benchmark identity.  Hard requirement:
-// every value comes from the authoritative /historical-context payload
-// (the SAME competition/state-specific benchmark the forensic audit
-// reconciled); the UI never recomputes and never shows a league-wide mean.
+// RELATIVE PACE — HISTORICAL STATE.  The operator reads, explicitly: the
+// benchmark IDENTITY, the HISTORICAL N of the relative-pace benchmark, the
+// HISTORICAL MEAN, both pace values with their direction against that mean,
+// and each relationship as its own literal TRUE/FALSE.
+//
+// EVERY value comes from the authoritative /historical-context payload.  The
+// browser recomputes NOTHING: the directions are server-evaluated labels and
+// the verdicts are payload booleans.
+//
+// The N shown here is the RELATIVE-PACE benchmark N (state_mean_n) — a
+// SEPARATE calculation from the Z-score benchmark N, which is rendered only
+// in the PACE Z-SCORE panel.  The two are never presented as one population.
 function relPaceHTML(ctx) {
   if (!ctx || ctx.status !== "matched") return "";
-  const row = (k, v) =>
-    `<div class="al-row"><span class="k">${k}</span>`
-    + `<span class="v">${num(v, 2)} <span class="u">pts/min</span></span></div>`;
+  const ident = (k, v) =>
+    `<div class="rp-ident"><span class="k">${k}</span>`
+    + `<span class="v">${esc(v == null ? "–" : v)}</span></div>`;
+  const pace = (k, v, dir) =>
+    `<div class="rp-pace">`
+    + `<div class="al-row"><span class="k">${k}</span>`
+    + `<span class="v">${num(v, 3)} <span class="u">pts/min</span></span></div>`
+    + `<div class="al-row rp-cmp"><span class="k">vs mean</span>`
+    + `<span class="v">${esc(dir == null ? "–" : dir)}</span></div></div>`;
+  const mu = ctx.state_mean_pace == null ? "–"
+    : Number(ctx.state_mean_pace).toFixed(3) + " pts/min";
   return `<div class="rp-block">`
-    + `<div class="rp-title">RELATIVE-PACE CONTEXT</div>`
-    + row("ACTUAL PACE", ctx.actual_pace)
-    + row("REQUIRED PACE", ctx.required_pace)
-    + row("HISTORICAL STATE MEAN", ctx.historical_avg_pace)
-    + `<div class="rp-id">PROVIDER: ${esc(ctx.provider || "–")}`
-    + ` · COMPETITION: ${esc(ctx.competition || "–")}`
-    + ` · PERIOD: ${esc(ctx.period || "–")}`
-    + ` · PROGRESS: ${num(ctx.progress_pct, 0)}%`
-    + ` · STATE: ${esc(ctx.state || "–")}`
-    + ` · HISTORICAL N: ${ctx.benchmark_n != null
-        ? Number(ctx.benchmark_n).toLocaleString("en-US") : "–"}</div>`
+    + `<div class="rp-title">RELATIVE PACE — HISTORICAL STATE</div>`
+    + ident("Provider", ctx.state_mean_provider)
+    + ident("Competition", ctx.state_mean_competition)
+    + ident("Period", ctx.state_mean_period)
+    + ident("State", ctx.state_mean_state)
+    + ident("Historical N", ctx.state_mean_n != null
+        ? Number(ctx.state_mean_n).toLocaleString("en-US") : "–")
+    + ident("Historical μ", mu)
+    + pace("ACTUAL PACE", ctx.actual_pace, ctx.actual_vs_state_mean)
+    + pace("REQUIRED PACE", ctx.required_pace, ctx.required_vs_state_mean)
+    + paceStateHTML(ctx)
     + `</div>`;
 }
 
-// RELATIVE-PACE STATE — each relationship evaluated IN THE PAYLOAD and
-// rendered separately as a literal TRUE/FALSE, followed by the combined
-// verdict.  The operator must never have to infer either relationship
-// from the z value, the pace gap, a colour, or the raw numbers.
+// The three relationships, each its OWN literal TRUE/FALSE — no quadrant of
+// the 2x2 can be hidden.  The verdicts are authoritative payload booleans
+// rendered verbatim; the operator never infers a relationship from the z
+// value, the pace gap, a colour or the raw numbers.
 function paceStateHTML(ctx) {
   if (!ctx || ctx.status !== "matched") return "";
   const line = (label, ok) =>
     `<div class="rp-state-line ${ok ? "rp-true" : "rp-false"}">`
-    + `${label} → <b>${ok ? "TRUE" : "FALSE"}</b></div>`;
+    + `${label} — TRUE/FALSE → <b>${ok ? "TRUE" : "FALSE"}</b></div>`;
   const actualBelow = ctx.actual_below_state_mean === true;
   const reqAtOrAbove = ctx.required_ge_state_mean === true;
   const both = ctx.both_conditions_true === true;
   return `<div class="rp-state">`
-    + `<div class="rp-title">RELATIVE-PACE STATE</div>`
-    + line("ACTUAL &lt; HISTORICAL MEAN — TRUE/FALSE", actualBelow)
-    + line("REQUIRED &ge; HISTORICAL MEAN — TRUE/FALSE", reqAtOrAbove)
-    + `<div class="rp-both ${both ? "rp-true" : "rp-false"}">`
-    + `BOTH CONDITIONS — TRUE/FALSE → <b>${both ? "TRUE" : "FALSE"}</b>`
-    + `</div></div>`;
+    + line("ACTUAL &lt; MEAN", actualBelow)
+    + line("REQUIRED &ge; MEAN", reqAtOrAbove)
+    + line("BOTH CONDITIONS TRUE", both)
+    + `</div>`;
 }
 
 // HISTORICAL CONTEXT block — shown when BOTH conditions are TRUE: the
@@ -908,7 +921,6 @@ function histPanelHTML(g) {
   // presentation.  When BOTH conditions are TRUE, the frozen whole-archive
   // qualifying rates follow (API-served constants, never browser arithmetic).
   const rp = relPaceHTML(ctx);
-  const ps = paceStateHTML(ctx);
   const hc = histContextHTML(ctx);
   // legacy pace-gap tier statistics keep their fixed-constant block; the
   // pace-state level presents its rates through hc above (one headline).
@@ -935,7 +947,7 @@ function histPanelHTML(g) {
   return `<div class="hist-panel hist-alert${lvl ? " al-" + lvl : " al-ctx"}">`
     + `<div class="al-head">${head}${marketChipHTML(st.mstatus)}</div>`
     + (rows.length ? `<div class="al-rows">${rows.join("")}</div>` : "")
-    + rp + ps + hc + legacyHist + kh + cy + note
+    + rp + hc + legacyHist + kh + cy + note
     + `</div>`;
 }
 
@@ -1082,12 +1094,12 @@ function renderModal(g) {
       </div>
       <div class="z-grid">
         <div class="z-cell"><span class="z-k">CURRENT ACTUAL PACE</span><span class="z-v" id="zStatPace">${num(zm.actual_pace != null ? zm.actual_pace : p.actual_pts_per_min, 3)}</span><span class="z-u">pts/min</span></div>
-        <div class="z-cell"><span class="z-k">HISTORICAL N</span><span class="z-v" id="zStatN">${zm.n != null ? zm.n : "–"}</span><span class="z-u">prior observations</span></div>
+        <div class="z-cell"><span class="z-k">Z-SCORE HISTORICAL N</span><span class="z-v" id="zStatN">${zm.n != null ? zm.n : "–"}</span><span class="z-u">prior observations</span></div>
         <div class="z-cell"><span class="z-k">HISTORICAL MEAN PACE</span><span class="z-v" id="zStatMu">${num(zm.mean_pace, 3)}</span><span class="z-u">μ pts/min</span></div>
         <div class="z-cell"><span class="z-k">HISTORICAL STD DEV</span><span class="z-v" id="zStatSigma">${num(zm.std_pace, 3)}</span><span class="z-u">σ</span></div>
       </div>
       <div class="z-key muted" id="zStatKey">${zm.benchmark_key ? esc(zm.benchmark_key) : "benchmark: provider|competition|period|progress — prior observations only"}${zm.status ? ` · ${esc(zm.status)}` : ""}</div>
-      <div class="z-note muted">z = (actual pace − historical mean) ÷ historical σ — how the current scoring pace compares with the prior actual-pace distribution at the same provider · competition · period · progress state. Descriptive only; the observation never defines its own benchmark.</div>
+      <div class="z-note muted">z = (actual pace − historical mean) ÷ historical σ — how the current scoring pace compares with the prior actual-pace distribution at the same provider · competition · period · progress state. Descriptive only; the observation never defines its own benchmark. <b>Z-SCORE HISTORICAL N is the Z-score benchmark population — a SEPARATE calculation from the RELATIVE PACE — HISTORICAL STATE N</b>, which uses its own cutoff observation and may legitimately differ.</div>
     </div>
     <div id="histAlertBox" class="hist-alert-box"></div>
     <div id="histNoCtxBox" class="hist-alert-box">${noContextPanelHTML(g)}</div>
@@ -1293,7 +1305,7 @@ async function renderModalCharts(g) {
   // benchmark provenance — read straight from the authoritative payload
   // (sample size, historical mean/σ, provider/competition partition)
   const zMeta = (pz && pz.n != null)
-    ? `N=${pz.n}` +
+    ? `Z-SCORE N=${pz.n}` +
       (pz.mean_pace != null ? ` · μ=${num(pz.mean_pace, 3)} pts/min` : "") +
       (pz.std_pace != null ? ` · σ=${num(pz.std_pace, 3)}` : "") +
       (pz.provider && pz.competition ? ` · ${pz.provider}/${pz.competition}` : "")
