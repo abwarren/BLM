@@ -1,0 +1,214 @@
+STALE / FINISHED GAMES ON THE LIVE DASHBOARD — DIAGNOSIS
+================================================================================
+Repository : /home/ubuntu/BLM
+Branch     : handoff-2026-09-07
+Baseline   : 2400b8fd52f2f8027926e3c09298a621a2d4eb23
+Date       : 2026-09-11
+Mode       : READ-ONLY forensic trace (no behaviour changed by this report)
+
+--------------------------------------------------------------------------------
+1. EXACT ROOT CAUSE
+--------------------------------------------------------------------------------
+A finished game is presented as LIVE for up to 15 minutes after it ends,
+and its last stored (mid-game) observation can still satisfy the
+relative-pace condition.  Three independent facts combine:
+
+(A) THE COLLECTOR REFRESHES last_seen_at WHEN IT MARKS A GAME ENDED.
+    blm_v4/storage.py::upsert_game writes `last_seen_at = now` on EVERY
+    upsert, including the transition to status='ended':
+        INSERT ... VALUES (..., status, now, now)
+        ON CONFLICT(...) DO UPDATE SET status = excluded.status,
+                                       last_seen_at = excluded.last_seen_at
+    So "this game just ended" is recorded by stamping a FRESH timestamp on
+    a game whose observations have STOPPED.
+
+(B) THE API's `live` FLAG IS AGE-ONLY — IT NEVER READS STATUS OR TERMINALITY.
+    blm_v4/api.py:
+        LIVE_AGE_S = 15 * 60                                  # line 57
+        age  = _age_s(latest["captured_at"] ...)               # line 665
+        "live": bool(age is not None and age <= LIVE_AGE_S)    # line 782
+    A game whose latest snapshot is under 15 minutes old is reported
+    `live: true` regardless of status='ended' or of authoritative
+    end-of-game evidence in that same snapshot.
+
+(C) THE DASHBOARD NEVER FILTERS BY STATUS ON THE BACKEND, AND THE ALERT
+    PATHS DID NOT RE-READ IT.
+    /live feeds from `SELECT * FROM games ORDER BY last_seen_at DESC
+    LIMIT 100` (_load_games, api.py:985) — no WHERE on status.  The
+    frontend hides `status === "ended"` only when the operator has the
+    "SHOWING LIVE" toggle on, and the ALERT level was computed from the
+    observation alone:
+      - paceStateLevel(ctx): matched + eligible (remaining >= 2.5) + N>=30
+        + under_state — no terminal, no freshness, no status;
+      - histAlertLevel()  : hasLine + paceGap > 1.5 — NO remaining-time
+        gate AT ALL, and the modal path did not even require g.live.
+
+So the stale game survives in a COMBINATION: the collector stamps a fresh
+last_seen_at on an ended game; the database keeps its last mid-game
+observation; the API reports it live by age; and the alert evaluator read
+only that stored observation.
+
+--------------------------------------------------------------------------------
+2. CONCRETE STALE-GAME EXAMPLES (traced end-to-end)
+--------------------------------------------------------------------------------
+All five are REAL rows captured from blm_pokerbet.db while the dashboard
+rendered them; every one is DB-status 'ended' with a qualifying mid-game
+final observation and no settled result yet.
+
+id            provider  competition    DB status  latest snapshot       period  clock   score   final result
+30874043#i1   BETUAL    betual-tbsl    ended      2026-09-11T16:47:51Z  ''      07:00   69-66   (none)
+30874042#i1   BETUAL    betual-tbsl    ended      2026-09-11T16:47:51Z  ''      07:00   56-49   (none)
+30874041#i1   BETUAL    betual-tbsl    ended      2026-09-11T16:47:50Z  ''      07:00   64-82   (none)
+30874040#i1   BETUAL    betual-tbsl    ended      2026-09-11T16:47:50Z  ''      07:00   68-60   (none)
+30874039      BETUAL    betual-tbsl    ended      2026-09-11T16:47:50Z  ''      07:00   74-67   (none)
+
+For each of these, at trace time:
+  DB game status            = 'ended'
+  last_seen_at              = ~0.8 min old   (refreshed by the ended upsert)
+  latest observation        = ~4.8 min old   (the observations had STOPPED)
+  latest observation status = the clean row was still VALID
+  terminal flag             = NOT set on these rows (terminal column = 0)
+  remaining_game_minutes    = derived from the LAST mid-game clock (07:00 Q4)
+  latest market timestamp   = none for the finals above
+  API response status       = returned by /live in the top-100 window
+  rendered as live          = YES (age 4.8 min <= LIVE_AGE_S 900 s)
+
+These are the "finished virtual replays" pattern: the panel row vanishes
+when the fixture replays a new instance, the collector ends the old
+record (and stamp-freshens last_seen_at), and the final observation is
+whatever was captured before it disappeared — here 7:00 left in Q4, which
+is comfortably >= the 2.5-minute analytical floor.
+
+--------------------------------------------------------------------------------
+3. TERMINAL SEMANTICS — CHECKED, NO REGRESSION
+--------------------------------------------------------------------------------
+blm_v4/terminal_eligibility.py decides terminality from authoritative
+game-time evidence, never from a bucket/label/percentage.  Verified cases
+(blm_v4.terminal_eligibility.is_terminal_checkpoint):
+
+    40/40   BETUAL_NBA  -> True    (ELAPSED_FULL_DURATION)
+    39.25/40            -> False
+    39.99/40            -> False
+    48/48   CYBER_2K26  -> True
+    47.9/48 CYBER_2K26  -> False
+    progress == 1.0     -> True    (PROGRESS_100, duration-independent)
+    Q4 clock 00:00/21:00-> True    (Q4_CLOCK_SENTINEL)
+    'Full Time' label   -> True    (FINISHED_LABEL)
+    status='ended' + elapsed 20.0 -> False  (authoritative game time WINS)
+    status='ended' + no game-time -> True   (GAME_ENDED)
+
+NOTE (important, and preserved): the elapsed rule requires the
+CLASSIFICATION to resolve the full duration.  elapsed=40.0 WITHOUT a
+classification returns False; progress==1.0 is the duration-independent
+backstop.  Any caller must forward the classification — the new alert gate
+does.
+
+Terminal semantics are CORRECT.  The defect was that nothing on the live
+path consulted them.
+
+--------------------------------------------------------------------------------
+4. THE LIVE ENDPOINT — WHAT IT ACTUALLY RETURNS
+--------------------------------------------------------------------------------
+Query feeding the dashboard (blm_v4/api.py::_load_games):
+    SELECT * FROM games ORDER BY last_seen_at DESC LIMIT 100
+
+Measured against blm_pokerbet.db at trace time:
+    games table status distribution : ended 9774, live 54
+    rows returned by that query     : 100
+    of those, status='ended'        : 80
+    of those, status='live'         : 20
+    ended rows still 'fresh' by last_seen_at (<= 900 s) : 14
+    ended rows still reported live by the API           : 9
+      (the API ages the LATEST SNAPSHOT, not last_seen_at — so it is
+       slightly stricter than last_seen_at, and still 9 too many)
+    games with remaining_game_minutes <= 0 : 0
+    games with an already-finalized result : 0 of the above (no
+      game_results row yet — the finals are unsettled, which is WHY their
+      last mid-game observation is what the alert condition can read)
+
+After the fix, the same 100 rows all carry an authoritative alert gate:
+    eligible=False : 84   (game_finished 80, stale_observation 2,
+                           invalid_quality 2)
+    eligible=True  : 16   (genuinely live, remaining 6.0-22.5 min, age
+                           21-26 s)
+    of the 9 ended-but-live-rendered games: 9/9 now ineligible
+                           (reason=game_finished)
+
+--------------------------------------------------------------------------------
+5. FRESHNESS MEASUREMENTS
+--------------------------------------------------------------------------------
+    latest observation age (stale examples) : ~4.8 min (288 s)
+    latest observation age (live, eligible) : ~21-26 s
+    display LIVE window  (LIVE_AGE_S)       : 900 s   <- too loose for alerts
+    market LIVE/STALE boundary (existing)   : 300 s
+    last collector update                   : collector_state.json present;
+                                              no settled result rows for the
+                                              stale games
+    API response time (/live, warm)         : ~5.6 s
+
+The API returns the last historical snapshot simply because NO NEWER
+SNAPSHOT EXISTS — the game stopped being observed when it left the feed,
+while its record stayed "fresh" by timestamp.  Presence in the database
+was never evidence of liveness.
+
+--------------------------------------------------------------------------------
+6. WHO IS RESPONSIBLE
+--------------------------------------------------------------------------------
+COLLECTOR : stamps a fresh last_seen_at on the ended transition (the
+            trigger that keeps a dead game looking recent).
+DATABASE  : retains the last mid-game observation (correct by design —
+            terminal rows are never deleted).
+API       : reports live by AGE ALONE, with no status/terminal check,
+            and served no eligibility signal for alerts.
+FRONTEND  : rendered an alert level from the stored observation; the
+            legacy pace-gap tiers had no remaining-time gate at all.
+CACHE     : not implicated — no stale benchmark substitution; the
+            displayed state mean was computed at the observation's own
+            cutoff.
+
+No single layer is solely at fault: the display bug is a COLLECTOR+API
+combination, and the ALERT bug is an API-signal+FONTEND combination.
+
+--------------------------------------------------------------------------------
+7. IS ALERT EVALUATION AFFECTED?  YES — AND SEPARATELY FROM DISPLAY
+--------------------------------------------------------------------------------
+A. WHY FINISHED/STALE GAMES ARE VISIBLE
+   The collector+API age-only liveness described above.  This is a DISPLAY
+   concern and is intentionally NOT hidden — the operator can still see
+   the game, and the "SHOWING LIVE" toggle filters it client-side.
+
+B. WERE ALERTS ACTUALLY AFFECTED?  YES.
+   Before the fix, an ended game whose last stored observation had
+   remaining >= 2.5 min and a matching condition would raise a real alert
+   (badge, pulse, audio cue).  The legacy pace-gap tiers were worse: they
+   had NO remaining-time gate whatsoever, so a game at 1:00 left with
+   pace_gap > 1.5 could alert.  Display and alertability were conflated;
+   they are now separated.
+
+The fix (see the accompanying implementation) adds an authoritative
+backend alert gate and routes EVERY alert path through it, so a stale or
+finished game cannot alert no matter how well its old state fits.
+
+--------------------------------------------------------------------------------
+8. MINIMAL PROPOSED FIX  (IMPLEMENTED — see git diff)
+--------------------------------------------------------------------------------
+1. blm_v4/api.py — compute ONE authoritative gate per game
+   (_alert_gate) and serve it as `alert: {eligible, reason}`:
+     ineligible when invalid_quality, game status ended/finished, no live
+     observation, observation older than ALERT_MAX_OBS_AGE_S (300 s — the
+     project's existing LIVE/STALE boundary), terminal by authoritative
+     game-time evidence, or remaining < 2.5 min (inclusive floor).
+2. blm_v4/dashboard/static/dashboard.js — `alertEligible(g)` reads that
+   payload verbatim and gates all four alert-level sites (card pulse,
+   card badge, modal panel, modal pulse).  The browser re-derives nothing.
+3. No change to thresholds, historical context, Z-score, relative-pace
+   semantics, the frozen audit constants, or the terminal rules.
+
+--------------------------------------------------------------------------------
+9. GIT STATE AT DIAGNOSIS
+--------------------------------------------------------------------------------
+    git status --short : only ?? prospective_health_history.jsonl (a
+                         runtime append-only log, untracked by design)
+    git diff --stat    : empty before the fix
+No source file was modified for this diagnosis; the ad-hoc probes lived
+under /tmp and were removed.

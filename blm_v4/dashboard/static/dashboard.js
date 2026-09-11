@@ -177,6 +177,16 @@ function alertEscalation(prevLvl, nextLvl) {
   const rPrev = prevLvl ? (ALERT_RANK[prevLvl] || 0) : 0;
   return (ALERT_RANK[nextLvl] || 0) > rPrev ? nextLvl : null;
 }
+// ALERT ELIGIBILITY — the authoritative gate, decided by the BACKEND
+// (api._alert_gate) and consumed here verbatim.  A game may alert ONLY
+// when its latest observation is concurrently live, non-terminal, fresh
+// (within the backend freshness bound) and has >= 2.5 minutes remaining.
+// The browser never re-derives this, so a finished game or a stale stored
+// observation can never raise an alert however well its OLD state happens
+// to match the condition.  Every alert path routes through here.
+function alertEligible(g) {
+  return !!(g && g.alert && g.alert.eligible === true);
+}
 /* __PURE_ALERT_END__ */
 // fixed archive statistics bound to each UNDER level (display values only)
 const HIST_ALERTS = {
@@ -607,7 +617,9 @@ function renderCards(payload) {
     // it consumes the authoritative /historical-context payload only.
     const legacyLvl = liveAlertOf(g);
     const ctxLvl = paceStateLevel(g.historical_context);
-    const alLvl = ctxLvl || legacyLvl;
+    // backend alert gate: an ineligible game yields NO level, so its pulse
+    // and cue state reset to null and it cannot fire from a stale state.
+    const alLvl = alertEligible(g) ? (ctxLvl || legacyLvl) : null;
     const entered = alertEscalation(card.prevAlert, alLvl);
     card.prevAlert = alLvl;
     if (entered) alertAudio(entered);
@@ -814,7 +826,8 @@ function histBadgeHTML(g, entered) {
   const p = g.projector || {};
   const st = liveLineState(g);
   if (st.line == null) return "";                     // missing line → no alert
-  const lvl = paceStateLevel(g.historical_context) || liveAlertOf(g);
+  const lvl = alertEligible(g)
+    ? (paceStateLevel(g.historical_context) || liveAlertOf(g)) : null;
   const cyber = isCyberGame(g);
   if (!lvl && !cyber) return "";
   const meta = lvl ? HIST_ALERTS[lvl] : null;
@@ -857,9 +870,11 @@ function histPanelHTML(g) {
   if (st.line == null) return "";                     // missing line → no alert
   const zm = state.modalZMeta || {};
   const ctx = g.historical_context;
-  const lvl = paceStateLevel(ctx)
-    || histAlertLevel({ hasLine: true, periodQ: periodQOf(g),
-      progressPct: p.progress_pct, paceGap: p.pace_gap, z: zm.z });
+  const lvl = alertEligible(g)
+    ? (paceStateLevel(ctx)
+       || histAlertLevel({ hasLine: true, periodQ: periodQOf(g),
+         progressPct: p.progress_pct, paceGap: p.pace_gap, z: zm.z }))
+    : null;
   const meta = lvl ? HIST_ALERTS[lvl] : null;
   const cyber = isCyberGame(g);
   const matched = ctx && ctx.status === "matched";
@@ -936,7 +951,7 @@ function refreshHistAlert(g) {
   const legacyLvl = histAlertLevel({ hasLine: liveLineState(g).line != null,
     periodQ: periodQOf(g), progressPct: p.progress_pct,
     paceGap: p.pace_gap, z: zm.z });
-  const lvl = ctxLvl || legacyLvl;
+  const lvl = alertEligible(g) ? (ctxLvl || legacyLvl) : null;
   const priorLevel = state.modalAlertLevel;
   state.modalAlertLevel = lvl;
   if (box.innerHTML === html) return;                 // stable during refresh

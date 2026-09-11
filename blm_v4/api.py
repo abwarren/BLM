@@ -40,8 +40,10 @@ from fastapi import APIRouter, HTTPException, Query
 from blm_v4.clean_boundary import (CLEAN, CLEAN_DATA_EPOCH, LEGACY,
                                    game_data_quality, is_clean_ts)
 from blm_v4.live_analytics.league import PROVIDERS
+from blm_v4.live_analytics.historical_context import (
+    ANALYTICAL_MIN_REMAINING_MINUTES)
 from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
-                               opening_snapshot, project)
+                               opening_snapshot, period_quarter, project)
 from blm_v4.terminal_eligibility import (is_terminal_checkpoint,
                                          predictive_validation_label,
                                          TERMINAL_EXCLUSION_REASON)
@@ -55,6 +57,27 @@ STATE_FILE = Path(__file__).resolve().parent / "state" / "collector_state.json"
 
 # A game is considered LIVE if its latest snapshot is fresher than this.
 LIVE_AGE_S = 15 * 60
+
+# ── Operational ALERT gate ──────────────────────────────────────────────
+# The display's LIVE window (LIVE_AGE_S) is deliberately loose — it keeps a
+# just-finished game visible while its last observation is still useful.
+# ALERTING must be far stricter: a game may raise an UNDER alert ONLY when
+# its latest authoritative observation is concurrently
+#
+#   1. non-terminal      (authoritative game-time evidence, never a label)
+#   2. not a finished game (status)
+#   3. CURRENT           (observation age <= ALERT_MAX_OBS_AGE_S)
+#   4. remaining_game_minutes >= 2.5  (the analytical floor, inclusive)
+#
+# The gate is evaluated HERE and consumed verbatim by the dashboard: the
+# browser must never re-derive it, so a stale stored observation or a
+# finished game can never alert merely because its old state still
+# satisfies the condition.  The freshness bound reuses the project's
+# existing LIVE/STALE 300s market boundary (pace_projector.
+# FRESH_LINE_SECONDS == calibration.MARKET_STALE_SECONDS) rather than
+# inventing a second notion of freshness.
+ALERT_MAX_OBS_AGE_S = 300.0
+ALERT_MIN_REMAINING_MINUTES = ANALYTICAL_MIN_REMAINING_MINUTES  # 2.5, inclusive
 
 
 def _db_path() -> Path:
@@ -763,6 +786,10 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     if step > 1:
         history = history[::step]
 
+    # the latest authoritative clean projection — feeds BOTH the descriptive
+    # projector block and the alert gate, so both read one observation.
+    proj_row = _pace_projector_for(game["source_game_id"])
+
     detail = {
         "game_id": game["source_game_id"],
         "game_db_id": game["id"],
@@ -825,8 +852,7 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "market_momentum": market_momentum,
         "foul_correlation": None,
         "history": history,
-        "projector": _projector_live_view(
-            _pace_projector_for(game["source_game_id"])),
+        "projector": _projector_live_view(proj_row),
         # Historical context is computed ONLY for live games: it is the
         # only case the dashboard renders (a card badge / detail panel for
         # a live observation).  Each lookup costs one indexed range scan of
@@ -837,6 +863,11 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "historical_context": (
             _historical_context_for(game["source_game_id"])
             if (age is not None and age <= LIVE_AGE_S) else None),
+        # authoritative alert eligibility — computed once, consumed verbatim
+        # by every dashboard alert path (badge, panel, pulse, audio).  A
+        # finished game or a stale observation is ineligible regardless of
+        # how well its stored state matches the condition.
+        "alert": _alert_gate(game, proj_row, now, age, quality),
     }
     if with_checkpoints and conn is not None:
         detail["checkpoints"] = _game_checkpoints(conn, game["source_game_id"])
@@ -949,6 +980,48 @@ def _projector_live_view(row: Optional[dict]) -> Optional[dict]:
     if not row:
         return None
     return {k: row.get(k) for k in _PROJECTOR_LIVE_KEYS if k in row}
+
+
+def _alert_gate(game: dict, proj: Optional[dict], now: datetime,
+                age: Optional[float], quality: Optional[dict]) -> dict:
+    """Authoritative alert eligibility for one game — the SINGLE source of
+    truth every dashboard alert path consumes verbatim (see
+    ALERT_MAX_OBS_AGE_S for the rule order and thresholds).
+
+    Returns ``{"eligible": bool, "reason": str | None}``.  ``reason`` names
+    the FIRST failed condition so an ineligible game is explainable rather
+    than merely hidden.  Terminality is decided from authoritative
+    per-frame game time (never a bucket/label/percentage) and a
+    game-time field overrides a contradicting game-level status flag.
+    """
+    if (quality or {}).get("status") == "INVALID":
+        return {"eligible": False, "reason": "invalid_quality"}
+    if (game.get("status") or "").strip().lower() in ("ended", "finished"):
+        return {"eligible": False, "reason": "game_finished"}
+    if not proj:
+        return {"eligible": False, "reason": "no_live_observation"}
+    # the observation that carries the condition must itself be current —
+    # an old stored snapshot may never alert on its own stale state
+    obs_age = _age_s(proj.get("captured_at"), now)
+    if obs_age is None:
+        obs_age = age
+    if obs_age is None or obs_age > ALERT_MAX_OBS_AGE_S:
+        return {"eligible": False, "reason": "stale_observation"}
+    pct = proj.get("progress_pct")
+    if is_terminal_checkpoint(
+            classification=proj.get("classification") or game.get("classification"),
+            elapsed_minutes=proj.get("elapsed_game_minutes"),
+            # progress_pct is 0..100; the terminal rule reads a 0..1 fraction
+            progress=(pct / 100.0 if pct is not None else None),
+            quarter=period_quarter(proj.get("period_label")),
+            clock=proj.get("clock"),
+            period_label=proj.get("period_label"),
+            game_status=game.get("status")):
+        return {"eligible": False, "reason": "terminal_observation"}
+    remaining = proj.get("remaining_game_minutes")
+    if remaining is None or remaining < ALERT_MIN_REMAINING_MINUTES:
+        return {"eligible": False, "reason": "below_min_remaining"}
+    return {"eligible": True, "reason": None}
 
 
 def _quality_map(conn: sqlite3.Connection,
