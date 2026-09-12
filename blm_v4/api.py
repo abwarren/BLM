@@ -42,7 +42,10 @@ from blm_v4.clean_boundary import (CLEAN, CLEAN_DATA_EPOCH, LEGACY,
 from blm_v4.live_analytics.league import PROVIDERS
 from blm_v4.live_analytics.historical_context import (
     ANALYTICAL_MIN_REMAINING_MINUTES)
-from blm_v4.live_analytics.under_alert import under_alert_state
+from blm_v4.live_analytics.under_alert import (
+    under_alert_eligibility,
+    under_alert_state,
+)
 from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
                                opening_snapshot, period_quarter, project)
 from blm_v4.terminal_eligibility import (is_terminal_checkpoint,
@@ -1232,12 +1235,30 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
         try:
             proj = g.get("projector") or {}
             entry = pace_reference.get(g.get("competition_slug")) or {}
+            # AUTHORITATIVE MARKET GATE (directive LIVE MARKETS ONLY,
+            # 2026-09-12): the quantitative condition is necessary but NOT
+            # sufficient.  An active alert also requires a genuinely live
+            # game AND a live market line, so a market that was live and has
+            # since gone stale — or a finished game whose line is still
+            # stored — can never keep presenting itself as a current live
+            # opportunity.  The genuine-live verdict and its reason are the
+            # values this payload ALREADY publishes (g["live"] /
+            # g["live_reason"]), so there is one live definition here, not
+            # two that could drift.  The reason is EXPOSED in the sibling
+            # block: suppression is never silent, and the quantitative
+            # numbers are still served.
+            eligibility = under_alert_eligibility(
+                proj.get("market_status"), g.get("live"), g.get("live_reason"))
+            g["under_alert_eligibility"] = eligibility
             g["under_alert"] = under_alert_state(
                 proj.get("actual_pts_per_min"), proj.get("required_pts_per_min"),
                 entry.get("avg_pace"), proj.get("progress_pct"),
-                entry.get("games"))
+                entry.get("games"), eligible=eligibility["eligible"])
         except Exception:
-            g["under_alert"] = under_alert_state(None, None, None)
+            g["under_alert_eligibility"] = under_alert_eligibility(
+                None, False, None)
+            g["under_alert"] = under_alert_state(
+                None, None, None, eligible=False)
     return {
         "generated_at": now.isoformat(),
         "data_epoch": CLEAN_DATA_EPOCH,

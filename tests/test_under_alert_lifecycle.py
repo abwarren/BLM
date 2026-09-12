@@ -442,9 +442,16 @@ def test_league_reference_failure_is_isolated():
 
 
 def test_liveness_gate_resolves_alerts(client):
-    """Directive 7 — a non-live game cannot hold an active record."""
+    """Directive 7 — a non-live game cannot hold an active record.
+
+    Pins the INTENT, not a frozen source line: the live gate composes the
+    server's own predicates, and since the LIVE MARKETS ONLY directive the
+    market-eligibility gate is one of them (a stale or missing line can no
+    longer hold a record either).
+    """
     js = _js(client)
-    assert "const live = isActuallyLive(g) && alertEligible(g);" in js
+    assert "const live = isActuallyLive(g) && alertEligible(g) && mktEligible;" in js
+    assert "g.under_alert_eligibility.eligible === true" in js
 
 
 def test_history_record_carries_the_trigger_snapshot_fields(client):

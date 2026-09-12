@@ -26,6 +26,18 @@ from typing import Any, Optional
 # record can never suppress a later 50% or 75% one.
 CHECKPOINTS = (25, 50, 75)
 
+# ── Eligibility vocabulary (LIVE MARKETS ONLY directive, 2026-09-12) ──
+# The quantitative condition above is necessary but NOT sufficient: an
+# active alert also requires a genuinely live game AND a live market line.
+# A market that was live and has since gone stale must never keep
+# presenting itself as a current live opportunity, and the exclusion must
+# be EXPLICIT rather than a silent suppression.
+ELIGIBLE_MARKET_LIVE = "market_live"
+INELIGIBLE_MARKET_STALE = "market_stale"
+INELIGIBLE_MARKET_MISSING = "market_missing"
+#: No genuine-live reason supplied by the caller (fail closed).
+INELIGIBLE_NOT_LIVE = "not_live"
+
 
 def _finite(value: Any) -> Optional[float]:
     """The value as a float, or None when it is not a finite number."""
@@ -50,22 +62,58 @@ def checkpoint_for(progress_pct: Any) -> Optional[int]:
     return cp
 
 
+def under_alert_eligibility(market_status: Any, live: Any,
+                            live_reason: Any = None) -> dict:
+    """Whether an active Under Alert is PERMITTED for this game right now.
+
+    Returns ``{"eligible": bool, "reason": str}``.  Reasons distinguish the
+    live-market case, each market failure, and — reused verbatim, never
+    reinvented — the existing genuine-live exclusion vocabulary supplied by
+    the caller: game_finished, unsupported_status, no_live_observation,
+    stale_observation, terminal_*.
+
+    The genuine-live test comes FIRST: when the game is not live at all,
+    its own reason is the informative one, and the market state is moot.
+    An unrecognised or absent ``market_status`` fails CLOSED as
+    ``market_missing`` — a market we cannot prove is live is never treated
+    as live.  The OPENING line is never consulted here: a stale or missing
+    live line is never substituted, it is excluded.
+    """
+    if not live:
+        return {"eligible": False,
+                "reason": (live_reason or INELIGIBLE_NOT_LIVE)}
+    if market_status == "LIVE":
+        return {"eligible": True, "reason": ELIGIBLE_MARKET_LIVE}
+    if market_status == "STALE":
+        return {"eligible": False, "reason": INELIGIBLE_MARKET_STALE}
+    return {"eligible": False, "reason": INELIGIBLE_MARKET_MISSING}
+
+
 def under_alert_state(actual_pace: Any, required_pace: Any,
                       league_average_pace: Any,
                       progress_pct: Any = None,
-                      reference_games: Any = None) -> dict:
+                      reference_games: Any = None,
+                      eligible: Any = True) -> dict:
     """The actionable UNDER state for one game.
 
-    ``active`` is TRUE only when all three numbers are finite and both
-    comparisons hold.  A missing league reference yields ``active=False``
-    — no comparison is available, so nothing is claimed and no other
-    competition's rate is borrowed.
+    ``active`` is TRUE only when ``eligible`` AND all three numbers are
+    finite and both comparisons hold.  ``eligible`` is the market/live gate
+    (:func:`under_alert_eligibility`) evaluated by the API: the condition
+    is necessary but not sufficient, so a stale market can never leave an
+    active alert standing.  The quantitative block itself is unchanged and
+    is still served when suppressed — the reason lives in the sibling
+    ``under_alert_eligibility`` field, never in a silently blank verdict.
+
+    A missing league reference yields ``active=False`` — no comparison is
+    available, so nothing is claimed and no other competition's rate is
+    borrowed.
     """
     actual = _finite(actual_pace)
     required = _finite(required_pace)
     league = _finite(league_average_pace)
     games = _finite(reference_games)
-    active = bool(actual is not None and required is not None
+    active = bool(eligible is True
+                  and actual is not None and required is not None
                   and league is not None
                   and actual < required and required > league)
     return {

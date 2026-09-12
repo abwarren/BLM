@@ -345,12 +345,24 @@ function reconcileUnderAlerts(games, labels) {
     // postponed game resolves its records (their history remains).  A null
     // checkpoint means the game has not reached its first checkpoint yet
     // (or has no resolvable progress), so there is no phase to attribute.
-    const live = isActuallyLive(g) && alertEligible(g);
+    // Defence-in-depth: the server's market gate, consumed verbatim.  It
+    // can only REMOVE a record — never create one — so the API stays the
+    // single authority on whether an alert is eligible at all.  An absent
+    // block (synthetic payloads only) means "no opinion", not "ineligible".
+    const mktEligible = !g.under_alert_eligibility
+      || g.under_alert_eligibility.eligible === true;
+    const live = isActuallyLive(g) && alertEligible(g) && mktEligible;
     const ok = live && cp != null && ua.active === true;
     held.set(g.game_id, {
       live,
+      // Why the record is not standing RIGHT NOW — the server's own
+      // vocabulary, in precedence order: the live gate's reason, the
+      // alert gate's reason, the market gate's reason (a stale or missing
+      // line is never silently dropped), else not_live.
       reason: live ? null
-        : (g.live_reason || (g.alert && g.alert.reason) || "not_live"),
+        : (g.live_reason || (g.alert && g.alert.reason)
+           || (g.under_alert_eligibility && g.under_alert_eligibility.reason)
+           || "not_live"),
       checkpoint: cp,
       ok,
     });
