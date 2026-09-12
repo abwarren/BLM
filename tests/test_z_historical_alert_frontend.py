@@ -100,10 +100,27 @@ def test_fixed_archive_statistics_present(client):
     for lvl, values in FIXED.items():
         for v in values:
             assert v in js, (lvl, v)
+    # the in-card HISTORICAL indicator is the "UNDER CONDITION" family.  It
+    # answers a different question from the actionable alert, so the two
+    # must never share a label (see test_alert_label_is_distinct).
     for label in ("UNDER CONDITION",
-                  "UNDER ALERT — STRONG",
-                  "UNDER ALERT — VERY STRONG"):
+                  "UNDER CONDITION — STRONG",
+                  "UNDER CONDITION — VERY STRONG"):
         assert label in js, label
+
+
+def test_alert_label_is_distinct(client):
+    """The actionable surface owns the term UNDER ALERT; the historical /
+    context indicator owns UNDER CONDITION — so a user never reads two
+    different conditions under one name."""
+    js = _js(client)
+    # exactly one LABEL claims the actionable name (the "UNDER ALERTS"
+    # section comment is not a label, hence the em-dash-anchored count)
+    assert js.count("UNDER ALERT — ") == 1, js.count("UNDER ALERT — ")
+    assert '🔥 UNDER ALERT — ${a.checkpoint}%' in js
+    # no historical tier may claim the actionable name
+    for stale in ("UNDER ALERT — STRONG", "UNDER ALERT — VERY STRONG"):
+        assert stale not in js, stale
 
 
 def test_no_stale_or_retired_numbers(client):

@@ -58,6 +58,28 @@
     <div class="empty" id="empty">Waiting for live data…</div>
   </main>
 
+  <!-- ═══════════ ACTIVE UNDER ALERTS — what needs attention NOW ═══════════ -->
+  <section class="alerts" id="activeAlertsSection">
+    <div class="alerts-head">
+      <span class="alerts-title">ACTIVE UNDER ALERTS</span>
+      <span class="muted" id="activeAlertsCount"></span>
+    </div>
+    <div class="alerts-body" id="activeAlerts">
+      <div class="alerts-empty">No active UNDER alerts</div>
+    </div>
+  </section>
+
+  <!-- ═══════════ UNDER ALERT HISTORY — what happened previously ═══════════ -->
+  <section class="alerts" id="alertHistorySection">
+    <div class="alerts-head">
+      <span class="alerts-title">UNDER ALERT HISTORY</span>
+      <span class="muted" id="alertHistoryCount"></span>
+    </div>
+    <div class="alerts-body" id="alertHistory">
+      <div class="alerts-empty">No alerts triggered</div>
+    </div>
+  </section>
+
   <!-- ═══════════ DETAIL MODAL ═══════════ -->
   <div class="modal-backdrop" id="modalBackdrop" hidden>
     <div class="modal" id="modal">

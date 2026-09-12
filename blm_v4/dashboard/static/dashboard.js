@@ -75,6 +75,25 @@ const prefSet = (key, collapsed) => {
   try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch (_) {}
 };
 
+/* ── LIVE-state gate — the single predicate every live surface uses ────
+   The BACKEND owns live-state (api._live_state): `live` is true only for a
+   game whose status is an explicitly supported in-progress state, whose own
+   latest frame proves it is not at/past the end of the game, AND whose
+   latest observation is fresh.  Freshness alone is never sufficient.
+
+   A game is NOT live merely because it appears in /api/v4/live, has a
+   recent observation, a score, a market line, an eligible alert, or
+   historical context — every one of those can be true of a finished game.
+   The supported-status list mirrors api.LIVE_STATUSES and is applied on top
+   of the backend flag (it can only ever REMOVE a game), so a stale cached
+   payload cannot leak a non-live card back in. */
+const LIVE_STATUSES = ["live", "halftime", "in_progress", "in-play", "inplay"];
+function isActuallyLive(g) {
+  if (!g || g.live !== true) return false;
+  const s = String(g.status || "").trim().toLowerCase();
+  return LIVE_STATUSES.indexOf(s) !== -1;
+}
+
 // keep a collapsible section's ▸/▾ arrow in sync with its state
 function setSectionLabel(det) {
   if (!det) return;
@@ -187,6 +206,28 @@ function alertEscalation(prevLvl, nextLvl) {
 function alertEligible(g) {
   return !!(g && g.alert && g.alert.eligible === true);
 }
+// ── fixed-progress UNDER condition (25% / 50% / 75%) ──
+// One INDEPENDENT record per game per checkpoint, identified by
+// game_id + checkpoint, so a 25% record never suppresses a later 50% or
+// 75% one.  Phase-based attribution: the server evaluates the condition on
+// the current observation and reports the highest checkpoint the game's
+// progress has reached (g.under_alert.checkpoint); advancing into the next
+// phase closes the previous checkpoint's record and lets the next one open
+// on its own.
+//
+// The CONDITION ITSELF is not defined here.  It is evaluated once by the
+// backend (blm_v4/live_analytics/under_alert.py) and arrives as
+// g.under_alert.active, so the browser cannot reconstruct it — and no two
+// surfaces can disagree about the same opportunity.
+function underAlertId(gameId, checkpoint) {
+  return `${gameId}|${checkpoint}`;
+}
+function fmtDuration(ms) {
+  if (ms == null || !isFinite(ms) || ms < 0) return "—";
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
 /* __PURE_ALERT_END__ */
 // fixed archive statistics bound to each UNDER level (display values only)
 const HIST_ALERTS = {
@@ -194,14 +235,252 @@ const HIST_ALERTS = {
     obs: "69.75%", game: "73.02%", n: "1,515" },
   base: { label: "UNDER CONDITION",
     obs: "72.65%", game: "87.31%", n: "1,489" },
-  strong: { label: "UNDER ALERT — STRONG",
+  strong: { label: "UNDER CONDITION — STRONG",
     obs: "78.01%", game: "87.71%", n: "1,446" },
-  high: { label: "UNDER ALERT — VERY STRONG",
+  high: { label: "UNDER CONDITION — VERY STRONG",
     obs: "85.74%", game: "89.27%", n: "363" },
 };
 // CYBER archive result — shown as READ-ONLY context with its thin sample
 // flagged; it is deliberately NOT an alert level (no CYBER tier exists).
 const CYBER_HIST = { obs: "59.3%", game: "56.5%", n: "84" };
+
+/* __ALERT_STORE_BEGIN__ */
+/* ── UNDER ALERTS: ACTIVE vs HISTORY — two SEPARATE stores ──────────
+   `active` holds ONLY the records whose condition is TRUE on the
+   current poll; `history` holds every record that has ever triggered,
+   resolved ones included.  Two distinct containers, never one array
+   doing both jobs, and no poll ever rebuilds one from the other: a
+   polling cycle cannot resurrect a resolved record as active, and it
+   cannot erase history.
+
+   Identity = game_id + checkpoint, so a single game carries up to three
+   independent records across its life (25%, 50%, 75%) and an earlier
+   checkpoint never suppresses a later one.
+
+   Lifecycle:  INACTIVE → ACTIVE → RESOLVED
+     FALSE→TRUE   open a record in `history`, add it to `active`
+     TRUE→TRUE    refresh the ACTIVE display values only — the history
+                  record keeps its original trigger snapshot untouched
+     TRUE→FALSE   drop it from `active`, mark the record RESOLVED in
+                  `history` (never deleted)
+
+   The league reference is NOT carried in this file.  Each game arrives
+   with its own server-evaluated `under_alert` block (active, checkpoint,
+   actual/required/league-average pace), built from the mean settled final
+   total / regulation minutes of the game's OWN competition — league-
+   specific by construction, never one global number.  The browser holds no
+   competition identifier of its own, so it can neither merge two leagues
+   nor invent one; a competition with no reference gets active:false rather
+   than borrowing another league's rate.
+
+   Display labels are read from the filter buttons that already carry the
+   canonical slug → label mapping in the page. */
+const LEAGUE_LABELS = {};
+function leagueLabelsFrom(root) {
+  const map = {};
+  const nodes = (root && root.querySelectorAll)
+    ? root.querySelectorAll("#filters .filter[data-filter]") : [];
+  for (const b of nodes) {
+    const slug = b.dataset ? b.dataset.filter : "";
+    const label = (b.textContent || "").trim();
+    if (slug && label) map[slug] = label;
+  }
+  return map;
+}
+const UNDER_ALERTS = { active: new Map(), history: [] };
+const ALERT_HISTORY_MAX = 300;
+const ALERT_HISTORY_KEY = "pz.underAlertHistory";
+
+const num2 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(2);
+const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
+
+function loadAlertHistory() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(ALERT_HISTORY_KEY) || "[]");
+    UNDER_ALERTS.history = Array.isArray(arr) ? arr : [];
+  } catch (_) { UNDER_ALERTS.history = []; }
+}
+function saveAlertHistory() {
+  try {
+    localStorage.setItem(ALERT_HISTORY_KEY,
+      JSON.stringify(UNDER_ALERTS.history.slice(-ALERT_HISTORY_MAX)));
+  } catch (_) { /* storage unavailable — history stays in memory */ }
+}
+
+// Every value comes from the authoritative /live payload — the game's own
+// `under_alert` block, evaluated server-side.  Nothing is scraped back out
+// of the rendered page, nothing is recalculated here, and the condition is
+// never re-derived: `pace_gap` in particular is the server's own field, so
+// the gap on screen and the verdict behind it come from one computation.
+function underAlertValues(g, ua, labels) {
+  const actual = ua.actual_pace;
+  const required = ua.required_pace;
+  const avg = ua.league_average_pace;
+  return {
+    checkpoint: ua.checkpoint,
+    league: (labels && labels[g.competition_slug]) || g.competition_slug || "—",
+    competition_slug: g.competition_slug || null,
+    actual_pace: actual,
+    required_pace: required,
+    league_average_pace: avg,
+    league_reference_games: ua.league_reference_games,
+    pace_gap: ua.pace_gap,
+    required_vs_league_avg_pct: avg ? (required - avg) / avg * 100 : null,
+    actual_vs_required_pct: required ? (actual - required) / required * 100 : null,
+    progress_pct: (g.projector || {}).progress_pct,
+  };
+}
+
+function reconcileUnderAlerts(games, labels) {
+  const now = Date.now();
+  const held = new Map();     // game_id -> this poll's live/phase verdict
+  const trueNow = new Set();  // identities whose condition is TRUE now
+
+  for (const g of games || []) {
+    // the server's verdict for this poll, consumed verbatim
+    const ua = g.under_alert || {};
+    const cp = ua.checkpoint;
+    // A record survives only while the game is genuinely live AND passes
+    // the existing backend alert gate — a finished, stale, cancelled or
+    // postponed game resolves its records (their history remains).  A null
+    // checkpoint means the game has not reached its first checkpoint yet
+    // (or has no resolvable progress), so there is no phase to attribute.
+    const live = isActuallyLive(g) && alertEligible(g);
+    const ok = live && cp != null && ua.active === true;
+    held.set(g.game_id, {
+      live,
+      reason: live ? null
+        : (g.live_reason || (g.alert && g.alert.reason) || "not_live"),
+      checkpoint: cp,
+      ok,
+    });
+    if (!ok) continue;
+
+    const id = underAlertId(g.game_id, cp);
+    trueNow.add(id);
+    const vals = underAlertValues(g, ua, labels);
+    const act = UNDER_ALERTS.active.get(id);
+    if (act) {
+      // TRUE → TRUE — refresh what the ACTIVE panel shows.  The history
+      // record keeps its original trigger snapshot untouched.
+      Object.assign(act, vals);
+      act.updated_at = new Date(now).toISOString();
+      continue;
+    }
+    // FALSE → TRUE — resume an unresolved record for this identity (a
+    // reload, or a poll that was missed), otherwise open a new one.
+    let rec = UNDER_ALERTS.history.find((r) => r.id === id && !r.resolved_at);
+    if (!rec) {
+      rec = Object.assign({
+        id, game_id: g.game_id,
+        triggered_at: new Date(now).toISOString(),
+        resolved_at: null, duration_ms: null, resolved_reason: null,
+      }, vals);
+      UNDER_ALERTS.history.push(rec);
+      saveAlertHistory();
+    }
+    UNDER_ALERTS.active.set(id, Object.assign({
+      id, game_id: g.game_id, triggered_at: rec.triggered_at,
+      updated_at: new Date(now).toISOString(),
+    }, vals));
+  }
+
+  // TRUE → FALSE — anything whose condition is not TRUE on THIS poll
+  // leaves the active store; its history record is marked RESOLVED and
+  // is never removed.
+  for (const [id, act] of Array.from(UNDER_ALERTS.active)) {
+    if (trueNow.has(id)) continue;
+    closeUnderAlert(id, act, held.get(act.game_id), now);
+  }
+}
+
+function closeUnderAlert(id, act, game, now) {
+  UNDER_ALERTS.active.delete(id);
+  const rec = UNDER_ALERTS.history.find((r) => r.id === id && !r.resolved_at);
+  if (!rec) return;
+  let reason = "condition_false";
+  if (!game) reason = "no_longer_monitored";
+  else if (!game.live) reason = game.reason || "not_live";
+  else if (game.checkpoint != null && game.checkpoint > act.checkpoint) {
+    reason = "checkpoint_passed";
+  }
+  rec.resolved_at = new Date(now).toISOString();
+  rec.duration_ms = now - Date.parse(act.triggered_at);
+  rec.resolved_reason = reason;
+  // optional resolution values — the trigger snapshot above is never
+  // overwritten by them.
+  rec.final_actual_pace = act.actual_pace;
+  rec.final_required_pace = act.required_pace;
+  rec.final_pace_gap = act.pace_gap;
+  saveAlertHistory();
+}
+
+const alertIdent = (r) => `${esc(r.league)} | Game ${esc(r.game_id)}`;
+
+function activeAlertsHTML() {
+  const rows = Array.from(UNDER_ALERTS.active.values())
+    .sort((a, b) => b.checkpoint - a.checkpoint);
+  if (!rows.length) {
+    return `<div class="alerts-empty">No active UNDER alerts</div>`;
+  }
+  return `<ul>` + rows.map((a) => `
+    <li class="al-row" data-alert-id="${esc(a.id)}">
+      <div class="al-headline">🔥 UNDER ALERT — ${a.checkpoint}%</div>
+      <div class="al-ident">${alertIdent(a)}</div>
+      <div class="al-line">Actual: <span class="al-num">${num2(a.actual_pace)}</span> | Required: <span class="al-num">${num2(a.required_pace)}</span> | League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></div>
+      <div class="al-line">Gap: <span class="al-neg">${num2(a.pace_gap)}</span> <span class="muted">(${num1(a.actual_vs_required_pct)}% vs required · ${num1(a.required_vs_league_avg_pct)}% vs avg)</span></div>
+    </li>`).join("") + `</ul>`;
+}
+
+function historyRowHTML(rec) {
+  const running = !rec.resolved_at;
+  const dur = running ? (Date.now() - Date.parse(rec.triggered_at)) : rec.duration_ms;
+  // final values are shown only when they actually moved after the trigger
+  const moved = !running && (rec.final_actual_pace !== rec.actual_pace
+    || rec.final_required_pace !== rec.required_pace);
+  return `
+    <li class="al-row${running ? "" : " al-resolved"}">
+      <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
+      <div class="al-times">
+        <span>Triggered: ${fmtTime(rec.triggered_at)}</span>
+        <span>Ended: ${running ? "—" : fmtTime(rec.resolved_at)}</span>
+        <span>Duration: ${fmtDuration(dur)}${running ? ` <span class="al-running">(still active)</span>` : ""}</span>
+      </div>
+      <div class="al-line">Actual: <span class="al-num">${num2(rec.actual_pace)}</span> | Required: <span class="al-num">${num2(rec.required_pace)}</span> | Avg: <span class="al-num">${num2(rec.league_average_pace)}</span></div>
+      ${moved ? `<div class="al-line">Final: <span class="al-num">${num2(rec.final_actual_pace)}</span> | <span class="al-num">${num2(rec.final_required_pace)}</span></div>` : ""}
+    </li>`;
+}
+
+function historyAlertsHTML() {
+  if (!UNDER_ALERTS.history.length) {
+    return `<div class="alerts-empty">No alerts triggered</div>`;
+  }
+  const rows = UNDER_ALERTS.history.slice().reverse();
+  return `<ul>` + rows.map(historyRowHTML).join("") + `</ul>`;
+}
+
+function paintAlerts(elId, html) {
+  const el = $(elId);
+  if (el && el.innerHTML !== html) el.innerHTML = html;
+}
+
+// Single entry point, called once per poll from refresh() with the SAME
+// payload the cards were rendered from.
+function renderUnderAlerts(games, labels) {
+  reconcileUnderAlerts(games, labels || LEAGUE_LABELS);
+  paintAlerts("activeAlerts", activeAlertsHTML());
+  paintAlerts("alertHistory", historyAlertsHTML());
+  const ac = $("activeAlertsCount");
+  if (ac) ac.textContent = UNDER_ALERTS.active.size
+    ? `${UNDER_ALERTS.active.size} active` : "";
+  const hc = $("alertHistoryCount");
+  if (hc) {
+    const open = UNDER_ALERTS.history.filter((r) => !r.resolved_at).length;
+    hc.textContent = UNDER_ALERTS.history.length
+      ? `${UNDER_ALERTS.history.length} triggered · ${open} still active` : "";
+  }
+}
+/* __ALERT_STORE_END__ */
 
 /* ── AUDIO alerts — sound ONLY on an alert ENTRY or ESCALATION ──
    A short cue sounds exactly when the UNDER condition RISES: the
@@ -1488,6 +1767,9 @@ async function refresh() {
     renderStatus(payload);
     renderSummary(payload);
     renderCards(payload);
+    // active-vs-history alert reconciliation runs on the SAME payload, once
+    // per poll — it never rebuilds one store from the other.
+    renderUnderAlerts(state.games);
     // The open modal's game is absent from the live payload — but that
     // list is not the authority on existence: the detail endpoint serves
     // ended/stale games too.  Keep the modal and its chart alive by
@@ -1568,5 +1850,11 @@ const armAudio = () => { if (!audioReady) unlockAudio(); };
 ["pointerdown", "keydown", "touchstart"].forEach((ev) =>
   window.addEventListener(ev, armAudio, { passive: true }));
 
+// Alert history is restored from local storage; the ACTIVE store is never
+// restored from it — it is always re-derived from live observations, so a
+// reload can never promote a resolved record back to active.  Competition
+// display labels come from the filter buttons already in the page.
+loadAlertHistory();
+Object.assign(LEAGUE_LABELS, leagueLabelsFrom(document));
 refresh();
 setInterval(refresh, POLL_MS);

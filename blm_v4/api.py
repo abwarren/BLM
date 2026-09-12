@@ -42,6 +42,7 @@ from blm_v4.clean_boundary import (CLEAN, CLEAN_DATA_EPOCH, LEGACY,
 from blm_v4.live_analytics.league import PROVIDERS
 from blm_v4.live_analytics.historical_context import (
     ANALYTICAL_MIN_REMAINING_MINUTES)
+from blm_v4.live_analytics.under_alert import under_alert_state
 from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
                                opening_snapshot, period_quarter, project)
 from blm_v4.terminal_eligibility import (is_terminal_checkpoint,
@@ -897,6 +898,20 @@ def _pace_projector_for(source_game_id: str) -> Optional[dict]:
         return None
 
 
+def _pace_reference(conn: sqlite3.Connection) -> dict:
+    """League-specific pace reference for the WHOLE payload, keyed by
+    canonical competition slug — failure-isolated ({} on any gap).  One
+    grouped scan, cached in-process by the engine below, so the per-poll
+    cost does not scale with the number of games or competitions."""
+    try:
+        from blm_v4.live_analytics.competition_pace import (
+            competition_pace_reference,
+        )
+        return competition_pace_reference(conn)
+    except Exception:
+        return {}
+
+
 def _historical_context_for(source_game_id: str) -> dict:
     """League/state-relative historical-context block for a game —
     failure-isolated, explicit no-context state on any gap.  Cheap: a
@@ -1198,17 +1213,38 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
             else:
                 out.append(_analyze_game(g, rows, now, conn,
                                          quality=qm.get(g["source_game_id"])))
+        # League-specific pace reference (mean settled final total /
+        # regulation minutes per canonical competition).  Served so the
+        # browser compares REQUIRED pace against the game's OWN league
+        # without carrying a competition table of its own.  Failure
+        # isolated: an unreadable population yields {} and the alert
+        # layer then produces nothing rather than borrowing a number.
+        pace_reference = _pace_reference(conn)
     finally:
         conn.close()
     out.sort(key=lambda g: (not g["live"], -(g["age_s"] or 0)))
     for g in out:
         g["data_quality"] = CLEAN
+        # The actionable UNDER verdict, computed HERE and consumed verbatim
+        # by every surface — the browser never reconstructs the condition.
+        # Failure isolated per game: an unexpected shape yields an inactive
+        # block rather than breaking the payload.
+        try:
+            proj = g.get("projector") or {}
+            entry = pace_reference.get(g.get("competition_slug")) or {}
+            g["under_alert"] = under_alert_state(
+                proj.get("actual_pts_per_min"), proj.get("required_pts_per_min"),
+                entry.get("avg_pace"), proj.get("progress_pct"),
+                entry.get("games"))
+        except Exception:
+            g["under_alert"] = under_alert_state(None, None, None)
     return {
         "generated_at": now.isoformat(),
         "data_epoch": CLEAN_DATA_EPOCH,
         "data_quality": CLEAN,
         "source": "clean_post_epoch",
         "collector": _load_collector_state(),
+        "pace_reference": pace_reference,
         "games": out,
         "totals": {
             "live": sum(1 for g in out if g["live"]),

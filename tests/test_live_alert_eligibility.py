@@ -234,16 +234,19 @@ def _js_norm() -> str:
 
 
 def test_every_alert_level_site_is_gated():
-    """All four places that decide an alert level must consult
-    alertEligible(g) — badge, panel, card pulse and modal pulse."""
+    """Every place that decides an alert level must consult
+    alertEligible(g) — badge, panel, card pulse, modal pulse and the
+    UNDER alerts surface."""
     js = _js()
     # the gate exists and reads the backend payload only (no re-derivation)
     assert "function alertEligible(g)" in js
     assert "g.alert && g.alert.eligible === true" in js
     # alertEligible is inside the pure (node-testable) block
     assert "function alertEligible(g)" in js[js.index(PURE_BEGIN):js.index(PURE_END)]
-    # 1 definition + exactly 4 consuming sites
-    assert _js_norm().count("alertEligible(g)") == 5
+    # 1 definition + exactly 5 consuming sites (the 5th is the
+    # active/history reconciliation, which gates every record it keeps)
+    assert _js_norm().count("alertEligible(g)") == 6
+    assert "isActuallyLive(g) && alertEligible(g)" in _js_norm()
 
 
 def test_no_alert_path_bypasses_the_gate():
