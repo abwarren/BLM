@@ -181,10 +181,16 @@ def test_tracked_state_roundtrip(monkeypatch, tmp_path):
     col2 = C.PokerBetCollector(db_path=tmp_path / "t2.db")
     n = col2._restore_tracked()
     assert n == 1, f"restored {n}"
-    key = f"{g.home_team}|{g.away_team}"
+    # 2026-09-12: restore canonicalizes Betual names at the identity
+    # boundary ("Virtual" marker stripped), so the tracked key is the
+    # canonical one even though the state file carried marked names.
+    from blm_v4.classifications import normalize_betual_team
+    key = (f"{normalize_betual_team(g.home_team)}|"
+           f"{normalize_betual_team(g.away_team)}")
     assert key in col2._tracked["BETUAL_NBA"]
     rg = col2._tracked["BETUAL_NBA"][key]
-    assert rg.source_game_id == "30799999" and rg.home_team == g.home_team
+    assert rg.source_game_id == "30799999"
+    assert rg.home_team == normalize_betual_team(g.home_team)
     assert g.source_game_id in col2._market_queue
     # ended games are not persisted/restored
     g.status = "ended"

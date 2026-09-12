@@ -341,7 +341,13 @@ def discover_competitions(html: str) -> list[DiscoveredCompetition]:
             continue
         sport, region = _section_sport_region(section)
         count = _header_count(section)
-        classification = classify_competition(display_name=title, region=region)
+        # Sport is threaded into classification: a name/slug that merely
+        # contains "betual"/"cyber" must not classify as a BASKETBALL
+        # population when the panel section belongs to another sport
+        # (Betual virtual football/volleyball, Cyber Tennis).
+        classification = classify_competition(
+            display_name=title, region=region, sport=sport,
+        )
         games = [g for g in (_parse_game_row(r) for r in rows) if g]
         out.append(DiscoveredCompetition(
             region=region, sport=sport, display_name=title,

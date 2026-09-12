@@ -31,12 +31,16 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from blm_v4.clean_store import clean_store_for
+from blm_v4.classifications import normalize_betual_team
 from blm_v4.clean_boundary import (CLEAN, CLEAN_DATA_EPOCH, LEGACY,
                                    game_data_quality, is_clean_ts)
 from blm_v4.live_analytics.league import PROVIDERS
@@ -46,10 +50,13 @@ from blm_v4.live_analytics.under_alert import (
     under_alert_eligibility,
     under_alert_state,
 )
+from blm_v4.live_analytics.under_outcome import under_alert_outcome
 from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
                                opening_snapshot, period_quarter, project)
-from blm_v4.terminal_eligibility import (is_terminal_checkpoint,
+from blm_v4.terminal_eligibility import (ENDED_STATUSES,
+                                         is_terminal_checkpoint,
                                          predictive_validation_label,
+                                         terminal_basis,
                                          TERMINAL_EXCLUSION_REASON)
 
 # ────────────────────────────────────────────────────────────────────────
@@ -60,7 +67,21 @@ DEFAULT_DB = Path(__file__).resolve().parent.parent / "blm_pokerbet.db"
 STATE_FILE = Path(__file__).resolve().parent / "state" / "collector_state.json"
 
 # A game is considered LIVE if its latest snapshot is fresher than this.
+# Freshness is NECESSARY but NEVER SUFFICIENT — see _live_state.
 LIVE_AGE_S = 15 * 60
+
+# ── LIVE-state (display) vocabulary ─────────────────────────────────────
+# The ONLY statuses the platform treats as in-progress.  The collector's
+# authoritative vocabulary is live | halftime | ended (see
+# PokerBetCollector._infer_status), plus the provider's in-play variants.
+# The test is an ALLOW-LIST so it stays total over the provider
+# vocabulary: a scheduled / not-started / postponed / cancelled / finished
+# game carries a status that is not listed here and can therefore never be
+# presented as live, whatever an old observation of it happens to look
+# like.  Half-time is deliberately included: the collector models it as a
+# distinct in-progress state, and terminal_basis does not treat it as an
+# end-of-game condition.
+LIVE_STATUSES = ("live", "halftime", "in_progress", "in-play", "inplay")
 
 # ── Operational ALERT gate ──────────────────────────────────────────────
 # The display's LIVE window (LIVE_AGE_S) is deliberately loose — it keeps a
@@ -794,6 +815,11 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     # projector block and the alert gate, so both read one observation.
     proj_row = _pace_projector_for(game["source_game_id"])
 
+    # LIVE-state: the SINGLE authoritative determination (status vocabulary
+    # + non-terminal per-frame game state + freshness).  Freshness alone
+    # used to decide this, which put finished games on the live surface.
+    live_state = _live_state(game, latest, proj_row, now, age)
+
     detail = {
         "game_id": game["source_game_id"],
         "game_db_id": game["id"],
@@ -810,7 +836,8 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "region": game.get("region") or "",
         "sport": game.get("sport") or "basketball",
         "status": game.get("status") or "live",
-        "live": bool(age is not None and age <= LIVE_AGE_S),
+        "live": live_state["live"],
+        "live_reason": live_state["reason"],
         "quality_status": (quality or {}).get("status") or "OK",
         "quality_reason": (quality or {}).get("reason") or None,
         "home_team": game["home_team"],
@@ -896,7 +923,7 @@ def _pace_projector_for(source_game_id: str) -> Optional[dict]:
         if not clean_path.exists():
             return None
         return PaceProjector().latest_for_game(
-            CleanMetricsStore(clean_path), source_game_id)
+            clean_store_for(clean_path), source_game_id)
     except Exception:
         return None
 
@@ -915,7 +942,43 @@ def _pace_reference(conn: sqlite3.Connection) -> dict:
         return {}
 
 
+_HCTX_CACHE: dict[str, tuple[float, dict]] = {}
+_HCTX_LOCK = threading.Lock()
+_HCTX_TTL_S = 120.0
+
+
 def _historical_context_for(source_game_id: str) -> dict:
+    """``_historical_context_for_uncached`` behind a short per-process TTL
+    cache.
+
+    The uncached path recomputes both state benchmarks from the live
+    population at the observation's own cutoff (use_cache=False by
+    design, so the displayed mean never reflects a stale archive).
+    Correct, but ~2 population scans per live game: with the full Betual
+    slate live that made every /api/v4/live poll take ~45s.  The payload
+    feeds display badges only (the alert verdict comes from
+    pace_reference), so a 120s staleness window is immaterial to what
+    the dashboard renders — while collapsing dozens of scans per poll
+    into one per game per window.  Failure semantics are unchanged:
+    errors are not cached, so a transient DB failure retries next poll."""
+    now = time.monotonic()
+    with _HCTX_LOCK:
+        hit = _HCTX_CACHE.get(source_game_id)
+        if hit and now - hit[0] < _HCTX_TTL_S:
+            return hit[1]
+    ctx = _historical_context_for_uncached(source_game_id)
+    if ctx.get("status") == "matched" or ctx.get("error") is None:
+        with _HCTX_LOCK:
+            _HCTX_CACHE[source_game_id] = (now, ctx)
+            if len(_HCTX_CACHE) > 512:
+                cutoff = now - _HCTX_TTL_S
+                for k in [k for k, (t, _) in _HCTX_CACHE.items()
+                          if t < cutoff]:
+                    del _HCTX_CACHE[k]
+    return ctx
+
+
+def _historical_context_for_uncached(source_game_id: str) -> dict:
     """League/state-relative historical-context block for a game —
     failure-isolated, explicit no-context state on any gap.  Cheap: a
     benchmark-cache lookup plus two indexed queries (see
@@ -1000,6 +1063,67 @@ def _projector_live_view(row: Optional[dict]) -> Optional[dict]:
     return {k: row.get(k) for k in _PROJECTOR_LIVE_KEYS if k in row}
 
 
+def _live_state(game: dict, latest: Optional[dict], proj: Optional[dict],
+                now: datetime, age: Optional[float]) -> dict:
+    """Authoritative LIVE-state for one game — the SINGLE source of truth
+    behind the ``live`` field and every dashboard live-gate.
+
+    A game is LIVE only when ALL THREE hold:
+
+      1. its status is an explicitly supported in-progress state
+         (LIVE_STATUSES — an allow-list, so an unrecognised provider
+         state fails closed);
+      2. its own latest game state is non-terminal, decided by the SAME
+         ``terminal_basis`` authority the research boundary and the alert
+         gate use (finished label / full regulation duration / progress
+         1.0 / Q4 clock sentinel) — never by a bucket or percentage;
+      3. its latest observation is fresh (age <= LIVE_AGE_S).
+
+    Observation freshness ALONE is never sufficient.  Before the
+    2026-09-12 fix this field was ``age <= LIVE_AGE_S``, so a finished
+    virtual game whose last snapshot was still inside the 15-minute
+    window was reported as live (observed live: game 30876289,
+    status=ended, period "Finished", age 509s -> live=true, and counted
+    in ``totals.live``).
+
+    Returns ``{"live": bool, "reason": str | None}``; ``reason`` names the
+    FIRST failed condition so a hidden game stays explainable rather than
+    merely absent.
+    """
+    status = (game.get("status") or "").strip().lower()
+    if status in ENDED_STATUSES:
+        return {"live": False, "reason": "game_finished"}
+    if status not in LIVE_STATUSES:
+        return {"live": False, "reason": "unsupported_status"}
+    # Per-frame game state: the projection row is the latest authoritative
+    # frame; when it is absent (clean-metrics gap) the stored snapshot
+    # still carries the panel's period/clock, so the terminal check runs
+    # on real evidence either way.
+    src = proj or {}
+    period_label = src.get("period_label") or (
+        latest.get("period_label") if latest else None)
+    clock = src.get("clock") if src.get("clock") is not None else (
+        latest.get("clock") if latest else None)
+    pct = src.get("progress_pct")
+    basis = terminal_basis(
+        classification=game.get("classification"),
+        elapsed_minutes=src.get("elapsed_game_minutes"),
+        # progress_pct is 0..100; the terminal rule reads a 0..1 fraction
+        progress=(pct / 100.0 if pct is not None else None),
+        quarter=period_quarter(period_label),
+        clock=clock,
+        period_label=period_label,
+        game_status=game.get("status"),
+    )
+    if basis:
+        return {"live": False, "reason": "terminal_" + basis.lower()}
+    if age is None:
+        return {"live": False, "reason": "no_live_observation"}
+    if age > LIVE_AGE_S:
+        return {"live": False, "reason": "stale_observation"}
+    return {"live": True, "reason": None}
+
+
 def _alert_gate(game: dict, proj: Optional[dict], now: datetime,
                 age: Optional[float], quality: Optional[dict]) -> dict:
     """Authoritative alert eligibility for one game — the SINGLE source of
@@ -1014,8 +1138,15 @@ def _alert_gate(game: dict, proj: Optional[dict], now: datetime,
     """
     if (quality or {}).get("status") == "INVALID":
         return {"eligible": False, "reason": "invalid_quality"}
-    if (game.get("status") or "").strip().lower() in ("ended", "finished"):
+    # The status test reuses the SAME vocabulary as the display live-state
+    # gate (_live_state), so a finished game and an unsupported provider
+    # state (scheduled / not-started / postponed / cancelled) are both
+    # ineligible by ONE definition rather than two drifting ones.
+    status = (game.get("status") or "").strip().lower()
+    if status in ENDED_STATUSES:
         return {"eligible": False, "reason": "game_finished"}
+    if status not in LIVE_STATUSES:
+        return {"eligible": False, "reason": "unsupported_status"}
     if not proj:
         return {"eligible": False, "reason": "no_live_observation"}
     # the observation that carries the condition must itself be current —
@@ -1100,6 +1231,24 @@ def _load_snapshots(conn: sqlite3.Connection, source_game_id: str,
     return [dict(r) for r in conn.execute(q, params)]
 
 
+def _load_snapshot_tail(conn: sqlite3.Connection, source_game_id: str,
+                        limit: int = 25) -> list[dict]:
+    """The game's MOST RECENT post-epoch snapshots, newest first.
+
+    Settlement data (final score / terminal state) lives at the END of a
+    game's timeline, which the ascending ``_load_snapshots`` window can
+    truncate on very long games — the tail guarantees the final rows are
+    always visible to the outcome settlement.
+    """
+    q = """
+        SELECT s.* FROM snapshots s
+        JOIN games g ON g.id = s.game_id
+        WHERE g.source_game_id = ? AND s.captured_at >= ?
+        ORDER BY s.captured_at DESC LIMIT ?"""
+    return [dict(r) for r in conn.execute(
+        q, (source_game_id, CLEAN_DATA_EPOCH, limit))]
+
+
 def _load_collector_state() -> Optional[dict]:
     try:
         if STATE_FILE.exists():
@@ -1107,6 +1256,22 @@ def _load_collector_state() -> Optional[dict]:
     except Exception:
         pass
     return None
+
+
+def _canonical_display(game: dict) -> None:
+    """Betual presentation normalization at the API boundary.
+
+    The collector has normalized at ingestion since 2026-09-12; rows
+    persisted BEFORE that fix still carry the marker.  Served canonical
+    names must never show it, so Betual-origin games are normalized here
+    too — the same idempotent, classification-gated transform (raw source
+    names stay preserved in snapshots.raw_json provenance).  A no-op for
+    every other classification and for already-canonical names.
+    """
+    if (game.get("classification") or "") != "BETUAL_NBA":
+        return
+    game["home_team"] = normalize_betual_team(game.get("home_team"))
+    game["away_team"] = normalize_betual_team(game.get("away_team"))
 
 
 def _db_stats(conn: sqlite3.Connection, now: datetime) -> dict:
@@ -1190,6 +1355,67 @@ def v4_status() -> dict:
     }
 
 
+def _settled_result(source_game_id: str) -> Optional[tuple]:
+    """The scorecard's authoritative settled final for one game.
+
+    ``game_results`` rows with ``final_result_status='OK'`` are the
+    backend's game-final data of record (the store the whole settlement
+    and calibration surface reads).  Returns ``(final_total,
+    result_at)`` or None when the game has no provable settled final —
+    UNKNOWN/INVALID rows are never treated as a final.
+    """
+    try:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT final_total, result_at FROM game_results "
+                "WHERE source_game_id = ? AND final_result_status = 'OK'",
+                (source_game_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    ft = _f(row["final_total"])
+    if ft is None:
+        return None
+    return (ft, row["result_at"])
+
+
+def _settled_result_map(source_game_ids: list) -> dict:
+    """Batched ``_settled_result`` for the /live list (one query).
+
+    Only OK rows map to ``(final_total, result_at)``; games without a
+    provable settled final are simply absent.
+    """
+    ids = [i for i in source_game_ids if i]
+    if not ids:
+        return {}
+    marks = ",".join("?" for _ in ids)
+    try:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                f"SELECT source_game_id, final_total, result_at "
+                f"FROM game_results "
+                f"WHERE source_game_id IN ({marks}) "
+                f"AND final_result_status = 'OK'",
+                ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        ft = _f(r["final_total"])
+        if ft is not None:
+            out[r["source_game_id"]] = (ft, r["result_at"])
+    return out
+
+
 @router.get("/live")
 def v4_live(classification: Optional[str] = Query(None)) -> dict:
     """LIVE view — CLEAN post-epoch games ONLY (the frontend's current
@@ -1204,10 +1430,19 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
         games = [g for g in games
                  if is_clean_ts(g.get("first_seen_at"))]
         qm = _quality_map(conn, [g["source_game_id"] for g in games])
+        # authoritative settled finals (scorecard game_results, OK rows):
+        # the backend's game-final data of record for outcome settlement
+        settled = _settled_result_map([g["source_game_id"] for g in games])
+        # full post-epoch timeline per game, newest-first (settlement tail
+        # preserved even when the timeline exceeds _load_snapshots' window)
+        tails = {g["source_game_id"]:
+                 _load_snapshot_tail(conn, g["source_game_id"], limit=500)
+                 for g in games}
         out = []
         for g in games:
-            rows = _load_snapshots(conn, g["source_game_id"],
-                                   since=CLEAN_DATA_EPOCH)
+            _canonical_display(g)
+            tail = tails.get(g["source_game_id"]) or []
+            rows = list(reversed(tail))[:400]   # ascending window (latest N)
             if not rows:
                 # games table entry with no post-epoch snapshots yet —
                 # still show it (NULL fields, never legacy fallback)
@@ -1259,6 +1494,19 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 None, False, None)
             g["under_alert"] = under_alert_state(
                 None, None, None, eligible=False)
+        # ── FINAL OUTCOME settlement (sibling block, never part of the
+        # seven-field under_alert contract): per-checkpoint UNDER / OVER /
+        # PUSH against the IMMUTABLE trigger market total, computed ONLY
+        # when the game has a provable final result — an active alert has
+        # no outcome, and no pace relationship is ever read as one.
+        # Failure-isolated like every other per-game block.
+        try:
+            tail = tails.get(g["game_id"]) or []
+            g["under_alert_outcome"] = under_alert_outcome(
+                list(reversed(tail)), g.get("classification"),
+                settled=settled.get(g.get("game_id")))
+        except Exception:
+            g["under_alert_outcome"] = {"status": None}
     return {
         "generated_at": now.isoformat(),
         "data_epoch": CLEAN_DATA_EPOCH,

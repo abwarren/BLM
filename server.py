@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
 import time
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
@@ -124,8 +125,18 @@ def main() -> None:
         logger.info("collector_starting")
         collector.start()
         logger.info("scheduler_starting")
-        task = asyncio.create_task(scheduler.run())
-        app.state._scheduler_task = task
+        # The scheduler's ticks are LONG SYNCHRONOUS work (SQLite reads,
+        # json_extract scans in the historical layer).  Running that
+        # coroutine on the uvicorn event loop blocked every HTTP request
+        # for seconds per tick (dashboard polls never completing — the
+        # page froze on its initial state).  Give it its own loop/thread:
+        # the API event loop stays responsive.
+        def _run_scheduler():
+            asyncio.run(scheduler.run())
+        thread = threading.Thread(target=_run_scheduler,
+                                  name="blm-scheduler", daemon=True)
+        thread.start()
+        app.state._scheduler_thread = thread
 
         # ── Projection accuracy scorecard (persisted, quality-gated) ──
         # The scorecard run is a long synchronous SQLite workload (1-3 min
@@ -159,11 +170,10 @@ def main() -> None:
 
     @app.on_event("shutdown")
     async def stop_pipeline():
-        task = getattr(app.state, "_scheduler_task", None)
-        if task and not task.done():
-            task.cancel()
-            try: await task
-            except asyncio.CancelledError: pass
+        await scheduler.stop()
+        thread = getattr(app.state, "_scheduler_thread", None)
+        if thread and thread.is_alive():
+            thread.join(timeout=25)
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
             sct.cancel()

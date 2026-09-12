@@ -35,12 +35,34 @@ from typing import Any, Optional
 from blm_v4.classifications import (
     Classification,
     classify_competition,
+    normalize_betual_team,
     parse_event_url,
     slugify_team,
 )
 from blm_v4.event_parser import parse_event_view
 
 _SLUG_TEAM_RE = re.compile(r"^(.*?)-vs-(.*?)$")
+
+
+def _strip_virtual_slug(slug: str) -> str:
+    """Strip Betual's "Virtual" presentation marker from a game slug.
+
+    Slugs are ``slugify(home) + slugify(away)``; the marker appears as a
+    leading ``virtual-`` token (prefix rendering) and/or a trailing
+    ``-virtual`` token (suffix rendering — the current source format).
+    BLM stores canonical team names ("Lakers"), so the URL slug
+    ("lakers-virtual-miami-heat-virtual") must lose the marker tokens
+    before the containment check.  Deterministic + idempotent.
+    """
+    s = slug or ""
+    prev = None
+    while prev != s:
+        prev = s
+        if s.startswith("virtual-"):
+            s = s[len("virtual-"):]
+        if s.endswith("-virtual"):
+            s = s[: -len("-virtual")]
+    return s
 
 
 def _slug_teams(game_slug: str) -> tuple[str, str]:
@@ -50,6 +72,20 @@ def _slug_teams(game_slug: str) -> tuple[str, str]:
     # the slug must START with the slugified home and END with the slugified
     # away.  Return the raw slug for that check.
     return game_slug or "", ""
+
+
+def _team_slug_variants(name: str) -> list[str]:
+    """Slug variants of a recorded team name for marker-tolerant checks.
+
+    BLM stores canonical Betual names ("Miami Heat") while older records
+    and raw source data carry the "Virtual" marker ("Miami Heat
+    Virtual").  Both slugify to valid comparison variants; the
+    containment check accepts either so canonicalization never breaks
+    reconciliation of already-stored games.
+    """
+    raw = slugify_team(name)
+    canon = slugify_team(normalize_betual_team(name))
+    return [v for v in dict.fromkeys([raw, canon]) if v]
 
 
 def reconcile_event(
@@ -94,15 +130,21 @@ def reconcile_event(
     if not ok:
         failures.append(f"classification mismatch: url={url_cls} record={rec_cls}")
 
-    # 4. team slug agreement (containment: slug starts with home, ends with away)
-    slug = _slug_teams(tax["game_slug"])[0]
-    rec_home = slugify_team(recorded.get("home_team", ""))
-    rec_away = slugify_team(recorded.get("away_team", ""))
-    ok = bool(slug) and slug.startswith(rec_home) and slug.endswith(rec_away)
+    # 4. team slug agreement (containment: slug starts with home, ends
+    #    with away; Betual's "Virtual" marker tokens stripped from the
+    #    source slug edges, and both marker/canonical variants of the
+    #    recorded names accepted so old and new records reconcile)
+    slug = _strip_virtual_slug(_slug_teams(tax["game_slug"])[0])
+    home_variants = _team_slug_variants(recorded.get("home_team", ""))
+    away_variants = _team_slug_variants(recorded.get("away_team", ""))
+    ok = bool(slug) \
+        and any(slug.startswith(v) for v in home_variants) \
+        and any(slug.endswith(v) for v in away_variants)
     checks["teams_match_slug"] = ok
     if not ok:
         failures.append(
-            f"teams mismatch: slug={slug} record={rec_home}/{rec_away}"
+            f"teams mismatch: slug={slug} "
+            f"record={home_variants}/{away_variants}"
         )
 
     # 5. displayed scoreboard + markets present

@@ -294,6 +294,36 @@ const ALERT_HISTORY_KEY = "pz.underAlertHistory";
 const num2 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(2);
 const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
 
+/* ── FINAL OUTCOME — coloring only, never recomputation ──────────
+   The outcome arrives per alert record in the game's authoritative
+   `under_alert_outcome` block (backend-computed from the game's final
+   total vs the IMMUTABLE trigger market total — never the opening,
+   closing or any later line).  The browser maps status → class/word
+   and renders it; it does not compare lines itself.
+     under → GREEN   over → RED   push → neutral
+     no_final/unknown → no coloring and no fake verdict
+     null/absent  → still-active or pre-outcome record: existing look */
+function alertOutcomeClass(oc) {
+  if (!oc || oc.status == null) return null;
+  return oc.status === "under" ? "al-under"
+    : oc.status === "over" ? "al-over"
+    : oc.status === "push" ? "al-push"
+    : null;
+}
+function alertOutcomeLine(rec) {
+  const oc = rec.outcome;
+  if (!oc || oc.status == null) return "";
+  const words = { under: "UNDER", over: "OVER", push: "PUSH",
+    no_final: "NO FINAL", unknown: "NO FINAL" };
+  const t = (v) => (v == null || !isFinite(v)) ? "–" : v.toFixed(1);
+  const word = words[oc.status] || String(oc.status).toUpperCase();
+  const trigger = `Trigger Total: <span class="al-num">${t(oc.trigger_total)}</span>`;
+  const fin = (oc.final_total != null)
+    ? ` · Final: <span class="al-num">${t(oc.final_total)}</span>` : "";
+  return `<div class="al-line"><span class="al-outcome">${word}</span>`
+    + ` · ${trigger}${fin}</div>`;
+}
+
 function loadAlertHistory() {
   try {
     const arr = JSON.parse(localStorage.getItem(ALERT_HISTORY_KEY) || "[]");
@@ -320,6 +350,9 @@ function underAlertValues(g, ua, labels) {
     checkpoint: ua.checkpoint,
     league: (labels && labels[g.competition_slug]) || g.competition_slug || "—",
     competition_slug: g.competition_slug || null,
+    // canonical team names (already normalized upstream — never touched here)
+    home_team: g.home_team || "",
+    away_team: g.away_team || "",
     actual_pace: actual,
     required_pace: required,
     league_average_pace: avg,
@@ -328,6 +361,11 @@ function underAlertValues(g, ua, labels) {
     required_vs_league_avg_pct: avg ? (required - avg) / avg * 100 : null,
     actual_vs_required_pct: required ? (actual - required) / required * 100 : null,
     progress_pct: (g.projector || {}).progress_pct,
+    // per-checkpoint final-outcome block, consumed verbatim (see
+    // alertOutcomeClass) — null while the game has no final result
+    outcome: (g.under_alert_outcome || {}).by_checkpoint
+      ? (g.under_alert_outcome.by_checkpoint[ua.checkpoint] || null)
+      : (g.under_alert_outcome || null),
   };
 }
 
@@ -404,6 +442,33 @@ function reconcileUnderAlerts(games, labels) {
     if (trueNow.has(id)) continue;
     closeUnderAlert(id, act, held.get(act.game_id), now);
   }
+  applyFinalOutcomes(games);
+}
+
+/* FINAL OUTCOME delivery — backend-computed, trigger snapshot untouched.
+   A game's alert can resolve (condition false) while the game continues;
+   the final result only exists once the game finishes, so the outcome is
+   sealed onto the matching history record whenever the payload first
+   carries it.  Only records WITHOUT an outcome are filled — a sealed
+   verdict is never recomputed or overwritten, and the trigger snapshot
+   fields (actual/required/pace/line values) are never touched. */
+function applyFinalOutcomes(games) {
+  let changed = false;
+  for (const g of games || []) {
+    const ocBlock = g.under_alert_outcome;
+    if (!ocBlock) continue;
+    const per = ocBlock.by_checkpoint || null;
+    for (const r of UNDER_ALERTS.history) {
+      if (r.game_id !== g.game_id || r.outcome) continue;
+      const one = per ? per[r.checkpoint] : ocBlock;
+      if (!one || one.status == null) continue;
+      r.outcome = Object.assign({}, one,
+        (r.duration_ms != null && one.duration_ms == null)
+          ? { duration_ms: r.duration_ms } : {});
+      changed = true;
+    }
+  }
+  if (changed) saveAlertHistory();
 }
 
 function closeUnderAlert(id, act, game, now) {
@@ -424,6 +489,22 @@ function closeUnderAlert(id, act, game, now) {
   rec.final_actual_pace = act.actual_pace;
   rec.final_required_pace = act.required_pace;
   rec.final_pace_gap = act.pace_gap;
+  // FINAL OUTCOME — sealed once at resolution, never recomputed.  If the
+  // backend already computed the final verdict (game finished between
+  // polls) it is kept verbatim and only the local duration is filled in;
+  // a trigger-only block (game vanished before a final existed) is
+  // stamped with the local resolution time.  A null status renders as
+  // the legacy look, never as a colored outcome.
+  let oc = act.outcome || null;
+  if (oc) {
+    if (oc.final_total == null && oc.status != null) {
+      oc = Object.assign({}, oc, {
+        resolved_at: rec.resolved_at, duration_ms: rec.duration_ms });
+    } else if (oc.duration_ms == null) {
+      oc = Object.assign({}, oc, { duration_ms: rec.duration_ms });
+    }
+  }
+  rec.outcome = oc;
   saveAlertHistory();
 }
 
@@ -438,7 +519,8 @@ function activeAlertsHTML() {
   return `<ul>` + rows.map((a) => `
     <li class="al-row" data-alert-id="${esc(a.id)}">
       <div class="al-headline">🔥 UNDER ALERT — ${a.checkpoint}%</div>
-      <div class="al-ident">${alertIdent(a)}</div>
+      <div class="al-ident">${a.home_team || a.away_team
+        ? `${esc(a.home_team)} vs ${esc(a.away_team)}` : alertIdent(a)}</div>
       <div class="al-line">Actual: <span class="al-num">${num2(a.actual_pace)}</span> | Required: <span class="al-num">${num2(a.required_pace)}</span> | League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></div>
       <div class="al-line">Gap: <span class="al-neg">${num2(a.pace_gap)}</span> <span class="muted">(${num1(a.actual_vs_required_pct)}% vs required · ${num1(a.required_vs_league_avg_pct)}% vs avg)</span></div>
     </li>`).join("") + `</ul>`;
@@ -450,9 +532,12 @@ function historyRowHTML(rec) {
   // final values are shown only when they actually moved after the trigger
   const moved = !running && (rec.final_actual_pace !== rec.actual_pace
     || rec.final_required_pace !== rec.required_pace);
+  const ocClass = alertOutcomeClass(rec.outcome);
   return `
-    <li class="al-row${running ? "" : " al-resolved"}">
+    <li class="al-row${running ? "" : " al-resolved"}${ocClass ? " " + ocClass : ""}">
       <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
+      ${(rec.home_team || rec.away_team)
+        ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
       <div class="al-times">
         <span>Triggered: ${fmtTime(rec.triggered_at)}</span>
         <span>Ended: ${running ? "—" : fmtTime(rec.resolved_at)}</span>
@@ -460,6 +545,7 @@ function historyRowHTML(rec) {
       </div>
       <div class="al-line">Actual: <span class="al-num">${num2(rec.actual_pace)}</span> | Required: <span class="al-num">${num2(rec.required_pace)}</span> | Avg: <span class="al-num">${num2(rec.league_average_pace)}</span></div>
       ${moved ? `<div class="al-line">Final: <span class="al-num">${num2(rec.final_actual_pace)}</span> | <span class="al-num">${num2(rec.final_required_pace)}</span></div>` : ""}
+      ${alertOutcomeLine(rec)}
     </li>`;
 }
 
@@ -640,9 +726,12 @@ function renderStatus(payload) {
     cpill.style.color = "";
   }
   $("lastUpdatePill").textContent = `update ${fmtTime(payload.generated_at)}`;
-  const totals = payload.totals || {};
+  // live count comes from the SAME predicate the cards use, so the header
+  // can never advertise a live game the grid refuses to render (or vice
+  // versa) — the backend `totals.live` is derived identically.
+  const liveNow = (payload.games || []).filter(isActuallyLive).length;
   $("gamesMonitoredPill").textContent =
-    `${totals.live || 0} live / ${totals.total || 0} games`;
+    `${liveNow} live / ${(payload.games || []).length} games`;
 }
 
 function renderSummary(payload) {
@@ -652,9 +741,9 @@ function renderSummary(payload) {
   for (const g of games) {
     if (per[g.classification]) {
       per[g.classification].n++;
-      if (g.live) per[g.classification].live++;
+      if (isActuallyLive(g)) per[g.classification].live++;
     }
-    if (g.live) live++;
+    if (isActuallyLive(g)) live++;
     snaps += g.snapshot_count || 0;
   }
   $("sumCyber").textContent = per.CYBER_2K26.n || 0;
@@ -706,7 +795,7 @@ function gameStateHTML(g) {
 function liveMarketHTML(g) {
   const m = g.market || {};
   const p = g.projector || {};
-  const isLive = g.live === true;
+  const isLive = isActuallyLive(g);
   const line = p.live_total_line != null ? p.live_total_line : m.total_line;
   const age = p.market_age_seconds != null ? p.market_age_seconds : m.total_line_age_s;
   const mstatus = p.market_status || mktStatusWord(age, line != null);
@@ -736,7 +825,7 @@ function liveMarketHTML(g) {
 // Measurements only — observed scoring rate against the observed line.
 function paceStripHTML(g) {
   const p = g.projector;
-  if (!p || !g.live) return "";
+  if (!p || !isActuallyLive(g)) return "";
   const ap = p.actual_pts_per_min, rp = p.required_pts_per_min;
   if (ap == null && rp == null) return "";
   const gap = p.pace_gap;
@@ -759,9 +848,10 @@ function gatedNoteHTML(g) {
 
 function cardHTML(g, ui, alertEnter) {
   const invalid = g.quality_status === "INVALID";
+  const liveNow = isActuallyLive(g);
   const liveCls = invalid ? "chip-excluded"
-    : (g.live ? "chip-live" : (g.status === "ended" ? "chip-ended" : "chip-stale"));
-  const liveTxt = invalid ? "EXCLUDED" : (g.live ? "LIVE" : g.status === "ended" ? "ENDED" : "STALE");
+    : (liveNow ? "chip-live" : (g.status === "ended" ? "chip-ended" : "chip-stale"));
+  const liveTxt = invalid ? "EXCLUDED" : (liveNow ? "LIVE" : g.status === "ended" ? "ENDED" : "STALE");
   const score = (v) => (v == null ? "–" : v);
   const m = g.market || {};
   const detOpen = !!(ui && ui.detOpen);
@@ -865,7 +955,7 @@ function renderCards(payload) {
     (g) => !state.filter || g.competition_slug === state.filter,
   );
   const visible = state.hideNonLive
-    ? games.filter((g) => g.live === true && g.status !== "ended")
+    ? games.filter(isActuallyLive)
     : games;
   syncLiveToggle(games.length, visible.length);
   const seen = new Set();
@@ -1018,7 +1108,7 @@ function signedNum(v, d = 2) {
 // never escalates past "strong"; the modal re-evaluates with the
 // authoritative stored z from the /pace-z payload.
 function liveAlertOf(g) {
-  if (!g || g.live !== true || g.quality_status === "INVALID") return null;
+  if (!g || !isActuallyLive(g) || g.quality_status === "INVALID") return null;
   const p = g.projector || {};
   const st = liveLineState(g);
   if (st.line == null) return null;
@@ -1126,7 +1216,7 @@ function histContextHTML(ctx) {
 // moment it ceases; z is unknown here so only base/strong can appear.
 // The pace-state (primary) level outranks the legacy pace-gap tiers.
 function histBadgeHTML(g, entered) {
-  if (!g || g.live !== true || g.quality_status === "INVALID") return "";
+  if (!g || !isActuallyLive(g) || g.quality_status === "INVALID") return "";
   const p = g.projector || {};
   const st = liveLineState(g);
   if (st.line == null) return "";                     // missing line → no alert
@@ -1168,7 +1258,7 @@ function histBadgeHTML(g, entered) {
 // progress), the canonical competition, the matched level's fixed archive
 // statistics and the market freshness marker.  UNDER only.
 function histPanelHTML(g) {
-  if (!g || g.live !== true || g.quality_status === "INVALID") return "";
+  if (!g || !isActuallyLive(g) || g.quality_status === "INVALID") return "";
   const p = g.projector || {};
   const st = liveLineState(g);
   if (st.line == null) return "";                     // missing line → no alert
@@ -1273,7 +1363,7 @@ function refreshHistAlert(g) {
 // no mature own-league/state population exists (never a fallback, never
 // a hidden game).  Pure presentation of the authoritative payload.
 function noContextPanelHTML(g) {
-  if (!g || g.live !== true || g.quality_status === "INVALID") return "";
+  if (!g || !isActuallyLive(g) || g.quality_status === "INVALID") return "";
   const ctx = g.historical_context;
   if (!ctx || ctx.status !== "no_mature_historical_context") return "";
   if (ctx.reason === "below_analytical_eligibility") return ""; // <2.5 min: quiet, excluded
@@ -1295,7 +1385,7 @@ function renderModal(g) {
   const invalid = g.quality_status === "INVALID";
   if (state.modalGapText === undefined) state.modalGapText = null;
   const full = fullMin(g);
-  const isLive = g.live === true;
+  const isLive = isActuallyLive(g);
   const chartsOpen = !prefGet(PREF.CHARTS, false);
   const detailsOpen = !prefGet(PREF.GAME_DETAILS, true);
   // Observed market line + freshness (clean metrics row preferred,

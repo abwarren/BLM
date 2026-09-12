@@ -72,6 +72,15 @@ CREATE INDEX IF NOT EXISTS idx_sv2_game_ts
 CREATE INDEX IF NOT EXISTS idx_sv2_game_id
     ON snapshots_v2(game_id);
 
+-- Historical league scans extract the league from data_json on every
+-- profile refresh; the expression index turns those full-table
+-- json_extract scans into index lookups.
+CREATE INDEX IF NOT EXISTS idx_sv2_league
+    ON snapshots_v2 (json_extract(data_json, '$.league'));
+
+CREATE INDEX IF NOT EXISTS idx_sv2_metadata_league
+    ON snapshots_v2 (json_extract(data_json, '$.metadata.league'));
+
 CREATE TABLE IF NOT EXISTS line_analysis (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     game_id         TEXT    NOT NULL,

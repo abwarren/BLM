@@ -78,6 +78,11 @@ _Q4_OVER_CLOCKS = ("00:00", "0:00", "21:00")
 _ENDED_STATUSES = ("ended", "finished", "full time", "ft", "complete",
                    "completed")
 
+# Public: the terminal-status vocabulary, exposed so the API live-state
+# gate tests "is this game over?" against ONE definition (the private
+# alias above keeps this module's existing call sites unchanged).
+ENDED_STATUSES: tuple[str, ...] = _ENDED_STATUSES
+
 
 def _finished_label(period_label: Optional[str]) -> bool:
     p = (period_label or "").lower()

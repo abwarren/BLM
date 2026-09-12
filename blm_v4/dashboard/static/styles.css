@@ -452,3 +452,19 @@ details > summary::marker { content: ""; }
 .al-times { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted, #94a3b8); font-size: 12px; }
 .al-times span { font-variant-numeric: tabular-nums; }
 .al-running { color: #f59e0b; }
+
+/* ── UNDER ALERT HISTORY — final-outcome coloring ─────────────
+   GREEN = successful UNDER (final total below the trigger line),
+   RED   = OVER, neutral = PUSH, active = the existing amber row.
+   The class lands on the whole history row so the outcome is
+   unmistakable at a glance; the badge colors to match. */
+.al-row.al-under { border-left-color: #22c55e; background: rgba(34, 197, 94, .10); }
+.al-row.al-under .al-headline { color: #22c55e; }
+.al-row.al-over { border-left-color: #ef4444; background: rgba(239, 68, 68, .10); }
+.al-row.al-over .al-headline { color: #ef4444; }
+.al-row.al-push { border-left-color: rgba(148, 163, 184, .8); background: rgba(148, 163, 184, .08); }
+.al-row.al-push .al-headline { color: var(--muted, #94a3b8); }
+.al-outcome { font-weight: 700; letter-spacing: .03em; }
+.al-under .al-outcome { color: #22c55e; }
+.al-over .al-outcome { color: #ef4444; }
+.al-push .al-outcome { color: var(--muted, #94a3b8); }

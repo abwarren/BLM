@@ -96,6 +96,11 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_game_ts
     ON snapshots(game_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_games_class
     ON games(classification);
+-- API joins resolve games by source identity on every /api/v4/* request
+-- (_load_snapshots: snapshots.game_id -> games.id via games.source_game_id);
+-- without this index SQLite scans the whole games table per game.
+CREATE INDEX IF NOT EXISTS idx_games_source
+    ON games(source_game_id);
 
 -- Virtual-replay split audit: positive evidence for EVERY instance split.
 -- Each row records the exact observation that triggered it (path + signal)

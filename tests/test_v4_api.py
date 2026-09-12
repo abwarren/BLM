@@ -165,7 +165,11 @@ def test_dashboard_live_only_toggle_present(client):
     js = client.get("/static/dashboard.js").text
     assert "hideNonLive" in js
     assert "SHOWING LIVE" in js
-    assert "g.status !== \"ended\"" in js
+    # The filter is the SINGLE live predicate (isActuallyLive), which
+    # subsumes the old inline `g.live === true && g.status !== "ended"`
+    # rule: the frontend no longer carries a second, drifting definition
+    # of "live" alongside the backend's.
+    assert "games.filter(isActuallyLive)" in js
 
 
 def test_dashboard_nonlive_market_not_presented_as_current(client):
@@ -247,7 +251,9 @@ def test_live_classification_isolation(client):
             assert "Cyber" in g["home_team"]
         else:
             assert g["competition"] == "Betual NBA"
-            assert "Virtual" in g["home_team"]
+            # served canonical names never carry the Betual "Virtual"
+            # presentation marker (consolidated directive 2026-09-12 §2)
+            assert "Virtual" not in g["home_team"]
 
 
 def test_live_marks_fresh_vs_stale(client):

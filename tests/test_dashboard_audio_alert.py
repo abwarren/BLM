@@ -275,7 +275,11 @@ def test_visual_alert_untouched_and_independent(client):
 
 def test_audio_introduces_no_over_and_no_banned_vocabulary(client):
     js = _js(client)
-    assert "OVER" not in js
+    # "OVER" is reserved for the final-outcome classification of a RESOLVED
+    # history record (UNDER ALERT HISTORY — FINAL OUTCOME COLORING);
+    # no OVER-direction ALERT exists.  Guard the active-alert surface.
+    active = js[js.index("activeAlertsHTML"):js.index("historyAlertsHTML")]
+    assert "OVER" not in active
     low = js.lower()
     for banned in ("edge", "signal", "momentum", "win rate", "probab",
                    "calibrat", "forecast", "predict", "fair", "z_score",

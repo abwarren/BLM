@@ -591,7 +591,12 @@ def test_no_second_history_record_on_steady_state(client):
 
 def test_no_alert_vocabulary_regression(client):
     js = _js(client)
-    assert "OVER" not in js
+    # "OVER" appears ONLY as the final-outcome classification of a RESOLVED
+    # history record (UNDER ALERT HISTORY — FINAL OUTCOME COLORING,
+    # 2026-09-12): the browser renders the backend's verdict, it never
+    # raises an OVER-direction alert.  Guard the two surfaces separately.
+    active = js[js.index("activeAlertsHTML"):js.index("historyAlertsHTML")]
+    assert "OVER" not in active
     low = js.lower()
     for banned in ("edge", "signal", "momentum", "win rate", "probab",
                    "calibrat", "forecast", "predict", "fair", "z_score",

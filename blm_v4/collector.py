@@ -88,6 +88,7 @@ from blm_v4.classifications import (
     Classification,
     canonical_competition_name,
     classify_event_url,
+    normalize_betual_team,
     parse_event_url,
     slugify_team,
 )
@@ -348,8 +349,8 @@ def ws_matchtotal_snapshot(
         source_game_id=game.source_game_id,
         classification=game.classification,
         captured_at=obs["captured_at"],
-        home_team=game.home_team,
-        away_team=game.away_team,
+        home_team=normalize_betual_team(game.home_team),
+        away_team=normalize_betual_team(game.away_team),
         home_score=obs.get("home_score"),
         away_score=obs.get("away_score"),
         period_label=period or "",
@@ -1060,6 +1061,8 @@ class PokerBetCollector:
             cls_val = g.classification
             if cls_val not in self._tracked:
                 continue
+            g.home_team, g.away_team = PokerBetCollector._canonical_teams(
+                g.home_team, g.away_team, cls_val)
             key = f"{g.home_team}|{g.away_team}"
             if not key.strip("|") or key in self._tracked[cls_val]:
                 continue
@@ -1145,7 +1148,7 @@ class PokerBetCollector:
                         self.stats["errors"] += 1
                         self._last_error_iso = utcnow_iso()
                         logger.warning("tick db lock — skipping tick: %s", exc)
-                    except TargetClosedError:
+                    except TargetClosedError as exc:
                         # the fast page's tab/browser died (SPA crash, OOM
                         # killer).  A dead tab is a FAST-path concern only —
                         # the slow worker owns its own browser and must
@@ -1376,7 +1379,7 @@ class PokerBetCollector:
                 logger.warning("resolve: no event taxonomy after click: %s", url)
                 return False
             text = page.inner_text("body", timeout=10000)
-            home, away = self._authoritative_teams(row, tax, text)
+            home, away = self._authoritative_teams(row, tax, text, cls)
             # dedup by durable identity (restart-safe, same as before)
             with self._track_lock:
                 existing = self._find_tracked(tax["game_id"])
@@ -1565,6 +1568,14 @@ class PokerBetCollector:
             for comp in comps:
                 cls = comp.classification
                 for row in comp.games:
+                    # Canonical identity boundary: Betual rows are
+                    # normalized ONCE at discovery so the panel key, the
+                    # tracked key, the DB record and the API payload all
+                    # share the canonical name (Betual's "Virtual"
+                    # presentation marker stripped; a no-op for Cyber /
+                    # conventional names).  Idempotent.
+                    row.home_team, row.away_team = self._canonical_teams(
+                        row.home_team, row.away_team, cls.value)
                     key = f"{row.home_team}|{row.away_team}"
                     seen_keys[cls.value].add(key)
                     game = self._tracked[cls.value].get(key)
@@ -1709,7 +1720,9 @@ class PokerBetCollector:
         )
         return new_id
 
-    def _authoritative_teams(self, row: RowGame, tax: dict, text: str) -> tuple[str, str]:
+    def _authoritative_teams(self, row: RowGame, tax: dict, text: str,
+                             cls: Optional[Classification] = None
+                             ) -> tuple[str, str]:
         """Pick the true team names for the event.
 
         Priority: event-view scoreboard (displayed truth) > URL slug
@@ -1741,7 +1754,11 @@ class PokerBetCollector:
                 head = slug[: len(slug) - len(away_slug)].rstrip("-")
                 if head:
                     home = head.replace("-", " ").title()
-        return home, away
+        # Betual canonicalization boundary: authoritative persisted names
+        # never carry the "Virtual" presentation marker (Betual-origin
+        # data only).
+        return self._canonical_teams(
+            home, away, cls.value if cls is not None else None)
 
     def _build_game(
         self, cls: Classification, row: RowGame, tax: dict, url: str,
@@ -1966,8 +1983,14 @@ class PokerBetCollector:
             source_game_id=game.source_game_id,
             classification=game.classification,
             captured_at=utcnow_iso(),
-            home_team=row.home_team or game.home_team,
-            away_team=row.away_team or game.away_team,
+            home_team=(self._canonical_teams(
+                row.home_team or game.home_team,
+                row.away_team or game.away_team,
+                game.classification)[0]),
+            away_team=(self._canonical_teams(
+                row.home_team or game.home_team,
+                row.away_team or game.away_team,
+                game.classification)[1]),
             home_score=row.home_score,
             away_score=row.away_score,
             period_label=row.period_label,
@@ -2077,8 +2100,14 @@ class PokerBetCollector:
                 source_game_id=game.source_game_id,
                 classification=game.classification,
                 captured_at=utcnow_iso(),
-                home_team=parsed["home_team"] or game.home_team,
-                away_team=parsed["away_team"] or game.away_team,
+                home_team=(self._canonical_teams(
+                    parsed["home_team"] or game.home_team,
+                    parsed["away_team"] or game.away_team,
+                    game.classification)[0]),
+                away_team=(self._canonical_teams(
+                    parsed["home_team"] or game.home_team,
+                    parsed["away_team"] or game.away_team,
+                    game.classification)[1]),
                 home_score=parsed["home_score"],
                 away_score=parsed["away_score"],
                 period_label=parsed["period_label"],
@@ -2289,9 +2318,13 @@ class PokerBetCollector:
             if self._event_view_failures >= BROWSER_RELAUNCH_AFTER_EMPTY:
                 logger.warning("event-view failures %d — rotating browser",
                                self._event_view_failures)
-                self._relaunch("event-view failure storm")
+                # worker thread: rotate the WORKER'S OWN browser.  The
+                # fast-path _relaunch() drives self._pw, whose greenlet
+                # belongs to the main thread — calling it here raises
+                # greenlet.error("Cannot switch to a different thread")
+                # AND closes the fast browser on the way out.
+                self._rotate_slow_browser()
                 self._event_view_failures = 0
-                self._slow_page = None          # recreate on next guard
                 break
             gid = self._market_queue.pop(0)
             self._market_queue.append(gid)
@@ -2432,19 +2465,56 @@ class PokerBetCollector:
                     self._slow_page = None      # worker recreates it
 
     def _ensure_comp_lobby(self, page: Page, cls: Classification) -> bool:
-        """Make sure ``page`` shows a live LOBBY containing ``cls`` rows.
+        """Make sure ``page`` shows a live LOBBY containing rows for ``cls``.
 
         The SPA's event-view route hydrates only from an in-app row click
         on the matching lobby list.  A stale event page or a foreign
         competition's lobby makes every click fail — the cross-lobby
-        starvation that left whole leagues (CYBER_2K26) with zero market
-        capture for hours.  Reload the competition lobby until rows exist.
+        starvation that left whole leagues (CYBER_2K26, BETUAL_NBA) with
+        zero market capture for hours.
+
+        2026-09-12 fix (identity-resolution starvation): the old check
+        accepted ANY rendered row (``.market-game-section`` exists) and
+        only reloaded when the page had NO rows at all, so a degraded
+        session that still rendered other sports' sections passed the
+        check while the target competition's rows were missing — every
+        subsequent row click failed (measured 2026-09-12: ~23k "row not
+        found" resolve failures vs 7 successes, successful resolves
+        clustered only right after hourly browser rotations).  The check
+        now counts rows inside the section matching THIS competition and
+        re-expands/reloads until those rows actually exist.
         """
         try:
+            # Header needles are deliberately tight so neighbouring
+            # virtual sections cannot satisfy the wrong classification
+            # ("Betual England Premier League" football, "Cyber Tennis
+            # AO2" — both render under expanded Virtual/Cyber trees).
+            needles = (["cyber basketball", "2k26"]
+                       if cls is Classification.CYBER_2K26
+                       else ["betual nba"])
             for _ in range(3):
                 has_rows = page.evaluate(
-                    "() => document.querySelectorAll("
-                    "'.market-game-section').length > 0")
+                    """(needles) => {
+                        const sections = document.querySelectorAll('.sp-sub-list-bc');
+                        for (const s of sections) {
+                            const head = s.querySelector('.sp-s-l-head-bc');
+                            if (!head) continue;
+                            const titles = [...head.querySelectorAll('p.sp-s-l-h-title-bc')]
+                                .map(p => (p.textContent || '').trim().toLowerCase());
+                            const t = titles.join(' ');
+                            if (!needles.some(n => t.includes(n))) continue;
+                            const rows = [...s.querySelectorAll('.market-game-section')].filter(r => {
+                                let p = r.parentElement;
+                                while (p) {
+                                    if (p.classList && p.classList.contains('sp-sub-list-bc')) return p === s;
+                                    p = p.parentElement;
+                                }
+                                return false;
+                            });
+                            if (rows.length > 0) return rows.length;
+                        }
+                        return 0;
+                    }""", needles)
                 if has_rows:
                     return True
                 url = competition_url(cls, self.comp_ids)
@@ -2467,12 +2537,17 @@ class PokerBetCollector:
         try:
             clicked = page.evaluate(
                 """(names) => {
+                    const stripV = (s) => (s || '').trim()
+                        .replace(/^virtual\\s+/i, '')
+                        .replace(/\\s+virtual$/i, '')
+                        .replace(/\\s+/g, ' ').toLowerCase();
+                    const want = [stripV(names.home), stripV(names.away)];
                     const rows = document.querySelectorAll('.market-game-section');
                     for (const r of rows) {
                         const rnames = [...r.querySelectorAll('.market-game-team-name')]
-                            .map(n => n.textContent.trim());
-                        if (rnames.length >= 2 && rnames[0] === names.home
-                                && rnames[1] === names.away) {
+                            .map(n => stripV(n.textContent));
+                        if (rnames.length >= 2 && rnames[0] === want[0]
+                                && rnames[1] === want[1]) {
                             r.click();
                             return true;
                         }
@@ -2502,12 +2577,17 @@ class PokerBetCollector:
         try:
             clicked = page.evaluate(
                 """(names) => {
+                    const stripV = (s) => (s || '').trim()
+                        .replace(/^virtual\\s+/i, '')
+                        .replace(/\\s+virtual$/i, '')
+                        .replace(/\\s+/g, ' ').toLowerCase();
+                    const want = [stripV(names.home), stripV(names.away)];
                     const rows = document.querySelectorAll('.market-game-section');
                     for (const r of rows) {
                         const rnames = [...r.querySelectorAll('.market-game-team-name')]
-                            .map(n => n.textContent.trim());
-                        if (rnames.length >= 2 && rnames[0] === names.home
-                                && rnames[1] === names.away) {
+                            .map(n => stripV(n.textContent));
+                        if (rnames.length >= 2 && rnames[0] === want[0]
+                                && rnames[1] === want[1]) {
                             r.click();
                             return true;
                         }
@@ -2529,7 +2609,39 @@ class PokerBetCollector:
 
     @staticmethod
     def _same_team(a: Optional[str], b: Optional[str]) -> bool:
-        return (a or "").strip().casefold() == (b or "").strip().casefold()
+        """Marker-tolerant team equality.
+
+        Compares casefolded names after stripping Betual's "Virtual"
+        presentation marker from BOTH sides, so a canonical stored name
+        ("Lakers") still matches the source-rendered row ("Lakers
+        Virtual") and vice versa.  Only the COMPARISON is tolerant —
+        identity values themselves are normalized at the dedicated
+        boundaries (_canonical_teams), never rewritten here.
+        """
+        def _norm(x: Optional[str]) -> str:
+            return normalize_betual_team(x).casefold()
+        return _norm(a) == _norm(b)
+
+    @staticmethod
+    def _canonical_teams(
+        home: Optional[str], away: Optional[str],
+        classification: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Canonical (home, away) names at BLM's identity boundary.
+
+        Strips Betual's "Virtual" presentation marker from both names
+        (prefix or suffix rendering, whitespace-tolerant) — applied ONLY
+        to Betual-origin data (classification gate; a None
+        classification normalizes, matching the historical single-family
+        pipeline).  The strip is a strict no-op for names without the
+        marker — Cyber 2K26 teams end in "Cyber" and conventional teams
+        never carry it — so no arbitrary rewriting is possible.
+        Deterministic and idempotent: applying it twice equals applying
+        it once.
+        """
+        if classification is not None and classification != "BETUAL_NBA":
+            return (home or "", away or "")
+        return normalize_betual_team(home), normalize_betual_team(away)
 
     def _verified_event_view(self, game: PokerBetGame, parsed: dict) -> bool:
         """True when the parsed page is THIS game's event view.

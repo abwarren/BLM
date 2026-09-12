@@ -150,9 +150,16 @@ def test_alert_terminology_descriptive_only(client):
 
 
 def test_no_over_anywhere(client):
-    """UNDER ONLY: the word OVER must not appear; no mirrored condition."""
+    """UNDER ONLY in the ALERT layer: no mirrored alert condition.
+
+    "OVER" survives solely as the final-outcome classification of a
+    RESOLVED history record (UNDER ALERT HISTORY — FINAL OUTCOME
+    COLORING, 2026-09-12) — rendered from the backend verdict, never an
+    alert direction.  The active-alert surface must stay OVER-free.
+    """
     js = _js(client)
-    assert "OVER" not in js
+    active = js[js.index("activeAlertsHTML"):js.index("historyAlertsHTML")]
+    assert "OVER" not in active
     # the removed opposite-direction context classifier is gone
     assert "zContextBin" not in js
     assert "over-concentrated" not in js.lower()
