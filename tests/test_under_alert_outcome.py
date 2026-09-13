@@ -579,3 +579,183 @@ def test_history_survives_reload_with_outcome(tmp_path):
     rec = r["history"][0]
     assert rec["outcome"]["status"] == "under"
     assert "al-under" in r["histHTML"]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Team-name persistence — history records are SELF-CONTAINED
+# ══════════════════════════════════════════════════════════════════════
+
+def _names_run(js, tmp_path, script, game):
+    """_run with GAME pre-bound to a specific game object."""
+    global GAME
+    old = dict(GAME)
+    GAME.clear()
+    GAME.update(game)
+    try:
+        return _run(js, tmp_path, script)
+    finally:
+        GAME.clear()
+        GAME.update(old)
+
+
+def test_team_name_persistence_lifecycle(tmp_path):
+    """The full directive matrix, against the SHIPPED store."""
+    client = _client()
+    js = client.get("/static/dashboard.js").text
+    G = dict(GAME, game_id="30874038", live=True,
+             home_team="Korfez Basket", away_team="Petkim Spor KB")
+
+    # 1+2: names stored at alert creation, canonical (no Virtual suffix)
+    r = _names_run(js, tmp_path,
+                   "m.reconcileUnderAlerts([Object.assign({}, GAME)]);", G)
+    rec = r["history"][0]
+    assert rec["home_team"] == "Korfez Basket"
+    assert rec["away_team"] == "Petkim Spor KB"
+    assert "Korfez Basket vs Petkim Spor KB" in r["histHTML"]
+    assert "Virtual" not in r["histHTML"]
+
+    # 3+4: TRUE → TRUE must NOT mutate the frozen trigger snapshot names;
+    # a later poll carrying different (e.g. raw) names cannot leak in
+    r2 = _names_run(js, tmp_path, """
+      m.reconcileUnderAlerts([Object.assign({}, GAME)]);
+      m.reconcileUnderAlerts([Object.assign({}, GAME,
+        { home_team: "Korfez Basket Virtual", away_team: "Petkim Spor KB Virtual" })]);
+      null;
+    """, G)
+    rec2 = r2["history"][0]
+    assert rec2["home_team"] == "Korfez Basket"
+    assert rec2["away_team"] == "Petkim Spor KB"
+
+    # 5: TRUE → FALSE (resolution) retains the names
+    fin = dict(G, live=False, live_reason="game_finished", status="ended",
+               under_alert=dict(GAME["under_alert"], active=False),
+               under_alert_outcome={"status": "resolved", "final_total": 175,
+                 "by_checkpoint": {25: {"status": "under",
+                   "trigger_total": 180.5, "final_total": 175}}})
+    r3 = _names_run(js, tmp_path, """
+      m.reconcileUnderAlerts([Object.assign({}, GAME)]);
+      const fin = Object.assign({}, GAME, { live: false,
+        live_reason: "game_finished", status: "ended",
+        under_alert: Object.assign({}, GAME.under_alert, { active: false }),
+        under_alert_outcome: { status: "resolved", final_total: 175,
+          by_checkpoint: { 25: { status: "under", trigger_total: 180.5,
+            final_total: 175 } } } });
+      m.reconcileUnderAlerts([fin]);
+      null;
+    """, G)
+    rec3 = r3["history"][0]
+    assert rec3["resolved_at"] is not None
+    assert rec3["home_team"] == "Korfez Basket"
+    assert rec3["away_team"] == "Petkim Spor KB"
+
+    # 6: game REMOVED from /live entirely — history still self-contained
+    r4 = _names_run(js, tmp_path, """
+      m.reconcileUnderAlerts([Object.assign({}, GAME)]);
+      m.reconcileUnderAlerts([]);
+      null;
+    """, G)
+    assert r4["history"][0]["home_team"] == "Korfez Basket"
+    assert "Korfez Basket vs Petkim Spor KB" in r4["histHTML"]
+
+    # 7: reload (localStorage restoration) keeps the names
+    r5 = _names_run(js, tmp_path, """
+      m.reconcileUnderAlerts([Object.assign({}, GAME)]);
+      m.loadAlertHistory();
+      null;
+    """, G)
+    assert r5["history"][0]["home_team"] == "Korfez Basket"
+
+    # 8: multiple checkpoints each carry their own names — no lookups
+    G25 = dict(G, game_id="M1", under_alert=dict(GAME["under_alert"],
+                                                checkpoint=25))
+    G50 = dict(G, game_id="M1", under_alert=dict(GAME["under_alert"],
+                                                 checkpoint=50))
+    r6 = _names_run(js, tmp_path, """
+      m.reconcileUnderAlerts([Object.assign({}, GAME, { game_id: "M1",
+        under_alert: Object.assign({}, GAME.under_alert, { checkpoint: 25 }) })]);
+      m.reconcileUnderAlerts([Object.assign({}, GAME, { game_id: "M1",
+        under_alert: Object.assign({}, GAME.under_alert, { checkpoint: 50 }) })]);
+      null;
+    """, G)
+    recs = {rec["checkpoint"]: rec for rec in r6["history"]}
+    assert recs[25]["home_team"] == "Korfez Basket"
+    assert recs[50]["home_team"] == "Korfez Basket"
+    assert recs[25]["id"] != recs[50]["id"]
+
+
+def test_legacy_records_backfilled_once_never_fabricated(tmp_path):
+    """Old records without names are filled exactly once from the backend's
+    canonical identity for the exact game_id; a game the backend cannot
+    resolve keeps no names (Game <id> fallback); stored names are never
+    overwritten; and no Virtual-stripping hack exists in the store."""
+    client = _client()
+    js = client.get("/static/dashboard.js").text
+    G = dict(GAME, game_id="30887006", live=True,
+             home_team="Beijing Royal Fighters", away_team="Tianjin Pioneers")
+
+    # backfill fills the nameless legacy record
+    r = _names_run(js, tmp_path, """
+      m.UNDER_ALERTS.history.push({ id: "30887006#25", game_id: "30887006",
+        checkpoint: 25, triggered_at: "2026-09-12T21:00:00Z",
+        resolved_at: "2026-09-12T22:00:00Z", legacy: true });
+      m.reconcileUnderAlerts([Object.assign({}, GAME)]);
+      null;
+    """, G)
+    rec = r["history"][0]
+    assert rec["home_team"] == "Beijing Royal Fighters"
+    assert "Beijing Royal Fighters vs Tianjin Pioneers" in r["histHTML"]
+
+    # backfilled names are then frozen: a later poll cannot overwrite them
+    r2 = _names_run(js, tmp_path, """
+      m.UNDER_ALERTS.history.push({ id: "30887006#25", game_id: "30887006",
+        checkpoint: 25, home_team: "Beijing Royal Fighters",
+        away_team: "Tianjin Pioneers", triggered_at: "2026-09-12T21:00:00Z" });
+      m.reconcileUnderAlerts([Object.assign({}, GAME,
+        { home_team: "Wrong Team", away_team: "Other Team" })]);
+      null;
+    """, G)
+    assert r2["history"][0]["home_team"] == "Beijing Royal Fighters"
+
+    # a game the backend cannot resolve (absent payload) -> no fabrication
+    r3 = _names_run(js, tmp_path, """
+      m.UNDER_ALERTS.history.push({ id: "999#25", game_id: "999",
+        checkpoint: 25, triggered_at: "2026-09-12T21:00:00Z" });
+      m.reconcileUnderAlerts([]);
+      null;
+    """, G)
+    assert r3["history"][0].get("home_team") in (None, "")
+    assert "Game 999" in r3["histHTML"]
+
+    # no frontend Virtual-stripping hack anywhere in the shipped store
+    store = _block(js, STORE_BEGIN, STORE_END)
+    for banned in ('replace("Virtual"', "replace('Virtual'",
+                   "/Virtual/g", "replaceAll('Virtual'",
+                   'replaceAll("Virtual"'):
+        assert banned not in store, banned
+
+
+def test_frontend_renders_names_from_history_record_only(tmp_path):
+    """The renderer reads names from the HISTORY record itself — with the
+    live game object long gone, HOME vs AWAY still renders."""
+    client = _client()
+    js = client.get("/static/dashboard.js").text
+    G = dict(GAME, game_id="30887004", live=True,
+             home_team="Guangdong Southern Tigers",
+             away_team="Nanjing Tongxi Monkey King")
+    r = _names_run(js, tmp_path, """
+      m.reconcileUnderAlerts([Object.assign({}, GAME)]);
+      // resolve AND remove the game in the same poll: the record must
+      // already be self-contained
+      m.reconcileUnderAlerts([]);
+      null;
+    """, G)
+    rec = r["history"][0]
+    assert rec["home_team"] == "Guangdong Southern Tigers"
+    assert rec["away_team"] == "Nanjing Tongxi Monkey King"
+    assert rec["resolved_at"] is not None
+    assert "Guangdong Southern Tigers vs Nanjing Tongxi Monkey King" \
+        in r["histHTML"]
+    # the names line renders from the record — the ident line (league | Game
+    # <id>) is the existing header; the fallback "Game <id>" WITHOUT a teams
+    # line applies only to nameless legacy records (covered above)
+    assert "al-teams" in r["histHTML"]

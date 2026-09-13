@@ -442,7 +442,34 @@ function reconcileUnderAlerts(games, labels) {
     if (trueNow.has(id)) continue;
     closeUnderAlert(id, act, held.get(act.game_id), now);
   }
+  backfillTeamNames(games);
   applyFinalOutcomes(games);
+}
+
+/* LEGACY records — records created before team names were captured at
+   trigger time carry no home/away.  Names are FROZEN in the trigger
+   snapshot for every record that has them; a record WITHOUT them may be
+   filled exactly once from the backend's canonical identity for that
+   EXACT game_id (the same canonical data the live payload serves, already
+   Betual-normalized upstream).  Never guessed, never overwritten, never
+   re-derived later: once set, the record is as self-contained as any new
+   one.  A record the backend cannot safely resolve keeps no names and
+   renders the Game <id> fallback. */
+function backfillTeamNames(games) {
+  let changed = false;
+  for (const g of games || []) {
+    if (!g || !g.game_id) continue;
+    const h = g.home_team || "", a = g.away_team || "";
+    if (!h && !a) continue;
+    for (const r of UNDER_ALERTS.history) {
+      if (r.game_id !== g.game_id) continue;
+      if (r.home_team || r.away_team) continue;   // frozen — never touched
+      r.home_team = h;
+      r.away_team = a;
+      changed = true;
+    }
+  }
+  if (changed) saveAlertHistory();
 }
 
 /* FINAL OUTCOME delivery — backend-computed, trigger snapshot untouched.
