@@ -290,6 +290,13 @@ function leagueLabelsFrom(root) {
 const UNDER_ALERTS = { active: new Map(), history: [] };
 const ALERT_HISTORY_MAX = 300;
 const ALERT_HISTORY_KEY = "pz.underAlertHistory";
+/* Which quantitative predicate created a record.  Records stamped with
+   this id were triggered under the corrected condition (actual pace below
+   BOTH the market-required pace and the league average).  Records WITHOUT
+   the stamp were triggered before the 2026-09-13 correction under the
+   superseded condition and are rendered with an explicit audit marker —
+   never silently reinterpreted as validated under the current rule. */
+const ALERT_RULE_ID = "v2-actual-below-both-2026-09-13";
 
 const num2 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(2);
 const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
@@ -327,7 +334,24 @@ function alertOutcomeLine(rec) {
 function loadAlertHistory() {
   try {
     const arr = JSON.parse(localStorage.getItem(ALERT_HISTORY_KEY) || "[]");
-    UNDER_ALERTS.history = Array.isArray(arr) ? arr : [];
+    const list = Array.isArray(arr) ? arr : [];
+    // ONE trigger record per identity (game_id|checkpoint), ever — stores
+    // polluted by the pre-2026-09-13 duplicate bug are collapsed here:
+    // the EARLIEST record per id IS the original trigger; later duplicates
+    // are discarded, never re-created.
+    const first = new Map();
+    for (const r of list) {
+      const prev = first.get(r.id);
+      if (!prev || Date.parse(r.triggered_at || 0)
+        < Date.parse(prev.triggered_at || 0)) first.set(r.id, r);
+    }
+    const deduped = Array.from(first.values());
+    if (deduped.length !== list.length) {
+      try { localStorage.setItem(ALERT_HISTORY_KEY,
+        JSON.stringify(deduped.slice(-ALERT_HISTORY_MAX))); }
+      catch (_) { /* storage unavailable — the in-memory list still holds */ }
+    }
+    UNDER_ALERTS.history = deduped;
   } catch (_) { UNDER_ALERTS.history = []; }
 }
 function saveAlertHistory() {
@@ -417,16 +441,30 @@ function reconcileUnderAlerts(games, labels) {
       act.updated_at = new Date(now).toISOString();
       continue;
     }
-    // FALSE → TRUE — resume an unresolved record for this identity (a
-    // reload, or a poll that was missed), otherwise open a new one.
-    let rec = UNDER_ALERTS.history.find((r) => r.id === id && !r.resolved_at);
+    // FALSE → TRUE — ONE trigger record per identity (game_id|checkpoint),
+    // EVER.  Resume the existing record whether it is unresolved (reload,
+    // missed poll) or resolved (a transient flicker inside the same
+    // checkpoint — a gate flutter, a progress-boundary jitter — must never
+    // stack a second, third, fourth record onto the first).  Only a
+    // brand-new identity opens a record, stamped with the rule that
+    // created it.  The original trigger snapshot (triggered_at, paces,
+    // team names, rule stamp) is never rewritten by a reopen.
+    let rec = UNDER_ALERTS.history.find((r) => r.id === id);
     if (!rec) {
       rec = Object.assign({
         id, game_id: g.game_id,
         triggered_at: new Date(now).toISOString(),
         resolved_at: null, duration_ms: null, resolved_reason: null,
+        alert_rule: ALERT_RULE_ID,
       }, vals);
       UNDER_ALERTS.history.push(rec);
+      saveAlertHistory();
+    } else if (rec.resolved_at) {
+      // same identity re-firing: reopen the SAME record — the checkpoint
+      // itself never drifts, and no duplicate history is created
+      rec.resolved_at = null;
+      rec.duration_ms = null;
+      rec.resolved_reason = null;
       saveAlertHistory();
     }
     UNDER_ALERTS.active.set(id, Object.assign({
@@ -565,6 +603,8 @@ function historyRowHTML(rec) {
       <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
       ${(rec.home_team || rec.away_team)
         ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
+      ${!rec.alert_rule
+        ? `<div class="al-audit">AUDIT · triggered under the superseded condition (pre-2026-09-13) — not a validated alert under the current rule</div>` : ""}
       <div class="al-times">
         <span>Triggered: ${fmtTime(rec.triggered_at)}</span>
         <span>Ended: ${running ? "—" : fmtTime(rec.resolved_at)}</span>

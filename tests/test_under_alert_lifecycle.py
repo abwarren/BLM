@@ -213,6 +213,20 @@ def test_condition_truth_table_directive_2026_09_13():
         assert got is expected, (a, r, avg, got, expected)
 
 
+def test_condition_real_examples_cyber_kbl_2026_09_13():
+    """The live-dashboard incidents that exposed the wrong predicate:
+    three CYBER 2K26 games were ABOVE the league average (invalid Under
+    Alerts the old rule let through); the KBL game is genuinely below
+    BOTH thresholds (valid)."""
+    from blm_v4.live_analytics.under_alert import under_alert_state
+    # CYBER 30876338 — actual ABOVE the 4.46 league average: NEVER an alert
+    assert under_alert_state(5.00, 5.07, 4.46)["active"] is False
+    assert under_alert_state(5.17, 5.27, 4.46)["active"] is False
+    assert under_alert_state(5.06, 5.12, 4.46)["active"] is False
+    # KBL 30887333 — actual below BOTH: the qualifying shape
+    assert under_alert_state(3.70, 3.95, 3.89)["active"] is True
+
+
 def test_checkpoint_boundaries():
     from blm_v4.live_analytics.under_alert import checkpoint_for
     assert [checkpoint_for(p) for p in
@@ -800,53 +814,56 @@ def test_full_alert_lifecycle(client, tmp_path):
     assert st["durations"] == ["4m 13s"], st
     assert st["triggerActual"] == [3.0]
 
-    # ── a resolved identity can trigger again as a NEW record ──
+    # ── a resolved identity RE-FIRING reopens the SAME record — one record
+    # per identity, ever (no duplicate on gate flutter / boundary jitter) ──
     st = tr["poll5-re-trigger"]
-    assert st["active"] == 1 and st["history"] == 2, st
-    assert st["histIds"] == ["G1|25", "G1|25"]
-    assert st["resolved"] == [True, False]
+    assert st["active"] == 1 and st["history"] == 1, st
+    assert st["histIds"] == ["G1|25"]
+    assert st["resolved"] == [False]
     assert st["activeActual"] == [3.0]
 
     # ── phase advance resolves the old identity, opens the new one ──
     st = tr["poll6-phase-advance"]
     assert st["activeIds"] == ["G1|50"], st
-    assert st["histIds"] == ["G1|25", "G1|25", "G1|50"]
-    assert st["reasons"][1] == "checkpoint_passed", st["reasons"]
-    assert st["active"] == 1 and st["history"] == 3
+    assert st["histIds"] == ["G1|25", "G1|50"]
+    assert st["reasons"][0] == "checkpoint_passed", st["reasons"]
+    assert st["active"] == 1 and st["history"] == 2
 
     st = tr["poll7-phase-advance-75"]
     assert st["activeIds"] == ["G1|75"], st
-    assert st["reasons"][2] == "checkpoint_passed", st["reasons"]
-    assert st["history"] == 4
+    assert st["reasons"][1] == "checkpoint_passed", st["reasons"]
+    assert st["history"] == 3
 
     # ── game termination resolves active; history survives ──
     st = tr["poll8-game-ended"]
     assert st["active"] == 0, st
-    assert st["history"] == 4, st
-    assert st["reasons"][3] == "game_finished", st["reasons"]
+    assert st["history"] == 3, st
+    assert st["reasons"][2] == "game_finished", st["reasons"]
     assert all(st["resolved"])
 
     # ── a poll never erases history ──
     st = tr["poll9-empty-payload"]
-    assert st["active"] == 0 and st["history"] == 4, st
+    assert st["active"] == 0 and st["history"] == 3, st
     assert st["openRecords"] == 0
 
     # ── independent games keep independent identities ──
     st = tr["poll10-two-games"]
-    assert st["active"] == 2 and st["history"] == 6, st
+    assert st["active"] == 2 and st["history"] == 4, st
     assert sorted(st["activeIds"]) == ["G1|25", "G2|25"], st
 
     st = tr["poll11-one-removed"]
     assert st["activeIds"] == ["G2|25"], st
-    assert st["history"] == 6, st
-    assert st["reasons"][4] == "no_longer_monitored", st["reasons"]
+    assert st["history"] == 4, st
+    # G1|25 was REOPENED at poll10 (same record), so its reason updates —
+    # the duplicate-free history keeps one entry per identity
+    assert st["reasons"][0] == "no_longer_monitored", st["reasons"]
 
     # ── a live game with no reference for its competition raises nothing
     # (never a borrowed rate); the record closes as a non-TRUE condition ──
     st = tr["poll12-unknown-competition"]
     assert st["active"] == 0, st
-    assert st["history"] == 6, st          # G2|25 closed, nothing opened
-    assert st["reasons"][5] == "condition_false", st["reasons"]
+    assert st["history"] == 4, st          # G2|25 closed, nothing opened
+    assert st["reasons"][3] == "condition_false", st["reasons"]
 
 
 @node
@@ -883,3 +900,70 @@ def test_rendered_markup_matches_the_directive_shapes(client, tmp_path):
     assert "Avg: " in h
     assert "still active" in h
     assert "No active UNDER alerts" in got["emptyActive"]
+
+
+@node
+def test_same_checkpoint_never_creates_duplicate_history(client, tmp_path):
+    """Directive (2026-09-13): identity game_id|checkpoint has EXACTLY ONE
+    trigger record, EVER.  A transient flicker that resolves the record
+    must REOPEN it on the next TRUE poll — not stack a second record with a
+    new triggered_at (the 00:27:14 / 00:28:37 / 00:29:20 duplicates)."""
+    js = _js(client)
+    got = _run(js, tmp_path, """
+      (() => {
+        const G = { game_id: "30876338", competition_slug: "cyber-2k26",
+          live: true, live_reason: null, alert: { eligible: true },
+          under_alert_eligibility: { eligible: true, reason: "market_live" },
+          projector: { progress_pct: 26 },
+          under_alert: { active: true, checkpoint: 25, actual_pace: 5.15,
+            required_pace: 5.16, league_average_pace: 4.46,
+            league_reference_games: 900, pace_gap: 5.15 - 5.16 } };
+        m.reconcileUnderAlerts([G]);          // 1st (and only) trigger
+        const t0 = m.UNDER_ALERTS.history[0].triggered_at;
+        m.reconcileUnderAlerts([]);           // flicker -> record resolves
+        m.__setT(m.__getT() + 61000);         // a minute of polls passes
+        m.reconcileUnderAlerts([G]);          // re-fire -> reopen SAME record
+        m.reconcileUnderAlerts([G]);          // TRUE -> TRUE
+        const recs = m.UNDER_ALERTS.history.filter(
+          (r) => r.id === "30876338|25");
+        return { count: recs.length,
+                 sameTrigger: recs[0].triggered_at === t0,
+                 reopened: recs[0].resolved_at === null };
+      })()
+    """)
+    assert got["count"] == 1, got          # one record per identity, ever
+    assert got["sameTrigger"] is True       # original snapshot untouched
+    assert got["reopened"] is True
+
+
+@node
+def test_pre_correction_history_is_audited_not_reinterpreted(client, tmp_path):
+    """Records created before the 2026-09-13 predicate correction carry no
+    rule stamp and are rendered with an explicit AUDIT marker; new records
+    carry the corrected-rule stamp and never show it."""
+    js = _js(client)
+    got = _run(js, tmp_path, """
+      (() => {
+        // a legacy record (pre-correction shape: no alert_rule)
+        m.UNDER_ALERTS.history.push({ id: "L1|25", game_id: "L1",
+          checkpoint: 25, triggered_at: "2026-09-12T21:00:00Z",
+          resolved_at: "2026-09-12T22:00:00Z", league: "CYBER 2K26",
+          actual_pace: 5.0, required_pace: 5.07, league_average_pace: 4.46 });
+        // a fresh trigger under the corrected rule
+        m.reconcileUnderAlerts([{ game_id: "N1", live: true,
+          alert: { eligible: true },
+          under_alert: { active: true, checkpoint: 25, actual_pace: 3.7,
+            required_pace: 3.95, league_average_pace: 3.89 } }]);
+        const legacy = m.UNDER_ALERTS.history.find((r) => r.id === "L1|25");
+        const fresh = m.UNDER_ALERTS.history.find((r) => r.id === "N1|25");
+        return { legacyStamped: legacy.alert_rule || null,
+                 freshStamped: fresh.alert_rule || null,
+                 html: m.historyAlertsHTML() };
+      })()
+    """)
+    assert got["legacyStamped"] is None                 # unstamped = legacy
+    assert got["freshStamped"]                          # stamped = current rule
+    assert "AUDIT" in got["html"]
+    assert "superseded condition" in got["html"]
+    # exactly ONE audit marker (the fresh record is clean)
+    assert got["html"].count("al-audit") == 1

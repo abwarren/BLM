@@ -452,6 +452,9 @@ details > summary::marker { content: ""; }
 .al-times { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted, #94a3b8); font-size: 12px; }
 .al-times span { font-variant-numeric: tabular-nums; }
 .al-running { color: #f59e0b; }
+/* audit marker — records triggered under the superseded (pre-2026-09-13)
+   condition: visible, honest, never styled as a validated alert */
+.al-audit { color: #fbbf24; font-size: 11.5px; font-style: italic; }
 
 /* ── UNDER ALERT HISTORY — final-outcome coloring ─────────────
    GREEN = successful UNDER (final total below the trigger line),

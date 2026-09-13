@@ -381,11 +381,11 @@ def test_stale_market_lifecycle(tmp_path):
     # STALE -> LIVE  ->  active again (the authoritative condition is TRUE)
     assert got["back_active"] == 1, got
     assert got["back_shown"] is True, got
-    # the stale episode is RETAINED as resolved (never re-promoted), and the
-    # re-trigger opens its own record on top of it
-    assert got["back_hist"] == 2, got
-    assert got["back_hist0_resolved"] is True, got
-    assert got["back_hist1_open"] is True, got
+    # the stale episode REOPENS the same single record (one record per
+    # identity, ever — 2026-09-13); the episode is retained in the record's
+    # history, never duplicated as a second one
+    assert got["back_hist"] == 1, got
+    assert got["back_hist0_resolved"] is False, got
 
     # MISSING behaves the same as STALE — no active record
     assert got["missing_active"] == 0, got
