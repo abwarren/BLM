@@ -12,7 +12,11 @@ Directive (COMPLETE DIRECTIVE — LIVE MARKETS ONLY, 2026-09-12):
 
 The quantitative condition itself is NOT changed:
 
-    actual_pace < required_pace  AND  required_pace > league_average_pace
+    actual_pace < required_pace  AND  actual_pace < league_average_pace
+
+    (corrected 2026-09-13: both comparisons are against actual_pace —
+    the game must be behind BOTH the market-required pace and the
+    league-specific average)
 
 The seven-field `under_alert` contract is NOT changed.
 
@@ -46,13 +50,15 @@ def _payload() -> dict:
 
 
 def _quant(ua: dict):
-    """The quantitative condition, recomputed from the SERVED numbers only
-    — independent of the server's own `active` boolean.  None when an
-    operand is absent (i.e. nothing is claimed)."""
+    """The quantitative condition (2026-09-13: both comparisons against
+    actual_pace — behind BOTH the market-required pace and the league
+    average), recomputed from the SERVED numbers only — independent of the
+    server's own `active` boolean.  None when an operand is absent (i.e.
+    nothing is claimed)."""
     a, r, lg = ua["actual_pace"], ua["required_pace"], ua["league_average_pace"]
     if a is None or r is None or lg is None:
         return None
-    return a < r and r > lg
+    return a < r and a < lg
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -93,7 +99,7 @@ def test_eligibility_preserves_the_existing_genuine_live_reason():
 def test_ineligible_market_suppresses_an_otherwise_true_condition():
     """The gate must actually suppress: same numbers, same condition TRUE,
     only eligibility differs."""
-    args = (3.84, 5.02, 4.155, 80, 1852)   # actual < required, required > avg
+    args = (3.84, 5.02, 4.155, 80, 1852)   # actual < required, actual < avg
     assert under_alert_state(*args)["active"] is True            # un-gated
     assert under_alert_state(*args, eligible=True)["active"] is True
     assert under_alert_state(*args, eligible=False)["active"] is False

@@ -1,10 +1,15 @@
 """The actionable UNDER condition — evaluated ONCE, authoritatively.
 
     active = actual_pace < required_pace
-             AND required_pace > league_average_pace
+             AND actual_pace < league_average_pace
 
-where ``league_average_pace`` is this game's OWN competition reference
-(see :mod:`blm_v4.live_analytics.competition_pace`) — never a global rate.
+Both comparisons are against ``actual_pace``: the game must be scoring
+slower than the pace required by the live market AND slower than its own
+league-specific historical average — behind BOTH.  (Superseded condition:
+``required_pace > league_average_pace`` compared the wrong operands and
+was removed 2026-09-13.)  ``league_average_pace`` is this game's OWN
+competition reference (see :mod:`blm_v4.live_analytics.competition_pace`)
+— never a global rate.
 
 This module is the ONLY definition of that condition.  The dashboard
 renders the boolean and the numbers it is built from; it never re-derives
@@ -97,7 +102,10 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
     """The actionable UNDER state for one game.
 
     ``active`` is TRUE only when ``eligible`` AND all three numbers are
-    finite and both comparisons hold.  ``eligible`` is the market/live gate
+    finite and both comparisons hold — actual pace strictly below the
+    market-required pace AND strictly below the league-specific average
+    (equality fails: a game exactly AT either pace is not "under" it).
+    ``eligible`` is the market/live gate
     (:func:`under_alert_eligibility`) evaluated by the API: the condition
     is necessary but not sufficient, so a stale market can never leave an
     active alert standing.  The quantitative block itself is unchanged and
@@ -115,7 +123,7 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
     active = bool(eligible is True
                   and actual is not None and required is not None
                   and league is not None
-                  and actual < required and required > league)
+                  and actual < required and actual < league)
     return {
         "active": active,
         "checkpoint": checkpoint_for(progress_pct),

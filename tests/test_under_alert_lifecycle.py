@@ -4,7 +4,8 @@ Contract under test (directive ADDENDUM, sections 1-10):
 
   * TWO separate surfaces in the served HTML, in the order
     LIVE GAME BOXES -> ACTIVE UNDER ALERTS -> UNDER ALERT HISTORY
-  * condition: actual_pace < required_pace AND required_pace > league_avg
+  * condition: actual_pace < required_pace AND actual_pace < league_avg
+    (both comparisons against actual_pace — behind BOTH)
     (league-specific average, never one global number)
   * identity = game_id + checkpoint, so 25% / 50% / 75% are independent
   * lifecycle INACTIVE -> ACTIVE -> RESOLVED
@@ -172,16 +173,17 @@ def test_alert_identity_is_game_plus_checkpoint(client):
 
 
 def test_condition_is_the_directive_condition():
-    """actual < required AND required > league average — evaluated ONCE, in
-    the backend, so no surface can disagree with another."""
+    """actual < required AND actual < league average — both comparisons
+    against ACTUAL pace (behind BOTH) — evaluated ONCE, in the backend, so
+    no surface can disagree with another."""
     from blm_v4.live_analytics.under_alert import under_alert_state
     t = lambda a, r, avg: under_alert_state(a, r, avg)["active"]   # noqa: E731
     assert t(3.0, 5.0, 4.155) is True
     assert t(6.0, 5.0, 4.155) is False      # actual above required
-    assert t(3.0, 3.5, 4.155) is False      # required below the league rate
-    assert t(3.0, 5.0, 5.5) is False        # required below the league rate
+    assert t(4.0, 5.0, 3.5) is False        # actual at/above the league rate
+    assert t(4.0, 3.5, 4.5) is False        # actual above required
     assert t(5.0, 5.0, 4.155) is False      # strict: actual == required
-    assert t(3.0, 4.155, 4.155) is False    # strict: required == average
+    assert t(4.155, 5.0, 4.155) is False    # strict: actual == average
     # a missing number is never a claim
     for args in ((None, 5.0, 4.155), (3.0, None, 4.155), (3.0, 5.0, None)):
         assert t(*args) is False, args
@@ -194,6 +196,21 @@ def test_condition_is_the_directive_condition():
         "active": True, "checkpoint": 75, "actual_pace": 3.84,
         "required_pace": 5.02, "league_average_pace": 4.155,
         "league_reference_games": 1852, "pace_gap": 3.84 - 5.02}
+
+
+def test_condition_truth_table_directive_2026_09_13():
+    """The mandated truth table (actual, required, league avg -> active)."""
+    from blm_v4.live_analytics.under_alert import under_alert_state
+    table = [
+        (4.0, 5.0, 4.5, True),    # the ONLY qualifying shape: below BOTH
+        (4.0, 5.0, 3.5, False),   # actual not below the league average
+        (4.0, 3.5, 4.5, False),   # actual not below required
+        (5.0, 5.0, 4.5, False),   # equality -> false
+        (4.5, 5.0, 4.5, False),   # equality -> false
+    ]
+    for a, r, avg, expected in table:
+        got = under_alert_state(a, r, avg)["active"]
+        assert got is expected, (a, r, avg, got, expected)
 
 
 def test_checkpoint_boundaries():
@@ -292,9 +309,9 @@ def test_pace_gap_is_consistent_for_qualifying_and_non_qualifying():
 
     # every way the condition can fail, with the gap still exact
     for a, r, avg in ((6.0, 5.0, 4.155),      # actual above required
-                      (3.0, 3.5, 4.155),      # required below the league rate
+                      (4.0, 5.0, 3.5),        # actual not below the league rate
                       (5.0, 5.0, 4.155),      # strict: actual == required
-                      (3.0, 4.155, 4.155)):   # strict: required == average
+                      (4.155, 5.0, 4.155)):   # strict: actual == average
         block = under_alert_state(a, r, avg)
         assert block["active"] is False, (a, r, avg)
         assert block["pace_gap"] == a - r, (a, r, avg)
