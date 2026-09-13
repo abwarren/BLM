@@ -500,3 +500,26 @@ details > summary::marker { content: ""; }
 .al-row.al-over .al-result { color: #ef4444; }
 .al-row.al-push .al-result { color: var(--muted, #94a3b8); }
 .al-line .al-pending { color: var(--muted, #94a3b8); font-weight: 700; letter-spacing: .03em; }
+
+/* ── FINAL RESULT on the game card (directive EVERY ENDED GAME ONCE
+   RESULTED) — the settled result of an ENDED game, shown whether or not the
+   game ever raised an alert.  The same verdict palette as the alert rows
+   (UNDER green / OVER red / PUSH neutral), so the card and the alert panels
+   read identically, plus a matching accent down the card's left edge. */
+.card-result {
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  margin: 6px 10px 2px; padding: 5px 9px; border-radius: 7px;
+  background: var(--panel2, #0d1420); border: 1px solid var(--border, #1e2a3a);
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .04em;
+}
+.card-result .cr-word { font-weight: 800; }
+.card-result.al-under { border-color: rgba(34, 197, 94, .45); }
+.card-result.al-under .cr-word { color: #22c55e; }
+.card-result.al-over { border-color: rgba(239, 68, 68, .45); }
+.card-result.al-over .cr-word { color: #ef4444; }
+.card-result.al-push { border-color: var(--border2, #26374d); }
+.card-result.al-push .cr-word { color: var(--muted, #94a3b8); }
+/* the settled accent on the card itself — a 3px verdict stripe */
+.card.card-result-under { border-left: 3px solid #22c55e; }
+.card.card-result-over { border-left: 3px solid #ef4444; }
+.card.card-result-push { border-left: 3px solid var(--muted, #94a3b8); }

@@ -51,7 +51,8 @@ from blm_v4.live_analytics.under_alert import (
     under_alert_eligibility,
     under_alert_state,
 )
-from blm_v4.live_analytics.under_outcome import (trigger_observation,
+from blm_v4.live_analytics.under_outcome import (outcome_status,
+                                                 trigger_observation,
                                                  under_alert_outcome)
 from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
                                opening_snapshot, period_quarter, project)
@@ -1530,6 +1531,48 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 None, False, None)
             g["under_alert"] = under_alert_state(
                 None, None, None, eligible=False)
+        # ── FINAL RESULT STATE (directive EVERY ENDED GAME ONCE RESULTED,
+        # 2026-09-13): how an ENDED game is coloured once its authoritative
+        # final is known.  Deliberately SEPARATE from the live alert above —
+        # the alert decides whether the game currently qualifies for a
+        # trading alert; this decides the game's settled result, and the
+        # alert state must never gate whether a result colour exists.
+        #
+        # The final is the SAME authoritative value the settlement used
+        # (``under_alert_outcome.final_total`` — the scorecard's
+        # ``game_results`` OK row when one exists, else the terminal
+        # observation), and the line is the SAME frozen trigger line the
+        # alert would have fired against (``under_alert.trigger_line`` — the
+        # market total in force at the game's checkpoint).  Only when no
+        # trigger line is provable does it fall back to the market's
+        # authoritative final line (``market.closing_line``), the line the
+        # existing result/outcome system grades a game against.  So no new
+        # betting interpretation is introduced: ONE comparison (final vs
+        # line), reusing the existing authorities.  ``status`` is None until a
+        # final exists, so an unfinished game is never coloured.
+        try:
+            oc = g.get("under_alert_outcome") or {}
+            final = oc.get("final_total")
+            line = (g.get("under_alert") or {}).get("trigger_line")
+            line_source = "trigger" if line is not None else None
+            if line is None:
+                line = (g.get("market") or {}).get("closing_line")
+                line_source = "closing" if line is not None else None
+            g["final_result"] = {
+                "status": outcome_status(line, final),
+                "final_total": final,
+                "line": line,
+                "line_source": line_source,
+                "final_source": oc.get("final_source"),
+                "authoritative": bool(oc.get("authoritative")),
+                "resolved_at": oc.get("resolved_at"),
+            }
+        except Exception:
+            g["final_result"] = {
+                "status": None, "final_total": None, "line": None,
+                "line_source": None, "final_source": None,
+                "authoritative": False, "resolved_at": None}
+
     return {
         "generated_at": now.isoformat(),
         "data_epoch": CLEAN_DATA_EPOCH,

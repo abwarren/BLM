@@ -315,12 +315,26 @@ const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
      under → GREEN   over → RED   push → neutral
      no_final/unknown → no coloring and no fake verdict
      null/absent  → still-active or pre-outcome record: existing look */
+/* THE single result-status → colour-class mapping.  Every surface that
+   colours a settled result — the ACTIVE alert row, the RESULTED ALERTS row
+   and the game card's FINAL RESULT — resolves its class through here, so no
+   two components can disagree about what colour a status is.  The status
+   itself is always the backend's (never re-derived in the browser):
+     under → GREEN   over → RED   push → neutral
+     anything else (no_final / unknown / null) → no colour, no fake verdict */
+function resultColorClass(status) {
+  return status === "under" ? "al-under"
+    : status === "over" ? "al-over"
+    : status === "push" ? "al-push"
+    : null;
+}
+
+/* An alert record's settled outcome → class.  Thin wrapper over the ONE
+   mapping above (kept as a named function because alert surfaces read the
+   status off the record's `outcome` object). */
 function alertOutcomeClass(oc) {
   if (!oc || oc.status == null) return null;
-  return oc.status === "under" ? "al-under"
-    : oc.status === "over" ? "al-over"
-    : oc.status === "push" ? "al-push"
-    : null;
+  return resultColorClass(oc.status);
 }
 /* The result vocabulary — ONE map, shared by the history outcome line and
    the active-alert result line, so both surfaces word a verdict the same
@@ -1222,6 +1236,42 @@ function paceStripHTML(g) {
   </div>`;
 }
 
+// FINAL RESULT — the settled result of an ENDED game, shown on its own card.
+// DELIBERATELY independent of under_alert.active: the live alert decides
+// whether a game currently qualifies for a trading alert, this shows how the
+// game actually finished.  Rendered only once the backend has established a
+// final (`final_result.status` — the same final-vs-line comparison the
+// settlement uses), so an unfinished game is never coloured and an ended
+// game with a valid final is never left uncoloured.  The status is consumed
+// verbatim; the word comes from the SAME vocabulary map as the alert
+// surfaces and the colour from the SAME resultColorClass mapping, so the
+// card cannot disagree with the alert panels about a verdict.
+function finalResultHTML(g) {
+  const fr = g && g.final_result;
+  if (!fr || fr.status == null) return "";
+  const cls = resultColorClass(fr.status);
+  if (!cls) return "";
+  const word = ALERT_RESULT_WORDS[fr.status] || String(fr.status).toUpperCase();
+  const vs = (fr.line != null)
+    ? ` <span class="muted">· final ${num1(fr.final_total)} vs line ${num1(fr.line)}</span>`
+    : ` <span class="muted">· final ${num1(fr.final_total)}</span>`;
+  const prov = fr.authoritative ? "settled"
+    : (fr.final_source === "observation" ? "from final observation" : "");
+  return `<div class="card-result ${cls}">
+      <span class="cr-word">RESULT ${word}</span>${vs}${prov
+      ? ` <span class="cr-prov muted">· ${prov}</span>` : ""}
+    </div>`;
+}
+
+/* The card ELEMENT's own result class — a coloured accent for a settled
+   game, removed the moment the game has no settled result (never a stale
+   colour).  '' when there is nothing to colour. */
+function finalResultCardClass(g) {
+  const fr = g && g.final_result;
+  const cls = (fr && fr.status != null) ? resultColorClass(fr.status) : null;
+  return cls ? cls.replace("al-", "card-result-") : "";
+}
+
 // Analytically INVALID games: the backend quality gate excluded them from
 // every aggregate.  The card marks them EXCLUDED (data-quality state).
 function gatedNoteHTML(g) {
@@ -1254,6 +1304,7 @@ function cardHTML(g, ui, alertEnter) {
         <div class="team-score away">${score(g.away_score)}</div></div>
     </div>
     ${gameStateHTML(g)}
+    ${finalResultHTML(g)}
     ${paceStripHTML(g)}
     ${liveMarketHTML(g)}
     ${histBadgeHTML(g, alertEnter || null)}
@@ -1375,6 +1426,13 @@ function renderCards(payload) {
       card.el.classList.add("flash");
     }
     card.lastScore = nowScore;
+    // the card ELEMENT carries the settled result's accent class — applied
+    // for an ended+settled game, removed otherwise (never a stale colour)
+    const frCls = finalResultCardClass(g);
+    for (const c of ["card-result-under", "card-result-over",
+                     "card-result-push"]) {
+      card.el.classList.toggle(c, c === frCls);
+    }
     // historical-condition entry tracking: pulse ONLY on level entry /
     // escalation (null→base→strong), never on steady 5s refreshes and
     // never on downgrades (strong→base renders the weaker badge silently).
