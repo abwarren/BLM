@@ -47,10 +47,12 @@ from blm_v4.live_analytics.league import PROVIDERS
 from blm_v4.live_analytics.historical_context import (
     ANALYTICAL_MIN_REMAINING_MINUTES)
 from blm_v4.live_analytics.under_alert import (
+    checkpoint_for,
     under_alert_eligibility,
     under_alert_state,
 )
-from blm_v4.live_analytics.under_outcome import under_alert_outcome
+from blm_v4.live_analytics.under_outcome import (trigger_observation,
+                                                 under_alert_outcome)
 from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
                                opening_snapshot, period_quarter, project)
 from blm_v4.terminal_eligibility import (ENDED_STATUSES,
@@ -1463,6 +1465,26 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
     out.sort(key=lambda g: (not g["live"], -(g["age_s"] or 0)))
     for g in out:
         g["data_quality"] = CLEAN
+        # this game's observation stream, ascending — the SHARED source of
+        # both the settled outcome and the frozen trigger line, so the two
+        # can never read a different market
+        try:
+            rows_asc = list(reversed(tails.get(g["game_id"]) or []))
+        except Exception:
+            rows_asc = []
+        # ── FINAL OUTCOME settlement (sibling block, never part of the
+        # under_alert contract): per-checkpoint UNDER / OVER / PUSH against
+        # the IMMUTABLE trigger market total, computed ONLY when the game
+        # has a provable final result — an active alert has no outcome, and
+        # no pace relationship is ever read as one.  Built FIRST because it
+        # is the authority for the frozen trigger line the live alert below
+        # reports.  Failure-isolated like every other per-game block.
+        try:
+            g["under_alert_outcome"] = under_alert_outcome(
+                rows_asc, g.get("classification"),
+                settled=settled.get(g.get("game_id")))
+        except Exception:
+            g["under_alert_outcome"] = {"status": None}
         # The actionable UNDER verdict, computed HERE and consumed verbatim
         # by every surface — the browser never reconstructs the condition.
         # Failure isolated per game: an unexpected shape yields an inactive
@@ -1470,6 +1492,19 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
         try:
             proj = g.get("projector") or {}
             entry = pace_reference.get(g.get("competition_slug")) or {}
+            # The FROZEN trigger line — the market total in force when the
+            # alert's checkpoint was reached.  Read from the SAME authority
+            # the settlement above uses (trigger_observation), so the live
+            # alert and its eventual verdict can never disagree about the
+            # line, and it stays fixed when the market moves afterwards.
+            # Derived here, OUTSIDE the market gate below: the gate decides
+            # liveness and never re-selects a line.
+            cp = checkpoint_for(proj.get("progress_pct"))
+            trig = (trigger_observation(rows_asc, cp, g.get("classification"))
+                    if cp is not None else {})
+            trigger = {"trigger_line": trig.get("total_line"),
+                       "trigger_progress": trig.get("progress"),
+                       "trigger_captured_at": trig.get("captured_at")}
             # AUTHORITATIVE MARKET GATE (directive LIVE MARKETS ONLY,
             # 2026-09-12): the quantitative condition is necessary but NOT
             # sufficient.  An active alert also requires a genuinely live
@@ -1488,25 +1523,13 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
             g["under_alert"] = under_alert_state(
                 proj.get("actual_pts_per_min"), proj.get("required_pts_per_min"),
                 entry.get("avg_pace"), proj.get("progress_pct"),
-                entry.get("games"), eligible=eligibility["eligible"])
+                entry.get("games"), eligible=eligibility["eligible"],
+                **trigger)
         except Exception:
             g["under_alert_eligibility"] = under_alert_eligibility(
                 None, False, None)
             g["under_alert"] = under_alert_state(
                 None, None, None, eligible=False)
-        # ── FINAL OUTCOME settlement (sibling block, never part of the
-        # seven-field under_alert contract): per-checkpoint UNDER / OVER /
-        # PUSH against the IMMUTABLE trigger market total, computed ONLY
-        # when the game has a provable final result — an active alert has
-        # no outcome, and no pace relationship is ever read as one.
-        # Failure-isolated like every other per-game block.
-        try:
-            tail = tails.get(g["game_id"]) or []
-            g["under_alert_outcome"] = under_alert_outcome(
-                list(reversed(tail)), g.get("classification"),
-                settled=settled.get(g.get("game_id")))
-        except Exception:
-            g["under_alert_outcome"] = {"status": None}
     return {
         "generated_at": now.isoformat(),
         "data_epoch": CLEAN_DATA_EPOCH,
@@ -1520,6 +1543,58 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
             "total": len(out),
         },
     }
+
+
+@router.get("/alert-outcomes")
+def v4_alert_outcomes(
+        ids: str = Query("", description="comma-separated game ids")) -> dict:
+    """RESULTED-ALERT outcome delivery — the settled verdict for games that
+    are no longer inside the ``/live`` window.
+
+    ``/live`` serves the 100 most recent games, so an alert record whose game
+    has since dropped out of that window can never be settled from it: the
+    RESULTED ALERTS row would keep rendering with no verdict and no verdict
+    colour however the game actually finished (338 of the 400 most recent
+    finished games are already outside the window).  This route serves the
+    SAME ``under_alert_outcome`` block for an explicit set of game ids so the
+    frontend can settle those records from the one authority.
+
+    READ-ONLY and settlement-free: it republishes nothing the ``/live`` route
+    does not already publish — the same per-game block, built by the same
+    function from the same stored observations and the same settled
+    ``game_results`` rows.  No verdict is recomputed here that ``/live`` would
+    not compute identically; this only delivers it past the live window.
+    """
+    wanted = list(dict.fromkeys(i.strip() for i in (ids or "").split(",")
+                                if i.strip()))
+    # bound the fan-out: /live itself serves 100 games, so a request asking
+    # for more is clamped rather than allowed to force an unbounded scan
+    wanted = wanted[:200]
+    if not wanted:
+        return {"outcomes": {}}
+    conn = _connect()
+    try:
+        marks = ",".join("?" for _ in wanted)
+        meta = {r["source_game_id"]: r["classification"] for r in conn.execute(
+            f"SELECT source_game_id, classification FROM games "
+            f"WHERE source_game_id IN ({marks})", wanted)}
+        settled = _settled_result_map([i for i in wanted if i in meta])
+        outcomes: dict = {}
+        for gid in wanted:
+            cls = meta.get(gid)
+            if cls is None:
+                continue        # unknown game — no block is invented for it
+            try:
+                rows = list(reversed(_load_snapshot_tail(conn, gid, limit=500)))
+                outcomes[gid] = under_alert_outcome(rows, cls,
+                                                    settled=settled.get(gid))
+            except Exception:
+                # failure-isolated exactly like /live: one unreadable game
+                # yields no block rather than breaking the batch
+                continue
+    finally:
+        conn.close()
+    return {"outcomes": outcomes}
 
 
 @router.get("/games")

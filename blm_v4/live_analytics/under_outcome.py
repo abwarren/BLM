@@ -71,23 +71,31 @@ def _terminal_row(row: dict, classification: Optional[str]) -> bool:
         game_status=row.get("game_status"))
 
 
-def trigger_market_total(rows: list[dict], checkpoint: int,
-                         classification: Optional[str] = None
-                         ) -> Optional[float]:
-    """The live market total the game carried when it REACHED ``checkpoint``.
+def trigger_observation(rows: list[dict], checkpoint: int,
+                        classification: Optional[str] = None) -> dict:
+    """The observation that REACHED ``checkpoint`` — the authoritative
+    triggering observation the live alert and the settlement BOTH read.
 
     ``rows`` is the game's snapshot list ascending (the same rows the
     projection consumed).  The checkpoint is reached at the FIRST
     observation whose game progress >= checkpoint/100 — phase-based
-    attribution, mirroring the alert layer — so the settled line is the
-    line the alert fired against.  The market total persists between
-    captures (the bookmaker line does not vanish between event-view
-    visits), so the line in force at the boundary is the most recent
-    line OBSERVED AT OR BEFORE it — exactly the value ``market.total_line``
-    (and the WS fallback) supplied the alert.  A later line is never
-    used: nothing captured after the boundary can leak in.  If no line
-    had been observed by the boundary, the trigger is unprovable and
-    stays None — never fabricated, never replaced by the closing line.
+    attribution, mirroring the alert layer.
+
+    Returns ``{"total_line", "progress", "captured_at"}``:
+
+      * ``total_line`` — the live market O/U line in force at the boundary:
+        the most recent line OBSERVED AT OR BEFORE it (the bookmaker line
+        persists between captures), never the opening line, a later live
+        line, the closing line or any reconstructed value.  ``None`` when no
+        line had been observed by the boundary — the trigger is then
+        unprovable, never fabricated.
+      * ``progress`` — that boundary observation's own progress (0..1).
+      * ``captured_at`` — when that boundary observation was captured.
+
+    This is the ONE definition of the frozen trigger line: the live alert's
+    ``under_alert.trigger_line`` and the settled verdict's
+    ``by_checkpoint[cp].trigger_total`` are the same value from here, so the
+    line on screen and the verdict behind it can never disagree.
     """
     target = checkpoint / 100.0
     last_line: Optional[float] = None
@@ -98,8 +106,18 @@ def trigger_market_total(rows: list[dict], checkpoint: int,
         progress = _row_progress(row, classification)
         if progress is None or progress < target:
             continue
-        return last_line
-    return None
+        return {"total_line": last_line, "progress": progress,
+                "captured_at": row.get("captured_at")}
+    return {"total_line": None, "progress": None, "captured_at": None}
+
+
+def trigger_market_total(rows: list[dict], checkpoint: int,
+                         classification: Optional[str] = None
+                         ) -> Optional[float]:
+    """The live market total the game carried when it REACHED ``checkpoint``
+    — the ``total_line`` of :func:`trigger_observation`.  A later line is
+    never used: nothing captured after the boundary can leak in."""
+    return trigger_observation(rows, checkpoint, classification)["total_line"]
 
 
 def final_total_for(rows: list[dict],
@@ -173,9 +191,29 @@ def under_alert_outcome(rows: list[dict],
     total is not provable (game still live, market not captured at the
     boundary) — an honest gap, never a guessed verdict.  Computed only
     from stored data; the browser never re-derives any of it.
+
+    PROVENANCE (directive RESULTED ALERTS — CONTROLLED FINAL-RESULT
+    CORRECTION, 2026-09-13).  The block carries the authority of its own
+    final so a settlement can be told apart from a correction::
+
+        final_source   "settled"      — the game-final record of record
+                       "observation"  — the game's own terminal row
+                       None           — no provable final
+        authoritative  final_source == "settled"
+
+    Only ``authoritative`` authorises the controlled correction path
+    downstream (a revised final in ``game_results`` after an alert has
+    already settled).  A verdict derived from a terminal OBSERVATION is
+    not a verified final and can never revise a settlement, however the
+    observations move.  Provenance describes the FINAL, not the line, so
+    it sits at the top level and leaves the per-checkpoint contract (and
+    with it the immutable trigger line) exactly as it was.
     """
     final = final_total_for(rows, classification, settled)
     resolved_at = resolved_at_for(rows, classification, settled)
+    authoritative = settled is not None and final is not None
+    final_source = ("settled" if authoritative
+                    else ("observation" if final is not None else None))
     by_checkpoint = {}
     for cp in CHECKPOINTS:
         trig = trigger_market_total(rows, cp, classification)
@@ -189,5 +227,7 @@ def under_alert_outcome(rows: list[dict],
         "status": "resolved" if final is not None else "pending",
         "final_total": final,
         "resolved_at": resolved_at,
+        "final_source": final_source,
+        "authoritative": authoritative,
         "by_checkpoint": by_checkpoint,
     }

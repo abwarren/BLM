@@ -309,7 +309,7 @@ def test_api_serves_outcome_block(store):
     assert bc["50"]["trigger_total"] == 176.5
     assert bc["75"]["trigger_total"] == 174.5
     assert bc["75"]["status"] == "over"
-    # the seven-field under_alert contract is untouched
+    # the under_alert contract (incl. the trigger-line fields) is untouched
     assert set(g["under_alert"].keys()) >= {"active", "checkpoint",
                                             "actual_pace", "required_pace",
                                             "league_average_pace", "pace_gap"}

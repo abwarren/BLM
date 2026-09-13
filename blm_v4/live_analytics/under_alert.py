@@ -1,26 +1,41 @@
 """The actionable UNDER condition — evaluated ONCE, authoritatively.
 
-    active = actual_pace < required_pace
-             AND actual_pace < league_average_pace
+Progress-tiered policy (directive 2026-09-13)::
 
-Both comparisons are against ``actual_pace``: the game must be scoring
-slower than the pace required by the live market AND slower than its own
-league-specific historical average — behind BOTH.  (Superseded condition:
-``required_pace > league_average_pace`` compared the wrong operands and
-was removed 2026-09-13.)  ``league_average_pace`` is this game's OWN
-competition reference (see :mod:`blm_v4.live_analytics.competition_pace`)
-— never a global rate.
+    progress < 50%          -> NO trading alert
+    50% <= progress < 75%    -> CONFIRMED UNDER ALERT
+        required_pace > league_average_pace * 1.04   (strict, RELATIVE margin)
+        AND actual_pace < league_average_pace        (strict)
+    progress >= 75%         -> LATE UNDER ALERT
+        required_pace > league_average_pace * 1.04   (strict)
+        (the actual<average leg is DROPPED — the historical sweep showed it
+         slightly diluted the late-game signal)
 
-This module is the ONLY definition of that condition.  The dashboard
-renders the boolean and the numbers it is built from; it never re-derives
-them, so no two surfaces can disagree about the same opportunity.
+Below 50% the historical alert population was a coin flip (48.51% UNDER),
+so no trading alert is raised there.  The 4% margin is RELATIVE to the
+league average, never an absolute pts/min offset, and every comparison is
+STRICT.
 
-Distinct from the historical/context indicator: the in-card HISTORICAL
-context badge compares each pace against the mean of the game's
-(competition, period, state) bucket on a mature benchmark.  That answers
-"is this game-state historically an UNDER state"; this answers "is this a
-live UNDER opportunity right now".  They are deliberately different
-questions and are labelled differently in the UI.
+``league_average_pace`` is this game's OWN competition reference (see
+:mod:`blm_v4.live_analytics.competition_pace`) — never a global rate.
+
+Non-quantitative gates are unchanged.  The caller passes ``eligible`` from
+the live-market eligibility gate (:func:`under_alert_eligibility`) plus the
+upstream alert gate (genuinely-live, fresh observation, non-terminal,
+>= min remaining minutes, valid quality) — the quantitative condition is
+necessary but NOT sufficient.  Any missing / non-finite input, or a missing
+``eligible``, yields active=False (fail closed).
+
+This module is the ONLY definition of the condition.  The dashboard renders
+the boolean and the numbers it is built from; it never re-derives them, so
+no two surfaces can disagree about the same opportunity.
+
+The served block ALSO carries the FROZEN ``trigger_line`` (plus
+``trigger_progress`` / ``trigger_captured_at``) — the market total in force
+when the alert's checkpoint was reached — supplied by the caller from the
+same ``trigger_observation`` authority settlement reads.  It is what the
+frontend shows and what the eventual verdict is measured against; it never
+moves when the market does.
 """
 from __future__ import annotations
 
@@ -31,12 +46,15 @@ from typing import Any, Optional
 # record can never suppress a later 50% or 75% one.
 CHECKPOINTS = (25, 50, 75)
 
+# ── Progress tiers for the live trading UNDER alert (directive 2026-09-13) ──
+#: Below this progress NO trading alert is raised (no alert for < 50%).
+MID_PROGRESS_PCT = 50.0
+#: At / above this progress the actual<average leg is DROPPED (late tier).
+LATE_PROGRESS_PCT = 75.0
+#: REQUIRED must exceed the league average by this RELATIVE margin, strictly.
+REQUIRED_MARGIN = 1.04
+
 # ── Eligibility vocabulary (LIVE MARKETS ONLY directive, 2026-09-12) ──
-# The quantitative condition above is necessary but NOT sufficient: an
-# active alert also requires a genuinely live game AND a live market line.
-# A market that was live and has since gone stale must never keep
-# presenting itself as a current live opportunity, and the exclusion must
-# be EXPLICIT rather than a silent suppression.
 ELIGIBLE_MARKET_LIVE = "market_live"
 INELIGIBLE_MARKET_STALE = "market_stale"
 INELIGIBLE_MARKET_MISSING = "market_missing"
@@ -98,15 +116,27 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
                       league_average_pace: Any,
                       progress_pct: Any = None,
                       reference_games: Any = None,
-                      eligible: Any = True) -> dict:
-    """The actionable UNDER state for one game.
+                      eligible: Any = True,
+                      trigger_line: Any = None,
+                      trigger_progress: Any = None,
+                      trigger_captured_at: Any = None) -> dict:
+    """The actionable UNDER state for one game (progress-tiered).
 
-    ``active`` is TRUE only when ``eligible`` AND all three numbers are
-    finite and both comparisons hold — actual pace strictly below the
-    market-required pace AND strictly below the league-specific average
-    (equality fails: a game exactly AT either pace is not "under" it).
-    ``eligible`` is the market/live gate
-    (:func:`under_alert_eligibility`) evaluated by the API: the condition
+    ``active`` is TRUE only when ALL of the following hold:
+
+      * ``eligible`` is True (the live / market / quality gate);
+      * ``actual_pace``, ``required_pace``, ``league_average_pace`` and
+        ``progress_pct`` are all finite;
+      * ``progress_pct >= MID_PROGRESS_PCT`` (50%) — below 50% there is no
+        trading alert of any kind;
+      * ``required_pace > league_average_pace * REQUIRED_MARGIN`` (STRICT —
+        a required pace exactly at the 4%-above-average threshold does not
+        qualify);
+      * AND, in the MID tier only (``progress_pct < LATE_PROGRESS_PCT``),
+        ``actual_pace < league_average_pace`` (STRICT).  The LATE tier
+        (``progress_pct >= 75%``) DROPS this leg.
+
+    ``eligible`` is the market/live gate evaluated by the API: the condition
     is necessary but not sufficient, so a stale market can never leave an
     active alert standing.  The quantitative block itself is unchanged and
     is still served when suppressed — the reason lives in the sibling
@@ -115,18 +145,30 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
     A missing league reference yields ``active=False`` — no comparison is
     available, so nothing is claimed and no other competition's rate is
     borrowed.
+
+    ``trigger_line`` / ``trigger_progress`` / ``trigger_captured_at`` are the
+    FROZEN trigger provenance and are NOT part of the condition: the caller
+    supplies them from :func:`blm_v4.live_analytics.under_outcome.trigger_observation`
+    — the same authority settlement reads — so the live alert carries the
+    exact market total in force when its checkpoint was reached, and that
+    value never moves when the market does later.
     """
     actual = _finite(actual_pace)
     required = _finite(required_pace)
     league = _finite(league_average_pace)
     games = _finite(reference_games)
-    active = bool(eligible is True
-                  and actual is not None and required is not None
-                  and league is not None
-                  and actual < required and actual < league)
+    prog = _finite(progress_pct)
+    active = bool(
+        eligible is True
+        and actual is not None and required is not None
+        and league is not None and prog is not None
+        and prog >= MID_PROGRESS_PCT
+        and required > league * REQUIRED_MARGIN
+        and (prog >= LATE_PROGRESS_PCT or actual < league)
+    )
     return {
         "active": active,
-        "checkpoint": checkpoint_for(progress_pct),
+        "checkpoint": checkpoint_for(prog),
         "actual_pace": actual,
         "required_pace": required,
         "league_average_pace": league,
@@ -136,4 +178,12 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
         # Undefined whenever either operand is — a gap needs both numbers.
         "pace_gap": (actual - required if actual is not None
                      and required is not None else None),
+        # ── the FROZEN trigger line + provenance (see docstring).  Passed
+        #    through from the caller; never the current/opening line and
+        #    never rewritten once an alert has activated.
+        "trigger_line": _finite(trigger_line),
+        "trigger_progress": _finite(trigger_progress),
+        "trigger_captured_at": (trigger_captured_at
+                                if isinstance(trigger_captured_at, str)
+                                else None),
     }

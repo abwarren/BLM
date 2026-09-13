@@ -4,8 +4,9 @@ Contract under test (directive ADDENDUM, sections 1-10):
 
   * TWO separate surfaces in the served HTML, in the order
     LIVE GAME BOXES -> ACTIVE UNDER ALERTS -> UNDER ALERT HISTORY
-  * condition: actual_pace < required_pace AND actual_pace < league_avg
-    (both comparisons against actual_pace — behind BOTH)
+  * condition (progress-tiered, 2026-09-13): no alert below 50% progress;
+    50-74% requires REQUIRED past the league average by the 4% margin AND
+    actual below the league average; >= 75% drops the actual leg
     (league-specific average, never one global number)
   * identity = game_id + checkpoint, so 25% / 50% / 75% are independent
   * lifecycle INACTIVE -> ACTIVE -> RESOLVED
@@ -134,8 +135,11 @@ def test_two_alert_sections_exist_in_the_required_order(client):
     assert 'id="activeAlerts"' in html
     assert 'id="alertHistory"' in html
     assert "ACTIVE UNDER ALERTS" in html
-    assert "UNDER ALERT HISTORY" in html
-    # order: live game boxes -> active alerts -> alert history
+    # the history panel is the RESULTED ALERTS review surface (directive
+    # RESULTED ALERTS MUST REMAIN VISIBLE AND COLOURED, 2026-09-13): every
+    # triggered alert, kept and colour-coded by its verdict
+    assert "RESULTED ALERTS" in html
+    # order: live game boxes -> active alerts -> resulted alerts
     grid = html.index('id="grid"')
     active = html.index('id="activeAlerts"')
     hist = html.index('id="alertHistory"')
@@ -173,58 +177,86 @@ def test_alert_identity_is_game_plus_checkpoint(client):
 
 
 def test_condition_is_the_directive_condition():
-    """actual < required AND actual < league average — both comparisons
-    against ACTUAL pace (behind BOTH) — evaluated ONCE, in the backend, so
-    no surface can disagree with another."""
+    """Progress-tiered policy (directive 2026-09-13): no alert below 50%;
+    50-74% requires REQUIRED past the league average by the 4% margin AND
+    actual below the league average; >= 75% drops the actual leg.  Evaluated
+    ONCE, in the backend, so no surface can disagree with another."""
     from blm_v4.live_analytics.under_alert import under_alert_state
-    t = lambda a, r, avg: under_alert_state(a, r, avg)["active"]   # noqa: E731
-    assert t(3.0, 5.0, 4.155) is True
-    assert t(6.0, 5.0, 4.155) is False      # actual above required
-    assert t(4.0, 5.0, 3.5) is False        # actual at/above the league rate
-    assert t(4.0, 3.5, 4.5) is False        # actual above required
-    assert t(5.0, 5.0, 4.155) is False      # strict: actual == required
-    assert t(4.155, 5.0, 4.155) is False    # strict: actual == average
+    # MID tier: required 5.0 > 4.5*1.04 = 4.68 AND actual 4.0 < 4.5 -> active
+    assert under_alert_state(4.0, 5.0, 4.5, 60)["active"] is True
+    # MID tier: actual not below the league average -> no alert
+    assert under_alert_state(4.6, 5.0, 4.5, 60)["active"] is False
+    # MID tier: required exactly at the 4% threshold -> strict -> no alert
+    assert under_alert_state(4.0, 4.68, 4.5, 60)["active"] is False
+    # LATE tier: the actual<average leg is dropped
+    assert under_alert_state(6.0, 5.0, 4.5, 75)["active"] is True
+    # below 50%: no trading alert of any kind
+    assert under_alert_state(1.0, 9.0, 4.5, 49.9)["active"] is False
+    # strict: required must EXCEED the margin, not meet it
+    assert under_alert_state(3.0, 4.68, 4.5, 75)["active"] is False
     # a missing number is never a claim
-    for args in ((None, 5.0, 4.155), (3.0, None, 4.155), (3.0, 5.0, None)):
-        assert t(*args) is False, args
+    for args in ((None, 5.0, 4.5, 60), (4.0, None, 4.5, 60),
+                 (4.0, 5.0, None, 60), (4.0, 5.0, 4.5, None)):
+        assert under_alert_state(*args)["active"] is False, args
     # non-finite and booleans never activate
-    assert t(float("nan"), 5.0, 4.155) is False
-    assert t(3.0, float("inf"), 4.155) is False
-    assert t(True, 5.0, 4.155) is False
-    # the served block carries the numbers the verdict was built from
+    assert under_alert_state(float("nan"), 5.0, 4.5, 60)["active"] is False
+    assert under_alert_state(4.0, float("inf"), 4.5, 75)["active"] is False
+    assert under_alert_state(True, 5.0, 4.5, 60)["active"] is False
+    # the served block carries the numbers the verdict was built from,
+    # plus the frozen trigger-line fields (None: none was supplied here)
     assert under_alert_state(3.84, 5.02, 4.155, 80, 1852) == {
         "active": True, "checkpoint": 75, "actual_pace": 3.84,
         "required_pace": 5.02, "league_average_pace": 4.155,
-        "league_reference_games": 1852, "pace_gap": 3.84 - 5.02}
+        "league_reference_games": 1852, "pace_gap": 3.84 - 5.02,
+        "trigger_line": None, "trigger_progress": None,
+        "trigger_captured_at": None}
 
 
 def test_condition_truth_table_directive_2026_09_13():
-    """The mandated truth table (actual, required, league avg -> active)."""
+    """The progress-tiered truth table (actual, required, avg, progress)."""
     from blm_v4.live_analytics.under_alert import under_alert_state
     table = [
-        (4.0, 5.0, 4.5, True),    # the ONLY qualifying shape: below BOTH
-        (4.0, 5.0, 3.5, False),   # actual not below the league average
-        (4.0, 3.5, 4.5, False),   # actual not below required
-        (5.0, 5.0, 4.5, False),   # equality -> false
-        (4.5, 5.0, 4.5, False),   # equality -> false
+        # MID tier (50-74%): BOTH legs required
+        (4.0, 5.0, 4.5, 60, True),     # above margin AND actual below avg
+        (4.6, 5.0, 4.5, 60, False),    # actual at/above the league average
+        (4.0, 4.68, 4.5, 60, False),   # required not strictly above margin
+        (4.0, 4.69, 4.5, 60, True),    # just above the margin
+        # LATE tier (>= 75%): actual leg dropped
+        (4.0, 5.0, 4.5, 75, True),
+        (6.0, 5.0, 4.5, 75, True),     # actual above avg is IRRELEVANT late
+        (6.0, 4.68, 4.5, 75, False),   # strict margin still binds
+        # below 50%: no alert ever
+        (1.0, 9.0, 4.5, 49.9, False),
+        (1.0, 9.0, 4.5, 25, False),
+        # the tier boundary is inclusive at 50; 74.9 is still the MID tier
+        (4.0, 5.0, 4.5, 50, True),
+        (4.0, 5.0, 4.5, 74.9, True),
+        (6.0, 5.0, 4.5, 74.9, False),  # MID: actual above avg -> no alert
     ]
-    for a, r, avg, expected in table:
-        got = under_alert_state(a, r, avg)["active"]
-        assert got is expected, (a, r, avg, got, expected)
+    for a, r, avg, p, expected in table:
+        got = under_alert_state(a, r, avg, p)["active"]
+        assert got is expected, (a, r, avg, p, got, expected)
 
 
 def test_condition_real_examples_cyber_kbl_2026_09_13():
-    """The live-dashboard incidents that exposed the wrong predicate:
-    three CYBER 2K26 games were ABOVE the league average (invalid Under
-    Alerts the old rule let through); the KBL game is genuinely below
-    BOTH thresholds (valid)."""
+    """The 2026-09-13 dashboard incidents, re-evaluated under the
+    progress-tiered policy (a BEHAVIOUR CHANGE, not a bug):
+      * a game ABOVE the league average at 50-74% is NOT an alert;
+      * at 75%+ the required-above-margin test alone decides;
+      * a game whose required does NOT clear the 4% margin never alerts."""
     from blm_v4.live_analytics.under_alert import under_alert_state
-    # CYBER 30876338 — actual ABOVE the 4.46 league average: NEVER an alert
-    assert under_alert_state(5.00, 5.07, 4.46)["active"] is False
-    assert under_alert_state(5.17, 5.27, 4.46)["active"] is False
-    assert under_alert_state(5.06, 5.12, 4.46)["active"] is False
-    # KBL 30887333 — actual below BOTH: the qualifying shape
-    assert under_alert_state(3.70, 3.95, 3.89)["active"] is True
+    # CYBER 30876338 — actual ABOVE the 4.46 league average.
+    # MID tier (50-74%) -> NOT an alert (actual not below the average).
+    assert under_alert_state(5.00, 5.07, 4.46, 60)["active"] is False
+    assert under_alert_state(5.17, 5.27, 4.46, 60)["active"] is False
+    assert under_alert_state(5.06, 5.12, 4.46, 60)["active"] is False
+    # ...but at 75%+ the same numbers DO alert: required 5.07 exceeds the
+    # 4.46 * 1.04 = 4.6384 margin and the actual leg no longer applies.
+    assert under_alert_state(5.00, 5.07, 4.46, 80)["active"] is True
+    # KBL 30887333 — required 3.95 does NOT clear 3.89 * 1.04 = 4.0456, so
+    # under the new rule it is NOT an alert at any progress.
+    assert under_alert_state(3.70, 3.95, 3.89, 60)["active"] is False
+    assert under_alert_state(3.70, 3.95, 3.89, 80)["active"] is False
 
 
 def test_checkpoint_boundaries():
@@ -269,7 +301,9 @@ def test_every_game_carries_its_own_verdict():
         ua = g["under_alert"]
         assert set(ua) == {"active", "checkpoint", "actual_pace",
                            "required_pace", "league_average_pace",
-                           "league_reference_games", "pace_gap"}, ua
+                           "league_reference_games", "pace_gap",
+                           "trigger_line", "trigger_progress",
+                           "trigger_captured_at"}, ua
         # the block's league average is this game's own competition entry
         entry = ref.get(g["competition_slug"])
         if entry:
@@ -322,13 +356,14 @@ def test_pace_gap_is_consistent_for_qualifying_and_non_qualifying():
     assert qualifying["pace_gap"] < 0
 
     # every way the condition can fail, with the gap still exact
-    for a, r, avg in ((6.0, 5.0, 4.155),      # actual above required
-                      (4.0, 5.0, 3.5),        # actual not below the league rate
-                      (5.0, 5.0, 4.155),      # strict: actual == required
-                      (4.155, 5.0, 4.155)):   # strict: actual == average
-        block = under_alert_state(a, r, avg)
-        assert block["active"] is False, (a, r, avg)
-        assert block["pace_gap"] == a - r, (a, r, avg)
+    for a, r, avg, p in ((4.6, 5.0, 4.5, 60),     # MID: actual not below avg
+                         (4.0, 4.68, 4.5, 60),    # MID: required not past margin
+                         (4.0, 4.0, 4.5, 25),     # below 50%: no alert at all
+                         (4.0, 4.68, 4.5, 75),    # LATE: required not past margin
+                         (4.0, 5.0, None, 60)):   # no league reference
+        block = under_alert_state(a, r, avg, p)
+        assert block["active"] is False, (a, r, avg, p)
+        assert block["pace_gap"] == a - r, (a, r, avg, p)
 
 
 def test_pace_gap_has_no_operands_to_derive_from():
@@ -967,3 +1002,32 @@ def test_pre_correction_history_is_audited_not_reinterpreted(client, tmp_path):
     assert "superseded condition" in got["html"]
     # exactly ONE audit marker (the fresh record is clean)
     assert got["html"].count("al-audit") == 1
+
+
+@node
+def test_superseded_rule_records_are_audited_too(client, tmp_path):
+    """A record stamped by a SUPERSEDED rule (the v2 below-both rule) is
+    flagged with the SAME audit marker as an unstamped record — it is not a
+    validated alert under the current progress-tiered rule."""
+    js = _js(client)
+    got = _run(js, tmp_path, """
+      (() => {
+        m.UNDER_ALERTS.history.push({ id: "V2|50", game_id: "V2",
+          checkpoint: 50, triggered_at: "2026-09-13T10:00:00Z",
+          resolved_at: "2026-09-13T11:00:00Z", league: "NBA",
+          alert_rule: "v2-actual-below-both-2026-09-13",
+          actual_pace: 4.0, required_pace: 5.0, league_average_pace: 4.46 });
+        m.reconcileUnderAlerts([{ game_id: "C1", live: true,
+          alert: { eligible: true },
+          under_alert: { active: true, checkpoint: 50, actual_pace: 3.9,
+            required_pace: 5.0, league_average_pace: 4.46 } }]);
+        const old = m.UNDER_ALERTS.history.find((r) => r.id === "V2|50");
+        const cur = m.UNDER_ALERTS.history.find((r) => r.id === "C1|50");
+        return { oldRule: old.alert_rule, curRule: cur.alert_rule,
+                 html: m.historyAlertsHTML() };
+      })()
+    """)
+    assert got["oldRule"] == "v2-actual-below-both-2026-09-13"
+    assert got["curRule"] != got["oldRule"]      # stamped with the CURRENT rule
+    assert "AUDIT" in got["html"]
+    assert got["html"].count("al-audit") == 1    # only the superseded record

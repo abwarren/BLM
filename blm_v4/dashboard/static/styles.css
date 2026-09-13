@@ -433,10 +433,25 @@ details > summary::marker { content: ""; }
 .hc-block .al-big { color: #f59e0b; }
 .hc-block .al-line.muted { color: var(--muted); font-weight: 400; }
 
+/* ✅ AUTHORITATIVE FINAL-RESULT CORRECTION — a record whose settled final
+   the backend revised (verified game result).  Distinguished from normal
+   settlement and styled as information, never as a new alert: the verdict
+   colours (green/red/neutral) still come from the corrected status alone. */
+.al-corrected { color: #38bdf8; font-size: 11.5px; }
+.al-corrected::before { content: "✅ "; }
+
 /* ═══════════ UNDER ALERT SECTIONS — active vs history, never merged ═══════════ */
 .alerts { margin: 18px 22px 0; border: 1px solid var(--line, rgba(148, 163, 184, .25)); border-radius: 10px; background: var(--panel, rgba(15, 23, 42, .55)); }
 .alerts-head { display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line, rgba(148, 163, 184, .25)); }
 .alerts-title { font-size: 12px; font-weight: 700; letter-spacing: .14em; color: var(--muted, #94a3b8); }
+/* the RESULTED ALERTS legend — names the three verdicts in their own colours
+   so the panel is readable at a glance.  These are LABELS, not rows: they
+   reuse the verdict palette but never the row classes, so a legend can't be
+   mistaken for an alert. */
+.alerts-sub { font-size: 11.5px; letter-spacing: .02em; }
+.lg-under { color: #22c55e; font-weight: 700; }
+.lg-over { color: #ef4444; font-weight: 700; }
+.lg-push { color: var(--muted, #94a3b8); font-weight: 700; }
 .alerts-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
 .alerts-empty { color: var(--muted, #94a3b8); font-size: 13px; font-style: italic; }
 .alerts ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -471,3 +486,17 @@ details > summary::marker { content: ""; }
 .al-under .al-outcome { color: #22c55e; }
 .al-over .al-outcome { color: #ef4444; }
 .al-push .al-outcome { color: var(--muted, #94a3b8); }
+
+/* ── ACTIVE UNDER ALERTS — the TRIGGERED LINE + the RESULT state ──────
+   The live market line the alert fired against (sealed at trigger, never
+   the opening / closing / current line) is printed on its own prominent
+   line.  The result is NEUTRAL while the alert is unresolved — PENDING is
+   never coloured green or red — and becomes UNDER (green) / OVER (red) /
+   PUSH (neutral) only once the backend settles it, coloured on the word
+   AND on the value. */
+.al-trigger-line { color: var(--fg, #e2e8f0); font-weight: 700; font-size: 12px; font-variant-numeric: tabular-nums; }
+.al-line .al-result { color: var(--muted, #94a3b8); font-variant-numeric: tabular-nums; }
+.al-row.al-under .al-result { color: #22c55e; }
+.al-row.al-over .al-result { color: #ef4444; }
+.al-row.al-push .al-result { color: var(--muted, #94a3b8); }
+.al-line .al-pending { color: var(--muted, #94a3b8); font-weight: 700; letter-spacing: .03em; }

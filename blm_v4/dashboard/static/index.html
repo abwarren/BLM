@@ -69,11 +69,15 @@
     </div>
   </section>
 
-  <!-- ═══════════ UNDER ALERT HISTORY — what happened previously ═══════════ -->
+  <!-- ═══════════ RESULTED ALERTS — historical review of every trigger ═══════════ -->
   <section class="alerts" id="alertHistorySection">
     <div class="alerts-head">
-      <span class="alerts-title">UNDER ALERT HISTORY</span>
+      <span class="alerts-title">RESULTED ALERTS</span>
       <span class="muted" id="alertHistoryCount"></span>
+      <span class="muted alerts-sub">every triggered alert ·
+        <span class="lg-under">UNDER</span> /
+        <span class="lg-over">OVER</span> /
+        <span class="lg-push">PUSH</span> against its immutable triggered line</span>
     </div>
     <div class="alerts-body" id="alertHistory">
       <div class="alerts-empty">No alerts triggered</div>

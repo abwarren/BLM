@@ -10,15 +10,14 @@ Directive (COMPLETE DIRECTIVE — LIVE MARKETS ONLY, 2026-09-12):
      existing genuine-live exclusion reason), so a stale market never
      silently looks like an active live opportunity.
 
-The quantitative condition itself is NOT changed:
+The quantitative condition is the progress-tiered policy (2026-09-13):
+below 50% progress no alert; 50-74% requires REQUIRED above the
+league-specific average by the 4% margin AND actual below that average;
+>= 75% drops the actual leg.  A stale/missing market still suppresses it.
 
-    actual_pace < required_pace  AND  actual_pace < league_average_pace
-
-    (corrected 2026-09-13: both comparisons are against actual_pace —
-    the game must be behind BOTH the market-required pace and the
-    league-specific average)
-
-The seven-field `under_alert` contract is NOT changed.
+The `under_alert` contract keeps its fields and adds the frozen
+trigger-line fields (`trigger_line` / `trigger_progress` /
+`trigger_captured_at`), which the API fills from the settlement authority.
 
 Self-contained: these tests exercise the market gate and read only the
 committed contract, so the commit stands alone.
@@ -50,15 +49,19 @@ def _payload() -> dict:
 
 
 def _quant(ua: dict):
-    """The quantitative condition (2026-09-13: both comparisons against
-    actual_pace — behind BOTH the market-required pace and the league
-    average), recomputed from the SERVED numbers only — independent of the
-    server's own `active` boolean.  None when an operand is absent (i.e.
-    nothing is claimed)."""
-    a, r, lg = ua["actual_pace"], ua["required_pace"], ua["league_average_pace"]
-    if a is None or r is None or lg is None:
+    """The progress-tiered quantitative condition (2026-09-13), recomputed
+    from the SERVED numbers only — independent of the server's own `active`
+    boolean.  Nothing below the 50% checkpoint; the 50% tier additionally
+    requires actual below the league average; the 75% tier drops that leg.
+    (The served `checkpoint` is the tier proxy: 25 = <50%, 50 = 50-74%,
+    75 = >=75%.)  None when an operand is absent (i.e. nothing is claimed)."""
+    a, r, lg, cp = (ua["actual_pace"], ua["required_pace"],
+                    ua["league_average_pace"], ua["checkpoint"])
+    if a is None or r is None or lg is None or cp is None:
         return None
-    return a < r and a < lg
+    if cp < 50 or r <= lg * 1.04:
+        return False
+    return True if cp >= 75 else a < lg
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -99,7 +102,7 @@ def test_eligibility_preserves_the_existing_genuine_live_reason():
 def test_ineligible_market_suppresses_an_otherwise_true_condition():
     """The gate must actually suppress: same numbers, same condition TRUE,
     only eligibility differs."""
-    args = (3.84, 5.02, 4.155, 80, 1852)   # actual < required, actual < avg
+    args = (3.84, 5.02, 4.155, 80, 1852)   # LATE tier: required past 4% margin
     assert under_alert_state(*args)["active"] is True            # un-gated
     assert under_alert_state(*args, eligible=True)["active"] is True
     assert under_alert_state(*args, eligible=False)["active"] is False
@@ -111,10 +114,13 @@ def test_ineligible_market_suppresses_an_otherwise_true_condition():
     assert suppressed["required_pace"] == 5.02
     assert suppressed["pace_gap"] == 3.84 - 5.02
     assert suppressed["checkpoint"] == 75
-    # and the seven-field contract is intact
+    # and the contract is intact — the frozen trigger-line fields ride
+    # alongside it (None here: no trigger line was supplied to the call)
     assert set(suppressed) == {"active", "checkpoint", "actual_pace",
                                "required_pace", "league_average_pace",
-                               "league_reference_games", "pace_gap"}
+                               "league_reference_games", "pace_gap",
+                               "trigger_line", "trigger_progress",
+                               "trigger_captured_at"}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -188,10 +194,12 @@ def test_every_served_game_carries_an_explicit_eligibility_reason():
 
         ms = (g.get("projector") or {}).get("market_status")
         ua = g["under_alert"]
-        # the seven-field contract is unchanged
+        # the contract (incl. the frozen trigger-line fields) is unchanged
         assert set(ua) == {"active", "checkpoint", "actual_pace",
                            "required_pace", "league_average_pace",
-                           "league_reference_games", "pace_gap"}, ua
+                           "league_reference_games", "pace_gap",
+                           "trigger_line", "trigger_progress",
+                           "trigger_captured_at"}, ua
         if elig["eligible"]:
             assert elig["reason"] == "market_live", g["game_id"]
             assert ms == "LIVE", (g["game_id"], ms)

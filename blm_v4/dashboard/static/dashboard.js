@@ -32,6 +32,12 @@
 
 const POLL_MS = 5000;
 const API_LIVE = "/api/v4/live";
+// READ-ONLY: the settled outcome block for games OUTSIDE the /live window.
+// /live carries only the 100 most recent games, so an alert record whose game
+// has since dropped out of it would never receive a verdict — this delivers
+// the SAME per-game block, by id, so those rows can still be settled.
+const API_ALERT_OUTCOMES = (ids) =>
+  `/api/v4/alert-outcomes?ids=${encodeURIComponent(ids.join(","))}`;
 const API_GAME = (id) => `/api/v4/game/${encodeURIComponent(id)}`;
 // READ-ONLY additive exposure: the observed live-line history (every
 // valid observed line at its exact observation time — the same
@@ -206,14 +212,14 @@ function alertEscalation(prevLvl, nextLvl) {
 function alertEligible(g) {
   return !!(g && g.alert && g.alert.eligible === true);
 }
-// ── fixed-progress UNDER condition (25% / 50% / 75%) ──
+// ── progress-tiered UNDER condition (no alert < 50%; 50% and 75% tiers) ──
 // One INDEPENDENT record per game per checkpoint, identified by
-// game_id + checkpoint, so a 25% record never suppresses a later 50% or
-// 75% one.  Phase-based attribution: the server evaluates the condition on
-// the current observation and reports the highest checkpoint the game's
+// game_id + checkpoint, so a 50% record never suppresses a later 75% one.
+// Phase-based attribution: the server evaluates the condition on the
+// current observation and reports the highest checkpoint the game's
 // progress has reached (g.under_alert.checkpoint); advancing into the next
 // phase closes the previous checkpoint's record and lets the next one open
-// on its own.
+// on its own.  Nothing below 50% progress is ever active.
 //
 // The CONDITION ITSELF is not defined here.  It is evaluated once by the
 // backend (blm_v4/live_analytics/under_alert.py) and arrives as
@@ -290,13 +296,12 @@ function leagueLabelsFrom(root) {
 const UNDER_ALERTS = { active: new Map(), history: [] };
 const ALERT_HISTORY_MAX = 300;
 const ALERT_HISTORY_KEY = "pz.underAlertHistory";
-/* Which quantitative predicate created a record.  Records stamped with
-   this id were triggered under the corrected condition (actual pace below
-   BOTH the market-required pace and the league average).  Records WITHOUT
-   the stamp were triggered before the 2026-09-13 correction under the
-   superseded condition and are rendered with an explicit audit marker —
-   never silently reinterpreted as validated under the current rule. */
-const ALERT_RULE_ID = "v2-actual-below-both-2026-09-13";
+/* Which quantitative predicate created a record.  A record is valid for the
+   CURRENT rule ONLY when it carries ALERT_RULE_ID; every other record — one
+   with no stamp at all, or one stamped by a rule that has since been
+   SUPERSEDED — is rendered with an explicit audit marker and is never
+   silently reinterpreted as validated under the current rule. */
+const ALERT_RULE_ID = "v3-progress-tiered-2026-09-13";
 
 const num2 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(2);
 const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
@@ -317,18 +322,58 @@ function alertOutcomeClass(oc) {
     : oc.status === "push" ? "al-push"
     : null;
 }
+/* The result vocabulary — ONE map, shared by the history outcome line and
+   the active-alert result line, so both surfaces word a verdict the same
+   way (and neither invents a synonym). */
+const ALERT_RESULT_WORDS = { under: "UNDER", over: "OVER", push: "PUSH",
+  no_final: "NO FINAL", unknown: "NO FINAL" };
+/* The result line of a RESULTED alert — the two halves of the trigger,
+   worded with the SAME vocabulary as the active row so the panels never
+   disagree:
+     the VERDICT (UNDER / OVER / PUSH / NO FINAL), coloured from the status
+     the IMMUTABLE TRIGGERED LINE the verdict was settled against — the
+     record's own sealed value, NEVER the opening, latest or closing market
+     line — and the FINAL total it was compared with.
+   This is what makes the panel reviewable: a verdict and the exact line it
+   came from, side by side. */
 function alertOutcomeLine(rec) {
   const oc = rec.outcome;
   if (!oc || oc.status == null) return "";
-  const words = { under: "UNDER", over: "OVER", push: "PUSH",
-    no_final: "NO FINAL", unknown: "NO FINAL" };
   const t = (v) => (v == null || !isFinite(v)) ? "–" : v.toFixed(1);
-  const word = words[oc.status] || String(oc.status).toUpperCase();
-  const trigger = `Trigger Total: <span class="al-num">${t(oc.trigger_total)}</span>`;
+  const word = ALERT_RESULT_WORDS[oc.status]
+    || String(oc.status).toUpperCase();
+  const line = triggeredLineOf(rec);
+  const trigger = `Triggered Line: <span class="al-trigger-line">${t(line)}</span>`;
   const fin = (oc.final_total != null)
     ? ` · Final: <span class="al-num">${t(oc.final_total)}</span>` : "";
   return `<div class="al-line"><span class="al-outcome">${word}</span>`
     + ` · ${trigger}${fin}</div>`;
+}
+
+/* ── THE RESULT of an alert — PENDING until the backend settles it ──
+   Consumed verbatim from the game's `under_alert_outcome` block for THIS
+   record's own checkpoint (the same block settlement is computed from).
+     no settled status  → PENDING, NEUTRAL — an unresolved alert is never
+                          coloured green or red
+     settled            → UNDER (green) / OVER (red) / PUSH (neutral),
+                          worded and coloured from the backend verdict
+   The result is a property of the alert's OWN trigger line: the final
+   total is shown against the record's sealed triggered line.  The current
+   live line is NEVER used to infer or imply a result. */
+function alertResultHTML(rec) {
+  const oc = rec && rec.outcome;
+  if (!oc || oc.status == null) {
+    return `<span class="al-pending">PENDING</span>`;
+  }
+  const t = (v) => (v == null || !isFinite(v)) ? "–" : v.toFixed(1);
+  const word = ALERT_RESULT_WORDS[oc.status]
+    || String(oc.status).toUpperCase();
+  const line = (rec.triggered_line != null)
+    ? rec.triggered_line : oc.trigger_total;
+  const fin = (oc.final_total == null) ? ""
+    : ` <span class="al-result">(final ${t(oc.final_total)}`
+      + ` vs triggered ${t(line)})</span>`;
+  return `<span class="al-outcome">${word}</span>${fin}`;
 }
 
 function loadAlertHistory() {
@@ -361,6 +406,133 @@ function saveAlertHistory() {
   } catch (_) { /* storage unavailable — history stays in memory */ }
 }
 
+/* ── THE TRIGGERED LINE — the live market line the alert fired against ──
+   The line an alert displays is the live bookmaker O/U line the game was
+   carrying when the alert's checkpoint was REACHED — i.e. the exact market
+   value in force at the trigger, captured once and then IMMUTABLE.
+
+   Its authority is the backend's own immutable trigger line — carried on
+   the LIVE ALERT itself (`under_alert.trigger_line`) and, identically, on
+   the per-checkpoint settlement block
+   (`under_alert_outcome.by_checkpoint[checkpoint].trigger_total`); they are
+   the SAME value the final result is settled against, so the line on screen
+   and the verdict behind it can never disagree.  The alert's own field is
+   preferred (it is one source), the settlement block is the fallback.  It
+   is a live-market
+   capture: the opening line, the closing line, the CURRENT live line, a
+   league/state average and every calculated or reference value are NEVER
+   substituted for it, and the browser never re-selects it from a line
+   series of its own.
+
+   Sealing: the first provable value wins and is never rewritten, so a line
+   that moves after the trigger (187.5 → 189.5) cannot change what the
+   record shows.  A record whose line the backend cannot yet prove stays
+   null (rendered "–") and is filled only if it later becomes provable —
+   never fabricated, never replaced by a later market value. */
+const UNDER_ALERT_MARKET = "MatchTotal (O/U)";
+
+function triggeredLineOf(one) {
+  if (!one) return null;
+  const v = (one.triggered_line != null) ? one.triggered_line : one.trigger_total;
+  return (v == null || !isFinite(v)) ? null : v;
+}
+function triggeredLineFrom(g, checkpoint) {
+  // the LIVE ALERT's own frozen trigger line is the authority when the
+  // server reports it for THIS checkpoint — it is the same value the
+  // settlement block compares the final against, carried on the alert
+  // itself so the panel never has to reach for a second source
+  const ua = (g && g.under_alert) || {};
+  if (ua.checkpoint === checkpoint && ua.trigger_line != null
+    && isFinite(ua.trigger_line)) return ua.trigger_line;
+  // fallback: the backend's immutable per-checkpoint settlement block
+  const oc = (g && g.under_alert_outcome) || {};
+  const per = oc.by_checkpoint || null;
+  return triggeredLineOf(per ? per[checkpoint] : oc);
+}
+function sealTriggeredLine(rec, candidate) {
+  if (!rec || rec.triggered_line != null) return false;
+  if (candidate == null || !isFinite(candidate)) return false;
+  rec.triggered_line = candidate;
+  return true;
+}
+
+/* ── THE RESULT is sealed exactly like the line it settles against ──
+   A record's outcome is written ONCE from the backend's settled block and
+   is then IMMUTABLE: a later poll — a re-render, a reopened record, a
+   payload that (wrongly) reports a different verdict — can never rewrite
+   it.  An UNSETTLED block (no status: served while the game is still
+   running) is not a verdict, so it stays upgradeable and is settled from
+   the payload as soon as the backend proves a final.  The ACTIVE row and
+   the HISTORY row are served from this ONE sealed value, so the two can
+   never disagree about the same alert. */
+function sealOutcome(rec, candidate) {
+  if (!rec) return false;
+  if (rec.outcome && rec.outcome.status != null) return false;   // sealed
+  if (!candidate || typeof candidate !== "object") return false;
+  rec.outcome = Object.assign({}, candidate);
+  return true;
+}
+
+/* ── AUTHORITATIVE FINAL-RESULT CORRECTION — the ONE controlled update ──
+   Normal settlement is WRITE-ONCE: sealOutcome refuses every later write,
+   so ordinary live polling cannot restate a settled verdict.  A verified /
+   corrected game final is a DIFFERENT event and takes this explicit path —
+   the only writer permitted to revise an existing settlement.
+
+   It is deliberately narrow, and every clause is load-bearing:
+
+     * AUTHORITATIVE ONLY — the block must come from the backend's
+       game-final record of record (the scorecard's settled `game_results`
+       row, `authoritative === true`).  A verdict derived from a terminal
+       OBSERVATION, or any ordinary poll, is refused: polling cannot
+       invoke this path.
+     * REVISION ONLY — the record must ALREADY be settled.  A first
+       settlement is still written once, by sealOutcome; this path never
+       performs one.
+     * CHANGE ONLY — an unchanged verdict is not a correction.
+     * THE LINE NEVER MOVES — the corrected block must settle against the
+       record's OWN immutable triggered line, and must name it.  A block
+       that restates the line (or omits it) is refused outright, so a
+       correction can never be used to re-point an alert at another line.
+     * SAME RECORD — it revises the record in place, so no second alert
+       is ever created and ACTIVE / HISTORY keep reading one sealed value.
+
+   The verdict is the backend's (`corrected final_total` vs the immutable
+   line, by the single settlement rule); the browser consumes the corrected
+   status verbatim and only maps it to a colour — it never compares lines. */
+function correctOutcome(rec, cand) {
+  if (!rec || !cand) return false;
+  if (cand.authoritative !== true) return false;              // polling can't
+  if (cand.status == null || cand.final_total == null) return false;
+  const prior = rec.outcome;
+  if (!prior || prior.status == null) return false;           // first seal wins
+  if (prior.status === cand.status
+      && prior.final_total === cand.final_total) return false;  // not a revision
+  const line = triggeredLineOf(cand);
+  if (line == null || line !== rec.triggered_line) return false;  // same line
+  rec.outcome = Object.assign({}, cand);
+  rec.outcome_corrected = true;        // normal settlement vs correction
+  return true;
+}
+
+/* ── ONE authority for the sealed values ──────────────────────────────
+   Whatever a poll refreshed onto an ACTIVE row, its triggered line and its
+   verdict belong to the HISTORY record — the same sealed values the result
+   was settled from.  Called once per poll, after every writer has run, so
+   the two surfaces can never disagree and a correction published onto the
+   record is picked up by the active row in the SAME poll. */
+function syncActiveSealed() {
+  for (const [id, act] of UNDER_ALERTS.active) {
+    const rec = UNDER_ALERTS.history.find((r) => r.id === id);
+    if (!rec) continue;
+    if (act.triggered_line !== rec.triggered_line) {
+      act.triggered_line = rec.triggered_line == null
+        ? null : rec.triggered_line;
+    }
+    if (act.outcome !== rec.outcome) act.outcome = rec.outcome || null;
+  }
+}
+
 // Every value comes from the authoritative /live payload — the game's own
 // `under_alert` block, evaluated server-side.  Nothing is scraped back out
 // of the rendered page, nothing is recalculated here, and the condition is
@@ -385,6 +557,17 @@ function underAlertValues(g, ua, labels) {
     required_vs_league_avg_pct: avg ? (required - avg) / avg * 100 : null,
     actual_vs_required_pct: required ? (actual - required) / required * 100 : null,
     progress_pct: (g.projector || {}).progress_pct,
+    // the FROZEN trigger line the server reports on the alert itself — the
+    // market total in force at the trigger, refreshed never (sealed via
+    // sealTriggeredLine).  Null while the backend cannot prove it.
+    trigger_line: (ua.trigger_line != null && isFinite(ua.trigger_line))
+      ? ua.trigger_line : null,
+    trigger_progress: ua.trigger_progress,
+    trigger_captured_at: ua.trigger_captured_at,
+    // the CURRENT live market line — explicitly a SEPARATE, moving value,
+    // never substituted for the trigger line
+    current_line: (g.market && g.market.total_line != null
+      && isFinite(g.market.total_line)) ? g.market.total_line : null,
     // per-checkpoint final-outcome block, consumed verbatim (see
     // alertOutcomeClass) — null while the game has no final result
     outcome: (g.under_alert_outcome || {}).by_checkpoint
@@ -433,10 +616,16 @@ function reconcileUnderAlerts(games, labels) {
     const id = underAlertId(g.game_id, cp);
     trueNow.add(id);
     const vals = underAlertValues(g, ua, labels);
+    // the trigger line this poll reports for THIS record's own checkpoint —
+    // sealed onto the record, never refreshed by a later poll (see
+    // sealTriggeredLine)
+    const lineNow = triggeredLineFrom(g, cp);
     const act = UNDER_ALERTS.active.get(id);
     if (act) {
       // TRUE → TRUE — refresh what the ACTIVE panel shows.  The history
-      // record keeps its original trigger snapshot untouched.
+      // record keeps its original trigger snapshot untouched; the sealed
+      // line and verdict are re-published from it by syncActiveSealed()
+      // once every writer for this poll has run.
       Object.assign(act, vals);
       act.updated_at = new Date(now).toISOString();
       continue;
@@ -448,15 +637,23 @@ function reconcileUnderAlerts(games, labels) {
     // stack a second, third, fourth record onto the first).  Only a
     // brand-new identity opens a record, stamped with the rule that
     // created it.  The original trigger snapshot (triggered_at, paces,
-    // team names, rule stamp) is never rewritten by a reopen.
+    // team names, rule stamp, triggered line) is never rewritten by a
+    // reopen.
     let rec = UNDER_ALERTS.history.find((r) => r.id === id);
     if (!rec) {
       rec = Object.assign({
         id, game_id: g.game_id,
         triggered_at: new Date(now).toISOString(),
+        // present-but-null until the backend can prove it — never absent,
+        // so "unprovable" is distinguishable from "not tracked"
+        triggered_line: null,
         resolved_at: null, duration_ms: null, resolved_reason: null,
         alert_rule: ALERT_RULE_ID,
       }, vals);
+      // the line and the verdict are captured with the SAME trigger
+      // snapshot as the paces — sealed here, sealed for the record's life
+      sealTriggeredLine(rec, lineNow);
+      sealOutcome(rec, vals.outcome);
       UNDER_ALERTS.history.push(rec);
       saveAlertHistory();
     } else if (rec.resolved_at) {
@@ -467,10 +664,17 @@ function reconcileUnderAlerts(games, labels) {
       rec.resolved_reason = null;
       saveAlertHistory();
     }
+    sealTriggeredLine(rec, lineNow);
+    sealOutcome(rec, vals.outcome);
     UNDER_ALERTS.active.set(id, Object.assign({
       id, game_id: g.game_id, triggered_at: rec.triggered_at,
       updated_at: new Date(now).toISOString(),
-    }, vals));
+    }, vals, {
+      // the two sealed values are the RECORD's — the active row consumes
+      // them, never this poll's copy of them
+      triggered_line: rec.triggered_line == null ? null : rec.triggered_line,
+      outcome: rec.outcome || null,
+    }));
   }
 
   // TRUE → FALSE — anything whose condition is not TRUE on THIS poll
@@ -482,6 +686,9 @@ function reconcileUnderAlerts(games, labels) {
   }
   backfillTeamNames(games);
   applyFinalOutcomes(games);
+  // ...and finally hand every ACTIVE row the RECORD's sealed values, so the
+  // two surfaces read one authority for this poll
+  syncActiveSealed();
 }
 
 /* LEGACY records — records created before team names were captured at
@@ -512,25 +719,45 @@ function backfillTeamNames(games) {
 
 /* FINAL OUTCOME delivery — backend-computed, trigger snapshot untouched.
    A game's alert can resolve (condition false) while the game continues;
-   the final result only exists once the game finishes, so the outcome is
-   sealed onto the matching history record whenever the payload first
-   carries it.  Only records WITHOUT an outcome are filled — a sealed
-   verdict is never recomputed or overwritten, and the trigger snapshot
-   fields (actual/required/pace/line values) are never touched. */
+   the final result only exists once the game finishes.  A record whose
+   outcome is still UNSETTLED (no status: the per-checkpoint block served
+   while the game was live, or a block sealed at resolution while the game
+   had no final yet) is settled from the payload as soon as the backend
+   proves a final — that is how every alert that closes before its game
+   ends still reaches its verdict.  Once SETTLED, ordinary polling can no
+   longer touch the verdict; the ONLY later writer is correctOutcome, the
+   controlled correction path, and it fires solely on the backend's
+   authoritative final.  The trigger snapshot fields (actual/required/
+   pace/line values) are never touched by either. */
 function applyFinalOutcomes(games) {
   let changed = false;
   for (const g of games || []) {
     const ocBlock = g.under_alert_outcome;
     if (!ocBlock) continue;
     const per = ocBlock.by_checkpoint || null;
+    // the block's own provenance — carried top-level, shared by every
+    // checkpoint (it describes the FINAL, not a line)
+    const auth = ocBlock.authoritative === true;
     for (const r of UNDER_ALERTS.history) {
-      if (r.game_id !== g.game_id || r.outcome) continue;
+      if (r.game_id !== g.game_id) continue;
       const one = per ? per[r.checkpoint] : ocBlock;
-      if (!one || one.status == null) continue;
-      r.outcome = Object.assign({}, one,
+      if (!one) continue;
+      // the trigger line is provable the moment the block carries it, so it
+      // is sealed here whether or not a verdict exists yet — once, never
+      // rewritten
+      if (sealTriggeredLine(r, triggeredLineOf(one))) changed = true;
+      if (one.status == null) continue;
+      const merged = Object.assign({}, one,
+        { authoritative: auth },
         (r.duration_ms != null && one.duration_ms == null)
           ? { duration_ms: r.duration_ms } : {});
-      changed = true;
+      // the ONE seal: a settled verdict is never recomputed or overwritten;
+      // an unsettled record is settled here as soon as the backend proves a
+      // final (that is how an alert that closed before its game ended still
+      // reaches its verdict)
+      if (sealOutcome(r, merged)) changed = true;
+      // ...and the ONE controlled revision, for a verified/corrected final
+      if (correctOutcome(r, merged)) changed = true;
     }
   }
   if (changed) saveAlertHistory();
@@ -559,7 +786,8 @@ function closeUnderAlert(id, act, game, now) {
   // polls) it is kept verbatim and only the local duration is filled in;
   // a trigger-only block (game vanished before a final existed) is
   // stamped with the local resolution time.  A null status renders as
-  // the legacy look, never as a colored outcome.
+  // the legacy look, never as a colored outcome — and is upgraded to the
+  // real verdict later, by the same seal, once the backend proves it.
   let oc = act.outcome || null;
   if (oc) {
     if (oc.final_total == null && oc.status != null) {
@@ -569,7 +797,11 @@ function closeUnderAlert(id, act, game, now) {
       oc = Object.assign({}, oc, { duration_ms: rec.duration_ms });
     }
   }
-  rec.outcome = oc;
+  sealOutcome(rec, oc);
+  // the trigger line travels with the settled record exactly as the trigger
+  // snapshot does — sealed at the first provable value, never rewritten
+  sealTriggeredLine(rec, act.triggered_line != null
+    ? act.triggered_line : triggeredLineOf(oc));
   saveAlertHistory();
 }
 
@@ -581,14 +813,32 @@ function activeAlertsHTML() {
   if (!rows.length) {
     return `<div class="alerts-empty">No active UNDER alerts</div>`;
   }
-  return `<ul>` + rows.map((a) => `
-    <li class="al-row" data-alert-id="${esc(a.id)}">
+  // The ACTIVE view answers "what needs attention now", so it shows BOTH
+  // halves of the alert: the LIVE MARKET LINE THE ALERT FIRED AGAINST
+  // (sealed at trigger, never the opening / closing / current line) and
+  // THE RESULT of that alert — neutral while unresolved, then the
+  // backend's settled verdict (UNDER green, PUSH neutral, the failed
+  // UNDER red) against that same line.  The verdict word and its colour
+  // come from alertResultHTML, outside this region; the row is coloured
+  // only by a SETTLED result, so a pending alert keeps the default look.
+  return `<ul>` + rows.map((a) => {
+    const ocClass = alertOutcomeClass(a.outcome);
+    return `
+    <li class="al-row${ocClass ? " " + ocClass : ""}" data-alert-id="${esc(a.id)}">
       <div class="al-headline">🔥 UNDER ALERT — ${a.checkpoint}%</div>
       <div class="al-ident">${a.home_team || a.away_team
         ? `${esc(a.home_team)} vs ${esc(a.away_team)}` : alertIdent(a)}</div>
+      <div class="al-line">League: <span class="al-num">${esc(a.league)}</span> | Market: <span class="al-num">${UNDER_ALERT_MARKET}</span></div>
+      <div class="al-line">Triggered Line: <span class="al-trigger-line">${num1(a.triggered_line)}</span> <span class="muted">· live market line at trigger (immutable)</span></div>
+      ${a.current_line != null
+        ? `<div class="al-line">Current Line: <span class="al-num">${num1(a.current_line)}</span> <span class="muted">· live market now (may move)</span></div>`
+        : ""}
+      <div class="al-line">Triggered: <span class="al-num">${fmtTime(a.triggered_at)}</span> | State: <span class="al-num">ACTIVE</span></div>
       <div class="al-line">Actual: <span class="al-num">${num2(a.actual_pace)}</span> | Required: <span class="al-num">${num2(a.required_pace)}</span> | League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></div>
       <div class="al-line">Gap: <span class="al-neg">${num2(a.pace_gap)}</span> <span class="muted">(${num1(a.actual_vs_required_pct)}% vs required · ${num1(a.required_vs_league_avg_pct)}% vs avg)</span></div>
-    </li>`).join("") + `</ul>`;
+      <div class="al-line">Result: ${alertResultHTML(a)}</div>
+    </li>`;
+  }).join("") + `</ul>`;
 }
 
 function historyRowHTML(rec) {
@@ -603,8 +853,10 @@ function historyRowHTML(rec) {
       <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
       ${(rec.home_team || rec.away_team)
         ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
-      ${!rec.alert_rule
-        ? `<div class="al-audit">AUDIT · triggered under the superseded condition (pre-2026-09-13) — not a validated alert under the current rule</div>` : ""}
+      ${rec.alert_rule !== ALERT_RULE_ID
+        ? `<div class="al-audit">AUDIT · triggered under the superseded condition — not a validated alert under the current rule</div>` : ""}
+      ${rec.outcome_corrected
+        ? `<div class="al-corrected">AUTHORITATIVE FINAL-RESULT CORRECTION · the settled final was revised by the backend's verified game result — the triggered line is unchanged</div>` : ""}
       <div class="al-times">
         <span>Triggered: ${fmtTime(rec.triggered_at)}</span>
         <span>Ended: ${running ? "—" : fmtTime(rec.resolved_at)}</span>
@@ -629,21 +881,86 @@ function paintAlerts(elId, html) {
   if (el && el.innerHTML !== html) el.innerHTML = html;
 }
 
-// Single entry point, called once per poll from refresh() with the SAME
-// payload the cards were rendered from.
-function renderUnderAlerts(games, labels) {
-  reconcileUnderAlerts(games, labels || LEAGUE_LABELS);
-  paintAlerts("activeAlerts", activeAlertsHTML());
+/* ── RESULTS BEYOND THE LIVE WINDOW ──────────────────────────────────
+   /live serves the 100 most recent games.  An alert record whose game has
+   since dropped out of that window can never be settled from the poll, so
+   its RESULTED ALERTS row would keep rendering with no verdict and no
+   verdict colour — however the game actually finished.  Those records are
+   settled from the outcome block served by id (API_ALERT_OUTCOMES) through
+   the SAME seal the poll uses (applyFinalOutcomes): one settlement rule, one
+   authority, one history record.  This DELIVERS a verdict the poll can no
+   longer reach; it decides nothing itself. */
+const OUTCOME_PROBE_MIN_MS = 5 * 60 * 1000;   // per-record re-ask throttle
+
+/* The game ids worth asking about: in history, NOT covered by this poll, and
+   not yet settled — skipping any we asked about too recently, so a record
+   whose game has no provable final (an INVALID result) cannot become a
+   per-poll request storm.  Pure: no fetching, no mutation. */
+function pendingOutcomeProbe(liveGameIds, now) {
+  const live = liveGameIds || new Set();
+  const out = [];
+  for (const r of UNDER_ALERTS.history) {
+    if (live.has(r.game_id)) continue;                 // this poll covers it
+    if (r.outcome && r.outcome.status != null) continue;  // already settled
+    if (r.outcome_probe_at
+        && (now - r.outcome_probe_at) < OUTCOME_PROBE_MIN_MS) continue;
+    if (out.indexOf(r.game_id) === -1) out.push(r.game_id);
+  }
+  return out.slice(0, 200);
+}
+
+/* Best-effort: a failed probe leaves the panel exactly as it was.  Returns
+   true when a verdict actually landed (so the caller repaints).  The ask is
+   stamped BEFORE it is made, so a route that errors or 500s backs off onto
+   the slow cadence instead of retrying every uncovered record each poll. */
+async function hydrateResultedOutcomes(liveGameIds) {
+  const now = Date.now();
+  const ids = pendingOutcomeProbe(liveGameIds, now);
+  if (!ids.length) return false;
+  for (const r of UNDER_ALERTS.history) {
+    if (ids.indexOf(r.game_id) !== -1) r.outcome_probe_at = now;
+  }
+  saveAlertHistory();                    // the throttle survives a reload
+  let data = null;
+  try {
+    const resp = await fetch(API_ALERT_OUTCOMES(ids));
+    if (!resp.ok) return false;
+    data = await resp.json();
+  } catch (err) {
+    return false;
+  }
+  const games = [];
+  const blocks = (data && data.outcomes) || {};
+  for (const gid of Object.keys(blocks)) {
+    if (blocks[gid]) {
+      games.push({ game_id: gid, under_alert_outcome: blocks[gid] });
+    }
+  }
+  if (games.length) applyFinalOutcomes(games);   // the SAME seal
+  return games.length > 0;
+}
+
+/* ONE painter for the RESULTED ALERTS panel — used by the poll and by the
+   out-of-window hydration, so both surfaces always show the same rows. */
+function paintResultedPanel() {
   paintAlerts("alertHistory", historyAlertsHTML());
-  const ac = $("activeAlertsCount");
-  if (ac) ac.textContent = UNDER_ALERTS.active.size
-    ? `${UNDER_ALERTS.active.size} active` : "";
   const hc = $("alertHistoryCount");
   if (hc) {
     const open = UNDER_ALERTS.history.filter((r) => !r.resolved_at).length;
     hc.textContent = UNDER_ALERTS.history.length
       ? `${UNDER_ALERTS.history.length} triggered · ${open} still active` : "";
   }
+}
+
+// Single entry point, called once per poll from refresh() with the SAME
+// payload the cards were rendered from.
+function renderUnderAlerts(games, labels) {
+  reconcileUnderAlerts(games, labels || LEAGUE_LABELS);
+  paintAlerts("activeAlerts", activeAlertsHTML());
+  paintResultedPanel();
+  const ac = $("activeAlertsCount");
+  if (ac) ac.textContent = UNDER_ALERTS.active.size
+    ? `${UNDER_ALERTS.active.size} active` : "";
 }
 /* __ALERT_STORE_END__ */
 
@@ -1939,6 +2256,11 @@ async function refresh() {
     // active-vs-history alert reconciliation runs on the SAME payload, once
     // per poll — it never rebuilds one store from the other.
     renderUnderAlerts(state.games);
+    // ...then settle any RESULTED row whose game has left the live window:
+    // those records are not in this payload, so the poll alone can never
+    // verdict them.  Best-effort and repaints only when a verdict lands.
+    hydrateResultedOutcomes(new Set(state.games.map((g) => g.game_id)))
+      .then((changed) => { if (changed) paintResultedPanel(); });
     // The open modal's game is absent from the live payload — but that
     // list is not the authority on existence: the detail endpoint serves
     // ended/stale games too.  Keep the modal and its chart alive by
