@@ -576,6 +576,13 @@ class PokerBetCollector:
         self._slow_job_pending = False        # fast -> worker round request
         self._slow_busy = False               # worker mid-round (diagnostics)
         self._slow_thread_error = ""
+        # Slow-page self-heal guard (2026-09-13 incident): the worker must
+        # never spin with ``_slow_page is None`` while resolve work is
+        # pending.  _slow_page_ensure_failed_until throttles page-recreation
+        # attempts after a failure (backoff, not a 2s hot loop);
+        # _slow_page_warn is the last throttled zombie diagnostic.
+        self._slow_page_ensure_failed_until = 0.0   # monotonic backoff gate
+        self._slow_page_warn = {"ts": 0.0, "n": 0}  # last warn ts + suppressed
         self._slow_round_started_at: float = 0.0   # monotonic, worker writes
         self._last_slow_request_at: float = 0.0    # monotonic, fast writes
         self._slow_worker_started = False
@@ -932,7 +939,11 @@ class PokerBetCollector:
         except Exception:
             pass
         self._browser = None
-        self._slow_page = None            # old browser gone — recreate on next guard
+        # NOTE: this also clears the WORKER's page handle if the worker's
+        # browser object was already gone; the worker's own self-heal guard
+        # (_ensure_worker_page, top of its loop) recreates the slow page —
+        # there is no main-thread mechanism to do it for the worker.
+        self._slow_page = None            # worker's guard recreates it
         self._empty_ticks = 0
         try:
             return self._new_session()
@@ -983,6 +994,19 @@ class PokerBetCollector:
                 "resolve_ok": self._resolved_ok,
                 "resolve_failures": self._resolve_failures,
                 "error": self._slow_thread_error or None,
+                # Health invariant (2026-09-13 zombie incident): alive +
+                # pending work + no page == degraded worker.  Observable
+                # in the state file so a pageless zombie can be detected
+                # without reading the journal.
+                "page_available": self._slow_page is not None,
+                "page_recreate_backoff_s": max(
+                    0.0, round(self._slow_page_ensure_failed_until
+                               - time.monotonic(), 1)),
+                "degraded": bool(
+                    self._slow_thread is not None
+                    and self._slow_thread.is_alive()
+                    and self._slow_page is None
+                    and len(self._pending_resolve) > 0),
             },
             "tick_timing": _tick_timing_summary(self._tick_stats),
             # LIVE freshness: collection cadence vs observation age are
@@ -1273,6 +1297,21 @@ class PokerBetCollector:
                 while not self._slow_stop.is_set():
                     woke_for = "idle"
                     try:
+                        # 0. SELF-HEAL GUARD (2026-09-13 incident): before
+                        #    any resolution work, make sure a usable slow
+                        #    event-view page exists.  The fast-path
+                        #    _relaunch() clears _slow_page from the MAIN
+                        #    thread ("recreate on next guard" — this IS
+                        #    that guard); without it the worker stayed
+                        #    alive-but-pageless for ~95 minutes while every
+                        #    new game silently failed to resolve.
+                        try:
+                            self._ensure_worker_page()
+                        except self.PageUnavailable:
+                            # Recreation failed — bounded backoff so this
+                            # never becomes a 2s launch hot loop.
+                            self._slow_stop.wait(2.0)
+                            continue
                         # 1. identity resolutions first (young games need
                         #    their durable id + first snapshots early)
                         done = 0
@@ -1282,7 +1321,17 @@ class PokerBetCollector:
                                 break
                             woke_for = "resolve"
                             cls, row = claim
-                            ok = self._resolve_pending_on_worker(cls, row)
+                            try:
+                                ok = self._resolve_pending_on_worker(cls, row)
+                            except self.PageUnavailable:
+                                # Page died under us mid-batch: requeue,
+                                # drop the dead handle and retry after the
+                                # guard backoff — never spin.
+                                self._requeue_resolve(cls, row)
+                                self._warn_slow_page_unavailable(
+                                    "slow page unavailable mid-resolve-batch")
+                                self._slow_page = None
+                                break
                             if not ok:
                                 self._requeue_resolve(cls, row)
                             done += 1
@@ -1364,7 +1413,12 @@ class PokerBetCollector:
         """
         page = self._slow_page
         if page is None:
-            return False
+            # 2026-09-13 incident: this used to be a SILENT False — every
+            # requeue incremented resolve_failures with zero journal noise
+            # while the worker ran pageless for ~95 minutes.  Make it
+            # visible (throttled) and let the worker loop self-heal.
+            self._warn_slow_page_unavailable("resolve claim with no page")
+            raise self.PageUnavailable("no slow page")
         key = f"{row.home_team}|{row.away_team}"
         try:
             if not self._ensure_comp_lobby(page, cls):
@@ -2256,6 +2310,87 @@ class PokerBetCollector:
             logger.error("slow page init failed:\n%s", traceback.format_exc())
             self._slow_page = None
 
+    # ── Slow-page self-heal (2026-09-13 zombie-worker incident) ──────
+
+    class PageUnavailable(RuntimeError):
+        """The worker's slow event-view page could not be (re)created.
+
+        Raised by _ensure_worker_page so the worker loop can apply a
+        bounded backoff instead of hot-looping launches; never escapes
+        the worker thread."""
+
+    def _ensure_worker_page(self) -> None:
+        """WORKER-ONLY guard: guarantee a usable slow event-view page.
+
+        Uses the EXISTING slow-browser lifecycle machinery only —
+        _rotate_slow_browser for a missing worker browser (it re-launches
+        and rebuilds the page), _ensure_slow_page for a missing page on a
+        live browser.  The fast-path _relaunch() is deliberately NOT
+        called from here: Playwright sync objects are thread-affine and
+        the fast browser belongs to the main thread (pinned by
+        tests/test_collector_crash_recovery.py).
+
+        Raises PageUnavailable when the page still cannot be created so
+        the caller applies its backoff.  A healthy page returns quickly
+        (no-op) and never launches anything.
+        """
+        if self._slow_page is not None:
+            return
+        if self._slow_stop.is_set():
+            raise self.PageUnavailable("worker stopping")
+        now_m = time.monotonic()
+        if now_m < self._slow_page_ensure_failed_until:
+            # Inside the post-failure backoff window: fail fast WITHOUT
+            # spamming launches (the loop sleeps 2s per attempt).
+            raise self.PageUnavailable("page recreation backing off")
+        logger.warning(
+            "slow worker page unavailable — recreating (pending_resolve "
+            "context preserved)")
+        try:
+            if self._slow_browser is None:
+                self._rotate_slow_browser()      # relaunch + _ensure_slow_page
+            else:
+                self._ensure_slow_page()         # page on the live browser
+        except Exception:
+            logger.error("slow page recreation failed:\n%s",
+                         traceback.format_exc())
+        if self._slow_page is None:
+            # Bounded backoff: 5s doubling to 60s.  The throttled zombie
+            # diagnostic (_warn_slow_page_unavailable) keeps the state
+            # visible without a 2s log storm.
+            prev = max(0.0, self._slow_page_ensure_failed_until - now_m)
+            delay = min(60.0, max(5.0, prev * 2.0))
+            self._slow_page_ensure_failed_until = now_m + delay
+            self._warn_slow_page_unavailable()
+            raise self.PageUnavailable(
+                f"slow page still unavailable (retry in {delay:.0f}s)")
+        self._slow_page_ensure_failed_until = 0.0
+        logger.info("slow worker page recovered")
+
+    def _warn_slow_page_unavailable(self, detail: str = "") -> None:
+        """Throttled zombie-state diagnostic: at most once per 60s, with
+        the suppression count folded into the next emission, so a
+        pageless worker can never again masquerade as normal operation
+        in a silent journal."""
+        now_m = time.monotonic()
+        w = self._slow_page_warn
+        if now_m - w["ts"] < 60.0:
+            w["n"] += 1
+            return
+        suppressed = w["n"]
+        w["ts"], w["n"] = now_m, 0
+        with self._track_lock:
+            pending = len(self._pending_resolve)
+        logger.warning(
+            "slow resolve page unavailable%s: worker_alive=%s "
+            "browser=%s pending_resolve=%d queue_len=%d%s",
+            f" ({detail})" if detail else "",
+            bool(self._slow_thread is not None and self._slow_thread.is_alive()),
+            self._slow_browser is not None,
+            pending, len(self._market_queue),
+            f" [suppressed {suppressed} repeats]" if suppressed else "",
+        )
+
     def _rotate_slow_browser(self) -> None:
         """Worker-side SPA-degradation rotation: close the worker's own
         browser and build a fresh one.  SLOW-WORKER-ONLY (worker thread)."""
@@ -2354,7 +2489,25 @@ class PokerBetCollector:
                 self._market_stats["skipped_backoff"] += 1
                 continue  # failing repeatedly — bounded retry, still queued
             game = self._find_tracked(gid)
-            if game is None or not game.source_url:
+            if game is None or game.status == "ended" or not game.source_url:
+                # 2026-09-13 incident: untracked gids (ended by
+                # _mark_ended before this visit, pruned, or lost across a
+                # restart) used to be CYCLED FOREVER — every cycle burned
+                # an attempt, drove _event_view_failures toward the
+                # browser-rotation storm, and let dead IDs starve live
+                # games behind them.  Tracked-game state is the authority:
+                # if it says the game is gone (or terminal), drop the
+                # queue entry.  Legitimately tracked live games are never
+                # touched by this branch.
+                self._market_stats["dropped_untracked"] = (
+                    self._market_stats.get("dropped_untracked", 0) + 1)
+                logger.info(
+                    "market queue: dropping untracked gid %s (no live "
+                    "tracked game) — kept legitimate pending games", gid)
+                try:
+                    self._market_queue.remove(gid)
+                except ValueError:
+                    pass
                 continue
             cls = Classification(game.classification)
             logger.info("slow event view for game %s", gid)
