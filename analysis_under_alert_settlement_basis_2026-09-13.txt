@@ -1,0 +1,172 @@
+================================================================================================
+BLM V4 — UNDER ALERT BACKTEST: SETTLEMENT-BASIS ANALYSIS (READ-ONLY), 2026-09-13 condition
+  condition: actual_pts_per_min < required_pts_per_min AND actual_pts_per_min < league_average_pace
+================================================================================================
+source: /home/ubuntu/BLM/blm_pokerbet.db + /home/ubuntu/BLM/blm_metrics_clean.db (both mode=ro)
+games 13421  settled OK 9984  quality-INVALID 371
+
+LEAGUE REFERENCE (competition_pace_reference, OK-only):
+  NBA          5.6367 pts/min (n=2974)
+  KBL          3.8887 pts/min (n=1249)
+  CBA          4.4582 pts/min (n=1257)
+  TBSL         4.1683 pts/min (n=2052)
+  EUROLEAGUE   4.3009 pts/min (n=1959)
+  CYBER        4.4696 pts/min (n=493)
+
+POPULATION FUNNEL (observations):
+  rows_prefilter            468335
+  drop_no_game_row          0
+  drop_quality_invalid      8238
+  drop_pre_epoch            564
+  drop_no_ok_final          63743
+  drop_no_league_ref        0
+  drop_non_finite           0
+  drop_elapsed_le0          0
+  drop_below_min_remaining  18817
+  drop_progress_lt25        70876
+  rows_usable               306097
+  -> (game,checkpoint) pairings  16737   ALERT 4717   BASELINE 12020
+  distinct alert games: 2711
+
+================================================================================================
+PRIMARY — settle vs V4's OWN sealed trigger line (under_outcome.trigger_market_total)
+================================================================================================
+ALERT cohort
+  cp          N   UNDER   OVER  PUSH  unprov   UNDER %
+  25%      1202     670    532     0     334     55.74
+  50%      1368     742    626     0     465     54.24
+  75%      1133     706    427     0     215     62.31
+  ALL      3703    2118   1585     0    1014     57.20
+
+BASELINE (non-alert) cohort
+  cp          N   UNDER   OVER  PUSH  unprov   UNDER %
+  25%      2247     989   1258     0     787     44.01
+  50%      3203    1481   1722     0    1302     46.24
+  75%      3992    1860   2132     0     489     46.59
+  ALL      9442    4330   5112     0    2578     45.86
+
+================================================================================================
+CROSS-CHECK — settle vs the TRADEABLE line at the first TRUE observation (full coverage)
+================================================================================================
+  cp          N   UNDER   OVER  PUSH   UNDER %
+  25%      1536     760    776     0     49.48
+  50%      1833     995    838     0     54.28
+  75%      1348     856    492     0     63.50
+  ALL      4717    2611   2106     0     55.35
+
+================================================================================================
+LIFT — alert vs baseline, BOTH on V4's sealed trigger line
+================================================================================================
+  cp      alertN   alert%   baseN    base%   lift pp   lift rel
+  25%       1202    55.74    2247    44.01    +11.73     +26.6%
+  50%       1368    54.24    3203    46.24     +8.00     +17.3%
+  75%       1133    62.31    3992    46.59    +15.72     +33.7%
+
+================================================================================================
+SEPARATE COHORT — required_pts_per_min > league_average_pace
+================================================================================================
+required > avg
+  cp          N   UNDER   OVER  PUSH  unprov   UNDER %
+  25%      1565     765    800     0     451     48.88
+  50%      1917     973    944     0     572     50.76
+  75%      1669     940    729     0     284     56.32
+  ALL      5151    2678   2473     0    1307     51.99
+
+================================================================================================
+INTERSECTION ANALYSIS
+================================================================================================
+  cohort                                  N   UNDER   OVER   UNDER %
+  A  required > league avg             5151    2678   2473     51.99
+  B  actual < required                 4476    2543   1933     56.81
+  C  actual < league avg               6341    3481   2860     54.90
+  D  CURRENT ALERT (B and C)           3703    2118   1585     57.20
+  E  A and D                           1850    1105    745     59.73
+
+================================================================================================
+PER LEAGUE x CHECKPOINT (V4 sealed trigger line)
+================================================================================================
+  league     cp       aN  UND   OV PUSH      a%    bN      b%   liftpp
+  NBA        25      303  188  115    0   62.05   967   44.98   +17.06
+  NBA        50      287  151  136    0   52.61  1366   47.66    +4.96
+  NBA        75       79   53   26    0   67.09  1651   47.91   +19.18
+  NBA        ALL     669  392  277    0   58.59  3984   47.11   +11.48
+
+  KBL        25      132   66   66    0   50.00   199   45.23    +4.77
+  KBL        50      171   85   86    0   49.71   327   45.57    +4.14
+  KBL        75      145   94   51    0   64.83   435   44.37   +20.46
+  KBL        ALL     448  245  203    0   54.69   961   44.95    +9.73
+
+  CBA        25      156   74   82    0   47.44   334   40.12    +7.32
+  CBA        50      188   96   92    0   51.06   466   46.78    +4.28
+  CBA        75      123   79   44    0   64.23   540   46.30   +17.93
+  CBA        ALL     467  249  218    0   53.32  1340   44.93    +8.39
+
+  TBSL       25      258  143  115    0   55.43   349   41.55   +13.88
+  TBSL       50      303  166  137    0   54.79   481   41.58   +13.21
+  TBSL       75      303  183  120    0   60.40   618   42.39   +18.00
+  TBSL       ALL     864  492  372    0   56.94  1448   41.92   +15.02
+
+  EUROLEAGUE 25      269  152  117    0   56.51   368   45.92   +10.58
+  EUROLEAGUE 50      321  186  135    0   57.94   526   46.77   +11.18
+  EUROLEAGUE 75      330  197  133    0   59.70   679   49.04   +10.65
+  EUROLEAGUE ALL     920  535  385    0   58.15  1573   47.55   +10.60
+
+  CYBER      25       84   47   37    0   55.95    30   53.33    +2.62
+  CYBER      50       98   58   40    0   59.18    37   45.95   +13.24
+  CYBER      75      153  100   53    0   65.36    69   44.93   +20.43
+  CYBER      ALL     335  205  130    0   61.19   136   47.06   +14.14
+
+================================================================================================
+SETTLEMENT COVERAGE — alerts with NO provable trigger line
+================================================================================================
+  cp 25%: 334/1536 alerts have no line at the boundary (21.7%)
+  cp 50%: 465/1833 alerts have no line at the boundary (25.4%)
+  cp 75%: 215/1348 alerts have no line at the boundary (15.9%)
+  (V4 forward-fills the line only from observed snapshots; early-game lines are sparse.)
+
+================================================================================================
+RAW VALIDATION ROWS — alert cohort, spread across leagues
+================================================================================================
+  game_id   league      cp   prog%   score   line    el   rem  actual required  lg_avg  board final   res
+  30804617  CYBER       25   41.98   54-36  221.5  20.1  27.9  4.4665   4.7217  4.4696  221.5 190.0 UNDER
+  30804740  CYBER       25   25.00   26-25  208.5  12.0  36.0  4.2500   4.3750  4.4696  209.5 213.0  OVER
+  30804834  EUROLEAGUE  25   25.00   21-15  154.5  10.0  30.0  3.6000   3.9500  4.3009  156.5 149.0 UNDER
+  30804835  EUROLEAGUE  25   42.50   38-34  179.5  17.0  23.0  4.2353   4.6739  4.3009  176.5 190.0  OVER
+  30804836  EUROLEAGUE  25   26.25   23-13  138.5  10.5  29.5  3.4286   3.4746  4.3009  138.5 158.0  OVER
+  30804968  TBSL        25   28.75   19-26  157.5  11.5  28.5  3.9130   3.9474  4.1683  157.5 131.0 UNDER
+  30804969  TBSL        25   28.12   20-24  157.5  11.2  28.8  3.9111   3.9478  4.1683  160.5 147.0 UNDER
+  30804971  TBSL        25   28.75   21-17  147.5  11.5  28.5  3.3043   3.8421  4.1683  151.5 142.0 UNDER
+  30805017  NBA         25   33.12   35-32  202.5  13.2  26.8  5.0566   5.0654  5.6367  213.5 201.0 UNDER
+  30805061  CBA         25   40.00   30-34  162.5  16.0  24.0  4.0000   4.1042  4.4582  168.5 164.0 UNDER
+  30805390  KBL         25   25.00   23-13  148.5  10.0  30.0  3.6000   3.7500  3.8887  148.5 163.0  OVER
+
+================================================================================================
+FORMULA VALIDATION
+================================================================================================
+  actual_pts_per_min   = current_total_points / elapsed_game_minutes
+  required_pts_per_min = (live_total_line - current_total_points) / remaining_game_minutes
+  rows checked            : 306097
+  rows disagreeing (>0.011): 0
+  max |stored-recomputed| : 0.000050
+
+================================================================================================
+CRITICAL ANSWER — % of alert games that finished UNDER
+================================================================================================
+  -- vs V4 sealed trigger line --
+     25%: 670/1202 = 55.74%   (OVER 532, PUSH 0)
+     50%: 742/1368 = 54.24%   (OVER 626, PUSH 0)
+     75%: 706/1133 = 62.31%   (OVER 427, PUSH 0)
+     ALL: 2118/3703 = 57.20%
+  -- vs tradeable line at first TRUE obs --
+     25%: 760/1536 = 49.48%   (OVER 776, PUSH 0)
+     50%: 995/1833 = 54.28%   (OVER 838, PUSH 0)
+     75%: 856/1348 = 63.50%   (OVER 492, PUSH 0)
+     ALL: 2611/4717 = 55.35%
+
+  Per league (all checkpoints, V4 sealed trigger line):
+     NBA          392/669 = 58.59%
+     KBL          245/448 = 54.69%
+     CBA          249/467 = 53.32%
+     TBSL         492/864 = 56.94%
+     EUROLEAGUE   535/920 = 58.15%
+     CYBER        205/335 = 61.19%
