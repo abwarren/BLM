@@ -234,19 +234,29 @@ def _js_norm() -> str:
 
 
 def test_every_alert_level_site_is_gated():
-    """Every place that decides an alert level must consult
-    alertEligible(g) — badge, panel, card pulse, modal pulse and the
-    UNDER alerts surface."""
+    """Every place that decides a PACE-STATE alert level must consult
+    alertEligible(g) — badge, panel, card pulse and modal pulse.
+
+    The UNDER alerts store no longer appears here: since directive
+    2026-09-14 it consumes the server's authoritative under_alert.active and
+    must NOT consult the separate backend _alert_gate (see
+    test_under_alert_lifecycle.test_under_alert_path_has_no_second_decision),
+    which could only ever suppress a real alert."""
     js = _js()
     # the gate exists and reads the backend payload only (no re-derivation)
     assert "function alertEligible(g)" in js
     assert "g.alert && g.alert.eligible === true" in js
     # alertEligible is inside the pure (node-testable) block
     assert "function alertEligible(g)" in js[js.index(PURE_BEGIN):js.index(PURE_END)]
-    # 1 definition + exactly 5 consuming sites (the 5th is the
-    # active/history reconciliation, which gates every record it keeps)
-    assert _js_norm().count("alertEligible(g)") == 6
-    assert "isActuallyLive(g) && alertEligible(g)" in _js_norm()
+    # 1 definition + exactly 4 consuming sites — every PACE-STATE level site
+    # (badge, panel, card pulse, modal pulse).  The UNDER alerts store used to
+    # be the 5th; it now consumes under_alert.active instead (2026-09-14).
+    assert _js_norm().count("alertEligible(g)") == 5
+    # ...and the UNDER store is explicitly NOT one of them
+    body = js[js.index("function reconcileUnderAlerts"):
+              js.index("\nfunction ", js.index("function reconcileUnderAlerts"))]
+    assert "alertEligible" not in body
+    assert "const ok = cp != null && ua.active === true;" in body
 
 
 def test_no_alert_path_bypasses_the_gate():

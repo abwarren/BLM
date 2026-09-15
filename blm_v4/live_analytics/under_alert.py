@@ -1,30 +1,29 @@
 """The actionable UNDER condition — evaluated ONCE, authoritatively.
 
-Progress-tiered policy (directive 2026-09-13)::
+THE production UNDER trigger (directive 2026-09-14)::
 
-    progress < 50%          -> NO trading alert
-    50% <= progress < 75%    -> CONFIRMED UNDER ALERT
-        required_pace > league_average_pace * 1.04   (strict, RELATIVE margin)
-        AND actual_pace < league_average_pace        (strict)
-    progress >= 75%         -> LATE UNDER ALERT
-        required_pace > league_average_pace * 1.04   (strict)
-        (the actual<average leg is DROPPED — the historical sweep showed it
-         slightly diluted the late-game signal)
+    progress_pct >= 75
+    AND
+    required_pts_per_min > league_average_pace * 1.04     (strict, RELATIVE)
 
-Below 50% the historical alert population was a coin flip (48.51% UNDER),
-so no trading alert is raised there.  The 4% margin is RELATIVE to the
-league average, never an absolute pts/min offset, and every comparison is
-STRICT.
+That is the WHOLE statistical rule — the exact parameter set that produced
+the ~69.89% UNDER rate in the historical database analysis.  There is no
+50% tier and no ``actual < league_average`` leg: the mid tier was a coin
+flip historically (48.51% UNDER) and is not part of that cohort.
+
+The 4% margin is RELATIVE to the league average, never an absolute pts/min
+offset, and the comparison is STRICT — a required pace exactly at
+``avg * 1.04`` does NOT qualify.
 
 ``league_average_pace`` is this game's OWN competition reference (see
 :mod:`blm_v4.live_analytics.competition_pace`) — never a global rate.
 
-Non-quantitative gates are unchanged.  The caller passes ``eligible`` from
-the live-market eligibility gate (:func:`under_alert_eligibility`) plus the
-upstream alert gate (genuinely-live, fresh observation, non-terminal,
->= min remaining minutes, valid quality) — the quantitative condition is
-necessary but NOT sufficient.  Any missing / non-finite input, or a missing
-``eligible``, yields active=False (fail closed).
+The ONLY gates besides the statistical rule are technical
+data-integrity / live-market gates, supplied by the caller as ``eligible``
+from :func:`under_alert_eligibility`: the game must be genuinely live AND
+its market line LIVE.  No other statistical threshold, pace condition,
+margin or minimum-remaining rule participates.  Any missing / non-finite
+input, or a missing ``eligible``, yields active=False (fail closed).
 
 This module is the ONLY definition of the condition.  The dashboard renders
 the boolean and the numbers it is built from; it never re-derives them, so
@@ -46,12 +45,13 @@ from typing import Any, Optional
 # record can never suppress a later 50% or 75% one.
 CHECKPOINTS = (25, 50, 75)
 
-# ── Progress tiers for the live trading UNDER alert (directive 2026-09-13) ──
-#: Below this progress NO trading alert is raised (no alert for < 50%).
-MID_PROGRESS_PCT = 50.0
-#: At / above this progress the actual<average leg is DROPPED (late tier).
-LATE_PROGRESS_PCT = 75.0
-#: REQUIRED must exceed the league average by this RELATIVE margin, strictly.
+# ── THE production UNDER trigger (directive 2026-09-14) ────────────────
+#: The ONE progress threshold.  Below it there is NO trading alert of any
+#: kind — the 50% tier was removed (it was a coin flip historically, 48.51%
+#: UNDER, and is not part of the ~69.89% cohort).
+ALERT_PROGRESS_PCT = 75.0
+#: REQUIRED must exceed the league average by this RELATIVE margin,
+#: STRICTLY.  Never an absolute pts/min offset.
 REQUIRED_MARGIN = 1.04
 
 # ── Eligibility vocabulary (LIVE MARKETS ONLY directive, 2026-09-12) ──
@@ -124,22 +124,22 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
 
     ``active`` is TRUE only when ALL of the following hold:
 
-      * ``eligible`` is True (the live / market / quality gate);
-      * ``actual_pace``, ``required_pace``, ``league_average_pace`` and
-        ``progress_pct`` are all finite;
-      * ``progress_pct >= MID_PROGRESS_PCT`` (50%) — below 50% there is no
+      * ``eligible`` is True (genuinely live AND a LIVE market line);
+      * ``required_pace``, ``league_average_pace`` and ``progress_pct`` are
+        all finite;
+      * ``progress_pct >= ALERT_PROGRESS_PCT`` (75%) — below 75% there is no
         trading alert of any kind;
       * ``required_pace > league_average_pace * REQUIRED_MARGIN`` (STRICT —
         a required pace exactly at the 4%-above-average threshold does not
-        qualify);
-      * AND, in the MID tier only (``progress_pct < LATE_PROGRESS_PCT``),
-        ``actual_pace < league_average_pace`` (STRICT).  The LATE tier
-        (``progress_pct >= 75%``) DROPS this leg.
+        qualify).
 
-    ``eligible`` is the market/live gate evaluated by the API: the condition
-    is necessary but not sufficient, so a stale market can never leave an
-    active alert standing.  The quantitative block itself is unchanged and
-    is still served when suppressed — the reason lives in the sibling
+    That is the entire decision.  ``actual_pace`` is still REPORTED (the
+    active row shows it beside the required pace) but it takes no part in
+    ``active`` — the old ``actual < league_average`` leg is gone.
+
+    ``eligible`` is the live/market gate evaluated by the API: it can only
+    suppress, never create.  The quantitative block itself is served
+    whether or not the alert is active — the reason lives in the sibling
     ``under_alert_eligibility`` field, never in a silently blank verdict.
 
     A missing league reference yields ``active=False`` — no comparison is
@@ -158,13 +158,15 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
     league = _finite(league_average_pace)
     games = _finite(reference_games)
     prog = _finite(progress_pct)
+    # THE production trigger, and nothing else: progress >= 75 AND
+    # required > league * 1.04, on a genuinely-live game with a LIVE market.
+    # actual_pace is reported but takes no part in the decision, and no
+    # minimum-remaining rule applies here.
     active = bool(
         eligible is True
-        and actual is not None and required is not None
-        and league is not None and prog is not None
-        and prog >= MID_PROGRESS_PCT
+        and required is not None and league is not None and prog is not None
+        and prog >= ALERT_PROGRESS_PCT
         and required > league * REQUIRED_MARGIN
-        and (prog >= LATE_PROGRESS_PCT or actual < league)
     )
     return {
         "active": active,

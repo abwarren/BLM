@@ -143,35 +143,38 @@ def test_api_exposes_the_immutable_triggered_line_for_an_active_alert(store,
                                                                      monkeypatch):
     """An ACTIVE alert's payload carries the line it fired against
     (187.5) — never the opening line (210.5) and never the live line that
-    came later (189.5).  The alert itself is still PENDING.  It now fires in
-    the 50% tier: nothing below 50% progress is active."""
+    came later (189.5).  The alert itself is still PENDING.  It fires in
+    THE production tier (directive 2026-09-14): nothing below 75% progress
+    is active, and there is no actual<average leg to satisfy."""
     st, add, now, iso = store
-    # the projector puts the game in the MID tier (progress 60%) with
-    # REQUIRED above the 9.0 * 1.04 margin and ACTUAL below 9.0 -> ACTIVE
-    _projector(monkeypatch, progress=60.0, actual=8.0, required=10.0)
+    # the projector puts the game at 80% progress with REQUIRED above the
+    # 9.0 * 1.04 margin -> ACTIVE (actual is irrelevant under this rule)
+    _projector(monkeypatch, progress=80.0, actual=8.0, required=10.0)
     snap = add("5001", "Line Home Virtual", "Line Away Virtual")
     snap(now - timedelta(minutes=52), 10, 8, 1, "05:00", OPENING)    # 12.5%
     snap(now - timedelta(minutes=8), 30, 25, 2, "08:00", TRIGGER)    # 30%
-    snap(now - timedelta(minutes=5), 42, 30, 2, "00:00", TRIGGER)    # 50%, still TRIGGER
-    snap(now - timedelta(minutes=2), 48, 34, 3, "06:00", LATER)      # 60%, line moved
+    snap(now - timedelta(minutes=5), 42, 30, 2, "00:00", TRIGGER)    # 50%
+    snap(now - timedelta(minutes=4), 55, 40, 3, "00:00", TRIGGER)    # 75% boundary
+    snap(now - timedelta(minutes=2), 60, 44, 4, "06:00", LATER)      # 85%, line moved
 
     g = _live({"5001"})["5001"]
     cp = g["under_alert"]["checkpoint"]
-    assert cp == 50, cp
+    assert cp == 75, cp
     assert g["live"] is True and g["under_alert"]["active"] is True
 
-    # the triggering line — the line in force when 50% was reached
+    # the triggering line — the line in force when 75% was reached
     oc = g["under_alert_outcome"]
-    assert oc["by_checkpoint"]["50"]["trigger_total"] == TRIGGER
+    assert oc["by_checkpoint"]["75"]["trigger_total"] == TRIGGER
     # ...and it is NOT any of the substituted values
     assert g["market"]["opening_line"] == OPENING != TRIGGER
     assert g["market"]["total_line"] == LATER != TRIGGER
     # the result is still open — the alert must render neutral
     assert oc["status"] == "pending"
-    assert oc["by_checkpoint"]["50"]["status"] is None
+    assert oc["by_checkpoint"]["75"]["status"] is None
     assert oc["final_total"] is None
-    # a checkpoint the game has not reached claims no line at all
-    assert oc["by_checkpoint"]["75"]["trigger_total"] is None
+    # the line that arrived LATER leaks into NO checkpoint's frozen line
+    assert LATER not in {oc["by_checkpoint"][k]["trigger_total"]
+                         for k in oc["by_checkpoint"]}
 
 
 def test_api_triggered_line_never_moves_when_the_market_does(store,
@@ -259,23 +262,23 @@ def test_trigger_line_is_exposed_on_the_live_alert_and_frozen(store,
     (under_alert.trigger_line) — never the current/opening line — and it is
     the SAME value the settlement compares the final against."""
     st, add, now, iso = store
-    _projector(monkeypatch, progress=60.0, remaining=16.0, actual=8.0,
+    _projector(monkeypatch, progress=80.0, remaining=8.0, actual=8.0,
                required=10.0)
     snap = add("7001", "TL Home", "TL Away")
     snap(now - timedelta(minutes=52), 10, 8, 1, "05:00", OPENING)    # 12.5%
-    snap(now - timedelta(minutes=10), 30, 25, 2, "08:00", TRIGGER)   # 30%
-    snap(now - timedelta(minutes=5), 42, 30, 2, "00:00", TRIGGER)    # 50% trigger
-    snap(now - timedelta(minutes=2), 48, 34, 3, "06:00", LATER)      # 60% moved
+    snap(now - timedelta(minutes=10), 30, 25, 2, "00:00", TRIGGER)   # 50%
+    snap(now - timedelta(minutes=5), 42, 34, 3, "00:00", TRIGGER)    # 75% trigger
+    snap(now - timedelta(minutes=2), 48, 40, 4, "06:00", LATER)      # 85% moved
 
     g = _live({"7001"})["7001"]
     ua = g["under_alert"]
-    assert ua["active"] is True and ua["checkpoint"] == 50
+    assert ua["active"] is True and ua["checkpoint"] == 75
     # the frozen trigger line rides ON the alert block
     assert ua["trigger_line"] == TRIGGER
-    assert ua["trigger_progress"] == 0.5
+    assert ua["trigger_progress"] == 0.75
     assert ua["trigger_captured_at"]
     # identical to the settlement's line for the same checkpoint (one authority)
-    bc = g["under_alert_outcome"]["by_checkpoint"]["50"]
+    bc = g["under_alert_outcome"]["by_checkpoint"]["75"]
     assert ua["trigger_line"] == bc["trigger_total"] == TRIGGER
     # the market moved AFTER the trigger: the current line is the later value,
     # a DIFFERENT field, never the trigger line
@@ -881,9 +884,10 @@ def test_outcome_delivery_never_touches_the_active_store():
     for banned in (".active", "UNDER_ALERTS.active", "active.delete",
                    "active.set", "closeUnderAlert"):
         assert banned not in body, banned
-    # and the reconciliation gate itself is unchanged: eligibility is the
-    # server's verdict, never the outcome block
-    assert "const ok = live && cp != null && ua.active === true;" in js
+    # and the reconciliation gate itself is unchanged: the alert is the
+    # server's authoritative verdict and NOTHING else — never the outcome
+    # block, never a second eligibility decision
+    assert "const ok = cp != null && ua.active === true;" in js
     # ONE authority for the sealed values: every poll ends by re-publishing
     # the RECORD's line + verdict onto the active rows, so the two surfaces
     # cannot disagree about the same alert

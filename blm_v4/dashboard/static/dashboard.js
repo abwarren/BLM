@@ -202,29 +202,18 @@ function alertEscalation(prevLvl, nextLvl) {
   const rPrev = prevLvl ? (ALERT_RANK[prevLvl] || 0) : 0;
   return (ALERT_RANK[nextLvl] || 0) > rPrev ? nextLvl : null;
 }
-// ALERT ELIGIBILITY — the authoritative gate, decided by the BACKEND
-// (api._alert_gate) and consumed here verbatim.  A game may alert ONLY
-// when its latest observation is concurrently live, non-terminal, fresh
-// (within the backend freshness bound) and has >= 2.5 minutes remaining.
-// The browser never re-derives this, so a finished game or a stale stored
-// observation can never raise an alert however well its OLD state happens
-// to match the condition.  Every alert path routes through here.
+// ALERT ELIGIBILITY — the backend's own gate (api._alert_gate), consumed
+// verbatim.  This governs the PACE-STATE historical-condition badge below;
+// it is NOT consulted for the UNDER alert store, whose only input is the
+// authoritative g.under_alert.active.
 function alertEligible(g) {
   return !!(g && g.alert && g.alert.eligible === true);
 }
-// ── progress-tiered UNDER condition (no alert < 50%; 50% and 75% tiers) ──
+// ── the UNDER alert store ─────────────────────────────────────────────
 // One INDEPENDENT record per game per checkpoint, identified by
-// game_id + checkpoint, so a 50% record never suppresses a later 75% one.
-// Phase-based attribution: the server evaluates the condition on the
-// current observation and reports the highest checkpoint the game's
-// progress has reached (g.under_alert.checkpoint); advancing into the next
-// phase closes the previous checkpoint's record and lets the next one open
-// on its own.  Nothing below 50% progress is ever active.
-//
-// The CONDITION ITSELF is not defined here.  It is evaluated once by the
-// backend (blm_v4/live_analytics/under_alert.py) and arrives as
-// g.under_alert.active, so the browser cannot reconstruct it — and no two
-// surfaces can disagree about the same opportunity.
+// game_id + checkpoint.  A record's existence is decided by ONE thing: the
+// backend's authoritative g.under_alert.active (see reconcileUnderAlerts).
+// The condition itself is never evaluated here.
 function underAlertId(gameId, checkpoint) {
   return `${gameId}|${checkpoint}`;
 }
@@ -300,8 +289,12 @@ const ALERT_HISTORY_KEY = "pz.underAlertHistory";
    CURRENT rule ONLY when it carries ALERT_RULE_ID; every other record — one
    with no stamp at all, or one stamped by a rule that has since been
    SUPERSEDED — is rendered with an explicit audit marker and is never
-   silently reinterpreted as validated under the current rule. */
-const ALERT_RULE_ID = "v3-progress-tiered-2026-09-13";
+   silently reinterpreted as validated under the current rule.
+   v4 (2026-09-14): progress at 75% or beyond, plus a required pace above
+   league_avg * 1.04 — and nothing else.  The v3 progress-tiered rule (a 50%
+   tier, plus an actual<average leg below 75%) is SUPERSEDED, so every
+   v3-stamped record is audited rather than presented as a validated alert. */
+const ALERT_RULE_ID = "v4-progress-75-margin-2026-09-14";
 
 const num2 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(2);
 const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
@@ -599,29 +592,24 @@ function reconcileUnderAlerts(games, labels) {
     // the server's verdict for this poll, consumed verbatim
     const ua = g.under_alert || {};
     const cp = ua.checkpoint;
-    // A record survives only while the game is genuinely live AND passes
-    // the existing backend alert gate — a finished, stale, cancelled or
-    // postponed game resolves its records (their history remains).  A null
-    // checkpoint means the game has not reached its first checkpoint yet
-    // (or has no resolvable progress), so there is no phase to attribute.
-    // Defence-in-depth: the server's market gate, consumed verbatim.  It
-    // can only REMOVE a record — never create one — so the API stays the
-    // single authority on whether an alert is eligible at all.  An absent
-    // block (synthetic payloads only) means "no opinion", not "ineligible".
-    const mktEligible = !g.under_alert_eligibility
-      || g.under_alert_eligibility.eligible === true;
-    const live = isActuallyLive(g) && alertEligible(g) && mktEligible;
-    const ok = live && cp != null && ua.active === true;
+    // THE ONE AUTHORISED RULE (directive 2026-09-14): an already-computed
+    // authoritative under_alert.active decides everything.  The browser does
+    // NOT re-derive eligibility and does NOT consult the separate backend
+    // _alert_gate — the alert engine has already folded the genuinely-live
+    // and LIVE-market gates into `active`, so a second decision here could
+    // only ever SUPPRESS a real alert.  A null checkpoint means the game has
+    // not reached the 75% trigger yet (or has no resolvable progress), so
+    // there is nothing to attribute.
+    const ok = cp != null && ua.active === true;
     held.set(g.game_id, {
-      live,
+      live: ok,
       // Why the record is not standing RIGHT NOW — the server's own
-      // vocabulary, in precedence order: the live gate's reason, the
-      // alert gate's reason, the market gate's reason (a stale or missing
-      // line is never silently dropped), else not_live.
-      reason: live ? null
-        : (g.live_reason || (g.alert && g.alert.reason)
+      // vocabulary (live / market reasons), else the condition simply not
+      // being true.  REPORTING ONLY: it never gates the decision above.
+      reason: ok ? null
+        : (g.live_reason
            || (g.under_alert_eligibility && g.under_alert_eligibility.reason)
-           || "not_live"),
+           || "condition_false"),
       checkpoint: cp,
       ok,
     });

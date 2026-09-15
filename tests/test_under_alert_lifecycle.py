@@ -177,31 +177,36 @@ def test_alert_identity_is_game_plus_checkpoint(client):
 
 
 def test_condition_is_the_directive_condition():
-    """Progress-tiered policy (directive 2026-09-13): no alert below 50%;
-    50-74% requires REQUIRED past the league average by the 4% margin AND
-    actual below the league average; >= 75% drops the actual leg.  Evaluated
+    """THE production trigger (directive 2026-09-14): progress >= 75 AND
+    required > league_average * 1.04, on a genuinely-live game with a LIVE
+    market.  There is no 50% tier and no actual<average leg.  Evaluated
     ONCE, in the backend, so no surface can disagree with another."""
     from blm_v4.live_analytics.under_alert import under_alert_state
-    # MID tier: required 5.0 > 4.5*1.04 = 4.68 AND actual 4.0 < 4.5 -> active
-    assert under_alert_state(4.0, 5.0, 4.5, 60)["active"] is True
-    # MID tier: actual not below the league average -> no alert
-    assert under_alert_state(4.6, 5.0, 4.5, 60)["active"] is False
-    # MID tier: required exactly at the 4% threshold -> strict -> no alert
-    assert under_alert_state(4.0, 4.68, 4.5, 60)["active"] is False
-    # LATE tier: the actual<average leg is dropped
-    assert under_alert_state(6.0, 5.0, 4.5, 75)["active"] is True
-    # below 50%: no trading alert of any kind
+    # the ONLY rule: >= 75% progress and required strictly past the 4% margin
+    assert under_alert_state(4.0, 5.0, 4.5, 80)["active"] is True
+    # required exactly at the 4% threshold -> STRICT -> no alert
+    assert under_alert_state(4.0, 4.68, 4.5, 80)["active"] is False
+    # below 75%: no trading alert of any kind — the 50% tier is GONE
+    assert under_alert_state(4.0, 5.0, 4.5, 50)["active"] is False
+    assert under_alert_state(4.0, 5.0, 4.5, 74.9)["active"] is False
     assert under_alert_state(1.0, 9.0, 4.5, 49.9)["active"] is False
-    # strict: required must EXCEED the margin, not meet it
-    assert under_alert_state(3.0, 4.68, 4.5, 75)["active"] is False
-    # a missing number is never a claim
-    for args in ((None, 5.0, 4.5, 60), (4.0, None, 4.5, 60),
-                 (4.0, 5.0, None, 60), (4.0, 5.0, 4.5, None)):
+    # actual pace takes NO part in the decision: above, exactly at, and
+    # below the league average all alert when the two canonical conditions
+    # hold (this is the removed legacy actual<average leg)
+    assert under_alert_state(6.0, 5.0, 4.5, 75)["active"] is True
+    assert under_alert_state(4.5, 5.0, 4.5, 75)["active"] is True
+    assert under_alert_state(3.0, 5.0, 4.5, 75)["active"] is True
+    # ...nor does the remaining-time floor that used to gate the alert
+    # (under_alert_state is not even given a remaining time)
+    # a missing REQUIRED input is never a claim (fail closed)
+    for args in ((4.0, None, 4.5, 80), (4.0, 5.0, None, 80),
+                 (4.0, 5.0, 4.5, None)):
         assert under_alert_state(*args)["active"] is False, args
     # non-finite and booleans never activate
-    assert under_alert_state(float("nan"), 5.0, 4.5, 60)["active"] is False
-    assert under_alert_state(4.0, float("inf"), 4.5, 75)["active"] is False
-    assert under_alert_state(True, 5.0, 4.5, 60)["active"] is False
+    assert under_alert_state(4.0, float("inf"), 4.5, 80)["active"] is False
+    assert under_alert_state(4.0, 5.0, float("nan"), 80)["active"] is False
+    assert under_alert_state(4.0, True, 4.5, 80)["active"] is False
+    assert under_alert_state(4.0, 5.0, 4.5, True)["active"] is False
     # the served block carries the numbers the verdict was built from,
     # plus the frozen trigger-line fields (None: none was supplied here)
     assert under_alert_state(3.84, 5.02, 4.155, 80, 1852) == {
@@ -212,26 +217,31 @@ def test_condition_is_the_directive_condition():
         "trigger_captured_at": None}
 
 
-def test_condition_truth_table_directive_2026_09_13():
-    """The progress-tiered truth table (actual, required, avg, progress)."""
+def test_condition_truth_table_directive_2026_09_14():
+    """The production truth table (actual, required, avg, progress).
+
+    ``actual`` stays in the tuples precisely so the REMOVAL of the old
+    actual<average leg is visible: it never changes a verdict."""
     from blm_v4.live_analytics.under_alert import under_alert_state
     table = [
-        # MID tier (50-74%): BOTH legs required
-        (4.0, 5.0, 4.5, 60, True),     # above margin AND actual below avg
-        (4.6, 5.0, 4.5, 60, False),    # actual at/above the league average
-        (4.0, 4.68, 4.5, 60, False),   # required not strictly above margin
-        (4.0, 4.69, 4.5, 60, True),    # just above the margin
-        # LATE tier (>= 75%): actual leg dropped
-        (4.0, 5.0, 4.5, 75, True),
-        (6.0, 5.0, 4.5, 75, True),     # actual above avg is IRRELEVANT late
-        (6.0, 4.68, 4.5, 75, False),   # strict margin still binds
-        # below 50%: no alert ever
-        (1.0, 9.0, 4.5, 49.9, False),
+        # the ONLY rule: progress >= 75 AND required > avg * 1.04
+        (4.0, 5.00, 4.5, 75, True),
+        (4.0, 4.69, 4.5, 75, True),     # just above the margin
+        (4.0, 4.68, 4.5, 75, False),    # exactly at the margin -> STRICT
+        (4.0, 4.67, 4.5, 75, False),    # below the margin
+        # actual above / at / below the average is IRRELEVANT
+        (9.0, 5.0, 4.5, 75, True),      # actual far ABOVE avg (old: no alert)
+        (4.5, 5.0, 4.5, 75, True),      # actual exactly at avg (old: no alert)
+        (1.0, 5.0, 4.5, 75, True),
+        (9.0, 5.0, 4.5, 95, True),
+        # the 75% boundary is INCLUSIVE; 74.99 is below it
+        (4.0, 5.0, 4.5, 75.0, True),
+        (4.0, 5.0, 4.5, 74.99, False),
+        (9.0, 9.9, 4.5, 74.99, False),  # a huge required does NOT compensate
+        # below the threshold: no alert at all, however extreme the pace
+        (1.0, 9.0, 4.5, 74.9, False),
+        (1.0, 9.0, 4.5, 50, False),
         (1.0, 9.0, 4.5, 25, False),
-        # the tier boundary is inclusive at 50; 74.9 is still the MID tier
-        (4.0, 5.0, 4.5, 50, True),
-        (4.0, 5.0, 4.5, 74.9, True),
-        (6.0, 5.0, 4.5, 74.9, False),  # MID: actual above avg -> no alert
     ]
     for a, r, avg, p, expected in table:
         got = under_alert_state(a, r, avg, p)["active"]
@@ -239,22 +249,22 @@ def test_condition_truth_table_directive_2026_09_13():
 
 
 def test_condition_real_examples_cyber_kbl_2026_09_13():
-    """The 2026-09-13 dashboard incidents, re-evaluated under the
-    progress-tiered policy (a BEHAVIOUR CHANGE, not a bug):
-      * a game ABOVE the league average at 50-74% is NOT an alert;
-      * at 75%+ the required-above-margin test alone decides;
+    """The 2026-09-13 dashboard incidents, re-evaluated under the production
+    trigger (directive 2026-09-14):
+      * nothing below 75% progress is an alert, however well it matches;
       * a game whose required does NOT clear the 4% margin never alerts."""
     from blm_v4.live_analytics.under_alert import under_alert_state
     # CYBER 30876338 — actual ABOVE the 4.46 league average.
-    # MID tier (50-74%) -> NOT an alert (actual not below the average).
+    # Below 75% these numbers are NOT an alert at all (the 50% tier is gone).
     assert under_alert_state(5.00, 5.07, 4.46, 60)["active"] is False
     assert under_alert_state(5.17, 5.27, 4.46, 60)["active"] is False
     assert under_alert_state(5.06, 5.12, 4.46, 60)["active"] is False
     # ...but at 75%+ the same numbers DO alert: required 5.07 exceeds the
-    # 4.46 * 1.04 = 4.6384 margin and the actual leg no longer applies.
+    # 4.46 * 1.04 = 4.6384 margin and there is no actual leg to satisfy.
     assert under_alert_state(5.00, 5.07, 4.46, 80)["active"] is True
+    assert under_alert_state(5.17, 5.27, 4.46, 60)["active"] is False
     # KBL 30887333 — required 3.95 does NOT clear 3.89 * 1.04 = 4.0456, so
-    # under the new rule it is NOT an alert at any progress.
+    # it is NOT an alert at any progress.
     assert under_alert_state(3.70, 3.95, 3.89, 60)["active"] is False
     assert under_alert_state(3.70, 3.95, 3.89, 80)["active"] is False
 
@@ -273,11 +283,31 @@ def test_frontend_consumes_the_server_verdict(client):
     backend's verdict, so the two can never disagree."""
     js = _js(client)
     assert "const ua = g.under_alert || {};" in js
-    assert "const ok = live && cp != null && ua.active === true;" in js
+    assert "const ok = cp != null && ua.active === true;" in js
     # the condition itself no longer exists in the browser
     assert "underConditionTrue" not in js
     assert "actual < required" not in js
     assert "currentCheckpoint" not in js
+
+
+def test_under_alert_path_has_no_second_decision(client):
+    """Directive 2026-09-14, requirement N — there is exactly ONE alert
+    decision.  reconcileUnderAlerts (the function that opens, holds and
+    closes UNDER alert records) consults the server's authoritative
+    under_alert.active and NOTHING else: no re-derived eligibility, no
+    market gate, and in particular no dependency on the separate backend
+    _alert_gate (g.alert), which could only ever suppress a real alert.
+
+    Pins the INTENT (the function body), not a frozen cosmetic line."""
+    js = _js(client)
+    body = _block(js, "function reconcileUnderAlerts", "\nfunction ")
+    assert "ua.active === true" in body
+    assert "alertEligible" not in body, "the second decision is back"
+    assert "mktEligible" not in body, "the second decision is back"
+    assert "g.alert" not in body, "the second decision is back"
+    assert "isActuallyLive" not in body, "the second decision is back"
+    # ...and the ONLY thing that opens a record is that one boolean
+    assert "const ok = cp != null && ua.active === true;" in body
 
 
 def test_frontend_carries_no_competition_identifier_of_its_own(client):
@@ -340,7 +370,13 @@ def test_pace_gap_is_served_for_every_block(monkeypatch):
             assert ua["pace_gap"] == actual - required, (g["game_id"], ua)
             defined += 1
         if ua["active"]:
-            assert ua["pace_gap"] < 0, g["game_id"]      # signed with the verdict
+            # the production rule, re-checked against the SERVED numbers:
+            # active implies 75%+ progress AND required past the 4% margin.
+            # (pace_gap is a DIFFERENT quantity — actual - required — and is
+            # no longer signed by the verdict, since there is no actual leg.)
+            assert ua["checkpoint"] >= 75, g["game_id"]
+            assert ua["required_pace"] > ua["league_average_pace"] * 1.04, \
+                g["game_id"]
     assert defined, "no game in the payload carried both operands"
     assert defined + undefined == len(games)
 
@@ -356,11 +392,11 @@ def test_pace_gap_is_consistent_for_qualifying_and_non_qualifying():
     assert qualifying["pace_gap"] < 0
 
     # every way the condition can fail, with the gap still exact
-    for a, r, avg, p in ((4.6, 5.0, 4.5, 60),     # MID: actual not below avg
-                         (4.0, 4.68, 4.5, 60),    # MID: required not past margin
-                         (4.0, 4.0, 4.5, 25),     # below 50%: no alert at all
-                         (4.0, 4.68, 4.5, 75),    # LATE: required not past margin
-                         (4.0, 5.0, None, 60)):   # no league reference
+    for a, r, avg, p in ((4.6, 5.0, 4.5, 70),     # below 75%: no alert
+                         (4.0, 4.68, 4.5, 75),    # required exactly at margin
+                         (4.0, 4.0, 4.5, 25),     # below 75%: no alert at all
+                         (4.0, 4.6, 4.5, 75),     # required below margin
+                         (4.0, 5.0, None, 75)):   # no league reference
         block = under_alert_state(a, r, avg, p)
         assert block["active"] is False, (a, r, avg, p)
         assert block["pace_gap"] == a - r, (a, r, avg, p)
@@ -442,11 +478,12 @@ def test_league_reference_does_not_require_row_factory():
     tmp = _P(tempfile.mkdtemp()) / "nofactory.db"
     c = sqlite3.connect(str(tmp))          # deliberately NO row_factory
     c.executescript(
-        "CREATE TABLE game_results (source_game_id TEXT, final_total REAL);"
+        "CREATE TABLE game_results (source_game_id TEXT, final_total REAL,"
+        " final_result_status TEXT);"
         "CREATE TABLE games (source_game_id TEXT, competition_slug TEXT,"
         " classification TEXT);")
     c.execute("INSERT INTO games VALUES ('g1','betual-tbsl','BETUAL_NBA')")
-    c.execute("INSERT INTO game_results VALUES ('g1',160.0)")
+    c.execute("INSERT INTO game_results VALUES ('g1',160.0,'OK')")
     c.commit()
     ref = competition_pace_reference(c)
     c.close()
@@ -468,12 +505,14 @@ def test_league_reference_cache_is_database_specific():
     def db(*rows):
         c = sqlite3.connect(str(_P(tempfile.mkdtemp()) / "pop.db"))
         c.executescript(
-            "CREATE TABLE game_results (source_game_id TEXT, final_total REAL);"
+            "CREATE TABLE game_results (source_game_id TEXT, final_total REAL,"
+            " final_result_status TEXT);"
             "CREATE TABLE games (source_game_id TEXT, competition_slug TEXT,"
             " classification TEXT);")
         for gid, slug, cls, tot in rows:
             c.execute("INSERT INTO games VALUES (?,?,?)", (gid, slug, cls))
-            c.execute("INSERT INTO game_results VALUES (?,?)", (gid, tot))
+            c.execute("INSERT INTO game_results VALUES (?,?,?)",
+                      (gid, tot, "OK"))
         c.commit()
         return c
 
@@ -510,14 +549,18 @@ def test_league_reference_failure_is_isolated():
 def test_liveness_gate_resolves_alerts(client):
     """Directive 7 — a non-live game cannot hold an active record.
 
-    Pins the INTENT, not a frozen source line: the live gate composes the
-    server's own predicates, and since the LIVE MARKETS ONLY directive the
-    market-eligibility gate is one of them (a stale or missing line can no
-    longer hold a record either).
+    Since directive 2026-09-14 the ONLY input is the server's authoritative
+    under_alert.active: the genuinely-live and LIVE-market gates are folded
+    into it server-side (under_alert_eligibility), so the browser holds no
+    second gate that could suppress a real alert.
     """
     js = _js(client)
-    assert "const live = isActuallyLive(g) && alertEligible(g) && mktEligible;" in js
-    assert "g.under_alert_eligibility.eligible === true" in js
+    assert "const ok = cp != null && ua.active === true;" in js
+    # the market verdict is still served, and the browser still reads its
+    # REASON for the resolution narrative — but never as a gate
+    assert "g.under_alert_eligibility.reason" in js
+    body = _block(js, "function reconcileUnderAlerts", "\nfunction ")
+    assert "g.under_alert_eligibility.eligible === true" not in body
 
 
 def test_history_record_carries_the_trigger_snapshot_fields(client):
@@ -776,11 +819,12 @@ poll([g({ projector: { progress_pct: 80,
   under_alert: ua(true, 75, 3.0, 5.6, 4.155) })]);
 tr.push(snap("poll7-phase-advance-75"));
 
-// the game stops being genuinely live -> active resolves, history remains.
-// The server verdict is deliberately still TRUE here, so the LIVE GATE
-// alone must resolve the record.
+// the game stops being genuinely live.  The SERVER verdict carries that —
+// its genuinely-live / LIVE-market gate is folded into `active` — so the
+// record resolves on the false boolean alone and the history remains.
 poll([g({ live: false, live_reason: "game_finished",
-  alert: { eligible: false } })]);
+  alert: { eligible: false },
+  under_alert: ua(false, 75, 3.0, 5.6, 4.155) })]);
 tr.push(snap("poll8-game-ended"));
 
 // a poll with no games at all must not erase anything

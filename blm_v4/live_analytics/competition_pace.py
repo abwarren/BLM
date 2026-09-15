@@ -17,7 +17,10 @@ the same authority the projector uses, so the reference is expressed in
 the same units as ``actual_pts_per_min`` and ``required_pts_per_min``.
 
 Population: ``game_results`` joined to ``games`` in the pipeline DB,
-positive final totals only.
+**authoritative settled results only** — ``final_result_status = 'OK'`` —
+with a positive final total.  A row the scorecard has not verified as OK
+(UNKNOWN / INVALID) is not a settled final and must never move a league's
+reference pace.
 
 Read-only and failure-isolated: a missing table or column yields an empty
 reference, and a competition absent from it produces NO alert rather than
@@ -79,7 +82,8 @@ def competition_pace_reference(conn: sqlite3.Connection
             "       gr.final_total     AS final_total "
             "FROM game_results gr "
             "JOIN games g ON g.source_game_id = gr.source_game_id "
-            "WHERE gr.final_total IS NOT NULL AND gr.final_total > 0 "
+            "WHERE gr.final_result_status = 'OK' "
+            "  AND gr.final_total IS NOT NULL AND gr.final_total > 0 "
             "  AND g.competition_slug IS NOT NULL "
             "  AND g.competition_slug <> ''"
         ).fetchall()

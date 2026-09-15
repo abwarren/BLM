@@ -10,10 +10,11 @@ Directive (COMPLETE DIRECTIVE — LIVE MARKETS ONLY, 2026-09-12):
      existing genuine-live exclusion reason), so a stale market never
      silently looks like an active live opportunity.
 
-The quantitative condition is the progress-tiered policy (2026-09-13):
-below 50% progress no alert; 50-74% requires REQUIRED above the
-league-specific average by the 4% margin AND actual below that average;
->= 75% drops the actual leg.  A stale/missing market still suppresses it.
+The quantitative condition is THE production trigger (2026-09-14):
+progress >= 75% AND required above the league-specific average by the 4%
+margin, STRICTLY — and nothing else (no 50% tier, no actual<average leg).
+A stale/missing market still suppresses it, because the market gate is
+folded into the served `active` verdict server-side.
 
 The `under_alert` contract keeps its fields and adds the frozen
 trigger-line fields (`trigger_line` / `trigger_progress` /
@@ -49,19 +50,17 @@ def _payload() -> dict:
 
 
 def _quant(ua: dict):
-    """The progress-tiered quantitative condition (2026-09-13), recomputed
-    from the SERVED numbers only — independent of the server's own `active`
-    boolean.  Nothing below the 50% checkpoint; the 50% tier additionally
-    requires actual below the league average; the 75% tier drops that leg.
-    (The served `checkpoint` is the tier proxy: 25 = <50%, 50 = 50-74%,
-    75 = >=75%.)  None when an operand is absent (i.e. nothing is claimed)."""
-    a, r, lg, cp = (ua["actual_pace"], ua["required_pace"],
-                    ua["league_average_pace"], ua["checkpoint"])
-    if a is None or r is None or lg is None or cp is None:
+    """THE production quantitative condition (2026-09-14), recomputed from
+    the SERVED numbers only — independent of the server's own `active`
+    boolean.  progress >= 75% AND required > league_average * 1.04,
+    STRICTLY; nothing else.  (The served `checkpoint` is the progress
+    proxy: 25 = <50%, 50 = 50-74%, 75 = >=75%.)  None when a required
+    operand is absent (i.e. nothing is claimed)."""
+    r, lg, cp = (ua["required_pace"], ua["league_average_pace"],
+                 ua["checkpoint"])
+    if r is None or lg is None or cp is None:
         return None
-    if cp < 50 or r <= lg * 1.04:
-        return False
-    return True if cp >= 75 else a < lg
+    return bool(cp >= 75 and r > lg * 1.04)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -255,13 +254,17 @@ def test_served_frontend_consumes_the_eligibility_reason():
 
 
 def test_served_frontend_gates_on_the_server_market_field():
-    """Defence-in-depth: the served asset must consume the server's market
-    eligibility, and only ever as a REMOVAL — never re-deriving the verdict
-    from pace numbers in the browser."""
+    """The served asset consumes the server's ONE authoritative verdict.
+
+    The market gate now lives server-side inside under_alert.active
+    (directive 2026-09-14): the browser reads the boolean and re-derives
+    neither the market verdict nor the quantitative condition."""
     js = _js()
-    assert "g.under_alert_eligibility.eligible === true" in js
-    assert "isActuallyLive(g) && alertEligible(g) && mktEligible" in js
-    # the browser still does not reconstruct the quantitative condition
+    assert "const ok = cp != null && ua.active === true;" in js
+    # the browser no longer composes a second eligibility gate at all
+    assert "mktEligible" not in js
+    assert "alertEligible(g) &&" not in js
+    # and it still does not reconstruct the quantitative condition
     assert "actual < required" not in js
     assert "required > " not in js
 
@@ -349,9 +352,12 @@ out.back_hist1_open = m.UNDER_ALERTS.history[1]
 m.renderUnderAlerts([stale("market_missing")], LABELS);
 out.missing_active = m.UNDER_ALERTS.active.size;
 
-// an ineligible market can never resurrect a record even when the numbers
-// would qualify: eligibility is the gate, the numbers are not
+// an ineligible market can never raise a record even when the NUMBERS
+// would qualify: the server folds eligibility into `active`, so the
+// browser is handed false and opens nothing.  The numbers alone are never
+// sufficient — the browser re-derives nothing.
 m.renderUnderAlerts([Object.assign(base(), {
+  under_alert: Object.assign(base().under_alert, { active: false }),
   under_alert_eligibility: { eligible: false, reason: "market_stale" },
 })], LABELS);
 out.qual_but_ineligible_active = m.UNDER_ALERTS.active.size;
@@ -398,5 +404,6 @@ def test_stale_market_lifecycle(tmp_path):
     # MISSING behaves the same as STALE — no active record
     assert got["missing_active"] == 0, got
 
-    # qualifying numbers are NOT sufficient on their own
+    # qualifying numbers are NOT sufficient on their own — the server's
+    # verdict (which folds in the market/live gates) is the sole authority
     assert got["qual_but_ineligible_active"] == 0, got
