@@ -38,6 +38,7 @@ The only file written is the report: analysis_under_alert_settlement_basis_2026-
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 import sys
 from collections import Counter, defaultdict
@@ -45,10 +46,15 @@ from collections import Counter, defaultdict
 sys.path.insert(0, "/home/ubuntu/BLM")
 from blm_v4.live_analytics.under_outcome import trigger_market_total  # noqa: E402
 
-PROD = "/home/ubuntu/BLM/blm_pokerbet.db"
-CLEAN = "/home/ubuntu/BLM/blm_metrics_clean.db"
-OUT = ("/home/ubuntu/BLM/"
-       "analysis_under_alert_settlement_basis_2026-09-13.txt")
+# Overridable so the harness can be pointed at a FROZEN COPY of the databases,
+# which is the only way to test determinism: the production DBs are live and a
+# collector writes them continuously (blm-collector.service), so the population
+# grows mid-run and raw cell counts legitimately move.  Defaults are production.
+PROD = os.environ.get("BLM_PROD_DB", "/home/ubuntu/BLM/blm_pokerbet.db")
+CLEAN = os.environ.get("BLM_CLEAN_DB", "/home/ubuntu/BLM/blm_metrics_clean.db")
+OUT = os.environ.get(
+    "BLM_BACKTEST_OUT",
+    "/home/ubuntu/BLM/analysis_under_alert_settlement_basis_2026-09-13.txt")
 
 CLEAN_DATA_EPOCH = "2026-09-05T05:40:41.782315Z"
 # projection.duration_for(), confirmed by import

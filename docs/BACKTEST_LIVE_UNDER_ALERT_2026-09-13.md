@@ -10,6 +10,10 @@ python3 scripts/backtest_under_alert_settlement_basis_2026-09-13.py
 # -> analysis_under_alert_settlement_basis_2026-09-13.txt
 ```
 
+`BLM_PROD_DB` / `BLM_CLEAN_DB` / `BLM_BACKTEST_OUT` override the two database
+paths and the report destination, so the harness can be run against a frozen
+copy instead of the live (continuously written) database — see §12.
+
 Read-only: both databases are opened `file:...?mode=ro`; nothing is written
 to either. No production code is imported except `under_outcome.
 trigger_market_total` (the settlement authority being tested).
@@ -344,7 +348,41 @@ the settled outcomes.
 
 ---
 
-## 12. Caveats
+## 12. Verification
+
+Both scripts were verified ad-hoc (no suite covers analysis scripts). What was
+proven, and how:
+
+- **Read-only, dynamically.** The production DBs are *live* — `blm-collector.
+  service` writes the WAL every ~3 s — so comparing their hashes around a run
+  measures the collector, not the harness. Instead both DBs were copied to a
+  frozen snapshot (`sqlite3.Connection.backup`), the harness was run twice
+  against the copies via `BLM_PROD_DB` / `BLM_CLEAN_DB`, and the copies were
+  hashed before and after: **unchanged**. On a snapshot nothing else writes,
+  so hash-equality is a valid proof there.
+- **Deterministic.** Two runs against the frozen snapshot produce byte-identical
+  reports.
+- **Read-only, statically.** Every `sqlite3.connect` in both scripts uses
+  `mode=ro`, and a `mode=ro` handle rejects a write
+  (`attempt to write a readonly database`).
+- **Semantics match the authority.** `checkpoint_for()` equals
+  `under_alert.checkpoint_for` across `None/0/24.9/25/25.0001/50/74.9/75/100/
+  True/False/nan/"abc"`; `settle()` equals `under_outcome.outcome_status`
+  (note: that function is `(trigger_total, final_total)` — argument order is the
+  reverse of this script's `settle(final, line)`).
+- **The reference is reproduced, not approximated.** The harness's league
+  reference equals the live `competition_pace_reference()` output **exactly** on
+  the same database, and drops the `final_result_status='OK'` filter
+  materially changes it (NBA 5.6372 vs 5.6367) — so the filter is load-bearing,
+  not decorative.
+- **Formula validation** re-asserted on the frozen snapshot: 0 mismatches.
+
+Run-to-run the *counts* move (the population grows); the *rates* in §3–§7 do
+not, which is the property that matters.
+
+---
+
+## 13. Caveats
 
 1. `league_average_pace` is computed over the whole settled population with
    no time window, exactly as `competition_pace_reference()` does. The
