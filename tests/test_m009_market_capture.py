@@ -156,7 +156,14 @@ EVENT_VIEW_TEXT = _event_view_text()
 assert len(json.dumps(EVENT_VIEW_TEXT)) > 5000, "event text must exceed 5000B raw"
 # sanity: the REAL parser must extract the market from the fixture text
 _PARSED_FIXTURE = parse_event_view(EVENT_VIEW_TEXT)
-assert _PARSED_FIXTURE["total"].get("first_line") == 216.5
+# MARKET-LINE SELECTION FIX (2026-09-16): first_line is now the
+# PRICE-SELECTED line (1.80–1.95 band, closest to 1.85; tie-break lower
+# line then Over), not ladder[0].  The 240-row chained fixture's band
+# candidates all sit 0.05 from 1.85 → tie-break picks the lowest band-
+# priced row: 138.5 Over 1.80 (NOT the legacy positional 216.5).
+assert _PARSED_FIXTURE["total"].get("first_line") == 138.5
+assert _PARSED_FIXTURE["total"].get("selected_price") == 1.8
+assert _PARSED_FIXTURE["total"].get("selected_side") == "OVER"
 assert _PARSED_FIXTURE["home_team"] == "Oklahoma City Thunder Cyber"
 assert _PARSED_FIXTURE["home_score"] == 100 and _PARSED_FIXTURE["away_score"] == 73
 
@@ -246,15 +253,16 @@ def test_event_view_capture_stores_total_line_and_markets_json_in_sync(tmp_path)
     row = _query(tmp_path / "blm.db",
                  "SELECT * FROM snapshots WHERE game_id=?",
                  (gid_db,))[0]
-    assert row["total_line"] == 216.5                       # first O/U ladder line
+    assert row["total_line"] == 138.5                    # price-selected O/U line
     mj = json.loads(row["markets_json"])
-    assert mj["total"]["first_line"] == 216.5
+    assert mj["total"]["first_line"] == 138.5
+    assert mj["total"]["selected_price"] == 1.8
     # the sync invariant the prod audit enforces
     assert row["total_line"] == mj["total"]["first_line"]
     # event-view-class row: raw payload large enough to carry markets
     assert len(row["raw_json"]) > 5000
     # event-view extras present
-    assert row["total_over_odds"] == 1.70 and row["total_under_odds"] == 2.02
+    assert row["total_over_odds"] == 1.80 and row["total_under_odds"] == 1.90
     assert row["home_total_line"] == 121.5 and row["away_total_line"] == 95.5
     assert row["quarter"] == 4 and row["period_label"] == "4th Quarter"
 
@@ -364,8 +372,8 @@ def test_length_raw_json_heuristic_pins_snapshot_kinds(tmp_path):
         WHERE LENGTH(raw_json) > 5000 AND total_line IS NULL""")[0]["c"] == 0
     assert all(r["total_line"] is None and r["markets_json"] == "{}"
                for r in stubs)
-    assert evs[0]["total_line"] == 216.5
-    assert json.loads(evs[0]["markets_json"])["total"]["first_line"] == 216.5
+    assert evs[0]["total_line"] == 138.5
+    assert json.loads(evs[0]["markets_json"])["total"]["first_line"] == 138.5
 
 
 # ═══════════════════════════════════════════════════════════════════

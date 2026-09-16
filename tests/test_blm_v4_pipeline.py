@@ -223,7 +223,8 @@ def test_parse_cyber_event():
     assert p["home_score"] == 100 and p["away_score"] == 73
     assert p["quarter"] == 4 and p["period_label"] == "4th Quarter"
     assert p["clock"] == "09:46"
-    assert p["total"]["first_line"] == 216.5
+    assert p["total"]["first_line"] == 217.5  # price-selected (band tie → lower line, Over)
+    assert p["total"]["selected_price"] == 1.80
     assert p["handicap"]["first_home_line"] == -26.5
     assert p["team_totals"]["Oklahoma City Thunder Cyber"]["line"] == 121.5
     assert len(p["quarter_scores"]) == 4
@@ -233,7 +234,7 @@ def test_parse_betual_event():
     p = parse_event_view(BETUAL_EVENT_TEXT)
     assert p["home_score"] == 78 and p["away_score"] == 76
     assert p["quarter"] == 3
-    assert p["total"]["first_line"] == 225.5
+    assert p["total"]["first_line"] == 227.5  # middle row @ 1.85, not first (225.5)
     assert p["match_winner"]["home_odds"] == 1.65
     assert p["simulated_note"] is True  # Betual's own market structure marker
 

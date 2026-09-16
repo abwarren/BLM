@@ -48,6 +48,7 @@ from zoneinfo import ZoneInfo
 from blm_v4.api import _detect_signals, _momentum
 from blm_v4.clean_boundary import (CLEAN_DATA_EPOCH, clean_games_where,
                                    clean_games_subq)
+from blm_v4.event_parser import select_total_market
 from blm_v4.projection import (MODEL_VERSION, clock_minutes, duration_for,
                                project)
 from blm_v4.terminal_eligibility import (TERMINAL_EXCLUSION_REASON,
@@ -602,9 +603,11 @@ def _frozen_market_line(conn, source_game_id: str, rows: list[dict],
 
     Never a later observation, never the closing line, never reconstructed
     from later data, never model-derived.  The WS fallback mirrors
-    storage.market_observations_before: the LOWEST line of the latest
-    batch at-or-before (event-view parity — the feed carries 3 O/U
-    variants per capture; the lowest is the main line).
+    storage.market_observations_before: the PRICE-SELECTED line of the
+    latest batch at-or-before (event-view parity — chosen by
+    event_parser.select_total_market over every line of the batch:
+    1.80–1.95 band, closest to 1.85, tie-break lower line then Over;
+    never positional, never "the last line").
     """
     return _frozen_market_obs(conn, source_game_id, rows, idx)[0]
 
@@ -625,18 +628,27 @@ def _frozen_market_obs(conn, source_game_id: str, rows: list[dict],
             ts = rr.get("captured_at")
     if line is not None:
         return line, ts
-    ws = conn.execute(
-        """SELECT line_value, captured_at FROM market_observations
+    # WS fallback: price-selected line of the latest batch AT-OR-BEFORE
+    # the checkpoint (same selection policy as the live pipeline —
+    # select_total_market; frozen semantics unchanged: never a later
+    # observation, never the closing line).
+    ws_rows = conn.execute(
+        """SELECT line_value, over_price, under_price, captured_at
+           FROM market_observations
            WHERE source_game_id=? AND market_type='MatchTotal'
              AND captured_at = (
                  SELECT MAX(captured_at) FROM market_observations
                  WHERE source_game_id=? AND market_type='MatchTotal'
                    AND captured_at <= ?)
-           ORDER BY line_value ASC LIMIT 1""",
+           ORDER BY line_value ASC""",
         (source_game_id, source_game_id, rows[idx]["captured_at"]),
-    ).fetchone()
-    if ws and ws["line_value"] is not None:
-        return float(ws["line_value"]), ws["captured_at"]
+    ).fetchall()
+    sel = select_total_market([
+        {"line": r["line_value"], "over": r["over_price"],
+         "under": r["under_price"]} for r in ws_rows
+    ])
+    if sel["line"] is not None:
+        return float(sel["line"]), ws_rows[0]["captured_at"]
     return None, None
 
 

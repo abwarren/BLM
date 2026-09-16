@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from blm_v4.event_parser import select_total_market
 from blm_v4.projection import duration_for, project, row_elapsed_minutes
 from blm_v4.terminal_eligibility import (
     TERMINAL_EXCLUSION_REASON,
@@ -442,9 +443,11 @@ class CleanMetricsStore:
 
         ``main_store`` (PokerBetStore) is read-only here: it supplies the
         current live MatchTotal line (event-view line wins; otherwise the
-        lowest line of the latest eu-swarm WS batch, the repository
-        convention) and the game's snapshot history for the authoritative
-        projection.  Returns the observation dict (status/reason included).
+        PRICE-SELECTED line of the latest eu-swarm WS batch via
+        ``event_parser.select_total_market`` — 1.80–1.95 band, closest to
+        1.85, tie-break lower line then Over, never positional) and the
+        game's snapshot history for the authoritative projection.  Returns
+        the observation dict (status/reason included).
         """
         total_points = None
         if home_score is not None and away_score is not None:
@@ -470,12 +473,27 @@ class CleanMetricsStore:
         except Exception:
             ws_batch = []
         if line is None and ws_batch:
-            first = ws_batch[0]
-            line = _f(first.get("line_value"))
-            over_price = _f(first.get("over_price"))
-            under_price = _f(first.get("under_price"))
-            market_captured_at = first.get("captured_at") or captured_at
-            market_source = "ws"
+            # Price-aware selection over EVERY line of the latest WS batch
+            # (never positional ws_batch[0]): 1.80–1.95 band, closest to
+            # 1.85, tie-break lower line then Over.  Line/price/side stay
+            # synchronized — they all come from the SAME batch row.
+            sel = select_total_market([
+                {"line": m.get("line_value"),
+                 "over": m.get("over_price"),
+                 "under": m.get("under_price")}
+                for m in ws_batch
+            ])
+            if sel["line"] is not None:
+                line = _f(sel["line"])
+                over_price = _f(sel["over"])
+                under_price = _f(sel["under"])
+                src_row = next(
+                    (m for m in ws_batch
+                     if m.get("line_value") == sel["line"]),
+                    ws_batch[0],
+                )
+                market_captured_at = src_row.get("captured_at") or captured_at
+                market_source = "ws"
         if line is not None and (line <= 0 or not _isfinite(line)):
             if status == VALID:
                 status = INVALID_MARKET

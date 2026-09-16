@@ -42,6 +42,7 @@ names) are skipped/handled explicitly.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Optional
 
@@ -58,6 +59,80 @@ _RE_QUARTER_SCORES = re.compile(r"\((\d{1,2}):(\d{1,2})\)")
 
 SECTION_HEADERS = ("Points Handicap", "Total Points", "Match Winner")
 TEAM_TOTAL_SUFFIX = "Total Points"
+
+# ── Total Points market-line selection policy (2026-09-16) ──────────
+# When the book offers a LADDER of O/U lines, the selected line must be
+# chosen by PRICE, never by position ("first line" / "last line" / array
+# order).  The selected (line, side, price) triple always originates from
+# ONE ladder row and stays associated through the pipeline: the selected
+# market_line is the line used by required_pts_per_min =
+# (selected_market_line - current_score) / remaining_minutes and by
+# settlement (final_total vs selected_market_line → UNDER/OVER/PUSH).
+PREFERRED_PRICE_BAND = (1.80, 1.95)   # inclusive decimal-price interval
+PREFERRED_PRICE_TARGET = 1.85         # closest price to this value wins
+
+
+def _valid_price(p: Any) -> bool:
+    """A usable decimal price: finite and > 1.0 (implied prob < 100%)."""
+    return (p is not None and isinstance(p, (int, float))
+            and math.isfinite(p) and p > 1.0)
+
+
+def select_total_market(ladder: list[dict] | None) -> dict:
+    """Price-aware Total Points (line, side, price) selection.
+
+    Candidates: every (line, side, price) with a valid price — BOTH the
+    Over and the Under price of every ladder row are considered.
+
+    1. PREFERRED: prices within ``PREFERRED_PRICE_BAND`` (1.80–1.95)
+       inclusive → the price closest to ``PREFERRED_PRICE_TARGET`` (1.85)
+       wins.
+    2. FALLBACK (no price in band): the price closest to 1.85 across ALL
+       candidates — explicit and deterministic, never positional and
+       never silently "the last line".
+
+    Tie-breakers (deterministic, documented):
+      i.  lower market line — consistent with the repository's existing
+          "lowest line of the latest batch is the main line" convention
+          (storage.latest_market_batch / scorecard frozen-line fallback);
+      ii. Over side before Under (the feed's first-listed side).
+
+    Returns ``{line, side, price, over, under, rule}`` where ``rule``
+    records which branch fired ("band_closest_to_1.85" |
+    "fallback_nearest_1.85" | "no_candidates") for auditability.  The
+    triple (line, side, price) always comes from the SAME ladder row.
+    """
+    lo_band, hi_band = PREFERRED_PRICE_BAND
+    cands: list[tuple[float, float, str, dict]] = []  # (price, line, side, row)
+    for row in ladder or []:
+        line = row.get("line")
+        if line is None:
+            continue
+        if _valid_price(row.get("over")):
+            cands.append((float(row["over"]), float(line), "OVER", row))
+        if _valid_price(row.get("under")):
+            cands.append((float(row["under"]), float(line), "UNDER", row))
+    if not cands:
+        return {"line": None, "side": None, "price": None,
+                "over": None, "under": None, "rule": "no_candidates"}
+
+    in_band = [c for c in cands if lo_band <= c[0] <= hi_band]
+    pool = in_band if in_band else cands
+    rule = "band_closest_to_1.85" if in_band else "fallback_nearest_1.85"
+    # Distance is rounded to 6dp before comparing: binary floating point
+    # makes |1.85-1.80| != |1.85-1.90| by ~1e-17, which would let float
+    # noise decide "equal-distance" ties.  2dp prices have >= 0.01
+    # distance gaps, so rounding can never merge genuinely different
+    # distances — it only restores exact decimal tie semantics, after
+    # which min()'s total order (distance, line, side-rank) is
+    # deterministic (lower line, then Over before Under).
+    price, line, side, row = min(
+        pool,
+        key=lambda c: (round(abs(c[0] - PREFERRED_PRICE_TARGET), 6), c[1],
+                       0 if c[2] == "OVER" else 1),
+    )
+    return {"line": line, "side": side, "price": price,
+            "over": row.get("over"), "under": row.get("under"), "rule": rule}
 
 
 def _lines(text: str) -> list[str]:
@@ -199,10 +274,18 @@ def parse_event_view(text: str) -> dict[str, Any]:
                 else:
                     break
             if ladder:
+                # Price-aware selection over the WHOLE ladder (never
+                # positional).  ``ladder`` is preserved untouched for
+                # research/audit; the selected triple stays bound to its
+                # ladder row (line/price/side synchronized).
+                sel = select_total_market(ladder)
                 totals = {
-                    "first_line": ladder[0]["line"],
-                    "over_odds": ladder[0]["over"],
-                    "under_odds": ladder[0]["under"],
+                    "first_line": sel["line"],
+                    "selected_side": sel["side"],
+                    "selected_price": sel["price"],
+                    "selection_rule": sel["rule"],
+                    "over_odds": sel["over"],
+                    "under_odds": sel["under"],
                     "ladder": ladder,
                 }
         elif header == "Points Handicap":
