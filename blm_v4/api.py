@@ -43,6 +43,7 @@ from blm_v4.clean_store import clean_store_for
 from blm_v4.classifications import normalize_betual_team
 from blm_v4.clean_boundary import (CLEAN, CLEAN_DATA_EPOCH, LEGACY,
                                    game_data_quality, is_clean_ts)
+from blm_v4.event_parser import select_total_market
 from blm_v4.live_analytics.league import PROVIDERS
 from blm_v4.live_analytics.historical_context import (
     ANALYTICAL_MIN_REMAINING_MINUTES)
@@ -950,11 +951,30 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
                      SELECT MAX(captured_at) FROM market_observations
                      WHERE source_game_id=? AND market_type='MatchTotal'
                        AND captured_at >= ?)
-               ORDER BY line_value ASC LIMIT 1""",
+               ORDER BY line_value ASC""",
             (game["source_game_id"], CLEAN_DATA_EPOCH,
              game["source_game_id"], CLEAN_DATA_EPOCH),
-        ).fetchone()
-        ws_obs = dict(r) if r else None
+        ).fetchall()
+        # MARKET-LINE SELECTION FIX (2026-09-16): the displayed WS line is
+        # the PRICE-SELECTED line of the latest batch — the same policy as
+        # the clean-metrics pipeline and the scorecard frozen line
+        # (event_parser.select_total_market: 1.80–1.95 band, closest to
+        # 1.85, tie-break lower line then Over), never the positional
+        # lowest row.  A degenerate batch with no usable prices keeps the
+        # old line-identity fallback (first row) so the line never
+        # disappears.
+        sel = select_total_market([
+            {"line": rr["line_value"], "over": rr["over_price"],
+             "under": rr["under_price"]} for rr in r
+        ])
+        if sel["line"] is not None:
+            row = next((rr for rr in r if rr["line_value"] == sel["line"]),
+                       None)
+        elif r:
+            row = r[0]
+        else:
+            row = None
+        ws_obs = dict(row) if row is not None else None
     ws_line = _f(ws_obs["line_value"]) if ws_obs else None
     if ws_line is not None and (total_line is None
                                 or (ws_obs and mlatest
