@@ -430,3 +430,106 @@ def test_settlement_uses_exact_selected_line():
     assert verdict(171.5) == "PUSH"        # half-point line → never PUSH on int
     # the wrong (positional last) line would flip 172 → UNDER:
     assert (172 < 173.5) is True and (172 > line) is True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. /live DISPLAY INVARIANT (api.py market block == selector's pick)
+# ═══════════════════════════════════════════════════════════════════
+# The API's own WS display query was the fourth positional promotion
+# point (found by the post-deploy smoke test): it promoted the LOWEST
+# line while the pipeline stored the SELECTED one.  These tests lock
+# the display fix in: the /live market block must show the selector's
+# exact (line, over, under) for a multi-line batch.
+
+import sqlite3
+
+from datetime import datetime, timezone
+
+from blm_v4.api import _analyze_game
+
+
+_WS_HARNESS_SQL = """
+    CREATE TABLE games (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL DEFAULT 'PokerBet',
+        source_game_id TEXT NOT NULL,
+        classification TEXT NOT NULL DEFAULT 'BETUAL_NBA',
+        home_team TEXT, away_team TEXT, status TEXT DEFAULT 'live',
+        last_seen_at TEXT, source_url TEXT,
+        competition TEXT, region TEXT, sport TEXT);
+    CREATE TABLE snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER, source_game_id TEXT NOT NULL,
+        classification TEXT, captured_at TEXT NOT NULL,
+        period_label TEXT, clock TEXT, quarter INTEGER,
+        home_score INTEGER, away_score INTEGER,
+        total_line REAL, total_over_odds REAL, total_under_odds REAL,
+        spread REAL, spread_indicator TEXT,
+        home_total_line REAL, away_total_line REAL,
+        w1_odds REAL, w2_odds REAL,
+        markets_json TEXT NOT NULL DEFAULT '{}',
+        raw_json TEXT NOT NULL DEFAULT '{}');
+    CREATE TABLE market_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER, source_game_id TEXT NOT NULL,
+        captured_at TEXT NOT NULL, market_type TEXT NOT NULL,
+        market_name TEXT NOT NULL, line_value REAL,
+        over_price REAL, under_price REAL,
+        home_score INTEGER, away_score INTEGER,
+        period_label TEXT, clock TEXT,
+        raw_json TEXT NOT NULL DEFAULT '{}');
+"""
+
+
+def _ws_analyze_harness(tmp_path, batch_rows):
+    """One tracked game whose snapshots carry NO total_line; the displayed
+    market must come from the WS batch via the selector.  Mirrors the
+    test_ws_market.py _analyze_game harness (real DB, no mocks)."""
+    db = tmp_path / "blm.db"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_WS_HARNESS_SQL)
+    conn.execute("INSERT INTO games (source_game_id, home_team, away_team, status) "
+                 "VALUES ('G1', 'Home', 'Away', 'live')")
+    gid = conn.execute("SELECT id FROM games").fetchone()[0]
+    conn.execute("""INSERT INTO snapshots (game_id, source_game_id, classification,
+            captured_at, period_label, clock, quarter, home_score, away_score)
+            VALUES (?, 'G1', 'BETUAL_NBA', '2026-09-16T18:00:30Z',
+                    '3rd Quarter', '06:48', 3, 44, 53)""", (gid,))
+    for line, over, under in batch_rows:
+        conn.execute("""INSERT INTO market_observations
+            (game_id, source_game_id, captured_at, market_type, market_name,
+             line_value, over_price, under_price, home_score, away_score)
+            VALUES (?, 'G1', '2026-09-16T18:00:10Z', 'MatchTotal', 'Total Points',
+                    ?, ?, ?, 44, 53)""", (gid, line, over, under))
+    conn.commit()
+    game = dict(conn.execute("SELECT * FROM games").fetchone())
+    rows = [dict(r) for r in conn.execute("SELECT * FROM snapshots").fetchall()]
+    d = _analyze_game(game, rows, datetime.now(timezone.utc), conn)
+    conn.close()
+    return d
+
+
+def test_live_market_block_shows_price_selected_ws_line(tmp_path):
+    """/live WS display invariant: the market block shows the SELECTED
+    (line, over, under) of the latest batch — the exact policy twin of
+    the supplied 169.5/171.5/173.5 example — never the positional
+    lowest row (the pre-fix behaviour this test pins out)."""
+    d = _ws_analyze_harness(
+        tmp_path, [(169.5, 1.50, 2.40), (171.5, 1.85, 1.85), (173.5, 2.40, 1.50)])
+    m = d["market"]
+    assert m["market_source"] == "ws"
+    assert m["total_line"] == 171.5
+    assert m["over_odds"] == 1.85 and m["under_odds"] == 1.85
+    assert m["total_line_at"] == "2026-09-16T18:00:10Z"
+
+
+def test_live_market_block_degenerate_batch_keeps_line_identity(tmp_path):
+    """A batch with NO usable prices never blanks the panel: the old
+    line-identity fallback (first row) supplies the line, prices NULL."""
+    d = _ws_analyze_harness(
+        tmp_path, [(199.5, None, None), (201.5, None, None)])
+    m = d["market"]
+    assert m["market_source"] == "ws"
+    assert m["total_line"] == 199.5
+    assert m["over_odds"] is None and m["under_odds"] is None
