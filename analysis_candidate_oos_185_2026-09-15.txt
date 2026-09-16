@@ -1,0 +1,451 @@
+====================================================================================================
+BLM CANDIDATE OOS BACKTEST — signals at 1.85 (break-even 54.054%)
+READ-ONLY.  Settlement: under_outcome.trigger_market_total (V4 sealed line).
+====================================================================================================
+
+LEAGUE REFERENCE (competition_pace_reference, OK-only) — used by candidate A
+  NBA    avg=5.6374   games=3033   frozen P80=4.650 P95=5.000 P97.5=5.150  (n_discovery=1498)
+  KBL    avg=3.8883   games=1259   frozen P80=3.829 P95=4.103 P97.5=4.241  (n_discovery=276)
+  CBA    avg=4.4595   games=1276   frozen P80=4.266 P95=4.506 P97.5=4.556  (n_discovery=195)
+  TBSL   avg=4.1687   games=2083   frozen P80=4.143 P95=5.375 P97.5=8.459  (n_discovery=356)
+  Euro   avg=4.3001   games=1995   frozen P80=5.850 P95=11.400 P97.5=12.553  (n_discovery=720)
+  CYBER  avg=4.4719   games=505    frozen P80=4.840 P95=5.232 P97.5=5.303  (n_discovery=214)
+
+CHRONOLOGICAL SPLIT (by trigger timestamp; candidate-independent)
+  span          2026-09-05 05:43  ->  2026-09-15 22:48
+  discovery     0-50%   < 2026-09-10 14:15
+  validation    50-75%  2026-09-10 14:15 .. 2026-09-13 06:32
+  latest OOS    75-100% > 2026-09-13 06:32
+  blocks        equal thirds at 2026-09-08 19:24 / 2026-09-12 09:06
+
+POPULATION  eligible games (>=1 observation at >=75% with a live line, remaining>=2.5): 4035
+
+BASELINE — every eligible game, no condition (control for regime shift)
+  n=4035  win=50.01%  roi=-7.48%
+  Discovery   n=1200  win=51.33% roi=-5.03%
+  Validation  n=1523  win=51.21% roi=-5.25%
+  Latest OOS  n=1312  win=47.41% roi=-12.29%
+  Block 1     n=686   win=50.44% roi=-6.69%
+  Block 2     n=1876  win=51.65% roi=-4.44%
+  Block 3     n=1473  win=47.73% roi=-11.71%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+A  production: req > league_avg x1.04
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 381  Wins 216  Losses 165  Pushes 0
+  Win% 56.69%  Loss% 43.31%  Push% 0.00%
+  Net units +18.60   ROI 4.88%   per 100 bets +4.88 u
+  95% CI (Wilson) [51.68% , 61.58%]   excludes break-even: NO
+  one-sided z vs 54.054%: z=0.98  p(norm)=0.16301  p(exact)=0.16302
+  Discovery   n=164   win=57.93% CI[50.27%,65.22%] roi=7.16% units=+11.8
+  Validation  n=123   win=63.41% CI[54.62%,71.40%] roi=17.32% units=+21.3
+  Latest OOS  n=94    win=45.74% CI[36.04%,55.78%] roi=-15.37% units=-14.4
+  Block 1     n=123   win=60.16% roi=11.30% units=+13.9
+  Block 2     n=152   win=61.18% roi=13.19% units=+20.1
+  Block 3     n=106   win=46.23% roi=-14.48% units=-15.3
+  Rolling 50   mean win=56.58% min=40.00% windows>BE=66.57%
+  Rolling 100  mean win=57.02% min=45.00% windows>BE=74.47%
+  Rolling 200  mean win=57.65% min=54.00% windows>BE=96.70%
+  Max drawdown 16.90 u   longest losing streak 5
+  STABILITY: Decaying (discovery >55%, later partitions <=55%)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      13     9     4     69.23%    28.08%   +3.7
+  KBL      35     17    18    48.57%    -10.14%  -3.5
+  CBA      18     11    7     61.11%    13.06%   +2.4
+  TBSL     44     27    17    61.36%    13.52%   +6.0
+  Euro     117    65    52    55.56%    2.78%    +3.3
+  CYBER    154    87    67    56.49%    4.51%    +7.0
+  largest league contribution: CYBER 40.42%
+  excluding CYBER:               n=227 win=56.83% roi=5.13% units=+11.7
+  COVERAGE triggered 381 / eligible 4035 = 9.44%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+A* causal: req > trailing league_avg x1.04
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 390  Wins 222  Losses 168  Pushes 0
+  Win% 56.92%  Loss% 43.08%  Push% 0.00%
+  Net units +20.70   ROI 5.31%   per 100 bets +5.31 u
+  95% CI (Wilson) [51.96% , 61.75%]   excludes break-even: NO
+  one-sided z vs 54.054%: z=1.09  p(norm)=0.13871  p(exact)=0.13865
+  Discovery   n=167   win=58.08% CI[50.50%,65.30%] roi=7.46% units=+12.5
+  Validation  n=128   win=63.28% CI[54.66%,71.13%] roi=17.07% units=+21.9
+  Latest OOS  n=95    win=46.32% CI[36.63%,56.29%] roi=-14.32% units=-13.6
+  Block 1     n=125   win=60.00% roi=11.00% units=+13.8
+  Block 2     n=158   win=61.39% roi=13.58% units=+21.5
+  Block 3     n=107   win=46.73% roi=-13.55% units=-14.5
+  Rolling 50   mean win=56.85% min=42.00% windows>BE=68.04%
+  Rolling 100  mean win=57.27% min=46.00% windows>BE=74.23%
+  Rolling 200  mean win=57.99% min=53.50% windows>BE=97.91%
+  Max drawdown 16.05 u   longest losing streak 6
+  STABILITY: Decaying (discovery >55%, later partitions <=55%)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      13     9     4     69.23%    28.08%   +3.7
+  KBL      35     17    18    48.57%    -10.14%  -3.5
+  CBA      18     11    7     61.11%    13.06%   +2.4
+  TBSL     46     28    18    60.87%    12.61%   +5.8
+  Euro     118    66    52    55.93%    3.47%    +4.1
+  CYBER    160    91    69    56.88%    5.22%    +8.4
+  largest league contribution: CYBER 41.03%
+  excluding CYBER:               n=230 win=56.96% roi=5.37% units=+12.4
+  COVERAGE triggered 390 / eligible 4035 = 9.67%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+B  frozen league P80
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 1076  Wins 553  Losses 523  Pushes 0
+  Win% 51.39%  Loss% 48.61%  Push% 0.00%
+  Net units -52.95   ROI -4.92%   per 100 bets -4.92 u
+  95% CI (Wilson) [48.41% , 54.37%]   excludes break-even: NO
+  one-sided z vs 54.054%: z=-1.78  p(norm)=0.96258  p(exact)=0.96246
+  Discovery   n=348   win=52.59% CI[47.34%,57.78%] roi=-2.72% units=-9.4
+  Validation  n=437   win=54.23% CI[49.55%,58.85%] roi=0.33% units=+1.5
+  Latest OOS  n=291   win=45.70% CI[40.07%,51.45%] roi=-15.45% units=-44.9
+  Block 1     n=230   win=53.48% roi=-1.07% units=-2.4
+  Block 2     n=513   win=53.61% roi=-0.83% units=-4.2
+  Block 3     n=333   win=46.55% roi=-13.89% units=-46.2
+  Rolling 50   mean win=51.71% min=36.00% windows>BE=29.11%
+  Rolling 100  mean win=51.75% min=41.00% windows>BE=31.32%
+  Rolling 200  mean win=51.78% min=43.00% windows>BE=25.77%
+  Max drawdown 58.60 u   longest losing streak 7
+  STABILITY: Not profitable (overall <=54.054%)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      621    306   315   49.28%    -8.84%   -54.9
+  KBL      96     45    51    46.88%    -13.28%  -12.7
+  CBA      115    60    55    52.17%    -3.48%   -4.0
+  TBSL     111    61    50    54.95%    1.67%    +1.9
+  Euro     61     43    18    70.49%    30.41%   +18.6
+  CYBER    72     38    34    52.78%    -2.36%   -1.7
+  largest league contribution: NBA 57.71%
+  excluding CYBER:               n=1004 win=51.29% roi=-5.10% units=-51.2
+  COVERAGE triggered 1076 / eligible 4035 = 26.67%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+C  trailing 3d P80
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 1353  Wins 696  Losses 657  Pushes 0
+  Win% 51.44%  Loss% 48.56%  Push% 0.00%
+  Net units -65.40   ROI -4.83%   per 100 bets -4.83 u
+  95% CI (Wilson) [48.78% , 54.10%]   excludes break-even: NO
+  one-sided z vs 54.054%: z=-1.96  p(norm)=0.97475  p(exact)=0.97465
+  Discovery   n=338   win=52.96% CI[47.63%,58.22%] roi=-2.03% units=-6.8
+  Validation  n=626   win=53.51% CI[49.60%,57.39%] roi=-1.00% units=-6.2
+  Latest OOS  n=389   win=46.79% CI[41.88%,51.75%] roi=-13.44% units=-52.3
+  Block 1     n=214   win=52.34% roi=-3.18% units=-6.8
+  Block 2     n=688   win=53.92% roi=-0.24% units=-1.6
+  Block 3     n=451   win=47.23% roi=-12.63% units=-56.9
+  Rolling 50   mean win=51.61% min=32.00% windows>BE=33.51%
+  Rolling 100  mean win=51.61% min=40.00% windows>BE=32.38%
+  Rolling 200  mean win=51.43% min=41.50% windows>BE=28.94%
+  Max drawdown 70.75 u   longest losing streak 7
+  STABILITY: Not profitable (overall <=54.054%)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      646    319   327   49.38%    -8.65%   -55.8
+  KBL      109    48    61    44.04%    -18.53%  -20.2
+  CBA      142    72    70    50.70%    -6.20%   -8.8
+  TBSL     189    99    90    52.38%    -3.10%   -5.8
+  Euro     195    119   76    61.03%    12.90%   +25.2
+  CYBER    72     39    33    54.17%    0.21%    +0.2
+  largest league contribution: NBA 47.75%
+  excluding CYBER:               n=1281 win=51.29% roi=-5.12% units=-65.5
+  COVERAGE triggered 1353 / eligible 4035 = 33.53%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+D  trailing 3d P85
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 1097  Wins 572  Losses 525  Pushes 0
+  Win% 52.14%  Loss% 47.86%  Push% 0.00%
+  Net units -38.80   ROI -3.54%   per 100 bets -3.54 u
+  95% CI (Wilson) [49.18% , 55.09%]   excludes break-even: NO
+  one-sided z vs 54.054%: z=-1.30  p(norm)=0.90336  p(exact)=0.90327
+  Discovery   n=281   win=52.67% CI[46.83%,58.43%] roi=-2.56% units=-7.2
+  Validation  n=502   win=54.98% CI[50.61%,59.28%] roi=1.71% units=+8.6
+  Latest OOS  n=314   win=47.13% CI[41.68%,52.66%] roi=-12.80% units=-40.2
+  Block 1     n=183   win=53.01% roi=-1.94% units=-3.5
+  Block 2     n=554   win=55.05% roi=1.85% units=+10.2
+  Block 3     n=360   win=47.22% roi=-12.64% units=-45.5
+  Rolling 50   mean win=52.36% min=32.00% windows>BE=36.93%
+  Rolling 100  mean win=52.35% min=42.00% windows>BE=33.87%
+  Rolling 200  mean win=52.34% min=43.00% windows>BE=34.63%
+  Max drawdown 54.05 u   longest losing streak 9
+  STABILITY: Not profitable (overall <=54.054%)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      548    275   273   50.18%    -7.16%   -39.2
+  KBL      85     39    46    45.88%    -15.12%  -12.8
+  CBA      109    58    51    53.21%    -1.56%   -1.7
+  TBSL     143    75    68    52.45%    -2.97%   -4.2
+  Euro     159    96    63    60.38%    11.70%   +18.6
+  CYBER    53     29    24    54.72%    1.23%    +0.7
+  largest league contribution: NBA 49.95%
+  excluding CYBER:               n=1044 win=52.01% roi=-3.78% units=-39.4
+  COVERAGE triggered 1097 / eligible 4035 = 27.19%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+E1 actual<req AND actual<league_avg
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 456  Wins 286  Losses 170  Pushes 0
+  Win% 62.72%  Loss% 37.28%  Push% 0.00%
+  Net units +73.10   ROI 16.03%   per 100 bets +16.03 u
+  95% CI (Wilson) [58.19% , 67.03%]   excludes break-even: YES
+  one-sided z vs 54.054%: z=3.67  p(norm)=0.00012  p(exact)=0.00011
+  Discovery   n=188   win=68.09% CI[61.12%,74.33%] roi=25.96% units=+48.8
+  Validation  n=190   win=58.95% CI[51.84%,65.70%] roi=9.05% units=+17.2
+  Latest OOS  n=78    win=58.97% CI[47.89%,69.22%] roi=9.10% units=+7.1
+  Block 1     n=128   win=63.28% roi=17.07% units=+21.9
+  Block 2     n=240   win=64.58% roi=19.48% units=+46.8
+  Block 3     n=88    win=56.82% roi=5.11% units=+4.5
+  Rolling 50   mean win=62.75% min=46.00% windows>BE=84.03%
+  Rolling 100  mean win=62.80% min=52.00% windows>BE=89.92%
+  Rolling 200  mean win=63.64% min=56.50% windows>BE=100.00%
+  Max drawdown 8.65 u   longest losing streak 5
+  STABILITY: Stable (above 55% in every chronological partition)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      17     9     8     52.94%    -2.06%   -0.3
+  KBL      50     31    19    62.00%    14.70%   +7.4
+  CBA      31     21    10    67.74%    25.32%   +7.9
+  TBSL     87     53    34    60.92%    12.70%   +11.1
+  Euro     132    80    52    60.61%    12.12%   +16.0
+  CYBER    139    92    47    66.19%    22.45%   +31.2
+  largest league contribution: CYBER 30.48%
+  excluding CYBER:               n=317 win=61.20% roi=13.22% units=+41.9
+  COVERAGE triggered 456 / eligible 4035 = 11.30%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+E1* actual<req AND actual<trailing league_avg
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 451  Wins 283  Losses 168  Pushes 0
+  Win% 62.75%  Loss% 37.25%  Push% 0.00%
+  Net units +72.55   ROI 16.09%   per 100 bets +16.09 u
+  95% CI (Wilson) [58.20% , 67.09%]   excludes break-even: YES
+  one-sided z vs 54.054%: z=3.66  p(norm)=0.00013  p(exact)=0.00012
+  Discovery   n=183   win=68.31% CI[61.25%,74.61%] roi=26.37% units=+48.3
+  Validation  n=190   win=58.95% CI[51.84%,65.70%] roi=9.05% units=+17.2
+  Latest OOS  n=78    win=58.97% CI[47.89%,69.22%] roi=9.10% units=+7.1
+  Block 1     n=123   win=63.41% roi=17.32% units=+21.3
+  Block 2     n=240   win=64.58% roi=19.48% units=+46.8
+  Block 3     n=88    win=56.82% roi=5.11% units=+4.5
+  Rolling 50   mean win=62.79% min=46.00% windows>BE=83.83%
+  Rolling 100  mean win=62.86% min=52.00% windows>BE=89.77%
+  Rolling 200  mean win=63.61% min=56.50% windows>BE=100.00%
+  Max drawdown 8.65 u   longest losing streak 5
+  STABILITY: Stable (above 55% in every chronological partition)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      17     9     8     52.94%    -2.06%   -0.3
+  KBL      50     31    19    62.00%    14.70%   +7.4
+  CBA      31     21    10    67.74%    25.32%   +7.9
+  TBSL     85     52    33    61.18%    13.18%   +11.2
+  Euro     132    80    52    60.61%    12.12%   +16.0
+  CYBER    136    90    46    66.18%    22.43%   +30.5
+  largest league contribution: CYBER 30.16%
+  excluding CYBER:               n=315 win=61.27% roi=13.35% units=+42.1
+  COVERAGE triggered 451 / eligible 4035 = 11.18%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+E2 actual<req
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 544  Wins 330  Losses 214  Pushes 0
+  Win% 60.66%  Loss% 39.34%  Push% 0.00%
+  Net units +66.50   ROI 12.22%   per 100 bets +12.22 u
+  95% CI (Wilson) [56.50% , 64.68%]   excludes break-even: YES
+  one-sided z vs 54.054%: z=3.05  p(norm)=0.00115  p(exact)=0.00109
+  Discovery   n=220   win=64.55% CI[58.02%,70.57%] roi=19.41% units=+42.7
+  Validation  n=219   win=60.73% CI[54.13%,66.96%] roi=12.35% units=+27.1
+  Latest OOS  n=105   win=52.38% CI[42.91%,61.68%] roi=-3.10% units=-3.2
+  Block 1     n=147   win=61.90% roi=14.52% units=+21.4
+  Block 2     n=280   win=63.93% roi=18.27% units=+51.2
+  Block 3     n=117   win=51.28% roi=-5.13% units=-6.0
+  Rolling 50   mean win=60.88% min=46.00% windows>BE=76.97%
+  Rolling 100  mean win=61.13% min=50.00% windows>BE=77.08%
+  Rolling 200  mean win=62.21% min=53.50% windows>BE=97.97%
+  Max drawdown 10.95 u   longest losing streak 5
+  STABILITY: Decaying (discovery >55%, later partitions <=55%)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      21     11    10    52.38%    -3.10%   -0.6
+  KBL      57     36    21    63.16%    16.84%   +9.6
+  CBA      34     24    10    70.59%    30.59%   +10.4
+  TBSL     97     59    38    60.82%    12.53%   +12.2
+  Euro     148    89    59    60.14%    11.25%   +16.7
+  CYBER    187    111   76    59.36%    9.81%    +18.4
+  largest league contribution: CYBER 34.38%
+  excluding CYBER:               n=357 win=61.34% roi=13.49% units=+48.2
+  COVERAGE triggered 544 / eligible 4035 = 13.48%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+E3 req>league_avg
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 603  Wins 340  Losses 263  Pushes 0
+  Win% 56.38%  Loss% 43.62%  Push% 0.00%
+  Net units +26.00   ROI 4.31%   per 100 bets +4.31 u
+  95% CI (Wilson) [52.40% , 60.29%]   excludes break-even: NO
+  one-sided z vs 54.054%: z=1.11  p(norm)=0.13402  p(exact)=0.13396
+  Discovery   n=223   win=56.95% CI[50.39%,63.28%] roi=5.36% units=+12.0
+  Validation  n=237   win=60.76% CI[54.42%,66.76%] roi=12.41% units=+29.4
+  Latest OOS  n=143   win=48.25% CI[40.22%,56.38%] roi=-10.73% units=-15.3
+  Block 1     n=152   win=59.21% roi=9.54% units=+14.5
+  Block 2     n=288   win=59.38% roi=9.84% units=+28.4
+  Block 3     n=163   win=48.47% roi=-10.34% units=-16.8
+  Rolling 50   mean win=56.74% min=42.00% windows>BE=63.72%
+  Rolling 100  mean win=56.84% min=46.00% windows>BE=78.37%
+  Rolling 200  mean win=57.47% min=50.50% windows>BE=85.15%
+  Max drawdown 21.55 u   longest losing streak 6
+  STABILITY: Decaying (discovery >55%, later partitions <=55%)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      33     21    12    63.64%    17.73%   +5.9
+  KBL      72     34    38    47.22%    -12.64%  -9.1
+  CBA      50     31    19    62.00%    14.70%   +7.4
+  TBSL     86     47    39    54.65%    1.10%    +1.0
+  Euro     154    86    68    55.84%    3.31%    +5.1
+  CYBER    208    121   87    58.17%    7.62%    +15.9
+  largest league contribution: CYBER 34.49%
+  excluding CYBER:               n=395 win=55.44% roi=2.57% units=+10.2
+  COVERAGE triggered 603 / eligible 4035 = 14.94%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+F  frozen P80 + actual<req
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 207  Wins 131  Losses 76  Pushes 0
+  Win% 63.29%  Loss% 36.71%  Push% 0.00%
+  Net units +35.35   ROI 17.08%   per 100 bets +17.08 u
+  95% CI (Wilson) [56.53% , 69.55%]   excludes break-even: YES
+  one-sided z vs 54.054%: z=2.60  p(norm)=0.00473  p(exact)=0.00449
+  Discovery   n=108   win=62.96% CI[53.56%,71.48%] roi=16.48% units=+17.8
+  Validation  n=62    win=77.42% CI[65.59%,86.04%] roi=43.23% units=+26.8
+  Latest OOS  n=37    win=40.54% CI[26.35%,56.51%] roi=-25.00% units=-9.2
+  Block 1     n=92    win=67.39% roi=24.67% units=+22.7
+  Block 2     n=75    win=69.33% roi=28.27% units=+21.2
+  Block 3     n=40    win=42.50% roi=-21.37% units=-8.5
+  Rolling 50   mean win=65.76% min=48.00% windows>BE=93.04%
+  Rolling 100  mean win=66.03% min=60.00% windows>BE=100.00%
+  Rolling 200  mean win=63.44% min=63.00% windows>BE=100.00%
+  Max drawdown 10.10 u   longest losing streak 7
+  STABILITY: Decaying (discovery >55%, later partitions <=55%)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      19     10    9     52.63%    -2.63%   -0.5
+  KBL      15     11    4     73.33%    35.67%   +5.4
+  CBA      14     10    4     71.43%    32.14%   +4.5
+  TBSL     35     24    11    68.57%    26.86%   +9.4
+  Euro     61     43    18    70.49%    30.41%   +18.6
+  CYBER    63     33    30    52.38%    -3.10%   -1.9
+  largest league contribution: CYBER 30.43%
+  excluding CYBER:               n=144 win=68.06% roi=25.90% units=+37.3
+  COVERAGE triggered 207 / eligible 4035 = 5.13%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+G  frozen P95 + actual<req
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 88  Wins 61  Losses 27  Pushes 0
+  Win% 69.32%  Loss% 30.68%  Push% 0.00%
+  Net units +24.85   ROI 28.24%   per 100 bets +28.24 u
+  95% CI (Wilson) [59.04% , 77.98%]   excludes break-even: YES
+  one-sided z vs 54.054%: z=2.77  p(norm)=0.00283  p(exact)=0.00252
+  Discovery   n=48    win=70.83% CI[56.82%,81.76%] roi=31.04% units=+14.9
+  Validation  n=25    win=88.00% CI[70.04%,95.83%] roi=62.80% units=+15.7
+  Latest OOS  n=15    win=33.33% CI[15.18%,58.29%] roi=-38.33% units=-5.8
+  Block 1     n=45    win=71.11% roi=31.56% units=+14.2
+  Block 2     n=25    win=88.00% roi=62.80% units=+15.7
+  Block 3     n=18    win=38.89% roi=-28.06% units=-5.0
+  Rolling 50   mean win=73.08% min=66.00% windows>BE=100.00%
+  Rolling 100  insufficient bets
+  Rolling 200  insufficient bets
+  Max drawdown 7.45 u   longest losing streak 5
+  STABILITY: Insufficient sample (<100 bets)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      13     8     5     61.54%    13.85%   +1.8
+  KBL      8      5     3     62.50%    15.62%   +1.2
+  CBA      6      5     1     83.33%    54.17%   +3.2
+  TBSL     10     8     2     80.00%    48.00%   +4.8
+  Euro     34     25    9     73.53%    36.03%   +12.3
+  CYBER    17     10    7     58.82%    8.82%    +1.5
+  largest league contribution: Euro 38.64%
+  excluding CYBER:               n=71 win=71.83% roi=32.89% units=+23.4
+  COVERAGE triggered 88 / eligible 4035 = 2.18%
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+H  frozen P97.5 + actual<req
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Bets 56  Wins 36  Losses 20  Pushes 0
+  Win% 64.29%  Loss% 35.71%  Push% 0.00%
+  Net units +10.60   ROI 18.93%   per 100 bets +18.93 u
+  95% CI (Wilson) [51.19% , 75.54%]   excludes break-even: NO
+  one-sided z vs 54.054%: z=1.40  p(norm)=0.08041  p(exact)=0.07957
+  Discovery   n=24    win=62.50% CI[42.71%,78.84%] roi=15.63% units=+3.8
+  Validation  n=19    win=89.47% CI[68.61%,97.06%] roi=65.53% units=+12.5
+  Latest OOS  n=13    win=30.77% CI[12.68%,57.63%] roi=-43.08% units=-5.6
+  Block 1     n=22    win=63.64% roi=17.73% units=+3.9
+  Block 2     n=18    win=88.89% roi=64.44% units=+11.6
+  Block 3     n=16    win=37.50% roi=-30.62% units=-4.9
+  Rolling 50   mean win=66.00% min=64.00% windows>BE=100.00%
+  Rolling 100  insufficient bets
+  Rolling 200  insufficient bets
+  Max drawdown 6.45 u   longest losing streak 4
+  STABILITY: Insufficient sample (<100 bets)
+  LEAGUE   Bets   Wins  Loss   Win%      ROI      units
+  NBA      11     6     5     54.55%    0.91%    +0.1
+  KBL      3      1     2     33.33%    -38.33%  -1.1
+  CBA      6      5     1     83.33%    54.17%   +3.2
+  TBSL     5      3     2     60.00%    11.00%   +0.6
+  Euro     16     12    4     75.00%    38.75%   +6.2
+  CYBER    15     9     6     60.00%    11.00%   +1.7
+  largest league contribution: Euro 28.57%
+  excluding CYBER:               n=41 win=65.85% roi=21.83% units=+9.0
+  COVERAGE triggered 56 / eligible 4035 = 1.39%
+
+====================================================================================================
+LEAKAGE VERIFICATION — trailing cutoffs
+====================================================================================================
+  NBA    youngest datum consumed in any cutoff is 0.1s BEFORE its trigger -> OK
+  KBL    youngest datum consumed in any cutoff is 0.2s BEFORE its trigger -> OK
+  CBA    youngest datum consumed in any cutoff is 0.2s BEFORE its trigger -> OK
+  TBSL   youngest datum consumed in any cutoff is 0.2s BEFORE its trigger -> OK
+  Euro   youngest datum consumed in any cutoff is 0.2s BEFORE its trigger -> OK
+  CYBER  youngest datum consumed in any cutoff is 0.2s BEFORE its trigger -> OK
+  window rule: strictly [t-3d, t); the trigger observation is
+  never a member of its own cutoff.  'actual < required' uses only
+  the trigger row's own fields (same timestamp) -> no leakage.
+
+====================================================================================================
+FINAL COMPARISON
+====================================================================================================
+  cand   bets    win%      roi  CI_low    disc   valid  latest   cover  leakage
+  A       381  56.69%    4.88%  51.68%  57.93%  63.41%  45.74%    9.4%  n/a (no cutoff)
+  A*      390  56.92%    5.31%  51.96%  58.08%  63.28%  46.32%    9.7%  causal (verified)
+  B      1076  51.39%   -4.92%  48.41%  52.59%  54.23%  45.70%   26.7%  discovery-frozen
+  C      1353  51.44%   -4.83%  48.78%  52.96%  53.51%  46.79%   33.5%  causal (verified)
+  D      1097  52.14%   -3.54%  49.18%  52.67%  54.98%  47.13%   27.2%  causal (verified)
+  E1      456  62.72%   16.03%  58.19%  68.09%  58.95%  58.97%   11.3%  n/a (no cutoff)
+  E1*     451  62.75%   16.09%  58.20%  68.31%  58.95%  58.97%   11.2%  n/a (no cutoff)
+  E2      544  60.66%   12.22%  56.50%  64.55%  60.73%  52.38%   13.5%  n/a (no cutoff)
+  E3      603  56.38%    4.31%  52.40%  56.95%  60.76%  48.25%   14.9%  n/a (no cutoff)
+  F       207  63.29%   17.08%  56.53%  62.96%  77.42%  40.54%    5.1%  discovery-frozen
+  G        88  69.32%   28.24%  59.04%  70.83%  88.00%  33.33%    2.2%  discovery-frozen
+  H        56  64.29%   18.93%  51.19%  62.50%  89.47%  30.77%    1.4%  discovery-frozen
+  BASE   4035  50.01%   -7.48%          51.33%  51.21%  47.41%  100.0%  control (no condition)
+
+====================================================================================================
+EXECUTIVE RESULT
+====================================================================================================
+  1. Candidates >55% overall:            A, A*, E1, E1*, E2, E3, F, G, H
+  2. Candidates >54.054% (break-even):   A, A*, E1, E1*, E2, E3, F, G, H
+  3. >55% in VALIDATION:                 A, A*, E1, E1*, E2, E3, F, G, H
+  4. >55% in LATEST OOS:                 E1, E1*
+  5. CI entirely above break-even:       E1, E1*, E2, F, G
+  6. discovery >55% (in-sample):         A, A*, E1, E1*, E2, E3, F, G, H
+
+  NB: '>55%' is a descriptive bar; the ECONOMIC bar at 1.85 is
+  54.054%.  A candidate can clear 55% in the aggregate and still
+  fail to persist out of sample — see the partition columns.
+
+§12  FACTUAL DETERMINATION
+  1. observed win rate >55% overall:   A, A*, E1, E1*, E2, E3, F, G, H
+  2. remain >55% in validation:        A, A*, E1, E1*, E2, E3, F, G, H
+  3. remain >55% in latest OOS:        E1, E1*
+  4. exceed 54.054% overall:           A, A*, E1, E1*, E2, E3, F, G, H
+     exceed 54.054% in latest OOS:     E1, E1*
+  5. coverage <5% or <100 bets (LOW):  G, H
+  6. 95% CI entirely above 54.054%:    E1, E1*, E2, F, G
+  7. >55% in BOTH validation AND
+     latest OOS (persistent):          E1, E1*
+  8. baseline UNDER% by block (control): 50.44% / 51.65% / 47.73%
+     -> if the baseline also collapses in block 3, the late-period
+        falloff is a MARKET regime shift, not signal-specific decay.
+  9. production rule (A) historical edge: 56.69% overall, 45.74% latest OOS
+ 10. trailing 3d P80/P85 vs production: C 51.44% / D 52.14% vs A 56.69% -> NO improvement
