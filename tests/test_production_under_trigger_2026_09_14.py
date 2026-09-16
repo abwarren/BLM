@@ -315,14 +315,27 @@ out.active_false = show(game({ under_alert: Object.assign(
 out.active_false_records = m.UNDER_ALERTS.active.size;
 // N — active:true while the SEPARATE backend liveness gate says INELIGIBLE
 //     (below_min_remaining) and the market block says stale, on a game the
-//     payload no longer calls live.  The authoritative active alert MUST
-//     still be displayed — no second decision may suppress it.
+//     backend still calls LIVE.  The authoritative active alert MUST still
+//     be displayed — no second ELIGIBILITY decision may suppress it.
+//     (audit 2026-09-16 §9: a game the authoritative state marks OVER is
+//     lifecycle reconciliation, not eligibility — covered by N2 below.)
 out.active_true_despite_gate = show(game({
-  live: false, live_reason: "game_finished",
   alert: { eligible: false, reason: "below_min_remaining" },
   under_alert_eligibility: { eligible: false, reason: "market_stale" },
 }));
 out.active_true_records = m.UNDER_ALERTS.active.size;
+// N2 — the SAME gate-ineligible alert on a game the authoritative state
+//     marks OVER (audit 2026-09-16 §9): lifecycle reconciliation CLOSES
+//     the record — an ended alert must stop rendering as ACTIVE even
+//     though the delayed verdict has not flipped yet.  This is not a
+//     second eligibility decision: it consumes only the backend's own
+//     state verdict (g.status / g.live / g.live_reason) and only closes.
+out.active_true_game_over = show(game({
+  live: false, live_reason: "game_finished",
+  alert: { eligible: false, reason: "below_min_remaining" },
+  under_alert_eligibility: { eligible: false, reason: "market_stale" },
+}));
+out.active_true_game_over_records = m.UNDER_ALERTS.active.size;
 console.log(JSON.stringify(out));
 """
 
@@ -372,14 +385,24 @@ def test_requirement_N_no_second_frontend_gate_suppresses_an_active_alert(
     required 6.5 vs a 4.334 threshold at 97.5% progress — a qualifying
     alert whose display was suppressed because the backend's SEPARATE
     liveness gate returned below_min_remaining.  Here the payload carries
-    active:true alongside alert.eligible:false, a stale market block and
-    live:false; the alert must STILL be displayed."""
+    active:true alongside alert.eligible:false and a stale market block
+    on a game the backend still calls live; the alert must STILL be
+    displayed.
+
+    N2 (audit 2026-09-16 §9): the SAME gate-ineligible alert on a game
+    the authoritative state marks OVER is closed by lifecycle
+    reconciliation — an ended alert must not keep rendering as ACTIVE.
+    That is a lifecycle close, not the eligibility second-gate N forbids."""
     got = _display(_js(client), tmp_path)
     html = got["active_true_despite_gate"]
     assert "UNDER ALERT" in html, html
     assert "UNDER ALERT — 75%" in html, html
     assert "TBSL | Game G-PROD" in html, html
     assert got["active_true_records"] == 1, got
+    # N2 — authoritative game over -> the ACTIVE record closes
+    html2 = got["active_true_game_over"]
+    assert "No active UNDER alerts" in html2, html2
+    assert got["active_true_game_over_records"] == 0, got
 
 
 @node
@@ -390,8 +413,15 @@ def test_requirement_N_the_under_alert_path_consults_nothing_but_active(
     under_alert.active and nothing else."""
     js = _js(client)
     body = _block(js, "function reconcileUnderAlerts", "\nfunction ")
-    assert "const ok = cp != null && ua.active === true;" in body
-    assert "const ok = cp != null && ua.active === true;" in js
+    # AMENDMENT (audit 2026-09-16 §9): the ONE opening rule also refuses to
+    # resurrect a record whose game the backend's authoritative state marks
+    # over (gameOverIds — g.status / g.live / g.live_reason only).  This is
+    # lifecycle reconciliation, not a second eligibility decision: it
+    # consumes backend state and can only CLOSE records, never suppress a
+    # live game's alert.
+    assert "const ok = cp != null && ua.active === true && !gameOver;" in body
+    assert "const ok = cp != null && ua.active === true && !gameOver;" in js
+    assert "const gameOver = gameOverIds.has(g.game_id);" in js
     for banned in ("alertEligible", "mktEligible", "g.alert",
                    "isActuallyLive", "under_alert_eligibility.eligible"):
         assert banned not in body, banned

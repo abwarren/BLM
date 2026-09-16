@@ -61,8 +61,14 @@ def _proj(remaining, *, captured=FRESH, elapsed=None, pct=None,
             "clock": clock}
 
 
-def _elig(game, proj, quality=None, age=None):
-    return _alert_gate(game, proj, NOW, age, quality)
+def _elig(game, proj, quality=None, age=None, state_age=5.0):
+    # AMENDMENT (audit 2026-09-16 §6): the gate now also verifies the
+    # accepted GAME STATE itself is current (state_age <=
+    # ALERT_MAX_STATE_AGE_S, fail closed -> stale_state).  Fixtures here
+    # default to a verified-fresh state so they exercise the SAME
+    # conditions as before; stale_state cases live in the §3 section and
+    # in test_temporal_freshness_fix_2026_09_16.py.
+    return _alert_gate(game, proj, NOW, age, quality, state_age)
 
 
 # ── 1. the 2.5-minute HARD CUTOFF (inclusive at 2.50) ───────────────────
@@ -256,7 +262,12 @@ def test_every_alert_level_site_is_gated():
     body = js[js.index("function reconcileUnderAlerts"):
               js.index("\nfunction ", js.index("function reconcileUnderAlerts"))]
     assert "alertEligible" not in body
-    assert "const ok = cp != null && ua.active === true;" in body
+    # AMENDMENT (audit 2026-09-16 §9): the ONE opening rule also refuses
+    # to resurrect a record whose game the backend's authoritative state
+    # marks over (gameOverIds — g.status / g.live / g.live_reason only).
+    # Lifecycle reconciliation, not a second eligibility decision: it can
+    # only CLOSE records, never suppress a live game's alert.
+    assert "const ok = cp != null && ua.active === true && !gameOver;" in body
 
 
 def test_no_alert_path_bypasses_the_gate():

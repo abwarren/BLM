@@ -33,7 +33,7 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -72,6 +72,46 @@ STATE_FILE = Path(__file__).resolve().parent / "state" / "collector_state.json"
 # A game is considered LIVE if its latest snapshot is fresher than this.
 # Freshness is NECESSARY but NEVER SUFFICIENT — see _live_state.
 LIVE_AGE_S = 15 * 60
+
+# ── AUTHORITATIVE LIVE GAME STATE (temporal-state audit 2026-09-16) ─────
+# The DOM-harvest leg of the collector can stop hydrating (the known
+# BetConstruct SPA degradation): it then writes snapshots with NULL
+# score/quarter/clock and event-view verification fails.  The eu-swarm
+# WebSocket MatchTotal feed is the INDEPENDENT, fresh, validated source of
+# score / quarter / clock during exactly those windows (read in
+# _ws_game_state below from market_observations).  Selection rules:
+#
+#   1. A complete DOM frame (score+quarter present) is preferred while it
+#      is fresh — the panel is the primary surface the collector models.
+#   2. A DOM frame whose state fields are NULL (degraded hydration) is
+#      NEVER a state candidate: it must not replace, roll back or freeze
+#      the live state (NULL-snapshot protection).
+#   3. When the newest complete DOM frame is older than
+#      WS_STATE_FALLBACK_S, the freshest validated WS frame (one carrying
+#      quarter AND clock AND both scores — never a line-only WS row)
+#      becomes the displayed game state.  WS lines already flow into the
+#      market block independently; this adds WS score/quarter/clock.
+#   4. TEMPORAL MONOTONICITY: an accepted state can never move backwards.
+#      A candidate older than the currently displayed state, or a quarter/
+#      clock regression within the same quarter (Q4→Q3, 03:00→05:00), is
+#      rejected — the accepted state holds until a GENUINELY newer one
+#      arrives.  Clock sentinels (00:00) are boundaries, not regressions.
+#      No clock value is ever invented: rejection keeps the prior state.
+#
+# The freshness window is deliberately LOOSE (the audit's observed DOM
+# gaps reached 454s; a tighter bound would flap between sources) and only
+# decides WHICH validated observation describes the game — never whether
+# the game is live (that stays _live_state) or alertable (that stays
+# _alert_gate + its own stricter age bound).
+WS_STATE_FALLBACK_S = 300.0
+#: metadata source labels for the accepted game state
+STATE_SOURCE_DOM = "dom"
+STATE_SOURCE_WS = "ws"
+#: alert observability bound: an alert evaluated against a game state
+#: older than this is a stale-state alert, period (documented limit —
+#: the 300s market-freshness boundary; ALERT_MAX_OBS_AGE_S stays the
+#: projector-observation bound).  Eligibility records ``stale_state``.
+ALERT_MAX_STATE_AGE_S = 300.0
 
 # ── LIVE-state (display) vocabulary ─────────────────────────────────────
 # The ONLY statuses the platform treats as in-progress.  The collector's
@@ -139,6 +179,139 @@ def _age_s(iso: Optional[str], now: Optional[datetime] = None) -> Optional[float
 def _f(v: Any) -> Optional[float]:
     """SQLite NULL-safe float coercion."""
     return None if v is None else float(v)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Authoritative live game-state selection (audit 2026-09-16 §1–§4)
+# ────────────────────────────────────────────────────────────────────────
+
+def _ws_game_state(conn: sqlite3.Connection, source_game_id: str,
+                   limit: int = 25) -> Optional[dict]:
+    """Freshest VALIDATED WS game-state frame for one game, newest first.
+
+    A WS frame is a STATE candidate only when it carries the complete
+    game state: period label (→ quarter), clock AND both scores.  Line-
+    only WS rows (period_label IS NULL — the feed emits those between
+    game-state pushes) are market data, not game state, and are skipped.
+    Nothing is fabricated: rows come back exactly as stored.
+    """
+    rows = conn.execute(
+        """SELECT captured_at, period_label, clock, home_score, away_score
+           FROM market_observations
+           WHERE source_game_id=? AND market_type='MatchTotal'
+             AND captured_at >= ?
+             AND period_label IS NOT NULL AND clock IS NOT NULL
+             AND home_score IS NOT NULL AND away_score IS NOT NULL
+           ORDER BY captured_at DESC LIMIT ?""",
+        (source_game_id, CLEAN_DATA_EPOCH, limit)).fetchall()
+    for r in rows:
+        d = dict(r)
+        q = period_quarter(d.get("period_label"))
+        if q is None:
+            continue                      # unresolvable label → not a state
+        d["quarter"] = q
+        return d
+    return None
+
+
+def _clock_seconds(clock: Optional[str]) -> Optional[int]:
+    """A MM:SS clock as descending seconds (05:00 → 300); None when the
+    value is not a parseable clock.  Pure parse — no invention."""
+    if not clock:
+        return None
+    try:
+        mm, ss = clock.strip().split(":")
+        return int(mm) * 60 + int(ss)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _state_is_regression(prev: dict, cand: dict) -> bool:
+    """True when ``cand`` would move the accepted state BACKWARDS.
+
+    Monotonicity rules (audit §3), applied only between two COMPLETE
+    states (both carry quarter + clock + scores):
+      • same quarter, candidate clock strictly greater than the accepted
+        clock → regression (03:00 → 05:00 inside Q4).  The 00:00 sentinel
+        is a period END boundary, never a regression.
+      • quarter is structural progress and cannot decrease (Q4→Q3).
+    Older captured_at is handled by the caller (recency comparison), not
+    here.  A candidate missing clock/quarter is never called a
+    regression — it is simply not eligible to replace a complete state.
+    """
+    pq = prev.get("quarter")
+    cq = cand.get("quarter")
+    if pq is None or cq is None:
+        return False
+    if cq < pq:
+        return True
+    if cq != pq:
+        return False
+    pc = _clock_seconds(prev.get("clock"))
+    cc = _clock_seconds(cand.get("clock"))
+    if pc is None or cc is None:
+        return False
+    return cc > pc and cc != 0
+
+
+def _authoritative_game_state(
+    rows: list[dict], ws_state: Optional[dict], now: datetime,
+) -> tuple[Optional[dict], dict]:
+    """The displayed game state + its freshness metadata (audit §1/§2/§5).
+
+    ``rows`` are the game's post-epoch snapshots ASCENDING (as served to
+    _analyze_game).  Selection, in order:
+
+      1. newest COMPLETE DOM frame (score AND quarter present) — the
+         primary source while fresh (age <= WS_STATE_FALLBACK_S);
+      2. otherwise the freshest validated WS frame (_ws_game_state);
+      3. otherwise the newest DOM frame of any shape (degraded — preserved
+         legacy behaviour for games with no complete frame at all).
+
+    A WS or older-DOM candidate that would REGRESS the accepted state is
+    rejected (_state_is_regression) and the accepted state holds.  The
+    returned metadata block is the payload's game_state_freshness field
+    (audit §5): which source, when it was observed, how old it is.
+    """
+    def _complete(r: dict) -> bool:
+        return (r.get("home_score") is not None
+                and r.get("away_score") is not None
+                and (r.get("quarter") is not None
+                     or period_quarter(r.get("period_label")) is not None))
+
+    dom_complete = [r for r in rows if _complete(r)]
+    dom_any = rows[-1] if rows else None
+    chosen: Optional[dict] = None
+    source = None
+    if dom_complete:
+        chosen = dom_complete[-1]
+        source = STATE_SOURCE_DOM
+        chosen_age = _age_s(chosen["captured_at"], now)
+        if chosen_age is not None and chosen_age > WS_STATE_FALLBACK_S:
+            # stale DOM state — try the WS feed before freezing on it
+            if ws_state is not None:
+                cand_q = period_quarter(ws_state.get("period_label"))
+                prev_q = (chosen.get("quarter")
+                          or period_quarter(chosen.get("period_label")))
+                prev = {"quarter": prev_q, "clock": chosen.get("clock")}
+                cand = {"quarter": cand_q, "clock": ws_state.get("clock")}
+                if not _state_is_regression(prev, cand):
+                    chosen, source = ws_state, STATE_SOURCE_WS
+    elif ws_state is not None:
+        chosen, source = ws_state, STATE_SOURCE_WS
+    elif dom_any is not None:
+        chosen, source = dom_any, STATE_SOURCE_DOM
+
+    observed_at = chosen["captured_at"] if chosen else None
+    meta = {
+        "source": source,
+        "state_observed_at": observed_at,
+        "state_age_seconds": (round(_age_s(observed_at, now), 1)
+                              if observed_at else None),
+        "source_observed_at": (ws_state["captured_at"]
+                               if ws_state else None),
+    }
+    return chosen, meta
 
 
 def _market_snapshot(rows: list[dict]) -> Optional[dict]:
@@ -708,6 +881,15 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     checkpoint table (M007-M4) AND the immutable Market-vs-Fair history
     (M009); only the single-game detail route requests it so the /live
     and /games lists stay lean.
+
+    GAME STATE (audit 2026-09-16 §1/§2/§3): the displayed score/quarter/
+    clock come from the authoritative-state selection
+    (_authoritative_game_state) — the freshest COMPLETE DOM frame, with a
+    validated WS frame replacing it when the DOM leg has degraded (NULL
+    fields / stale complete frame) — never a NULL-bearing snapshot, never
+    a backwards move.  The selection also serves the alert gate's
+    staleness bound (the projected trajectory row can legitimately lag the
+    freshest state in a degraded window).
     """
     scored = [r for r in rows if r.get("home_score") is not None
               and r.get("away_score") is not None]
@@ -715,8 +897,23 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
     snap_count = len(rows)
     age = _age_s(latest["captured_at"] if latest else game.get("last_seen_at"), now)
 
-    home_score = _i(latest["home_score"]) if latest else None
-    away_score = _i(latest["away_score"]) if latest else None
+    # ── authoritative game-state selection ─────────────────────────────
+    # The STATE (score/quarter/clock/last_update) comes from the selected
+    # authoritative frame; all OTHER per-row reads (odds, spread, series,
+    # momentum, market snapshots) keep reading the snapshot timeline as
+    # before.  ``state_row`` is only the state carrier — a WS frame has a
+    # different column set than a snapshot row, so never index it with
+    # snapshot-only keys.
+    ws_state = (_ws_game_state(conn, game["source_game_id"])
+                if conn is not None else None)
+    state, state_meta = _authoritative_game_state(rows, ws_state, now)
+    state_row = latest
+    if state is not None:
+        state_row = state
+        age = _age_s(state["captured_at"], now)   # state age, not row age
+
+    home_score = _i(state_row["home_score"]) if state_row else None
+    away_score = _i(state_row["away_score"]) if state_row else None
 
     # Market state comes from the most recent snapshot that actually
     # carries a market payload.  List-level (panel) snapshots are written
@@ -847,11 +1044,15 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         "away_team": game["away_team"],
         "home_score": home_score,
         "away_score": away_score,
-        "period_label": (latest.get("period_label") if latest else None),
-        "quarter": (latest.get("quarter") if latest else None),
-        "clock": (latest.get("clock") if latest else None),
-        "last_update": (latest["captured_at"] if latest else game.get("last_seen_at")),
+        "period_label": (state_row.get("period_label") if state_row else None),
+        "quarter": (state_row.get("quarter") if state_row else None),
+        "clock": (state_row.get("clock") if state_row else None),
+        "last_update": (state_row["captured_at"] if state_row
+                        else game.get("last_seen_at")),
         "age_s": round(age, 1) if age is not None else None,
+        # game-state freshness metadata (audit §5) — the OBSERVED state's
+        # own provenance, never the API generation time
+        "game_state_freshness": state_meta,
         "snapshot_count": snap_count,
         "source_url": game.get("source_url"),
         "market": {
@@ -899,9 +1100,15 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
             if (age is not None and age <= LIVE_AGE_S) else None),
         # authoritative alert eligibility — computed once, consumed verbatim
         # by every dashboard alert path (badge, panel, pulse, audio).  A
-        # finished game or a stale observation is ineligible regardless of
-        # how well its stored state matches the condition.
-        "alert": _alert_gate(game, proj_row, now, age, quality),
+        # finished game or a stale observation/state is ineligible regardless
+        # of how well its stored state matches the condition.  The gate gets
+        # the authoritative STATE age (audit §6): the freshest validated
+        # state's own age, so a degraded DOM window with fresh WS data does
+        # not age out alerts that the state selection already refreshed —
+        # while a genuinely stale state (no fresh source anywhere) fails
+        # closed with reason stale_state.
+        "alert": _alert_gate(game, proj_row, now, age, quality,
+                             state_age=state_meta.get("state_age_seconds")),
     }
     if with_checkpoints and conn is not None:
         detail["checkpoints"] = _game_checkpoints(conn, game["source_game_id"])
@@ -1128,7 +1335,8 @@ def _live_state(game: dict, latest: Optional[dict], proj: Optional[dict],
 
 
 def _alert_gate(game: dict, proj: Optional[dict], now: datetime,
-                age: Optional[float], quality: Optional[dict]) -> dict:
+                age: Optional[float], quality: Optional[dict],
+                state_age: Optional[float] = None) -> dict:
     """Authoritative alert eligibility for one game — the SINGLE source of
     truth every dashboard alert path consumes verbatim (see
     ALERT_MAX_OBS_AGE_S for the rule order and thresholds).
@@ -1138,6 +1346,13 @@ def _alert_gate(game: dict, proj: Optional[dict], now: datetime,
     than merely hidden.  Terminality is decided from authoritative
     per-frame game time (never a bucket/label/percentage) and a
     game-time field overrides a contradicting game-level status flag.
+
+    STALE-STATE BOUND (audit §6): beyond the projector-observation bound
+    below, the ACCEPTED GAME STATE itself must be current — a game whose
+    every source (DOM and WS) is older than ALERT_MAX_STATE_AGE_S is a
+    stale state and fails closed with reason ``stale_state``.  The bound
+    is the documented 300s market-freshness limit; it is never worked
+    around by manipulating remaining time or pace inputs.
     """
     if (quality or {}).get("status") == "INVALID":
         return {"eligible": False, "reason": "invalid_quality"}
@@ -1159,6 +1374,11 @@ def _alert_gate(game: dict, proj: Optional[dict], now: datetime,
         obs_age = age
     if obs_age is None or obs_age > ALERT_MAX_OBS_AGE_S:
         return {"eligible": False, "reason": "stale_observation"}
+    # the accepted GAME STATE must be current too (audit §6): both the
+    # projector observation AND the authoritative state (DOM or WS) have
+    # to be inside their bounds before anything can alert
+    if state_age is None or state_age > ALERT_MAX_STATE_AGE_S:
+        return {"eligible": False, "reason": "stale_state"}
     pct = proj.get("progress_pct")
     if is_terminal_checkpoint(
             classification=proj.get("classification") or game.get("classification"),
@@ -1328,6 +1548,40 @@ except Exception:  # pragma: no cover - context layer is optional at boot
     pass
 
 
+def _freshest_game_state(conn: sqlite3.Connection,
+                         now: datetime) -> dict:
+    """Freshest COMPLETE game state across the live collection (score AND
+    quarter-bearing), from either source: the DOM snapshots table or the
+    WS market_observations feed.  This is the number the dashboard's
+    STATE-AGE indicator renders — distinct from response generation time
+    and from collector heartbeat (audit 2026-09-16 §8)."""
+    try:
+        dom = conn.execute(
+            "SELECT MAX(captured_at) AS m FROM snapshots "
+            "WHERE home_score IS NOT NULL AND away_score IS NOT NULL "
+            "AND quarter IS NOT NULL AND captured_at >= ?",
+            (CLEAN_DATA_EPOCH,)).fetchone()["m"]
+        ws = conn.execute(
+            "SELECT MAX(captured_at) AS m FROM market_observations "
+            "WHERE market_type='MatchTotal' AND period_label IS NOT NULL "
+            "AND clock IS NOT NULL AND home_score IS NOT NULL "
+            "AND away_score IS NOT NULL AND captured_at >= ?",
+            (CLEAN_DATA_EPOCH,)).fetchone()["m"]
+        candidates = [("dom", dom)] + ([("ws", ws)] if ws else [])
+        best_source, best_ts = max(
+            ((s, t) for s, t in candidates if t),
+            key=lambda st: st[1], default=(None, None))
+        return {
+            "source": best_source,
+            "state_observed_at": best_ts,
+            "state_age_seconds": (round(_age_s(best_ts, now), 1)
+                                  if best_ts else None),
+        }
+    except Exception:
+        return {"source": None, "state_observed_at": None,
+                "state_age_seconds": None}
+
+
 @router.get("/status")
 def v4_status() -> dict:
     now = datetime.now(timezone.utc)
@@ -1339,6 +1593,9 @@ def v4_status() -> dict:
                 "server_time": now.isoformat()}
     try:
         db = _db_stats(conn, now)
+        # freshest complete game state (DOM or WS) — read on the SAME open
+        # connection (audit 2026-09-16 §8)
+        db["game_state_freshness"] = _freshest_game_state(conn, now)
     finally:
         conn.close()
     # collector status: running (heartbeat fresh), stalled, offline
@@ -1350,6 +1607,12 @@ def v4_status() -> dict:
             col_status = "running" if state.get("status") == "running" else "stalled"
         else:
             col_status = "offline"
+    # TWO distinct freshness surfaces (audit 2026-09-16 §8):
+    #   db.last_snapshot_at     — collector write recency
+    #   db.game_state_freshness — freshest COMPLETE game state, DOM or WS
+    # The header's STALE pill must read the second (state age), never the
+    # response age alone: a freshly-generated JSON can carry a minutes-old
+    # game state.
     return {
         "status": col_status,
         "collector": state,
@@ -1518,8 +1781,21 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
             # two that could drift.  The reason is EXPOSED in the sibling
             # block: suppression is never silent, and the quantitative
             # numbers are still served.
+            # STALE-STATE GATE (audit 2026-09-16 §6): the authoritative
+            # game-state age is folded into the eligibility verdict — a
+            # game whose accepted state (DOM or WS) is older than the
+            # documented ALERT_MAX_STATE_AGE_S bound is never eligible,
+            # with the explicit reason stale_state (fail closed, reported).
+            # No pace/remaining input is ever adjusted to compensate.
             eligibility = under_alert_eligibility(
                 proj.get("market_status"), g.get("live"), g.get("live_reason"))
+            state_age = ((g.get("game_state_freshness") or {})
+                         .get("state_age_seconds"))
+            if eligibility["eligible"] and (
+                    state_age is None
+                    or state_age > ALERT_MAX_STATE_AGE_S):
+                eligibility = {"eligible": False,
+                               "reason": "stale_state"}
             g["under_alert_eligibility"] = eligibility
             g["under_alert"] = under_alert_state(
                 proj.get("actual_pts_per_min"), proj.get("required_pts_per_min"),
@@ -1573,6 +1849,16 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 "line_source": None, "final_source": None,
                 "authoritative": False, "resolved_at": None}
 
+    # payload-level game-state freshness (audit 2026-09-16 §5/§8): the
+    # freshest accepted game state across the served games (per-game
+    # game_state_freshness is on each game object) — the dashboard's
+    # state-age indicator reads this, NEVER the response timestamp above.
+    served_state_ages = [
+        g["game_state_freshness"]["state_age_seconds"]
+        for g in out
+        if g.get("game_state_freshness")
+        and g["game_state_freshness"].get("state_age_seconds") is not None]
+    freshest_state_age = min(served_state_ages) if served_state_ages else None
     return {
         "generated_at": now.isoformat(),
         "data_epoch": CLEAN_DATA_EPOCH,
@@ -1584,6 +1870,12 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
         "totals": {
             "live": sum(1 for g in out if g["live"]),
             "total": len(out),
+        },
+        "game_state_freshness": {
+            "state_age_seconds": freshest_state_age,
+            "state_observed_at": (now - timedelta(seconds=freshest_state_age)
+                                  ).isoformat()
+            if freshest_state_age is not None else None,
         },
     }
 

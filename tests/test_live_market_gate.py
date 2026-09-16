@@ -145,10 +145,18 @@ def test_api_passes_the_gate_verdict_into_every_verdict(monkeypatch):
     assert all("eligible" in kw for kw in calls), \
         "a verdict was composed WITHOUT the market gate"
     # one call per game, in order — each flag equals the gate's verdict
+    # AMENDED (audit 2026-09-16 §6): the served verdict ALSO folds the
+    # accepted-game-state age in AFTER the market gate — a game whose
+    # state is older than ALERT_MAX_STATE_AGE_S reports stale_state.
     for g, kw in zip(games, calls):
         proj = g.get("projector") or {}
         gate = under_alert_eligibility(
             proj.get("market_status"), g.get("live"), g.get("live_reason"))
+        state_age = ((g.get("game_state_freshness") or {})
+                     .get("state_age_seconds"))
+        if gate["eligible"] and (state_age is None
+                                 or state_age > v4api.ALERT_MAX_STATE_AGE_S):
+            gate = {"eligible": False, "reason": "stale_state"}
         assert g["under_alert_eligibility"] == gate, g["game_id"]
         assert kw["eligible"] == gate["eligible"], g["game_id"]
 
@@ -164,16 +172,42 @@ def test_api_active_flag_follows_the_gate(monkeypatch):
     assert p["games"]
     assert not any(g["under_alert"]["active"] for g in p["games"])
 
-    # force ELIGIBLE: every quantitatively-qualifying game becomes active,
-    # and nothing else does
+    # force ELIGIBLE: every quantitatively-qualifying, state-fresh game
+    # becomes active, and nothing else does.  STALE-STATE EXCLUSION
+    # (audit 2026-09-16 §6): the accepted game-state age folds in AFTER
+    # the market gate — a game older than ALERT_MAX_STATE_AGE_S stays
+    # inactive even with the gate forced eligible (can only tighten).
+    # The LIVE payload often carries zero FRESH qualifiers (finished
+    # games keep stale stored states), so the binding of the real bound
+    # is proven first, then the flag-drive proof neutralizes the bound on
+    # the module attribute so fresh qualifiers exist to observe.
     monkeypatch.setattr(v4api, "under_alert_eligibility",
                         lambda *a, **k: {"eligible": True,
                                          "reason": "market_live"})
     p = _payload()
+
+    def _state_fresh(g):
+        sa = ((g.get("game_state_freshness") or {})
+              .get("state_age_seconds"))
+        return sa is not None and sa <= v4api.ALERT_MAX_STATE_AGE_S
+
     qual = [g for g in p["games"] if _quant(g["under_alert"]) is True]
-    assert qual, "no qualifying game to prove the flag drives active"
-    assert all(g["under_alert"]["active"] is True for g in qual)
-    assert not [g["game_id"] for g in p["games"]
+    assert qual, "no quantitatively-qualifying game to exercise the gate"
+    # the REAL bound binds: a stale-state qualifier is NOT active even now
+    assert all(not g["under_alert"]["active"] for g in qual
+               if not _state_fresh(g)), \
+        "a stale-state game went active despite the forced-eligible gate"
+    # neutralize the bound so the FLAG is what drives active
+    real_bound = v4api.ALERT_MAX_STATE_AGE_S
+    try:
+        v4api.ALERT_MAX_STATE_AGE_S = float("inf")
+        p2 = _payload()
+    finally:
+        v4api.ALERT_MAX_STATE_AGE_S = real_bound
+    qual2 = [g for g in p2["games"] if _quant(g["under_alert"]) is True]
+    assert qual2, "no qualifying game to prove the flag drives active"
+    assert all(g["under_alert"]["active"] is True for g in qual2)
+    assert not [g["game_id"] for g in p2["games"]
                 if _quant(g["under_alert"]) is not True
                 and g["under_alert"]["active"]]
 
@@ -204,9 +238,18 @@ def test_every_served_game_carries_an_explicit_eligibility_reason():
             assert ms == "LIVE", (g["game_id"], ms)
             assert ua["active"] is (_quant(ua) is True), g["game_id"]
         elif g.get("live"):
-            # a genuinely live game excluded by the MARKET — name which
-            assert elig["reason"] == ("market_stale" if ms == "STALE"
-                                      else "market_missing"), (g["game_id"], ms)
+            # a genuinely live game excluded by the MARKET or by the
+            # accepted-state freshness bound (audit 2026-09-16 §6) — name
+            # which
+            if elig["reason"] == "stale_state":
+                sa = ((g.get("game_state_freshness") or {})
+                      .get("state_age_seconds"))
+                assert sa is None or sa > v4api.ALERT_MAX_STATE_AGE_S, \
+                    (g["game_id"], sa)
+            else:
+                assert elig["reason"] == ("market_stale" if ms == "STALE"
+                                          else "market_missing"), \
+                    (g["game_id"], ms)
             assert ua["active"] is False, g["game_id"]
 
 
@@ -260,7 +303,12 @@ def test_served_frontend_gates_on_the_server_market_field():
     (directive 2026-09-14): the browser reads the boolean and re-derives
     neither the market verdict nor the quantitative condition."""
     js = _js()
-    assert "const ok = cp != null && ua.active === true;" in js
+    # audit 2026-09-16 §9: the one boolean now also refuses to re-open a
+    # record whose game the backend's own state marks over (gameOverIds —
+    # g.status / g.live / g.live_reason only; never a re-derived condition)
+    assert ("const ok = cp != null && ua.active === true && !gameOver;"
+            in js)
+    assert "gameOverIds.has(g.game_id)" in js
     # the browser no longer composes a second eligibility gate at all
     assert "mktEligible" not in js
     assert "alertEligible(g) &&" not in js

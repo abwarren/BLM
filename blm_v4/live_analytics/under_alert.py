@@ -60,6 +60,11 @@ INELIGIBLE_MARKET_STALE = "market_stale"
 INELIGIBLE_MARKET_MISSING = "market_missing"
 #: No genuine-live reason supplied by the caller (fail closed).
 INELIGIBLE_NOT_LIVE = "not_live"
+#: Accepted game state older than the documented freshness bound
+#: (api.ALERT_MAX_STATE_AGE_S, audit 2026-09-16 §6).  Passed through from
+#: the backend alert gate's reason verbatim — a stale state is a live-
+#: gate failure: nothing about the game is provably current.
+INELIGIBLE_STALE_STATE = "stale_state"
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -91,9 +96,10 @@ def under_alert_eligibility(market_status: Any, live: Any,
 
     Returns ``{"eligible": bool, "reason": str}``.  Reasons distinguish the
     live-market case, each market failure, and — reused verbatim, never
-    reinvented — the existing genuine-live exclusion vocabulary supplied by
-    the caller: game_finished, unsupported_status, no_live_observation,
-    stale_observation, terminal_*.
+    reinvented — the existing genuine-live exclusion vocabulary supplied
+    by the caller: game_finished, unsupported_status, no_live_observation,
+    stale_observation, stale_state (state older than the documented
+    freshness bound — audit 2026-09-16 §6), terminal_*.
 
     The genuine-live test comes FIRST: when the game is not live at all,
     its own reason is the informative one, and the market state is moot.
@@ -103,8 +109,12 @@ def under_alert_eligibility(market_status: Any, live: Any,
     live line is never substituted, it is excluded.
     """
     if not live:
-        return {"eligible": False,
-                "reason": (live_reason or INELIGIBLE_NOT_LIVE)}
+        # stale_state is a live-gate failure carrying its own reason — pass
+        # it through verbatim so surfaces can distinguish "old state" from
+        # "no state" (audit §6); anything else keeps the caller's reason or
+        # the fail-closed default.
+        reason = live_reason or INELIGIBLE_NOT_LIVE
+        return {"eligible": False, "reason": reason}
     if market_status == "LIVE":
         return {"eligible": True, "reason": ELIGIBLE_MARKET_LIVE}
     if market_status == "STALE":

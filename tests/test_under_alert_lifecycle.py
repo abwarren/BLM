@@ -280,10 +280,23 @@ def test_checkpoint_boundaries():
 
 def test_frontend_consumes_the_server_verdict(client):
     """The browser must NOT reconstruct the condition — it renders the
-    backend's verdict, so the two can never disagree."""
+    backend's verdict, so the two can never disagree.
+
+    Audit 2026-09-16 §9: the ONLY addition to the opening rule is the
+    authoritative-game-over reconciliation pass (gameOverIds) — an
+    active record is closed when the payload's backend state marks the
+    game over.  That pass consumes ONLY backend-published state
+    (g.status / g.live / g.live_reason); it never re-derives the alert
+    condition, so the one-verdict rule still holds."""
     js = _js(client)
     assert "const ua = g.under_alert || {};" in js
-    assert "const ok = cp != null && ua.active === true;" in js
+    assert ("const ok = cp != null && ua.active === true && !gameOver;"
+            in js)
+    assert "gameOverIds.has(g.game_id)" in js
+    # the pass is bounded by the backend's OWN live vocabulary — nothing
+    # recomputed browser-side
+    assert 'reason === "game_finished"' in js
+    assert "reason.startsWith(" in js
     # the condition itself no longer exists in the browser
     assert "underConditionTrue" not in js
     assert "actual < required" not in js
@@ -307,7 +320,12 @@ def test_under_alert_path_has_no_second_decision(client):
     assert "g.alert" not in body, "the second decision is back"
     assert "isActuallyLive" not in body, "the second decision is back"
     # ...and the ONLY thing that opens a record is that one boolean
-    assert "const ok = cp != null && ua.active === true;" in body
+    # (extended only by the authoritative-game-over reconciliation —
+    # audit 2026-09-16 §9 — which consumes backend state, never a
+    # browser-side condition, and can only close records)
+    assert ("const ok = cp != null && ua.active === true && !gameOver;"
+            in body)
+    assert "ua.active === true" in body
 
 
 def test_frontend_carries_no_competition_identifier_of_its_own(client):
@@ -555,7 +573,8 @@ def test_liveness_gate_resolves_alerts(client):
     second gate that could suppress a real alert.
     """
     js = _js(client)
-    assert "const ok = cp != null && ua.active === true;" in js
+    assert ("const ok = cp != null && ua.active === true && !gameOver;"
+            in js)
     # the market verdict is still served, and the browser still reads its
     # REASON for the resolution narrative — but never as a gate
     assert "g.under_alert_eligibility.reason" in js

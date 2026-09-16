@@ -588,6 +588,32 @@ function reconcileUnderAlerts(games, labels) {
   const held = new Map();     // game_id -> this poll's live/phase verdict
   const trueNow = new Set();  // identities whose condition is TRUE now
 
+  // AUTHORITATIVE GAME OVER (audit 2026-09-16 §9): a game the payload
+  // itself marks finished can never host a standing alert, whatever a
+  // delayed alert verdict says.  Collect the ids whose authoritative
+  // state is over — status ended, backend live flag false with a
+  // terminal reason, or game absent from this poll's live set — and
+  // close their ACTIVE records BEFORE the verdict-based pass.
+  // RECONCILIATION with requirement N (2026-09-14): this is NOT a second
+  // eligibility gate — N forbids re-deciding ELIGIBILITY (gate/market
+  // conditions) in the browser; game-over LIFECYCLE reconciliation
+  // consumes only the backend's own authoritative state verdict
+  // (g.status / g.live / g.live_reason), can only ever CLOSE (never
+  // open or suppress a live game's alert), and is exactly what §9
+  // directs: an ended alert must stop rendering as ACTIVE even when the
+  // verdict flip has not yet been delivered by a later poll.
+  const gameOverIds = new Set();
+  for (const g of games || []) {
+    const reason = String((g && g.live_reason) || "");
+    const over = (g && (g.status === "ended" || g.live === false
+      || reason === "game_finished" || reason.startsWith("terminal_")));
+    if (over) gameOverIds.add(g.game_id);
+  }
+  for (const [id, act] of Array.from(UNDER_ALERTS.active)) {
+    if (!gameOverIds.has(act.game_id)) continue;
+    closeUnderAlert(id, act, { live: false, reason: "game_finished" }, now);
+  }
+
   for (const g of games || []) {
     // the server's verdict for this poll, consumed verbatim
     const ua = g.under_alert || {};
@@ -600,7 +626,13 @@ function reconcileUnderAlerts(games, labels) {
     // only ever SUPPRESS a real alert.  A null checkpoint means the game has
     // not reached the 75% trigger yet (or has no resolvable progress), so
     // there is nothing to attribute.
-    const ok = cp != null && ua.active === true;
+    // EXCEPTION (audit 2026-09-16 §9): a game the authoritative state marks
+    // OVER is never re-opened by an alert verdict — the pass above closed it
+    // and the per-game loop below must not resurrect it.  This is lifecycle
+    // reconciliation, not a second eligibility decision: it consumes only
+    // the backend's authoritative live/state verdict and can only CLOSE.
+    const gameOver = gameOverIds.has(g.game_id);
+    const ok = cp != null && ua.active === true && !gameOver;
     held.set(g.game_id, {
       live: ok,
       // Why the record is not standing RIGHT NOW — the server's own
@@ -1095,6 +1127,24 @@ function renderStatus(payload) {
   } else {
     livePill.className = "pill live-pill bad";
     $("liveLabel").textContent = "STALE";
+  }
+  // API-response age (the poll loop's own health) and GAME-STATE age are
+  // DIFFERENT conditions (temporal-state audit 2026-09-16 §8): a fresh JSON
+  // response can carry a minutes-old game state.  The state-age pill renders
+  // the backend's game_state_freshness metadata (per-payload freshest
+  // accepted state across the live collection) — never the generation time.
+  const statePill = $("stateAgePill");
+  if (statePill) {
+    const gs = payload.game_state_freshness || {};
+    const sa = gs.state_age_seconds;
+    if (sa == null) {
+      statePill.textContent = "state --";
+      statePill.style.color = "";
+    } else {
+      statePill.textContent = `state ${fmtAgeExact(sa)} old`;
+      statePill.style.color = sa <= 60 ? "var(--green)"
+        : sa <= 300 ? "var(--orange)" : "var(--red)";
+    }
   }
   const col = payload.collector;
   const cpill = $("collectorPill");

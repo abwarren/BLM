@@ -215,7 +215,7 @@ def _qualifying_proj():
                                     "cancelled", "ended", "finished"])
 def test_non_live_state_cannot_alert_however_good_the_condition(status):
     game = {"status": status, "classification": "BETUAL_NBA"}
-    got = _alert_gate(game, _qualifying_proj(), NOW, 5.0, None)
+    got = _alert_gate(game, _qualifying_proj(), NOW, 5.0, None, 5.0)
     assert got["eligible"] is False
     assert got["reason"] in ("game_finished", "unsupported_status")
 
@@ -227,8 +227,11 @@ def test_alert_gate_and_live_state_share_one_status_vocabulary():
         live = _live_state({"status": status, "classification": "BETUAL_NBA"},
                            {"period_label": "3rd Quarter", "quarter": 3,
                             "clock": "04:00"}, None, NOW, 5.0)
+        # AMENDMENT (audit 2026-09-16 §6): the alert gate now also verifies
+        # accepted-game-state freshness; fixtures pass a verified-fresh
+        # state so the vocabulary comparison stays status-only.
         alert = _alert_gate({"status": status, "classification": "BETUAL_NBA"},
-                            _qualifying_proj(), NOW, 5.0, None)
+                            _qualifying_proj(), NOW, 5.0, None, 5.0)
         assert live["live"] == alert["eligible"], status
 
 

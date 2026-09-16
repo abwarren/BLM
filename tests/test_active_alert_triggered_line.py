@@ -887,7 +887,15 @@ def test_outcome_delivery_never_touches_the_active_store():
     # and the reconciliation gate itself is unchanged: the alert is the
     # server's authoritative verdict and NOTHING else — never the outcome
     # block, never a second eligibility decision
-    assert "const ok = cp != null && ua.active === true;" in js
+    # AMENDMENT (audit 2026-09-16 §9): the gate may also refuse to
+    # resurrect an ACTIVE record whose game the payload's authoritative
+    # state marks over (gameOverIds is built from g.status / g.live /
+    # g.live_reason only — never from an outcome block, never a
+    # re-derived condition). It can only ever CLOSE, never open.  This is
+    # lifecycle reconciliation, distinct from the eligibility second-gate
+    # requirement N forbids.
+    assert "const ok = cp != null && ua.active === true && !gameOver;" in js
+    assert "const gameOver = gameOverIds.has(g.game_id);" in js
     # ONE authority for the sealed values: every poll ends by re-publishing
     # the RECORD's line + verdict onto the active rows, so the two surfaces
     # cannot disagree about the same alert
