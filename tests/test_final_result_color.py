@@ -448,9 +448,17 @@ def test_one_colour_mapping_shared_by_every_surface():
 console.log(JSON.stringify({
   under: resultColorClass("under"), over: resultColorClass("over"),
   push: resultColorClass("push"), none: resultColorClass(null),
-  nf: resultColorClass("no_final"), junk: resultColorClass("weird") }));""")
+  nf: resultColorClass("no_final"), junk: resultColorClass("weird"),
+  upper: resultColorClass("UNDER"), mixed: resultColorClass(" Under "),
+  quoted: resultColorClass('"Over"') }));""")
+    # RESULTED ALERTS result-coverage directive (2026-09-16): the mapping is
+    # NORMALIZED (any spelling of a result classifies identically) and an
+    # unknown/malformed status gets the EXPLICIT al-unknown fallback — never
+    # silently uncoloured.  Only the pending family (no result yet) is null.
     assert r == {"under": "al-under", "over": "al-over", "push": "al-push",
-                 "none": None, "nf": None, "junk": None}, r
+                 "none": None, "nf": None, "junk": "al-unknown",
+                 "upper": "al-under", "mixed": "al-under",
+                 "quoted": "al-over"}, r
 
 
 def test_the_card_renders_the_final_result_and_its_accent():

@@ -482,6 +482,14 @@ details > summary::marker { content: ""; }
 .al-row.al-over .al-headline { color: #ef4444; }
 .al-row.al-push { border-left-color: rgba(148, 163, 184, .8); background: rgba(148, 163, 184, .08); }
 .al-row.al-push .al-headline { color: var(--muted, #94a3b8); }
+/* the explicit FALLBACK state — an unknown/malformed result status is never
+   silently rendered as a normal settled row: it gets its own unmistakable
+   colour (amber) and is logged once for diagnosis.  Genuine PENDING rows
+   (no status at all) keep the default unresolved look instead. */
+.al-row.al-unknown { border-left-color: #f59e0b; background: rgba(245, 158, 11, .08); }
+.al-row.al-unknown .al-headline { color: #f59e0b; }
+.al-unknown .al-outcome, .al-row.al-unknown .al-result { color: #f59e0b; }
+.al-pending { color: var(--muted, #94a3b8); font-weight: 700; letter-spacing: .03em; }
 .al-outcome { font-weight: 700; letter-spacing: .03em; }
 .al-under .al-outcome { color: #22c55e; }
 .al-over .al-outcome { color: #ef4444; }

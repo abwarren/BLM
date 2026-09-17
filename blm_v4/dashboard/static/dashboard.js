@@ -312,28 +312,82 @@ const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
    colours a settled result — the ACTIVE alert row, the RESULTED ALERTS row
    and the game card's FINAL RESULT — resolves its class through here, so no
    two components can disagree about what colour a status is.  The status
-   itself is always the backend's (never re-derived in the browser):
-     under → GREEN   over → RED   push → neutral
-     anything else (no_final / unknown / null) → no colour, no fake verdict */
+   itself is always the backend's (never re-derived in the browser), and it
+   is NORMALIZED before comparison (case, whitespace, stray quotes) so
+   "UNDER" / "under" / " Under " all classify identically:
+     under → GREEN   over → RED   push → neutral verdict classes
+     null/absent → null (a genuinely unsettled game: no fake verdict)
+     anything else → al-unknown (the explicit fallback state — an
+       unknown/malformed status is never silently rendered as an uncoloured
+       settled row and never faked as a verdict) */
 function resultColorClass(status) {
-  return status === "under" ? "al-under"
-    : status === "over" ? "al-over"
-    : status === "push" ? "al-push"
-    : null;
+  const s = String(status == null ? "" : status).trim()
+    .replace(/^[\"'`]+|[\"'`]+$/g, "").trim().toLowerCase();
+  return s === "under" ? "al-under"
+    : s === "over" ? "al-over"
+    : s === "push" ? "al-push"
+    : s === "" || s === "pending" || s === "no_final" || s === "unknown"
+      ? null                          // genuinely unsettled — PENDING look
+    : "al-unknown";                   // malformed/foreign verdict — fallback
 }
 
-/* An alert record's settled outcome → class.  Thin wrapper over the ONE
-   mapping above (kept as a named function because alert surfaces read the
-   status off the record's `outcome` object). */
-function alertOutcomeClass(oc) {
-  if (!oc || oc.status == null) return null;
-  return resultColorClass(oc.status);
+/* THE status normalizer — trim, strip stray quotes, lowercase — applied by
+   resultColorClass before comparison so every spelling of a result
+   classifies identically. */
+function normalizedResultStatus(status) {
+  return String(status == null ? "" : status).trim()
+    .replace(/^[\"'`]+|[\"'`]+$/g, "").trim().toLowerCase();
 }
+
 /* The result vocabulary — ONE map, shared by the history outcome line and
    the active-alert result line, so both surfaces word a verdict the same
    way (and neither invents a synonym). */
 const ALERT_RESULT_WORDS = { under: "UNDER", over: "OVER", push: "PUSH",
   no_final: "NO FINAL", unknown: "NO FINAL" };
+
+/* Unknown/malformed statuses are reported once per distinct value (console
+   only — never a visual or data mutation) so a payload regression is visible
+   in the browser log for diagnosis, while the row still renders its explicit
+   fallback state instead of silently looking like a settled verdict. */
+const RESULT_WARNED = new Set();
+function warnUnknownResult(where, status) {
+  try {
+    if (RESULT_WARNED.has(status)) return;
+    RESULT_WARNED.add(status);
+    console.warn(`[alerts] ${where}: unknown result status ${JSON.stringify(status)}`
+      + ` — rendered as RESULT UNKNOWN (fallback)`);
+  } catch (_) { /* diagnostics must never break rendering */ }
+}
+
+/* One VERDICT state for every record that carries a status — the result
+   line's colour AND word, and the row's class, all come from this, so a
+   RESULTED row can never render without its result colour:
+     under/over/push → the verdict class + word
+     anything else   → al-unknown + RESULT UNKNOWN (explicit fallback state)
+   Null only while a record has NO status at all (game not yet finished) —
+   that is a genuinely PENDING row, not a bypassed result. */
+function alertVerdictState(oc) {
+  if (!oc || oc.status == null) return null;   // no status at all — PENDING
+  const cls = resultColorClass(oc.status);
+  if (cls === "al-unknown") {
+    warnUnknownResult("resulted alert", oc.status);
+    return { cls, word: "RESULT UNKNOWN" };
+  }
+  if (cls == null) return { cls: null, word: "PENDING" };   // pending family
+  return { cls,
+    word: ALERT_RESULT_WORDS[normalizedResultStatus(oc.status)] || "PENDING" };
+}
+
+/* An alert record's settled outcome → class.  Thin wrapper over the ONE
+   mapping above (kept as a named function because alert surfaces read the
+   status off the record's `outcome` object).  A known result returns its
+   verdict class, an unknown/malformed one the explicit al-unknown fallback,
+   and null only while the record carries no status at all (genuinely
+   unsettled) — a result colour is never gated on anything else. */
+function alertOutcomeClass(oc) {
+  if (!oc || oc.status == null) return null;
+  return resultColorClass(oc.status);
+}
 /* The result line of a RESULTED alert — the two halves of the trigger,
    worded with the SAME vocabulary as the active row so the panels never
    disagree:
@@ -347,13 +401,12 @@ function alertOutcomeLine(rec) {
   const oc = rec.outcome;
   if (!oc || oc.status == null) return "";
   const t = (v) => (v == null || !isFinite(v)) ? "–" : v.toFixed(1);
-  const word = ALERT_RESULT_WORDS[oc.status]
-    || String(oc.status).toUpperCase();
+  const st = alertVerdictState(oc);
   const line = triggeredLineOf(rec);
   const trigger = `Triggered Line: <span class="al-trigger-line">${t(line)}</span>`;
   const fin = (oc.final_total != null)
     ? ` · Final: <span class="al-num">${t(oc.final_total)}</span>` : "";
-  return `<div class="al-line"><span class="al-outcome">${word}</span>`
+  return `<div class="al-line"><span class="al-outcome">${st.word}</span>`
     + ` · ${trigger}${fin}</div>`;
 }
 
@@ -369,12 +422,15 @@ function alertOutcomeLine(rec) {
    live line is NEVER used to infer or imply a result. */
 function alertResultHTML(rec) {
   const oc = rec && rec.outcome;
-  if (!oc || oc.status == null) {
+  const st = alertVerdictState(oc);
+  if (!st) {
     return `<span class="al-pending">PENDING</span>`;
   }
+  if (st.cls == null) {
+    return `<span class="al-pending">${st.word}</span>`;   // pending family
+  }
   const t = (v) => (v == null || !isFinite(v)) ? "–" : v.toFixed(1);
-  const word = ALERT_RESULT_WORDS[oc.status]
-    || String(oc.status).toUpperCase();
+  const word = st.word;
   const line = (rec.triggered_line != null)
     ? rec.triggered_line : oc.trigger_total;
   const fin = (oc.final_total == null) ? ""

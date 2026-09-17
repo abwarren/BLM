@@ -1,0 +1,16 @@
+==========================================================================
+RESULTED ALERTS — RESULT-COLOUR COVERAGE (production dataset)
+==========================================================================
+result rows checked (game × checkpoint statuses): 33510
+  UNDER  → al-under   : 9776
+  OVER   → al-over    : 9799
+  PUSH   → al-push    : 0
+  PENDING (no result) : 13935
+  UNKNOWN fallback    : 0
+--------------------------------------------------------------------------
+settled rows coloured : 19575/19575
+uncoloured resulted rows: 0
+
+ACCEPTANCE: 100% of UNDER/OVER/PUSH results coloured,
+           genuinely-pending rows pending-styled,
+           0 resulted rows uncoloured, order-independent.
