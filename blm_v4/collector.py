@@ -1933,6 +1933,22 @@ class PokerBetCollector:
             return None
         cur = home + away
         prev = lh + la
+        # HALFTIME-CONTINUITY GUARD (defect 30964771, 2026-09-20): a frame
+        # whose team scores are IDENTICAL to the stored last row's is the
+        # SAME GAME's frozen state, never a new replay.  The half-end
+        # boundary is exactly where this happens: the panel freezes on the
+        # Q2-end score (47-61) and displays the break clock ("Half End"
+        # 12:00), which parses as mid-Q2 and made the OLD code read a
+        # legitimate continuation as `clock_regression` — splitting the
+        # game and orphaning its second half (and the final) into a #iN
+        # sibling that settlement and the alert panel never bridge.  A
+        # genuine replay is never observed at the identical both-team score
+        # (it restarts at 0-0 or a low early-game total — signal 1's 50%
+        # threshold or the signals below catch it; a replay frame at the
+        # exact stored score would split one tick later, at a negligible
+        # one-frame pollution cost vs losing the whole game's final).
+        if home == lh and away == la:
+            return None
         if prev >= 30 and cur < prev * 0.5:
             return "score_drop"
         last_el = self._elapsed_minutes(

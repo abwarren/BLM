@@ -39,6 +39,13 @@ SCORECARD_INTER_RUN_GAP_S = float(
 #: read-mostly, bounded; never a second collector.
 RECONCILER_INTERVAL_S = float(
     os.environ.get("BLM_GAME_FINISHED_RECONCILE_S", "30"))
+#: DEDICATED SETTLE WORKER cadence (directive 2026-09-19) — settles newly
+#: ended games into game_results every 30–60 s, in its OWN thread, so a
+#: final never waits on the scorecard gap.  The 4-hour full-history sweep
+#: itself is UNTOUCHED: this worker reuses the sweep's settlement rule
+#: (blm_v4/settle_worker.py) and changes no thresholds, gates or logic.
+SETTLE_INTERVAL_S = float(
+    os.environ.get("BLM_SETTLE_INTERVAL_S", "45"))
 #: a live-flagged game with NO snapshot AND NO WS observation for this
 #: long has left the source's live board — its authoritative final state
 #: exists upstream, so reconcile it to ended.
@@ -254,6 +261,23 @@ def main() -> None:
             name="blm-game-finished-reconciler", daemon=True)
         reconciler.start()
         app.state._reconciler_thread = reconciler
+
+        # ── DEDICATED SETTLE WORKER (directive 2026-09-19) ────────────
+        # A small dedicated settlement thread, the sibling of the
+        # game_finished reconciler above: its ONLY responsibility is to
+        # detect newly-ended games and compute/update game_results every
+        # 30–60 s, so the resulting UNDER/OVER/PUSH verdict reaches the
+        # frontend promptly instead of waiting for the scorecard gap.
+        # Settlement semantics are REUSED verbatim from the scorecard
+        # (same quality gate, same OK/UNKNOWN rule, same upsert) — no
+        # alert threshold, gate, trigger or classification logic is
+        # touched, and the 4-hour full-history sweep is UNTOUCHED.
+        from blm_v4.settle_worker import SettleWorker
+        settle_worker = SettleWorker(
+            root / "blm_pokerbet.db", interval_s=SETTLE_INTERVAL_S)
+        settle_worker.start()
+        app.state._settle_worker = settle_worker
+        logger.info("settle_worker_started", interval_s=SETTLE_INTERVAL_S)
         logger.info("pipeline_started")
 
     @app.on_event("shutdown")
@@ -267,6 +291,9 @@ def main() -> None:
         recthread = getattr(app.state, "_reconciler_thread", None)
         if recthread and recthread.is_alive():
             recthread.join(timeout=2)
+        settle_worker = getattr(app.state, "_settle_worker", None)
+        if settle_worker is not None:
+            settle_worker.stop(timeout=2)
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
             sct.cancel()
