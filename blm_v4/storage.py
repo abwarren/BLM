@@ -92,8 +92,20 @@ CREATE TABLE IF NOT EXISTS reconciliation (
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_class_captured
     ON snapshots(classification, captured_at);
-CREATE INDEX IF NOT EXISTS idx_snapshots_game_ts
-    ON snapshots(game_id, captured_at);
+-- The scorecard's stage 5 (record_market_history) reads ONE game's snapshots
+-- by source_game_id, ordered by captured_at, once per game over ~11.6k games
+-- a pass.  Nothing led with source_game_id, so each of those reads was a full
+-- scan plus a temp B-tree sort — 2.05s/game idle, 18.0s under memory pressure
+-- — which is why stage 6 was never reached and checkpoint_market went hours
+-- stale.  (source_game_id, captured_at) serves the equality AND the ORDER BY
+-- from the index.  Index-only: no column, constraint or query semantics.
+CREATE INDEX IF NOT EXISTS idx_snapshots_source_ts
+    ON snapshots(source_game_id, captured_at);
+-- idx_snapshots_game_ts is deliberately NOT created: UNIQUE(game_id,
+-- captured_at) already builds sqlite_autoindex_snapshots_1 with that exact
+-- key, so a separate index was 71.9 MB of duplicated B-tree.  The game_id
+-- consumers (scorecard stages 3/4/6, settle_worker) use the autoindex.
+-- See tests/test_storage_schema_indexes.py.
 CREATE INDEX IF NOT EXISTS idx_games_class
     ON games(classification);
 -- API joins resolve games by source identity on every /api/v4/* request
