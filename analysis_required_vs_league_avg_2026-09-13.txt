@@ -1,0 +1,213 @@
+============================================================================================
+REQUIRED vs LEAGUE-SPECIFIC AVERAGE — 50% & 75% CHECKPOINTS  (READ-ONLY FORENSIC ANALYSIS, 2026-09-13)
+============================================================================================
+source DB      : /home/ubuntu/BLM/blm_pokerbet.db (read-only)  +  /home/ubuntu/BLM/blm_metrics_clean.db (read-only)
+games in DB    : 11167   game_results rows: 11078
+settled games  : 8617 (game_results OK, final_total>0, league known)
+
+LEAGUE-SPECIFIC REFERENCES (computed over the settled set above):
+  league         avg pace pts/min  avg total pts   games
+  NBA                      5.6343       225.3739    2450
+  KBL                      3.8881       155.5250    1139
+  CBA                      4.4432       177.7278    1003
+  TBSL                     4.1588       166.3526    1886
+  EUROLEAGUE               4.2980       171.9195    1715
+  CYBER(2K26)              4.4632       214.2335     424
+
+REQUIRED mappings:
+  PANEL A  REQUIRED = required pace (pts/min) at the checkpoint
+           LEAGUE AVG = league avg pace; UNDER = final pace < REQUIRED
+  PANEL B  REQUIRED = checkpoint total line (pts)
+           LEAGUE AVG = league avg total; UNDER = final total < line
+  Both panels also show MARKET UNDER (final total < checkpoint line).
+
+CHECKPOINT OBSERVATION SELECTION (closest valid observation to target):
+  50%: 4169 settled games with a valid observation in [40%,60%]; 2501 landed exactly on 50%.
+       progress range 42.5..60.0, median 50.0
+  75%: 5593 settled games with a valid observation in [65%,85%]; 3500 landed exactly on 75%.
+       progress range 65.62..85.0, median 75.0
+
+EXCLUSIONS & DATA AUDIT:
+  settled games (completed, authoritative final): 8617
+  50%: included=4169  excluded=4448 (no obs row in window=2401, line NULL=2047, required NULL=0)
+  75%: included=5593  excluded=3024 (no obs row in window=2371, line NULL=653, required NULL=0)
+  missing league averages: 0 (all 6 leagues have a settled reference); no game fell back to a global average.
+  duplicates: one observation per game per checkpoint (closest to target); split instances (id#iN) collapsed to base id.
+
+============================================================================================
+50% CHECKPOINT
+============================================================================================
+TOTAL GAMES AT 50% (settled, valid checkpoint obs): 4169
+PANEL A — REQUIRED (pace 50%) > league avg pace : 1286 / 4169 = 30.85%
+
+  PANEL A cohort (REQUIRED>avg) final OUTCOME:
+    by MARKET  (final total vs checkpoint line): UNDER 716/1286=55.68%  OVER 570=44.32%  PUSH 0=0.00%
+    by PACE    (final pace vs REQUIRED pace): UNDER 587=45.65%  OVER 678=52.72%  PUSH 21=1.63%
+
+  PANEL A league breakdown (REQUIRED pace > league avg pace):
+  League          >Avg  UNDER      U%   OVER      O%  PUSH     P%  (market outcome)
+  NBA              325    182   56.00    143   44.00     0   0.00
+  KBL              177     84   47.46     93   52.54     0   0.00
+  CBA              143     85   59.44     58   40.56     0   0.00
+  TBSL             295    167   56.61    128   43.39     0   0.00
+  EUROLEAGUE       285    161   56.49    124   43.51     0   0.00
+  CYBER(2K26)       61     37   60.66     24   39.34     0   0.00
+  PANEL A reverse cohort REQUIRED <= avg pace: 2883 games, market UNDER 1360 = 47.17%
+  PANEL A LIFT (market UNDER% >avg minus <=avg) = +8.50pp
+
+PANEL B — REQUIRED (checkpoint line 50%) > league avg total : 2086 / 4169 = 50.04%
+  PANEL B cohort (line>avg total) final OUTCOME (market): UNDER 1064/2086=51.01%  OVER 1022=48.99%  PUSH 0=0.00%
+  PANEL B league breakdown:
+  League          >Avg  UNDER      U%   OVER      O%  PUSH     P%
+  NBA              753    384   51.00    369   49.00     0   0.00
+  KBL              250    125   50.00    125   50.00     0   0.00
+  CBA              249    124   49.80    125   50.20     0   0.00
+  TBSL             399    206   51.63    193   48.37     0   0.00
+  EUROLEAGUE       382    192   50.26    190   49.74     0   0.00
+  CYBER(2K26)       53     33   62.26     20   37.74     0   0.00
+  PANEL B reverse cohort line <= avg total: 2083 games, market UNDER 1012 = 48.58%
+  PANEL B LIFT (market UNDER% >avg minus <=avg) = +2.42pp
+
+============================================================================================
+75% CHECKPOINT
+============================================================================================
+TOTAL GAMES AT 75% (settled, valid checkpoint obs): 5593
+PANEL A — REQUIRED (pace 75%) > league avg pace : 1048 / 5593 = 18.74%
+
+  PANEL A cohort (REQUIRED>avg) final OUTCOME:
+    by MARKET  (final total vs checkpoint line): UNDER 719/1048=68.61%  OVER 329=31.39%  PUSH 0=0.00%
+    by PACE    (final pace vs REQUIRED pace): UNDER 753=71.85%  OVER 288=27.48%  PUSH 7=0.67%
+
+  PANEL A league breakdown (REQUIRED pace > league avg pace):
+  League          >Avg  UNDER      U%   OVER      O%  PUSH     P%  (market outcome)
+  NBA              166    130   78.31     36   21.69     0   0.00
+  KBL              120     90   75.00     30   25.00     0   0.00
+  CBA              108     82   75.93     26   24.07     0   0.00
+  TBSL             264    172   65.15     92   34.85     0   0.00
+  EUROLEAGUE       324    200   61.73    124   38.27     0   0.00
+  CYBER(2K26)       66     45   68.18     21   31.82     0   0.00
+  PANEL A reverse cohort REQUIRED <= avg pace: 4545 games, market UNDER 2124 = 46.73%
+  PANEL A LIFT (market UNDER% >avg minus <=avg) = +21.87pp
+
+PANEL B — REQUIRED (checkpoint line 75%) > league avg total : 2813 / 5593 = 50.30%
+  PANEL B cohort (line>avg total) final OUTCOME (market): UNDER 1442/2813=51.26%  OVER 1371=48.74%  PUSH 0=0.00%
+  PANEL B league breakdown:
+  League          >Avg  UNDER      U%   OVER      O%  PUSH     P%
+  NBA              899    458   50.95    441   49.05     0   0.00
+  KBL              349    174   49.86    175   50.14     0   0.00
+  CBA              345    171   49.57    174   50.43     0   0.00
+  TBSL             581    293   50.43    288   49.57     0   0.00
+  EUROLEAGUE       582    309   53.09    273   46.91     0   0.00
+  CYBER(2K26)       57     37   64.91     20   35.09     0   0.00
+  PANEL B reverse cohort line <= avg total: 2780 games, market UNDER 1401 = 50.40%
+  PANEL B LIFT (market UNDER% >avg minus <=avg) = +0.87pp
+
+============================================================================================
+50% vs 75% COMPARISON (market UNDER rate within each cohort)
+============================================================================================
+  metric                                              50%          75%
+  total games (settled, valid obs)                   4169         5593
+  PANEL A required_pace>avgpace                      1286         1048
+  PANEL A market UNDER% of cohort                  55.68%       68.61%
+  PANEL B line>avgtotal                              2086         2813
+  PANEL B market UNDER% of cohort                  51.01%       51.26%
+
+  PANEL A UNDER% difference (75% - 50%) = +12.93pp
+  PANEL B UNDER% difference (75% - 50%) = +0.26pp
+
+============================================================================================
+RAW EXAMPLES — 50% — PANEL A REQUIRED(pace) > league avg pace, top 20 by required_minus_avg
+============================================================================================
+  game_id | league | cp | required(pace) | league_avg(pace) | req-avg | actual_final | mkt_outcome | pace_outcome
+  30868638 | TBSL | 50% | 5.8481 | 4.1588 | +1.6893 | 139 | UNDER | UNDER
+  30810136 | EUROLEAGUE | 50% | 5.9250 | 4.2980 | +1.6270 | 197 | UNDER | UNDER
+  30818698 | EUROLEAGUE | 50% | 5.7250 | 4.2980 | +1.4270 | 193 | UNDER | UNDER
+  30818701 | EUROLEAGUE | 50% | 5.6750 | 4.2980 | +1.3770 | 189 | UNDER | UNDER
+  30852943 | EUROLEAGUE | 50% | 5.6250 | 4.2980 | +1.3270 | 198 | UNDER | UNDER
+  30840316 | TBSL | 50% | 5.4571 | 4.1588 | +1.2983 | 150 | UNDER | UNDER
+  30810222 | TBSL | 50% | 5.4250 | 4.1588 | +1.2662 | 180 | UNDER | UNDER
+  30812474 | TBSL | 50% | 5.3750 | 4.1588 | +1.2162 | 204 | OVER | UNDER
+  30818460 | TBSL | 50% | 5.3750 | 4.1588 | +1.2162 | 186 | UNDER | UNDER
+  30808892 | TBSL | 50% | 5.3250 | 4.1588 | +1.1662 | 164 | UNDER | UNDER
+  30817259 | TBSL | 50% | 5.3250 | 4.1588 | +1.1662 | 173 | UNDER | UNDER
+  30888956 | EUROLEAGUE | 50% | 5.4286 | 4.2980 | +1.1306 | 167 | UNDER | UNDER
+  30855213 | EUROLEAGUE | 50% | 5.4217 | 4.2980 | +1.1237 | 220 | UNDER | OVER
+  30808715 | TBSL | 50% | 5.2750 | 4.1588 | +1.1162 | 190 | OVER | UNDER
+  30814058 | CYBER(2K26) | 50% | 5.5625 | 4.4632 | +1.0993 | 280 | OVER | OVER
+  30818699 | EUROLEAGUE | 50% | 5.3750 | 4.2980 | +1.0770 | 174 | UNDER | UNDER
+  30818986 | TBSL | 50% | 5.2250 | 4.1588 | +1.0662 | 126 | UNDER | UNDER
+  30814474 | EUROLEAGUE | 50% | 5.3250 | 4.2980 | +1.0270 | 189 | UNDER | UNDER
+  30808812 | EUROLEAGUE | 50% | 5.2750 | 4.2980 | +0.9770 | 194 | OVER | UNDER
+  30818618 | TBSL | 50% | 5.1250 | 4.1588 | +0.9662 | 173 | UNDER | UNDER
+
+RAW EXAMPLES — 50% — PANEL B line > league avg total, top 20 by required_minus_avg
+  game_id | league | cp | line | league_avg(total) | line-avg | actual_final | mkt_outcome
+  30834280 | NBA | 50% | 286.5 | 225.3739 | +61.1261 | 283 | UNDER
+  30856775 | NBA | 50% | 282.5 | 225.3739 | +57.1261 | 303 | OVER
+  30814058 | CYBER(2K26) | 50% | 270.5 | 214.2335 | +56.2665 | 280 | OVER
+  30834606 | KBL | 50% | 208.5 | 155.5250 | +52.9750 | 213 | OVER
+  30840234 | NBA | 50% | 276.5 | 225.3739 | +51.1261 | 271 | UNDER
+  30887243 | NBA | 50% | 274.5 | 225.3739 | +49.1261 | 287 | OVER
+  30855213 | EUROLEAGUE | 50% | 220.5 | 171.9195 | +48.5805 | 220 | UNDER
+  30877685 | NBA | 50% | 273.5 | 225.3739 | +48.1261 | 252 | UNDER
+  30888923 | CBA | 50% | 225.5 | 177.7278 | +47.7722 | 224 | UNDER
+  30874703 | EUROLEAGUE | 50% | 219.5 | 171.9195 | +47.5805 | 222 | OVER
+  30810851 | NBA | 50% | 272.5 | 225.3739 | +47.1261 | 289 | OVER
+  30866316 | NBA | 50% | 272.5 | 225.3739 | +47.1261 | 270 | UNDER
+  30848775 | EUROLEAGUE | 50% | 218.5 | 171.9195 | +46.5805 | 230 | OVER
+  30812181 | NBA | 50% | 270.5 | 225.3739 | +45.1261 | 260 | UNDER
+  30851598 | NBA | 50% | 270.5 | 225.3739 | +45.1261 | 266 | UNDER
+  30833421 | EUROLEAGUE | 50% | 216.5 | 171.9195 | +44.5805 | 221 | OVER
+  30840229 | NBA | 50% | 269.5 | 225.3739 | +44.1261 | 264 | UNDER
+  30860318 | NBA | 50% | 269.5 | 225.3739 | +44.1261 | 267 | UNDER
+  30890537 | NBA | 50% | 269.5 | 225.3739 | +44.1261 | 263 | UNDER
+  30832471 | NBA | 50% | 268.5 | 225.3739 | +43.1261 | 257 | UNDER
+
+============================================================================================
+RAW EXAMPLES — 75% — PANEL A REQUIRED(pace) > league avg pace, top 20 by required_minus_avg
+============================================================================================
+  game_id | league | cp | required(pace) | league_avg(pace) | req-avg | actual_final | mkt_outcome | pace_outcome
+  30819215 | TBSL | 75% | 7.7500 | 4.1588 | +3.5912 | 131 | UNDER | UNDER
+  30813009 | TBSL | 75% | 7.5500 | 4.1588 | +3.3912 | 150 | UNDER | UNDER
+  30864311 | TBSL | 75% | 7.4634 | 4.1588 | +3.3046 | 148 | UNDER | UNDER
+  30814474 | EUROLEAGUE | 75% | 7.4500 | 4.2980 | +3.1520 | 189 | UNDER | UNDER
+  30818986 | TBSL | 75% | 7.2500 | 4.1588 | +3.0912 | 126 | UNDER | UNDER
+  30845391 | NBA | 75% | 8.6500 | 5.6343 | +3.0157 | 235 | UNDER | UNDER
+  30810696 | TBSL | 75% | 6.9500 | 4.1588 | +2.7912 | 188 | OVER | UNDER
+  30810136 | EUROLEAGUE | 75% | 7.0500 | 4.2980 | +2.7520 | 197 | UNDER | UNDER
+  30810317 | EUROLEAGUE | 75% | 7.0500 | 4.2980 | +2.7520 | 156 | UNDER | UNDER
+  30812277 | EUROLEAGUE | 75% | 7.0500 | 4.2980 | +2.7520 | 184 | OVER | UNDER
+  30812653 | EUROLEAGUE | 75% | 7.0500 | 4.2980 | +2.7520 | 173 | UNDER | UNDER
+  30808891 | TBSL | 75% | 6.8500 | 4.1588 | +2.6912 | 170 | UNDER | UNDER
+  30810766 | EUROLEAGUE | 75% | 6.9500 | 4.2980 | +2.6520 | 187 | UNDER | UNDER
+  30811699 | EUROLEAGUE | 75% | 6.9500 | 4.2980 | +2.6520 | 172 | UNDER | UNDER
+  30814475 | EUROLEAGUE | 75% | 6.9500 | 4.2980 | +2.6520 | 138 | UNDER | UNDER
+  30818698 | EUROLEAGUE | 75% | 6.9500 | 4.2980 | +2.6520 | 193 | UNDER | UNDER
+  30868638 | TBSL | 75% | 6.7500 | 4.1588 | +2.5912 | 139 | UNDER | UNDER
+  30836442 | CBA | 75% | 7.0000 | 4.4432 | +2.5568 | 181 | UNDER | UNDER
+  30812078 | EUROLEAGUE | 75% | 6.8500 | 4.2980 | +2.5520 | 183 | OVER | UNDER
+  30818701 | EUROLEAGUE | 75% | 6.8500 | 4.2980 | +2.5520 | 189 | UNDER | UNDER
+
+RAW EXAMPLES — 75% — PANEL B line > league avg total, top 20 by required_minus_avg
+  game_id | league | cp | line | league_avg(total) | line-avg | actual_final | mkt_outcome
+  30876295 | CYBER(2K26) | 75% | 287.5 | 214.2335 | +73.2665 | 287 | UNDER
+  30814058 | CYBER(2K26) | 75% | 277.5 | 214.2335 | +63.2665 | 280 | OVER
+  30834280 | NBA | 75% | 286.5 | 225.3739 | +61.1261 | 283 | UNDER
+  30887243 | NBA | 75% | 284.5 | 225.3739 | +59.1261 | 287 | OVER
+  30840234 | NBA | 75% | 282.5 | 225.3739 | +57.1261 | 271 | UNDER
+  30856775 | NBA | 75% | 282.5 | 225.3739 | +57.1261 | 303 | OVER
+  30868935 | EUROLEAGUE | 75% | 228.5 | 171.9195 | +56.5805 | 226 | UNDER
+  30833058 | NBA | 75% | 280.5 | 225.3739 | +55.1261 | 290 | OVER
+  30834606 | KBL | 75% | 208.5 | 155.5250 | +52.9750 | 213 | OVER
+  30889061 | NBA | 75% | 277.5 | 225.3739 | +52.1261 | 284 | OVER
+  30840019 | CYBER(2K26) | 75% | 264.5 | 214.2335 | +50.2665 | 269 | OVER
+  30888923 | CBA | 75% | 226.5 | 177.7278 | +48.7722 | 224 | UNDER
+  30890184 | EUROLEAGUE | 75% | 220.5 | 171.9195 | +48.5805 | 221 | OVER
+  30826684 | KBL | 75% | 203.5 | 155.5250 | +47.9750 | 201 | UNDER
+  30810851 | NBA | 75% | 272.5 | 225.3739 | +47.1261 | 289 | OVER
+  30848775 | EUROLEAGUE | 75% | 218.5 | 171.9195 | +46.5805 | 230 | OVER
+  30852192 | EUROLEAGUE | 75% | 218.5 | 171.9195 | +46.5805 | 212 | UNDER
+  30855213 | EUROLEAGUE | 75% | 218.5 | 171.9195 | +46.5805 | 220 | OVER
+  30878412 | EUROLEAGUE | 75% | 218.5 | 171.9195 | +46.5805 | 216 | UNDER
+  30888472 | EUROLEAGUE | 75% | 218.5 | 171.9195 | +46.5805 | 216 | UNDER
+

@@ -1,0 +1,22 @@
+SHADOW MOMENTUM GATE — PROSPECTIVE REPORT  generated 2026-09-18T23:13:02Z
+shadow start 2026-09-18T23:13:01Z (unseen games only; decisions pre-registered)
+decision rows: 0  settled&valid: 0
+
+COHORTS (settled so far)
+------------------------------------------------------------------------------------------------
+  production mirror        N=   0 (prod-fire    0)  UNDER=  0 OVER=  0 PUSH= 0  hit=  0.00%  CI95=[  0.0,  0.0]  p=1.0000
+  gateA_m_lt_0             N=   0 (prod-fire    0)  UNDER=  0 OVER=  0 PUSH= 0  hit=  0.00%  CI95=[  0.0,  0.0]  p=1.0000
+  gateB_m_lt_-0.5          N=   0 (prod-fire    0)  UNDER=  0 OVER=  0 PUSH= 0  hit=  0.00%  CI95=[  0.0,  0.0]  p=1.0000
+
+SAMPLE-SIZE REQUIREMENT for the 70-75% question
+------------------------------------------------------------------------------------------------
+  minimum n for Wilson95 LOWER BOUND to clear break-even 54.054%:
+    true hit ~60%:  n >= 261
+    true hit ~65%:  n >= 75
+    true hit ~70%:  n >= 37
+    true hit ~75%:  n >= 18
+
+  alert-frequency reality (audit E3, current gates): ~6.4 production triggers/day,
+  gateA keeps ~48% -> ~3.1 gated alerts/day  ->  n=60 in ~19 days, n=100 in ~32 days.
+
+No settled shadow rows yet — collection starts now; report again after games settle.

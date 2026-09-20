@@ -1,0 +1,173 @@
+observation selection: first clean_projections row with progress >= 75% per game (earliest 75%+ observation)
+signals assembled: 7576 (games without parseable timestamps/settlement: 0; no point-in-time league reference at trigger: 0; post-settlement triggers EXCLUDED: 21)
+§6 data quality over 7597 games with a 75%+ observation:
+  missing/invalid observations (no OK settlement, INVALID quality, no line, or no league reference): 0
+  post-settlement trigger rows (EXCLUDED, no look-ahead-free reference possible): 21
+
+§9 REQUIRED TABLE (CLEAN cohort headline; baseline = same games, no condition)
+| Cohort | N | UNDER | OVER | Hit % | Baseline % | ROI | Net Units |
+|--------|---:|------:|-----:|------:|-----------:|----:|----------:|
+| CLEAN ALL | 297 | 178 | 119 | 59.93% | 50.54% | +10.88% | +32.30 |
+<!-- T1 window: 2026-09-05T08:21:54.729596Z .. 2026-09-06T05:48:30.995164Z -->
+| OOS T1 | 99 | 54 | 45 | 54.55% | n/a | +0.91% | +0.90 |
+<!-- T2 window: 2026-09-06T05:48:37.725071Z .. 2026-09-07T04:12:16.163799Z -->
+| OOS T2 | 99 | 56 | 43 | 56.57% | n/a | +4.65% | +4.60 |
+<!-- T3 window: 2026-09-07T04:45:44.958111Z .. 2026-09-16T04:17:57.217059Z -->
+| OOS T3 | 99 | 68 | 31 | 68.69% | n/a | +27.07% | +26.80 |
+
+Baseline (same universe, no condition) by third:
+  T1: N=459 hit=48.58%
+  T2: N=366 hit=49.45%
+  T3: N=6614 hit=50.74%
+
+§10 LEAGUE BREAKDOWN (CLEAN 75% signals)
+| league | N | UNDER | OVER | Hit % | ROI |
+|--------|---:|------:|-----:|------:|----:|
+| NBA | 10 | 10 | 0 | 100.00% | +85.00% |
+| KBL | 13 | 11 | 2 | 84.62% | +56.54% |
+| CBA | 8 | 7 | 1 | 87.50% | +61.88% |
+| TBSL | 86 | 43 | 43 | 50.00% | -7.50% |
+| EuroLeague | 132 | 79 | 53 | 59.85% | +10.72% |
+| CYBER | 48 | 28 | 20 | 58.33% | +7.92% |
+| OTHER | 0 | - | - | n/a | n/a |
+
+§11 ROLLING STABILITY (chronological, CLEAN; windows fixed a priori: 50 and 100)
+  rolling 50: min=44.00% max=80.00% latest=62.00% (windows=248)
+  rolling 100: min=48.00% max=72.00% latest=69.00% (windows=198)
+
+§11b SIGNIFICANCE vs BREAK-EVEN — CLEAN cohort (Wilson 95% interval + exact binomial; H1: hit rate > 54.054%)
+  cohort               N  UNDER    hit%          Wilson 95% CI  LB-BE pp   binom p   z(cc)
+  ------------------------------------------------------------------------------------
+  CLEAN ALL          297    178  59.93% [54.27%, 65.34%]    +0.21    0.0238    1.97
+  OOS T1              99     54  54.55% [44.75%, 64.00%]    -9.30    0.5022   -0.00
+  OOS T2              99     56  56.57% [46.74%, 65.90%]    -7.32    0.3453    0.40
+  OOS T3              99     68  68.69% [59.00%, 76.98%]    +4.94    0.0021    2.82
+  STALE ALL (ctx)    289    221  76.47% [71.25%, 80.99%]   +17.20    0.0000    7.59
+
+  CLEAN ALL Wilson lower bound 54.27% > break-even 54.054%: the overall edge survives a 95% lower-bound test
+  CLEAN ALL exact binomial P(X>=178 | n=297, p=0.540541) = 0.0238 — significant at the 5% level
+  per-third Wilson lower bounds vs break-even: T1=straddles, T2=straddles, T3=above
+  interpretation: only the pooled CLEAN cohort clears break-even on its lower bound; individual thirds are too small (n=99) for their intervals to exclude it
+
+§11c RULE COMPARISON — exact condition vs production 1.04-margin rule (REQUIRED_MARGIN=1.04), SAME clean universe (N=5393 settled signals, one per game, same lines, same point-in-time averages)
+
+  per-rule cohorts (CLEAN):
+  EXACT (act<avg & req>avg)      N=297   UNDER=178  hit= 59.93%  Wilson95=[54.27%, 65.34%]  binomP=0.0238  ROI= +10.88%  net=  +32.30u
+  PRODUCTION (req>avg*1.04)      N=480   UNDER=288  hit= 60.00%  Wilson95=[55.55%, 64.29%]  binomP=0.0050  ROI= +11.00%  net=  +52.80u
+
+  overlap quadrants (CLEAN universe):
+    both rules fire                  N=242   UNDER=143  hit= 59.09%  ROI=  +9.32%  net=  +22.55u
+    EXACT only (thin margin band)    N=55    UNDER=35   hit= 63.64%  ROI= +17.73%  net=   +9.75u
+    PROD only (failed actual leg)    N=238   UNDER=145  hit= 60.92%  ROI= +12.71%  net=  +30.25u
+    neither                          N=4858  UNDER=2423 hit= 49.88%  ROI=  -7.73%  net= -375.45u
+
+  consistency: EXACT-fired clean N (297) equals the §9 CLEAN ALL N (297): OK
+  logic: PROD-fire implies req>avg, so the rules differ only by the actual<avg leg —
+    EXACT-only = required in (avg, avg*1.04] (the margin band the production rule ignores)
+    PROD-only  = required above the margin but actual >= avg
+  verdict: EXACT N=297 hit=59.93% vs PROD N=480 hit=60.00% — the actual<avg leg does not add hit rate over the production margin rule on this universe; net units +32.30 vs +52.80
+
+  per-chronological-third duel (thirds of the clean universe by trigger time — SAME windows for both rules; N per third is the universe third, not the §9 EXACT-cohort third)
+    T    window (UTC)                             rule        N    hit%     net u      ROI
+    ------------------------------------------------------------------------------------
+    T1   2026-09-05T06:13:37 .. 2026-09-09T23:41:53 EXACT     233  57.51%    +14.90   +6.39%
+                                                  PROD      298  59.73%    +31.30  +10.50%
+    T2   2026-09-10T00:35:16 .. 2026-09-13T06:13:38 EXACT      30  76.67%    +12.55  +41.83%
+                                                  PROD       86  72.09%    +28.70  +33.37%
+    T3   2026-09-13T06:13:39 .. 2026-09-16T08:20:42 EXACT      34  61.76%     +4.85  +14.26%
+                                                  PROD       96  50.00%     -7.20   -7.50%
+
+  stability: PROD leads EXACT on net units in 2/3 thirds; PROD hit >= EXACT hit in 1/3 thirds — the production rule's lead is NOT uniform across thirds
+
+§11f PROD-ONLY DECOMPOSITION — useful additions, and the T3 deterioration question
+  aggregate (clean universe, same lines + settlement):
+    baseline (no condition)    N=5393  hit= 50.92%  Wilson95=[49.58%, 52.25%]  LB-BE= -4.47pp  binomP=1.0000  net= -312.90u  ROI=  -5.80%
+    BOTH rules fire            N=242   hit= 59.09%  Wilson95=[52.80%, 65.10%]  LB-BE= -1.25pp  binomP=0.0654  net=  +22.55u  ROI=  +9.32%
+    PROD-only (actual>=avg)    N=238   hit= 60.92%  Wilson95=[54.60%, 66.90%]  LB-BE= +0.54pp  binomP=0.0192  net=  +30.25u  ROI= +12.71%
+
+  per chronological third (SAME universe thirds as §11c):
+    T    base N base hit   BOTH N     hit      net   P-ONLY N     hit      net
+    ------------------------------------------------------------------------------------
+    T1     1797   52.25%      209  56.94%   +11.15         89  66.29%   +20.15
+    T2     1797   52.98%       15  86.67%    +9.05         71  69.01%   +19.65
+    T3     1799   47.53%       18  61.11%    +2.35         78  47.44%    -9.55
+
+  T3 attribution (PROD fired 96 in T3; EXACT fired 34 for +4.85u):
+    BOTH-fire  : N=18   hit= 61.11%  net=   +2.35u
+    PROD-only  : N=78   hit= 47.44%  net=   -9.55u
+    PROD total : net=-7.20u
+    -> the T3 deterioration is carried by the PROD-only signals alone
+    PROD-only vs T3 baseline (no condition): hit 47.44% vs 47.53% — PROD-only did NOT beat the unconditional baseline in its own third
+
+  PROD-only league mix (overall vs T3):
+    league          N    hit%     net u    | T3:    N    hit%     net u
+    --------------------------------------------------------------------------
+    NBA            19  57.89%     +1.35        |   15  53.33%     -0.20
+    KBL            42  69.05%    +11.65        |    8  62.50%     +1.25
+    CBA            35  48.57%     -3.55        |   15  26.67%     -7.60
+    TBSL           40  65.00%     +8.10        |   12  75.00%     +4.65
+    EuroLeague     72  62.50%    +11.25        |   16  50.00%     -1.20
+    CYBER          30  56.67%     +1.45        |   12  25.00%     -6.45
+
+  profile (median actual/avg, required/avg): PROD-only (1.139, 1.074) vs BOTH (0.880, 1.346)
+  reading:
+    aggregate: PROD-only hit 60.92% (Wilson LB 54.60%, binomP 0.0192) — genuinely additional above break-even
+    caution: per-third cells are small; no subset is being promoted — this decomposition only locates where the §11c T3 deterioration lives
+
+§11d EXPORT — clean signal list for external review
+  file: /home/ubuntu/BLM/scripts/clean_signals_75_exact_2026-09-16.csv
+  rows: 5393 (the FULL clean universe — every settled game with a 75%+ observation, fired or not)
+  columns: game_id, league, trigger_captured_at, checkpoint_pct, market_line (the sealed 75% line), final_total, outcome, actual_pace, required_pace, league_avg_pace_pit (point-in-time), league_ref_games, market_age_seconds, exact_fire, prod_fire, exact_hit, prod_hit (hit columns blank when the rule did not fire)
+  stale rows excluded here: 289 (reported in §13); post-settlement trigger rows excluded upstream: 21
+
+§11e POWER / BREAKEVEN-N — separating EXACT from PRODUCTION at the 5% level (two-proportion tests)
+  observed: EXACT 178/297 = 59.93% vs PROD 288/480 = 60.00%  (delta = 0.067pp)
+  two-proportion z on the fired cohorts: z = -0.019, two-sided p = 0.985 — NOT separable at 5%
+  McNemar view: the 242 both-fire games have IDENTICAL outcomes under both rules (same game, same line) -> 0 discordant pairs; the comparison rests on the disjoint signals alone
+  disjoint signals: EXACT-only 35/55 = 63.64% vs PROD-only 145/238 = 60.92% -> z = +0.372, two-sided p = 0.710
+
+  sample size needed (per arm, p̄ = 59.97% on the fired pools, two-sided 5%):
+    bare significance (50% power) at the OBSERVED delta (0.067pp): 4,067,086 signals per arm
+    80% power at the OBSERVED delta: 8,309,881 signals per arm
+    80% power to detect a TRUE delta of 1pp: 37,682 per arm
+    80% power to detect a TRUE delta of 2pp: 9,419 per arm
+    80% power to detect a TRUE delta of 3pp: 4,186 per arm
+    80% power to detect a TRUE delta of 5pp: 1,506 per arm
+    80% power to detect a TRUE delta of 10pp: 376 per arm
+  minimum detectable difference at the CURRENT sample (80% power): 10.1pp — the observed 0.067pp is far below any detectable effect
+  at the observed signal rates (EXACT 26.8/day, PROD 43.3/day over 11.1 days), bare-significance n would take ~416 years of identical data
+  conclusion: the two rules are statistically INDISTINGUISHABLE on this data — choosing between them on hit rate is not supported; signal COUNT (480 vs 297) and net units favour PRODUCTION and remain the only practical differentiators
+
+§12 INDEPENDENCE / COVERAGE
+  total qualifying observations (incl. stale): 586
+  unique games: 586
+  games qualifying more than once: 0
+  maximum signals per game: 1 (one per (game, checkpoint) by construction)
+  qualifying signals at the 75% checkpoint: 586 (the only checkpoint evaluated)
+
+§13 STALE-COHORT INVESTIGATION (descriptive — NOT a validated edge)
+  CLEAN  N=297   UNDER%=59.93 avg_market_age=86s median_market_age=46s
+  STALE  N=289   UNDER%=76.47 avg_market_age=611s median_market_age=585s
+  ALL    N=586   UNDER%=68.09 avg_market_age=345s median_market_age=297s
+
+§14 NO LOOK-AHEAD VERIFICATION
+  analyzed signals whose checkpoint_timestamp is strictly before EVERY league-average result_at (bisect STRICT, programmatic): violations = 0 (expected 0)
+  triggers NOT strictly before their own settlement: 21 — EXCLUDED from the cohort before analysis (post-settlement ingestion rows; their own final could otherwise enter their reference)
+  for every included signal the current game's own result cannot enter its league average (trigger < own result_at, enforced by exclusion; bisect_left excludes the boundary)
+
+§16 FINAL ASSESSMENT
+  A. exact 75% condition > 54.054% overall (CLEAN)? YES (59.93%)
+  B. > 55% overall? YES
+  C. above 54.054% in ALL three OOS thirds? YES (54.55%, 56.57%, 68.69%)
+  D. above 55% in ALL three OOS thirds? NO
+  E. clean unique-game sample size: 297
+  F. edge concentrated in one league? EuroLeague = +14.15u of +32.30u total (78%)
+  G. materially dependent on stale observations? NO — headline cohort excludes them; stale cohort reported separately (§13)
+  H. clean 1.85 ROI and net units: ROI +10.88%, net +32.30u over 297 signals (+10.88u/100)
+  I. significance addendum: Wilson 95% CI for CLEAN ALL = [54.27%, 65.34%]; exact binomial vs break-even p = 0.0238 (<0.05 — the overall edge is statistically distinguishable from break-even)
+  J. rule-comparison addendum: on the SAME clean universe, EXACT N=297 hit=59.93% net=+32.30u vs PRODUCTION (req>avg*1.04) N=480 hit=60.00% net=+52.80u — the extra actual<avg leg lowers hit rate and lowers net units, but trades signal count (480 -> 297)
+  K. per-third duel addendum: PROD leads EXACT on net units in 2/3 chronological thirds of the clean universe (and on hit rate in 1/3) — the production rule's lead is not chronologically uniform
+  L. power addendum: EXACT vs PRODUCTION two-proportion z = -0.019 (p = 0.985) — not separable at 5%; bare significance at the observed delta needs ~4,067,086 signals/arm and the current sample's minimum detectable difference is ~10.1pp
+  M. PROD-only decomposition: overall hit 60.92% (Wilson LB 54.60%, binomP 0.0192) — proven additional value above break-even; T3 attribution: PROD-only -9.55u vs BOTH-fire +2.35u (PROD T3 total -7.20u)
+
+PRODUCTION CHANGES: NONE.  Script + report only; both DBs mode=ro.

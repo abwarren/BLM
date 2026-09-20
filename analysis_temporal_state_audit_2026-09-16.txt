@@ -1,0 +1,329 @@
+TEMPORAL STATE AUDIT — 2026-09-16
+READ-ONLY INVESTIGATION. NO PRODUCTION CHANGES. NO SERVICES RESTARTED.
+Audit window: 02:34–02:56 UTC. Screenshot under investigation: ~02:31:09 UTC.
+
+═══════════════════════════════════════════════════════════════════════
+1. PRODUCERS OF THE DASHBOARD HEADER (exact code)
+═══════════════════════════════════════════════════════════════════════
+blm_v4/dashboard/static/dashboard.js — renderStatus(payload):
+  • "STALE" / "LIVE" pill
+      fresh = now - payload.generated_at < 15000  → LIVE, else STALE
+      (dashboard.js:1088-1097). Rendered against the BROWSER CLOCK.
+  • "collector: RUNNING"
+      col = payload.collector (from /api/v4/live → _load_collector_state()
+      → blm_v4/state/collector_state.json, written every fast tick).
+      tickAge = now - col.last_tick_at; label RUNNING when tickAge < 90s
+      AND col.status === "running" (dashboard.js:1100-1108; api.py:1334-1344).
+  • "update HH:MM:SS"
+      payload.generated_at — server-side datetime.now(UTC) AT PAYLOAD BUILD
+      (api.py:1577, inside GET /api/v4/live). It dates the RESPONSE, not
+      the game data in it.
+  • "X live / Y games"
+      payload.games.filter(isActuallyLive) on the client (dashboard.js:1115-1120);
+      isActuallyLive = g.live===true AND status ∈ LIVE_STATUSES (dashboard.js:90-95).
+      g.live is computed server-side by _live_state() (api.py) from status
+      vocabulary + non-terminal frame + observation age (LIVE_AGE_S=900).
+
+═══════════════════════════════════════════════════════════════════════
+2. MEANING OF "update" TIMESTAMP
+═══════════════════════════════════════════════════════════════════════
+payload.generated_at = wall-clock time the FastAPI handler assembled the
+JSON (api.py:1428 now = datetime.now(timezone.utc) … returned as
+"generated_at"). It proves NOTHING about the freshness of the per-game
+state inside the payload. "STALE" therefore means: the /live RESPONSE is
+>15s old at render time — i.e. the poll loop is not completing — NOT that
+any individual game row is stale. Those are two independent failure modes
+and BOTH were present.
+
+═══════════════════════════════════════════════════════════════════════
+3–4. END-TO-END TRACE (one game, per stage)
+═══════════════════════════════════════════════════════════════════════
+Game 30919555 — Panathinaikos BC vs Virtus Bologna — betual-euroleague
+
+ stage            record
+ ───────────────  ───────────────────────────────────────────────────────
+ source (WS)      market_observations (blm_pokerbet.db), market_type=
+                  MatchTotal, period_label="4th Quarter", clock="05:00"
+                  captured_at=2026-09-16T02:25:32.484805Z
+                  (raw frame carries home/away, line, prices)
+ collector        ws_market.parse_market_frame → normalize_observations →
+                  PokerBetStore.insert (blm_pokerbet.db) + ws_matchtotal_
+                  snapshot() → snapshots row; _record_clean() →
+                  clean_observations + PaceProjector.refresh_game() →
+                  clean_projections (blm_metrics_clean.db)
+ raw observation  DOM snapshot path: last complete snapshot 02:29:42
+                  (Q=None clk=01:00 sc=84-88 st=live, age at screenshot 87s)
+ snapshot         blm_pokerbet.db.snapshots — 02:29:42.459298Z (last
+                  score-bearing; later ticks wrote line-only rows with NULL
+                  scores/quarter — degraded SPA parse)
+ BLM              clean_projections row 02:29:42.459298Z: 4th Quarter
+                  clk=01:00 progress 97.5%, required 7.5, actual 4.3846,
+                  line 178.5, market_status=LIVE
+ API              GET /api/v4/live → _analyze_game: game detail comes from
+                  last COMPLETE snapshot; projector block from
+                  PaceProjector.latest_for_game (clean_projections)
+ dashboard        cards render g.quarter/clock/last_update from the payload;
+                  alert panel from g.under_alert + frontend history store
+
+Other traced games: 30919468 (Orlando–Houston, same pattern), 30920033,
+30920034, 30920032, 30920035, 30920030, 30920093, 30920096 (full timelines
+queried; see §12/§15).
+
+═══════════════════════════════════════════════════════════════════════
+5. SOURCE vs BLM COMPARISON (at audit time, 39 live-flagged games)
+═══════════════════════════════════════════════════════════════════════
+quarter mismatch (API vs WS source): 37/39 (mostly clock-phase skew)
+hard quarter mismatches (SOURCE later quarter than BLM):
+  • 30920093 KoGas Daegu vs Seoul SK:  SOURCE=Q4 04:00 (WS, 51s old)
+                                       BLM/API=Q3 01:00 (453s old)
+clock mismatches: 18/39 (examples: 30920092 API 03:00 vs SRC 06:00;
+  30920094 same; 30920235/37 API 06:00 vs SRC 10:00; 30920104 03:00 vs 05:00)
+historical morning batch (00:00–02:30Z): 122 games reached Q4 in source;
+  17 of them NEVER got a Q4 DOM snapshot (BLM stayed in Q3 to the end):
+  30918855, 30918878, 30918877, 30918908, 30918913, 30918914, 30918915,
+  30918981, 30918983, 30919030, …
+Games incorrectly marked live: 0 at audit time (all 33→40 live flags had
+  fresh obs + live status; live-flagged games carrying a settled final: 0).
+
+═══════════════════════════════════════════════════════════════════════
+6. WHAT IS STALE
+═══════════════════════════════════════════════════════════════════════
+COMBINATION:
+  (a) STALE COLLECTOR OBSERVATION (DOM path) — the event-view/panel DOM
+      parse is degraded (SPA non-hydration): snapshots written with NULL
+      scores/quarter/clock ("None-96", "86-None", Q=None). _analyze_game
+      falls back to the last COMPLETE snapshot, so per-game state freezes
+      minutes in the past while line-only rows keep flowing.
+  (b) STALE ALERT (frontend) — the active alert row outlived its game:
+      at 02:31:09 the payload showed the alert ACTIVE for a game with 30
+      game-seconds left that ended 28s later.
+NOT stale: API response (no HTTP caching; 0.8–4.3s build), database
+  snapshots (WS rows fresh), collector_state heartbeat, frontend rendering.
+
+═══════════════════════════════════════════════════════════════════════
+7. THE RUNNING + STALE CONTRADICTION — EXACT CONDITION
+═══════════════════════════════════════════════════════════════════════
+Two independent signals:
+  RUNNING = age(collector_state.json.last_tick_at) < 90s  (heartbeat)
+  STALE   = now - payload.generated_at ≥ 15s at RENDER time
+The collector heartbeat is written every fast tick (10s target) regardless
+of data quality, so it stays green even when (i) the DOM harvest is broken
+and (ii) the API poll loop is slow. At 02:31:09 the browser rendered a
+payload whose generated_at was >15s old because /api/v4/live latency was
+spiked by CPU saturation:
+  • load average 17.2 on 8 cores (02:42), 14.2/13.5 (1/5-min)
+  • Scorecard run: elapsed_s=6445.9 (1h47m) started 23:23, next run started
+    00:51:38 and was STILL RUNNING at 02:31 (60s sleep between runs —
+    back-to-back; server.py _scorecard_loop)
+  • collector fast ticks overrunning: 39.84s and 44.11s vs 10s target;
+    fast_cycle p95=41.3s, p99=52.4s, MAX=3741s (62 min); 6,463 overruns
+STALE condition = poll-cycle latency (API build+transfer) > 15s window, or
+any poll throwing (renders "OFFLINE"/"api error"). Not collector death.
+
+═══════════════════════════════════════════════════════════════════════
+8. THE ACTIVE ALERT IN THE SCREENSHOT
+═══════════════════════════════════════════════════════════════════════
+game_id:            30919555 (Panathinaikos BC vs Virtus Bologna,
+                    betual-euroleague, CYBER/BETUAL class: BETUAL_NBA league
+                    reference used: avg_pace=4.3001, threshold=×1.04=4.472)
+trigger timestamp:  2026-09-16T02:28:58.557974Z (condition first TRUE in
+                    clean_projections: progress≥75 ∧ required>avg×1.04 ∧
+                    market_status=LIVE)
+trigger quarter:    4th Quarter, clock 01:00, progress 97.5%
+                    required=7.5 pts/min, actual=4.3846, line=178.5
+latest source qtr:  Q4 (WS 02:25:32 label; DOM 02:29:42)
+latest source clk:  01:00 (DOM 02:29:42; ~30 game-seconds left)
+latest BLM qtr:     4th Quarter (clean_projections 02:29:42)
+latest BLM clk:     01:00 — FROZEN (no further rows; game ended unseen)
+alert age at shot:  02:31:09 − 02:28:58 = 131s (~2m 11s)
+last obs age:       02:31:09 − 02:29:42 = 87s
+game end (source):  games.last_seen 02:31:37 — trigger fired with ~2.5 min
+                    of wall-clock game left; alert active when the game had
+                    30 game-seconds remaining.
+
+═══════════════════════════════════════════════════════════════════════
+9. "STILL ACTIVE" SEMANTICS
+═══════════════════════════════════════════════════════════════════════
+The GAME was NOT active (30 game-seconds left at trigger; ended 02:31:37).
+The ALERT record remained active. Two different mechanisms:
+  • Backend gate (authoritative): under_alert_eligibility() flips reason to
+    game_finished when the next /live poll sees games.status='ended'.
+    Verified 02:52:02Z: active under_alert count = 0 (40 live games, all
+    market_live/game_finished split correct).
+  • Frontend: ACTIVE ALERTS rows persist in a history store across polls;
+    they re-render ACTIVE until a poll carrying the flipped verdict lands.
+    During the stalled window (scorecard-induced slow polls) the last known
+    state — ACTIVE — kept being rendered after the game had ended.
+So the screenshot shows an ALERT-still-active state, not a game-still-active
+state. They diverged by ~2.5 minutes of wall clock plus the poll latency.
+
+═══════════════════════════════════════════════════════════════════════
+10–11. ENDED GAMES INSIDE THE LIVE COLLECTION
+═══════════════════════════════════════════════════════════════════════
+/api/v4/live returns the 100 most recent post-epoch games: 33–40 live +
+60–67 status='ended' (intentional visibility window; excluded from the
+live count by isActuallyLive both server and client side — counts match).
+Games incorrectly marked live: 0 found at audit time. BUT the terminal
+write path is lossy: for the alert game (and 30919468) NO snapshot with
+game_status='ended' and NO terminal BLM row was ever written — the source
+stopped listing the game (removed from lobby) before the collector could
+observe/verify the final state; games.status flips to 'ended' via last-seen
+expiry only (02:31:37 / 02:27:07), so final-state detection depends on the
+games-table heartbeat, not on an authoritative terminal observation.
+Also: 70 of 111 recently-tracked games had last observation >300s old
+(ended games in the 100-game window) — correct behaviour, listed for
+completeness. No virtual-game instance reuse found today (no >3h spans).
+
+═══════════════════════════════════════════════════════════════════════
+12. FRESHNESS MEASUREMENT
+═══════════════════════════════════════════════════════════════════════
+SOURCE (WS market_observations, live set):
+  latest ≤5s · median 10.1s · p95 26.1s · max 44.1s (collector's own
+  market_freshness block; 96.6% ≤30s target) — NEW data flowing.
+API/game state (39 live-flagged games, 02:52):
+  latest 2s · P50 ≈25s · P95 ≈160s · MAX 453s (30920093)
+  >300s: 1 game.
+ALL 100 payload games at 02:36 (incl. ended): P50 676s · P95 3501s ·
+  MAX 3699s — ended-tail skew, expected in the 100-game window.
+At the 02:31 screenshot moment, live-set ages included 704.7s (30920033
+  frozen at "Q2 01:00" — an 8-minute hole in score-bearing DOM snapshots
+  while WS carried Q3→Q4) — the state the operator saw.
+
+═══════════════════════════════════════════════════════════════════════
+13. COLLECTOR CADENCE vs DATA FRESHNESS
+═══════════════════════════════════════════════════════════════════════
+Collector IS receiving new data: snapshots_total 313,689 → 314,403 →
+314,471 across consecutive ticks; WS MatchTotal rows arriving continuously
+(30920091: 111 rows/20min; per-game p50 10.1s). BUT:
+  • fast tick target 10s → actual p50 11.9s, p95 41.3s, p99 52.4s,
+    max 3,741s; 6,463 deadline overruns
+  • journal 02:41–02:43: "fast tick done in 39.84s / 44.11s",
+    "event-view failures 12 — rotating browser", repeated
+    "event view unverified (parsed teams ''/'') — skipped"
+  → cadence alone proves nothing; the DOM harvest is the degraded leg.
+
+═══════════════════════════════════════════════════════════════════════
+14. CHECKLIST RESULTS
+═══════════════════════════════════════════════════════════════════════
+frozen observations          YES (DOM fallback; e.g. 30920033 704s at Q2)
+duplicate observations       NO (exact-dup guard: insert only when row_id
+                             accepted; multi-line WS rows are market variants)
+unchanged timestamps         cosmetic only (line-only snapshots reuse WS
+                             captured_at)
+stale cache entries          NO (no HTTP caching; pace_reference in-process
+                             cache is by design)
+stale collector_state        NO (heartbeat 8–12s fresh)
+stale snapshot buffer        NO
+failed source polling        PARTIAL — WS feed healthy; DOM event-view
+                             parse failing (unverified skips, browser rotation)
+source hydration failure     YES — BetConstruct SPA degradation (the known
+                             FRESH_CONTEXT_AFTER_EMPTY failure mode)
+API caching                  NONE
+frontend polling failure     TRANSIENT — >15s payload age at render (STALE);
+                             consistent with server CPU saturation
+frontend rendering failure   NO
+resource pressure            load 17.2/8 cores; scorecard run 6,446s
+                             back-to-back; collector overruns 6,463
+
+═══════════════════════════════════════════════════════════════════════
+15. Q3→Q4 TRANSITION LAG (source WS label → first recorded row downstream)
+═══════════════════════════════════════════════════════════════════════
+Population: 160 games with quarter-bearing snapshots since 00:00Z; 122
+reached Q4 in the WS source.
+
+WS → DOM snapshot (what the dashboard's quarter/clock reads):
+  n=105 · P50=0s · P95=247s · MAX=454s · never-negative
+WS → BLM projection (clean_projections):
+  n=118 · P50=−7s · P95=130s · MAX=310s
+  (negatives are a bookkeeping artifact: clean rows inherit period labels
+  from WS-mapped snapshot writes while the market_observations MatchTotal
+  row of the same frame can carry period_label=NULL; treat ≤0 as 0.)
+DOM NEVER recorded Q4: 17/122 games (BLM stuck in Q3 through game end).
+Worked examples:
+  30919555: WS Q4 02:22:38 → DOM 02:25:32 (lag 174s) → BLM 02:20:31 (−127s,
+            label-path artifact)
+  30919468: WS Q4 02:16:25 → DOM 02:16:25 (0s) → BLM 02:14:05 (−140s)
+  30920093 (LIVE now): SOURCE=Q4 04:00, BLM/API=Q3 01:00, 453s old.
+
+═══════════════════════════════════════════════════════════════════════
+RETURN BLOCK (requested format)
+═══════════════════════════════════════════════════════════════════════
+TEMPORAL STATE AUDIT
+Current dashboard timestamp : 02:31:09 UTC (screenshot); audit 02:34–02:56Z
+Timestamp meaning           : server wall-clock when the /api/v4/live JSON
+                              was BUILT (api.py:1577) — response freshness,
+                              not game-state freshness
+Collector last tick         : 02:34:41.652985Z (heartbeat <90s → "RUNNING")
+Collector last NEW obs      : continuous — WS rows ≤5s old at every probe;
+                              snapshots +68..+78 per tick (NEW data flowing)
+API last NEW state          : generated_at fresh on every successful poll
+                              (0.8–4.3s build); per-game NEW state gated by
+                              the degraded DOM leg (see ROOT CAUSE)
+Dashboard last NEW state    : STALE at 02:31:09 — rendered payload was >15s
+                              old at render (poll loop not completing on time)
+
+Current state age (39 live-flagged games, 02:52):
+  latest 2s · P50 ≈25s · P95 ≈160s · MAX 453s (1 game >300s)
+  source WS freshness for the same set: latest ≤5s · P50 10.1s · P95 26.1s
+Q3→Q4 transition lag (WS → DOM snapshot):
+  P50 0s · P95 247s · MAX 454s
+  (WS → BLM projection: P50 ~0s [−7s artifact] · P95 130s · MAX 310s)
+Games currently stale (>300s):            1 / 39 live-flagged (30920093)
+Games with quarter mismatch vs source:    37 / 39 (1 hard: 30920093)
+Games with clock mismatch vs source:      18 / 39
+Games incorrectly marked active (live):   0 (audit time)
+Alerts referencing stale games:           1 (30919555 — active at 02:31:09
+                                          while game had 30 game-seconds
+                                          left; ended 02:31:37)
+
+ROOT CAUSE (exact component)
+  TWO stacked components, neither of which is the collector process:
+  1. blm_v4.collector DOM-harvest leg (event-view/panel parse): the
+     BetConstruct SPA stops hydrating in the long-lived session, so
+     snapshots are written with NULL scores/quarter/clock and event views
+     fail verification ("parsed teams ''/''"); _analyze_game then pins the
+     dashboard to the last COMPLETE snapshot — a minutes-old frozen state —
+     while the healthy WS leg keeps recording the true source state.
+     Q3→Q4 (and final-state) information exists in the source but never
+     reaches the dashboard's quarter/clock fields for minutes, or at all
+     (17/122 games).
+  2. blm_v4.scorecard run inside server.py (started 00:51:38Z, elapsed
+     6,446s, looping with 60s sleep): saturates CPU (load 17.2/8 cores),
+     stretching /api/v4/live poll cycles past the 15s render window — the
+     exact condition that flips the header to STALE while the collector
+     heartbeat (<90s) keeps it green. It also delays delivery of the
+     game_finished verdict, so the ACTIVE alert outlived its game.
+
+EVIDENCE (files/functions/tables/records)
+  • blm_v4/dashboard/static/dashboard.js renderStatus() 1088–1120 (STALE
+    <15s vs collector <90s; isActuallyLive)
+  • blm_v4/api.py: _analyze_game() 700–930 (score-bearing fallback;
+    last_update 853), _live_state/_alert_gate, /live builder 1419–1583
+    (generated_at 1577), /status 1333–1357 (running <90s)
+  • blm_v4/collector.py: FAST/SLOW split docstring 45–70, ws_matchtotal_
+    snapshot() 334–381, _record_clean 2068–2097, state writer 2905–2920
+  • blm_v4/pace_projector.py refresh_game/latest_for_game 241–262
+  • blm_v4/live_analytics/under_alert.py (trigger, eligibility fail-closed)
+  • TABLES/RECORDS (blm_pokerbet.db, read-only):
+      market_observations 30919555 02:25:32 Q4 05:00 (source truth)
+      snapshots 30919555 last complete 02:29:42 clk 01:00; line-only rows
+      with NULL scores after; NO ended row
+      games 30919555 status=ended last_seen 02:31:37; game_results: none
+  • TABLES (blm_metrics_clean.db, read-only): clean_projections 30919555
+    02:29:42 Q4 97.5% LIVE — frozen; clean_observations joined via
+    snapshot_id
+  • collector_state.json: tick 11708, overruns 6463, fast_cycle p95 41.3s
+    p99 52.4s max 3,741s, slow_worker busy, market_freshness p50 10.1s
+  • journalctl --user -u blm-collector 02:41–02:43 ("fast tick done in
+    39.84s/44.11s", "event-view failures 12 — rotating browser",
+    "event view unverified … skipped")
+  • journalctl --user -u blm-server: scorecard_run elapsed_s=6445.9
+    00:50:38; scorecard_run_start 00:51:38 (running at 02:31)
+  • uptime: load 17.20/14.17/13.45 on 8 cores (02:42:57)
+  • live probes 02:36–02:53: /status 0.8s running; /live generated_at ages
+    0.8–4.3s; 02:52 payload: 0 active alerts, eligibility split
+    {market_live:40, game_finished:60}
+
+PRODUCTION CHANGES: NONE
+  (read-only sqlite mode=ro, HTTP GET probes, journalctl, /proc reads;
+  the only file written is this audit report)

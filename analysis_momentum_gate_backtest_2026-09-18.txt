@@ -1,0 +1,92 @@
+================================================================================================
+READ-ONLY BACKTEST — MOMENTUM-GATED 75% UNDER TRIGGER  (2026-09-18)
+cohort = audit production mirror: 75% CLEAN triggers, N=256 (recent3 missing on 0 -> momentum analyses on N=256)
+m = recent_pace_3m - actual_pts_per_min at the trigger observation (negative = cooling)
+ODDS=1.85, break-even 54.054%.  IN-SAMPLE: feature discovered on this cohort (audit §3i).
+================================================================================================
+
+§1 GATE SWEEP (round-number gates only, no optimisation)
+------------------------------------------------------------------------------------------------
+  V0 production (no gate)            N= 256  UNDER=152 OVER=104 PUSH= 0  hit= 59.38%  CI95=[ 53.3, 65.2]  p(binom)=0.0495  ROI= +9.84%  net=  +25.2u
+  m < +0.5  (exclude heating)        N= 160  UNDER=103 OVER= 57 PUSH= 0  hit= 64.38%  CI95=[ 56.7, 71.4]  p(binom)=0.0052  ROI=+19.09%  net=  +30.6u  *LB>BE*
+  m < 0     (any cooling)            N= 124  UNDER= 89 OVER= 35 PUSH= 0  hit= 71.77%  CI95=[ 63.3, 78.9]  p(binom)=0.0000  ROI=+32.78%  net=  +40.7u  *LB>BE*
+  m < -0.25                          N= 108  UNDER= 78 OVER= 30 PUSH= 0  hit= 72.22%  CI95=[ 63.1, 79.8]  p(binom)=0.0001  ROI=+33.61%  net=  +36.3u  *LB>BE*
+  m < -0.5  (cooling audit bucket)   N=  91  UNDER= 67 OVER= 24 PUSH= 0  hit= 73.63%  CI95=[ 63.7, 81.6]  p(binom)=0.0001  ROI=+36.21%  net=  +33.0u  *LB>BE*
+  m < -1.0  (strong cooling)         N=  57  UNDER= 43 OVER= 14 PUSH= 0  hit= 75.44%  CI95=[ 62.9, 84.8]  p(binom)=0.0007  ROI=+39.56%  net=  +22.6u  *LB>BE*
+  m >= +0.5 (heating only — contrast) N=  96  UNDER= 49 OVER= 47 PUSH= 0  hit= 51.04%  CI95=[ 41.2, 60.8]  p(binom)=0.7567  ROI= -5.57%  net=   -5.3u
+
+§2 COUNTERFACTUAL vs PRODUCTION (what the gate adds/drops)
+------------------------------------------------------------------------------------------------
+  m < +0.5  (exclude heating)        kept  160/256  hits kept 103  dropped   96 (hits dropped  49)  drop-accuracy= 51.04%
+  m < 0     (any cooling)            kept  124/256  hits kept  89  dropped  132 (hits dropped  63)  drop-accuracy= 47.73%
+  m < -0.25                          kept  108/256  hits kept  78  dropped  148 (hits dropped  74)  drop-accuracy= 50.00%
+  m < -0.5  (cooling audit bucket)   kept   91/256  hits kept  67  dropped  165 (hits dropped  85)  drop-accuracy= 51.52%
+  m < -1.0  (strong cooling)         kept   57/256  hits kept  43  dropped  199 (hits dropped 109)  drop-accuracy= 54.77%
+
+§3 STABILITY — chronological thirds (same order as trigger time)
+------------------------------------------------------------------------------------------------
+  V0 production      T1: N= 85 hit= 56.47%   T2: N= 85 hit= 50.59%   T3: N= 86 hit= 70.93%
+  m < 0              T1: N= 41 hit= 63.41%   T2: N= 41 hit= 70.73%   T3: N= 42 hit= 80.95%
+  m < -0.5           T1: N= 30 hit= 70.00%   T2: N= 30 hit= 73.33%   T3: N= 31 hit= 77.42%
+
+§4 LEAGUE MIX under the strictest declared gate (m < -0.5)
+------------------------------------------------------------------------------------------------
+  m<-0.5 & NBA                       N=   5  UNDER=  5 OVER=  0 PUSH= 0  hit=100.00%  CI95=[ 56.6,100.0]  p(binom)=0.0461  ROI=+85.00%  net=   +4.2u  *LB>BE*
+  m<-0.5 & KBL                       N=   6  UNDER=  5 OVER=  1 PUSH= 0  hit= 83.33%  CI95=[ 43.6, 97.0]  p(binom)=0.1522  ROI=+54.17%  net=   +3.2u
+  m<-0.5 & CBA                       N=   3  UNDER=  2 OVER=  1 PUSH= 0  hit= 66.67%  CI95=[ 20.8, 93.9]  p(binom)=0.5607  ROI=+23.33%  net=   +0.7u
+  m<-0.5 & TBSL                      N=  29  UNDER= 19 OVER= 10 PUSH= 0  hit= 65.52%  CI95=[ 47.3, 80.1]  p(binom)=0.1461  ROI=+21.21%  net=   +6.2u
+  m<-0.5 & EuroLeague                N=  34  UNDER= 24 OVER= 10 PUSH= 0  hit= 70.59%  CI95=[ 53.8, 83.2]  p(binom)=0.0373  ROI=+30.59%  net=  +10.4u
+  m<-0.5 & CYBER                     N=  14  UNDER= 12 OVER=  2 PUSH= 0  hit= 85.71%  CI95=[ 60.1, 96.0]  p(binom)=0.0143  ROI=+58.57%  net=   +8.2u  *LB>BE*
+
+§5 INTERACTION with the required-margin size (is momentum just a proxy for extremity?)
+------------------------------------------------------------------------------------------------
+  req/avg 1.04-1.20 & m < -0.5       N=  27  UNDER= 22 OVER=  5 PUSH= 0  hit= 81.48%  CI95=[ 63.3, 91.8]  p(binom)=0.0029  ROI=+50.74%  net=  +13.7u  *LB>BE*
+  req/avg 1.04-1.20 & m >= -0.5      N=  40  UNDER= 24 OVER= 16 PUSH= 0  hit= 60.00%  CI95=[ 44.6, 73.7]  p(binom)=0.2768  ROI=+11.00%  net=   +4.4u
+  req/avg >= 1.20 & m < -0.5         N=  64  UNDER= 45 OVER= 19 PUSH= 0  hit= 70.31%  CI95=[ 58.2, 80.1]  p(binom)=0.0059  ROI=+30.08%  net=  +19.3u  *LB>BE*
+  req/avg >= 1.20 & m >= -0.5        N= 125  UNDER= 61 OVER= 64 PUSH= 0  hit= 48.80%  CI95=[ 40.2, 57.5]  p(binom)=0.8975  ROI= -9.72%  net=  -12.1u
+
+§6 VERDICT (filled in analysis report)
+------------------------------------------------------------------------------------------------
+
+================================================================================
+§7 VERDICT — MOMENTUM-GATED 75% TRIGGER  (READ-ONLY BACKTEST, IN-SAMPLE)
+================================================================================
+
+DOES THE GATE WORK?  YES, on this cohort — with the in-sample caveat below.
+
+ Headline (N=256 production cohort, OK-settled, fresh line):
+   production (no gate)      59.38%  p=0.0495 (marginal)   ROI +9.8%
+   gate m < +0.5             64.38%  p=0.0052  LB>BE       ROI +19.1%
+   gate m < 0                71.77%  p<0.0001  LB>BE       ROI +32.8%
+   gate m < -0.5             73.63%  p=0.0001  LB>BE       ROI +36.2%
+   gate m < -1.0             75.44%  p=0.0007  LB>BE       ROI +39.6%
+   heating only (contrast)   51.04%  p=0.757   no edge     ROI -5.6%
+
+ Evidence quality:
+   1. Monotone dose-response across independent round-number gates
+      (59.4 -> 64.4 -> 71.8 -> 72.2 -> 73.6 -> 75.4) with break-even cleared
+      on the Wilson LOWER bound from m<0 upward.
+   2. Chronologically stable: m<0 thirds 63.4/70.7/81.0; m<-0.5 thirds
+      70.0/73.3/77.4 — no third below 63%, no single-window artifact.
+   3. NOT an extremity proxy (§5): within req/avg 1.04-1.20, cooling 81.5% vs
+      60.0% (+21.5pp); within req/avg >= 1.20, cooling 70.3% vs heating-side
+      48.8% (ROI -9.7%). The audit's "strong margin" bucket was carried by
+      cooling games; margin alone is not the driver.
+   4. League-robust: gate lifts TBSL 49.4->65.5, EuroLeague 58.7->70.6,
+      CYBER 67.7->85.7, KBL 90.0 (N=6), NBA 100 (N=5).
+   5. Counterfactual: dropped alerts are 47.7-54.8% accurate (coin flips);
+      the gate discards variance, not edge. Net units RISE despite ~half the stakes.
+
+ CAVEATS (must be stated):
+   * IN-SAMPLE: the momentum feature was discovered in audit §3i on this SAME
+     cohort; bucket edges come from the same data. Expect OOS degradation.
+   * n=124 at the m<0 gate; Wilson lower bounds clear break-even but cell
+     counts per league are small; NBA/KBL/CBA cells are anecdotal.
+   * Zero pushes in the cohort; settlement = OK finals only; stale-line alerts
+     are NOT part of this cohort (production gate already excludes them).
+   * recent_pace_3m availability was 100% on this cohort (0 missing).
+
+ RECOMMENDATION (no production change made):
+   Shadow-run the m < 0 (or m < -0.5) gate next to the live trigger for a
+   prospective window before any rule change; pre-register thresholds.
+================================================================================

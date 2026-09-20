@@ -1,0 +1,111 @@
+================================================================================================
+READ-ONLY AUDIT — ALERT WINRATE WITH Q3_BREAK INCLUDED + EX-TBSL + DAILY, 2026-09-20
+75% mirror = audit_alert_improvement_2026-09-18 (projector required pace).
+Q3_BREAK mirror = directive 2026-09-18 geometry: required=(line-Q3score)/quarter_minutes,
+frozen trigger_observation line, SAME point-in-time league mean (strict-before),
+settlement = game_results final_result_status='OK' only. ODDS=1.85 breakeven 54.05%.
+================================================================================================
+
+Q3_BREAK boundary games with provable line+score: 9233   (unprovable / fail-closed: 744)
+
+§1 HEADLINE WINRATE — both alert identities (ALL and CLEAN = fresh line <=300s)
+------------------------------------------------------------------------------------------------
+  75% projector ALL                  N=  500  U= 333  O= 167  P= 0  WIN%= 66.60%  [62.4%,70.6%]  net= +116.05u  ROI=+23.21%
+  75% projector CLEAN                N=  263  U= 155  O= 108  P= 0  WIN%= 58.94%  [52.9%,64.7%]  net=  +23.75u  ROI=+9.03%
+  Q3_BREAK ALL                       N=  925  U= 627  O= 298  P= 0  WIN%= 67.78%  [64.7%,70.7%]  net= +234.95u  ROI=+25.40%
+  Q3_BREAK CLEAN                     N=  531  U= 319  O= 212  P= 0  WIN%= 60.08%  [55.9%,64.2%]  net=  +59.15u  ROI=+11.14%
+
+§1b Baselines (same boundary universe, NO condition)
+  baseline 75% (all obs)             N= 9977  U=5136  O=4841  P= 0  WIN%= 51.48%  [50.5%,52.5%]  net= -475.40u  ROI=-4.76%
+  baseline Q3_BREAK (boundary)       N= 9233  U=4652  O=4581  P= 0  WIN%= 50.38%  [49.4%,51.4%]  net= -626.80u  ROI=-6.79%
+
+§2 OVERLAP — a game can fire BOTH identities at the same boundary; never summed
+------------------------------------------------------------------------------------------------
+  both identities fire               N=  419  U= 277  O= 142  P= 0  WIN%= 66.11%  [61.4%,70.5%]  net=  +93.45u  ROI=+22.30%
+  Q3_BREAK only                      N=  506  U= 350  O= 156  P= 0  WIN%= 69.17%  [65.0%,73.0%]  net= +141.50u  ROI=+27.96%
+  75% projector only                 N=   81  U=  58  O=  23  P= 0  WIN%= 71.60%  [61.0%,80.3%]  net=  +26.30u  ROI=+32.47%
+
+§3 EX-TBSL IMPACT — the league cut and what it does to winrate/ROI
+------------------------------------------------------------------------------------------------
+  75% projector ALL — with TBSL      N=  500  U= 333  O= 167  P= 0  WIN%= 66.60%  [62.4%,70.6%]  net= +116.05u  ROI=+23.21%
+  75% projector ALL — ex-TBSL        N=  340  U= 238  O= 102  P= 0  WIN%= 70.00%  [64.9%,74.6%]  net= +100.30u  ROI=+29.50%
+      -> TBSL share=32.0% of cohort; winrate +3.40pp ex-TBSL; ROI +6.29pp ex-TBSL
+
+  75% projector CLEAN — with TBSL    N=  263  U= 155  O= 108  P= 0  WIN%= 58.94%  [52.9%,64.7%]  net=  +23.75u  ROI=+9.03%
+  75% projector CLEAN — ex-TBSL      N=  182  U= 115  O=  67  P= 0  WIN%= 63.19%  [56.0%,69.9%]  net=  +30.75u  ROI=+16.90%
+      -> TBSL share=30.8% of cohort; winrate +4.25pp ex-TBSL; ROI +7.87pp ex-TBSL
+
+  Q3_BREAK ALL — with TBSL           N=  925  U= 627  O= 298  P= 0  WIN%= 67.78%  [64.7%,70.7%]  net= +234.95u  ROI=+25.40%
+  Q3_BREAK ALL — ex-TBSL             N=  702  U= 483  O= 219  P= 0  WIN%= 68.80%  [65.3%,72.1%]  net= +191.55u  ROI=+27.29%
+      -> TBSL share=24.1% of cohort; winrate +1.02pp ex-TBSL; ROI +1.89pp ex-TBSL
+
+  Q3_BREAK CLEAN — with TBSL         N=  531  U= 319  O= 212  P= 0  WIN%= 60.08%  [55.9%,64.2%]  net=  +59.15u  ROI=+11.14%
+  Q3_BREAK CLEAN — ex-TBSL           N=  419  U= 257  O= 162  P= 0  WIN%= 61.34%  [56.6%,65.9%]  net=  +56.45u  ROI=+13.47%
+      -> TBSL share=21.1% of cohort; winrate +1.26pp ex-TBSL; ROI +2.33pp ex-TBSL
+
+§3b Per-league contribution (Q3_BREAK CLEAN)
+  Q3_CLEAN league NBA                N=   51  U=  38  O=  13  P= 0  WIN%= 74.51%  [61.1%,84.5%]  net=  +19.30u  ROI=+37.84%
+  Q3_CLEAN league KBL                N=   44  U=  29  O=  15  P= 0  WIN%= 65.91%  [51.1%,78.1%]  net=   +9.65u  ROI=+21.93%
+  Q3_CLEAN league CBA                N=   53  U=  29  O=  24  P= 0  WIN%= 54.72%  [41.5%,67.3%]  net=   +0.65u  ROI=+1.23%
+  Q3_CLEAN league TBSL               N=  112  U=  62  O=  50  P= 0  WIN%= 55.36%  [46.1%,64.2%]  net=   +2.70u  ROI=+2.41%
+  Q3_CLEAN league EuroLeague         N=  190  U= 112  O=  78  P= 0  WIN%= 58.95%  [51.8%,65.7%]  net=  +17.20u  ROI=+9.05%
+  Q3_CLEAN league CYBER              N=   81  U=  49  O=  32  P= 0  WIN%= 60.49%  [49.6%,70.4%]  net=   +9.65u  ROI=+11.91%
+
+§4 DAILY BREAKDOWN — last week, 2026-09-13 .. 2026-09-20 (UTC)
+------------------------------------------------------------------------------------------------
+  75% ALL:
+    2026-09-13  N=   1  U=  1  O=  0  P= 0  WIN%=100.00%    +0.85u
+    2026-09-14  N=  11  U=  6  O=  5  P= 0  WIN%= 54.55%    +0.10u
+    2026-09-15  N=   6  U=  4  O=  2  P= 0  WIN%= 66.67%    +1.40u
+    2026-09-16  N=   4  U=  2  O=  2  P= 0  WIN%= 50.00%    -0.30u
+    2026-09-17  N=   5  U=  4  O=  1  P= 0  WIN%= 80.00%    +2.40u
+    2026-09-18  N=   6  U=  4  O=  2  P= 0  WIN%= 66.67%    +1.40u
+    2026-09-19  N=   6  U=  3  O=  3  P= 0  WIN%= 50.00%    -0.45u
+    2026-09-20  N=   1  U=  0  O=  1  P= 0  WIN%=  0.00%    -1.00u
+    WEEK TOTAL   N=  40  U= 24  O= 16  P= 0  WIN%= 60.00%  [44.6%,73.7%]  net=  +4.40u  ROI=+11.00%
+
+  75% CLEAN:
+    2026-09-13  N=   1  U=  1  O=  0  P= 0  WIN%=100.00%    +0.85u
+    2026-09-14  N=  11  U=  6  O=  5  P= 0  WIN%= 54.55%    +0.10u
+    2026-09-15  N=   6  U=  4  O=  2  P= 0  WIN%= 66.67%    +1.40u
+    2026-09-16  N=   4  U=  2  O=  2  P= 0  WIN%= 50.00%    -0.30u
+    2026-09-17  N=   5  U=  4  O=  1  P= 0  WIN%= 80.00%    +2.40u
+    2026-09-18  N=   6  U=  4  O=  2  P= 0  WIN%= 66.67%    +1.40u
+    2026-09-19  N=   6  U=  3  O=  3  P= 0  WIN%= 50.00%    -0.45u
+    2026-09-20  N=   1  U=  0  O=  1  P= 0  WIN%=  0.00%    -1.00u
+    WEEK TOTAL   N=  40  U= 24  O= 16  P= 0  WIN%= 60.00%  [44.6%,73.7%]  net=  +4.40u  ROI=+11.00%
+
+  Q3_BREAK ALL:
+    2026-09-13  N=  11  U=  6  O=  5  P= 0  WIN%= 54.55%    +0.10u
+    2026-09-14  N=  58  U= 27  O= 31  P= 0  WIN%= 46.55%    -8.05u
+    2026-09-15  N=  33  U= 21  O= 12  P= 0  WIN%= 63.64%    +5.85u
+    2026-09-16  N=  40  U= 23  O= 17  P= 0  WIN%= 57.50%    +2.55u
+    2026-09-17  N=  43  U= 27  O= 16  P= 0  WIN%= 62.79%    +6.95u
+    2026-09-18  N=  26  U= 16  O= 10  P= 0  WIN%= 61.54%    +3.60u
+    2026-09-19  N=  16  U= 12  O=  4  P= 0  WIN%= 75.00%    +6.20u
+    2026-09-20  N=  12  U=  7  O=  5  P= 0  WIN%= 58.33%    +0.95u
+    WEEK TOTAL   N= 239  U=139  O=100  P= 0  WIN%= 58.16%  [51.8%,64.2%]  net= +18.15u  ROI=+7.59%
+
+  Q3_BREAK CLEAN:
+    2026-09-13  N=  11  U=  6  O=  5  P= 0  WIN%= 54.55%    +0.10u
+    2026-09-14  N=  58  U= 27  O= 31  P= 0  WIN%= 46.55%    -8.05u
+    2026-09-15  N=  33  U= 21  O= 12  P= 0  WIN%= 63.64%    +5.85u
+    2026-09-16  N=  40  U= 23  O= 17  P= 0  WIN%= 57.50%    +2.55u
+    2026-09-17  N=  43  U= 27  O= 16  P= 0  WIN%= 62.79%    +6.95u
+    2026-09-18  N=  25  U= 15  O= 10  P= 0  WIN%= 60.00%    +2.75u
+    2026-09-19  N=  16  U= 12  O=  4  P= 0  WIN%= 75.00%    +6.20u
+    2026-09-20  N=  12  U=  7  O=  5  P= 0  WIN%= 58.33%    +0.95u
+    WEEK TOTAL   N= 238  U=138  O=100  P= 0  WIN%= 57.98%  [51.6%,64.1%]  net= +17.30u  ROI=+7.27%
+
+§5 METHOD NOTES
+------------------------------------------------------------------------------------------------
+  - 75% cohorts: identical to audit_alert_improvement_2026-09-18 (imported, not copied).
+  - Q3_BREAK: line+score from the production trigger_observation /
+    score_at_observation authorities over blm_pokerbet.snapshots; required pace
+    is market-implied ((line-score)/q_min), NOT the projector's number.
+  - Q3_BREAK league mean is POINT-IN-TIME (strict before trigger) like the 75%
+    mirror; the 2026-09-18 Q3 backtest used the all-time mean — expect small
+    differences from that report for this reason alone.
+  - CLEAN = boundary row line fresh (market_status LIVE, age <=300s).
+  - PUSH settles are stake-returned: excluded from ROI stakes, counted honestly.
+  - READ-ONLY: both DBs opened mode=ro; the only file written is this report.

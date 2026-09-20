@@ -1,0 +1,158 @@
+TEMPORAL-FRESHNESS FIX — FINAL REPORT (2026-09-16)
+Directive: BLM TEMPORAL-FRESHNESS FIX — IMPLEMENTATION (follows analysis_temporal_state_audit_2026-09-16.txt)
+Constraint honoured: NO betting thresholds / model mathematics touched
+(ALERT_PROGRESS_PCT, REQUIRED_MARGIN, P80/P85, league averages,
+remaining_minutes, required_pts_per_min all bit-identical).
+
+════════════════════════════════════════════════════════════════════
+VERDICT
+════════════════════════════════════════════════════════════════════
+ROOT CAUSE FIXED:            YES (both stack components addressed)
+DOM stale-state protected:   YES
+WS/current-state preserved:  YES
+Q3→Q4 synchronization:       PASS
+Stale alert prevention:      PASS (state_age_seconds <= 300s bound,
+                             fail-closed, reason stale_state)
+Game-finished reconciliation: PASS (independent 60s reconciler thread)
+API freshness:               PASS (per-game metadata, STALE pill split)
+Frontend freshness:          PASS (API-age vs game-state-age separate)
+Tests:                       PASS — 1053 passed / 3 failed, all 3
+                             pre-existing (stash-verified)
+Production changes:          code in working tree ONLY — services NOT
+                             restarted (awaiting explicit authorization)
+
+════════════════════════════════════════════════════════════════════
+FILES CHANGED (exact)
+════════════════════════════════════════════════════════════════════
+ blm_v4/api.py                                  | +314 (core fix)
+ blm_v4/live_analytics/under_alert.py           |  +24 (reason vocabulary)
+ server.py                                      |  +95 (reconciler thread)
+ blm_v4/dashboard/static/dashboard.js           |  +52 (§8/§9)
+ blm_v4/dashboard/static/index.html             |   +1 (pill markup)
+ tests/test_temporal_freshness_fix_2026_09_16.py|  NEW (22 directed tests)
+ tests/test_live_market_gate.py                 |  +66 (§6 contract)
+ tests/test_live_alert_eligibility.py           |  +17 (fixture + canary)
+ tests/test_live_state_gate.py                  |   +7 (fixture)
+ tests/test_production_under_trigger_2026_09_14.py | +44 (N split + N2)
+ tests/test_under_alert_lifecycle.py            |  +27 (§9 canaries)
+ tests/test_active_alert_triggered_line.py      |  +10 (§9 canary)
+ (610 insertions, 47 deletions across 11 files + 1 new test file)
+
+════════════════════════════════════════════════════════════════════
+LOGIC CHANGED (exact, by directive section)
+════════════════════════════════════════════════════════════════════
+§1/§2/§4  AUTHORITATIVE STATE — api.py
+  _ws_game_state(): freshest VALIDATED WS frame for a game from
+  market_observations (MatchTotal rows with period_label+clock+both
+  scores; line-only rows skipped). Nothing fabricated.
+  _state_is_regression(): monotonicity guard — rejects candidates that
+  move the accepted state backwards (quarter decrease = Q4→Q3; same-
+  quarter clock increase = newer clock→older clock; 00:00 sentinel is a
+  period END, never a regression). Only complete states are compared;
+  missing fields never called a regression.
+  _authoritative_game_state(): selection order —
+    1. newest COMPLETE DOM frame while fresh (age <= WS_STATE_FALLBACK_S)
+    2. otherwise freshest validated WS frame (unless it would regress)
+    3. otherwise newest DOM frame of any shape (legacy degraded path)
+  A NULL-score/NULL-quarter snapshot can NEVER replace a newer complete
+  state; a stale DOM state no longer freezes the display when a healthy
+  WS frame exists. Unvalidated DOM fields are never merged into WS state.
+§5  FRESHNESS METADATA — api.py
+  Every served game carries game_state_freshness = {source
+  (ws|dom), state_observed_at, state_age_seconds, source_observed_at}.
+  The API generation timestamp is never used as a freshness proxy.
+  /api/v4/status also exposes set-wide game_state_freshness percentiles.
+§6  ALERT SAFETY — api.py
+  New constant ALERT_MAX_STATE_AGE_S = 300.0 (documented market-
+  freshness limit). _alert_gate() fails closed with reason stale_state
+  when the accepted state age is missing or > bound. The gate is folded
+  into the served under_alert_eligibility verdict AFTER the market gate
+  (can only tighten). No remaining-minute or pace compensation.
+§7  GAME-FINISHED RECONCILIATION — server.py
+  New background reconciler thread (60s cadence, independent of the
+  scorecard workload): flips pending checkpoints to game_finished the
+  moment an authoritative final exists, and exposes a freshness probe.
+  No second collector created; scorecard untouched.
+§8  DASHBOARD — index.html + dashboard.js
+  Header now shows TWO separate clocks: API response age (existing
+  FRESH/STALE pill) AND game-state age (new STATE pill fed by
+  game_state_freshness percentiles). A recent JSON carrying old game
+  states can no longer read as all-fresh.
+§9  ACTIVE ALERTS — server.py + dashboard.js
+  Backend: reconciler flips the authoritative verdict promptly when the
+  game finishes. Frontend: reconcileUnderAlerts closes ACTIVE records
+  whose game the payload's authoritative state marks over (status ended
+  / live=false / terminal reason) and never resurrects them
+  (gameOverIds gate, close-only). Reconciled with requirement N
+  (2026-09-14): this is LIFECYCLE reconciliation consuming only the
+  backend's own state verdict — not the second ELIGIBILITY decision N
+  forbids; N's core case (gate-ineligible but game still live) still
+  displays, now pinned by the split N/N2 tests.
+
+════════════════════════════════════════════════════════════════════
+TESTS (directive §10 — all scenarios covered)
+════════════════════════════════════════════════════════════════════
+tests/test_temporal_freshness_fix_2026_09_16.py — 22 tests:
+  valid WS + failed DOM, valid WS + stale DOM, Q3→Q4 transition (the
+  exact audit pattern SOURCE=Q4 / DOM=stale Q3 / WS=current Q4 →
+  accepted=Q4), Q4→Q3 regression rejection, NULL snapshot protection,
+  stale snapshot protection, stale alert prevention (stale_state),
+  game_finished reconciliation, API freshness metadata, frontend
+  active/ended reconciliation (node-executed state machine).
+Suites amended to the new contract (intent preserved, comments cite §):
+  test_live_market_gate (state gate fold-in), test_live_alert_eligibility
+  + test_live_state_gate (fixtures pass verified-fresh state_age),
+  test_production_under_trigger (N split + N2 §9 case),
+  test_under_alert_lifecycle / test_active_alert_triggered_line (§9
+  close-only canaries).
+FULL SUITE: 1053 passed, 3 failed — ALL PRE-EXISTING (verified by
+  git-stash triage on the clean tree):
+  - test_forensic_relative_pace_freeze x2: frozen 69.75% constant has
+    drifted from the grown archive (65.84%)
+  - test_prospective_freeze::test_report_cli_writes_json: report CLI
+    reads 0 observations from fixture DBs
+  None touch the temporal fix; none were passing before this change.
+
+════════════════════════════════════════════════════════════════════
+LIVE READ-ONLY VERIFICATION (v4_live() in-process, ro SQLite, 07:37Z)
+════════════════════════════════════════════════════════════════════
+                            audit (02:52)      now (07:37)
+LIVE-set state age P50      25s                5.9s
+LIVE-set state age P95      160s               53.5s
+LIVE-set state age P99      —                  57.9s
+LIVE-set state age MAX      453s               57.9s
+Live games stale (>300s)    several            0
+Quarter mismatches          37/39 (behind)     0 behind source
+Clock mismatches            18/39 (1 hard)     0
+Incorrectly active games    0                  0
+Alerts on stale states      1 (30919555)       0 (0 active alerts)
+State source mix            DOM-only           ws=28 / dom=68 / none=4
+
+The 2–4 remaining "mismatches" seen between probes are all accepted
+state AHEAD of the feed's latest labeled WS row at quarter boundaries
+(DOM observed Q2→Q3 / Q3→Q4 before the feed's next state push; accepted
+ages 7–15s) — the direction §4 wants, and the reverse of the audit's
+frozen-DOM failure. WS→DOM feed-level Q3→Q4 lag (P50 0s / P95 331s /
+MAX 1902s, last 12h) is unchanged — it is collector-harvest cadence —
+but it no longer poisons the dashboard: stale DOM now defers to WS, and
+the §6 gate blocks alerts on stale states either way.
+
+════════════════════════════════════════════════════════════════════
+REMAINING ISSUES (exact)
+════════════════════════════════════════════════════════════════════
+1. Collector DOM-harvest leg still degrades under load (NULL frames,
+   slow ticks, event-view verification failures). Mitigated downstream;
+   the collector itself is unchanged per directive scope.
+2. Scorecard run duration (~1h47m) unchanged; its load spikes still
+   stretch collector cycles — reconciliation is now independent, the
+   workload itself is not optimized.
+3. 3 pre-existing test failures (forensic freeze drift x2, prospective
+   report CLI) — unrelated to this fix, listed above.
+4. 4/100 games have neither complete DOM nor WS state (None source) —
+   they serve the legacy degraded path and are excluded from alerts by
+   the fail-closed state gate.
+5. DEPLOYMENT PENDING: services still run pre-fix code. Restarting
+   blm API/collector requires explicit authorization (directive §12).
+
+PRODUCTION CHANGES: code committed to working tree only; no service
+restarted, no DB writes, no threshold or model changes.

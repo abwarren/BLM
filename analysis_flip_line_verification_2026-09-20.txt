@@ -1,0 +1,331 @@
+============================================================================================================
+READ-ONLY — FROZEN TRIGGER-LINE VERIFICATION FOR ALL FLIP SETTLEMENTS, 2026-09-20
+flip = |final-frozen|<=2 AND verdict(frozen) != verdict(last-fired).
+store A = clean_projections (first firing obs); store B = snapshots trigger_observation.
+============================================================================================================
+
+flip settlements verified: 179
+  A==B (line convention-proof): 55
+  A!=B (STORES DISAGREE — integrity defect): 121
+  B missing (no line at boundary in snapshots): 3
+  split-identity games (base#iN sibling exists): 0 
+
+§1 STORE DISAGREEMENTS (A != B) — the only rows where the sealed line is doubtful
+------------------------------------------------------------------------------------------------------------
+   30810222 TBSL       A=178.5 B=180.5 final=180.0 (OVER vs UNDER)
+   30810546 EuroLeague A=156.5 B=158.5 final=160.0 (OVER vs UNDER)
+   30813008 TBSL       A=164.5 B=166.5 final=167.0 (OVER vs UNDER)
+   30815402 CYBER      A=207.5 B=211.5 final=205.0 (UNDER vs OVER)
+   30817261 TBSL       A=154.5 B=156.5 final=162.0 (OVER vs UNDER)
+   30820753 EuroLeague A=158.5 B=159.5 final=160.0 (OVER vs UNDER)
+   30821034 KBL        A=179.5 B=173.5 final=168.0 (UNDER vs OVER)
+   30821905 CYBER      A=211.5 B=209.5 final=216.0 (OVER vs UNDER)
+   30824326 CYBER      A=217.5 B=216.5 final=170.0 (UNDER vs OVER)
+   30824906 TBSL       A=202.5 B=204.5 final=195.0 (UNDER vs OVER)
+   30825212 EuroLeague A=164.5 B=166.5 final=165.0 (OVER vs UNDER)
+   30829334 CYBER      A=204.5 B=206.5 final=200.0 (UNDER vs OVER)
+   30839822 CYBER      A=212.5 B=203.5 final=208.0 (UNDER vs OVER)
+   30849472 CYBER      A=228.5 B=224.5 final=234.0 (OVER vs UNDER)
+   30849490 CYBER      A=221.5 B=224.5 final=216.0 (UNDER vs OVER)
+   30849524 CYBER      A=225.5 B=227.5 final=220.0 (UNDER vs OVER)
+   30849906 CYBER      A=213.5 B=214.5 final=214.0 (OVER vs UNDER)
+   30854588 TBSL       A=192.5 B=194.5 final=189.0 (UNDER vs OVER)
+   30855923 CBA        A=188.5 B=190.5 final=189.0 (OVER vs UNDER)
+   30863674 KBL        A=164.5 B=159.5 final=166.0 (OVER vs UNDER)
+   30863748 EuroLeague A=205.5 B=200.5 final=201.0 (UNDER vs OVER)
+   30866682 EuroLeague A=214.5 B=208.5 final=215.0 (OVER vs UNDER)
+   30866820 TBSL       A=177.5 B=173.5 final=177.0 (UNDER vs OVER)
+   30866930 EuroLeague A=188.5 B=184.5 final=187.0 (UNDER vs OVER)
+   30869166 KBL        A=179.5 B=176.5 final=180.0 (OVER vs UNDER)
+   30869413 KBL        A=165.5 B=163.5 final=167.0 (OVER vs UNDER)
+   30869414 KBL        A=170.5 B=171.5 final=172.0 (OVER vs UNDER)
+   30869447 EuroLeague A=195.5 B=189.5 final=197.0 (OVER vs UNDER)
+   30869764 CYBER      A=225.5 B=210.5 final=221.0 (UNDER vs OVER)
+   30870017 KBL        A=162.5 B=177.5 final=172.0 (OVER vs UNDER)
+   30870315 KBL        A=187.5 B=175.5 final=184.0 (UNDER vs OVER)
+   30870865 TBSL       A=170.5 B=167.5 final=173.0 (OVER vs UNDER)
+   30870990 CBA        A=201.5 B=197.5 final=205.0 (OVER vs UNDER)
+   30871278 CBA        A=197.5 B=194.5 final=194.0 (UNDER vs OVER)
+   30871674 CYBER      A=209.5 B=205.5 final=212.0 (OVER vs UNDER)
+   30874703 EuroLeague A=215.5 B=220.5 final=222.0 (OVER vs UNDER)
+   30876190 TBSL       A=189.5 B=188.5 final=188.0 (UNDER vs OVER)
+   30876294 CYBER      A=246.5 B=243.5 final=245.0 (UNDER vs OVER)
+   30876328 CYBER      A=216.5 B=210.5 final=216.0 (UNDER vs OVER)
+   30877885 CBA        A=208.5 B=203.5 final=199.0 (UNDER vs OVER)
+   30877886 CBA        A=212.5 B=209.5 final=207.0 (UNDER vs OVER)
+   30878096 TBSL       A=173.5 B=172.5 final=173.0 (UNDER vs OVER)
+   30878464 TBSL       A=186.5 B=185.5 final=188.0 (OVER vs UNDER)
+   30879394 TBSL       A=194.5 B=190.5 final=194.0 (UNDER vs OVER)
+   30879480 CBA        A=201.5 B=200.5 final=201.0 (UNDER vs OVER)
+   30879481 CBA        A=218.5 B=217.5 final=219.0 (OVER vs UNDER)
+   30880046 EuroLeague A=190.5 B=183.5 final=181.0 (UNDER vs OVER)
+   30880754 EuroLeague A=164.5 B=156.5 final=168.0 (OVER vs UNDER)
+   30880872 TBSL       A=171.5 B=180.5 final=170.0 (UNDER vs OVER)
+   30887320 CBA        A=216.5 B=213.5 final=222.0 (OVER vs UNDER)
+   30888789 KBL        A=186.5 B=181.5 final=186.0 (UNDER vs OVER)
+   30888952 EuroLeague A=201.5 B=195.5 final=206.0 (OVER vs UNDER)
+   30889137 KBL        A=177.5 B=172.5 final=177.0 (UNDER vs OVER)
+   30889427 KBL        A=168.5 B=167.5 final=176.0 (OVER vs UNDER)
+   30890000 CYBER      A=249.5 B=250.5 final=255.0 (OVER vs UNDER)
+   30893647 CYBER      A=208.5 B=207.5 final=205.0 (UNDER vs OVER)
+   30893722 CYBER      A=211.5 B=210.5 final=211.0 (UNDER vs OVER)
+   30893751 CYBER      A=210.5 B=207.5 final=221.0 (OVER vs UNDER)
+   30893754 CYBER      A=202.5 B=199.5 final=221.0 (OVER vs UNDER)
+   30893770 CYBER      A=227.5 B=225.5 final=232.0 (OVER vs UNDER)
+   30893789 CYBER      A=204.5 B=206.5 final=219.0 (OVER vs UNDER)
+   30893840 CYBER      A=207.5 B=208.5 final=206.0 (UNDER vs OVER)
+   30895896 EuroLeague A=188.5 B=200.5 final=188.0 (UNDER vs OVER)
+   30897403 TBSL       A=172.5 B=171.5 final=172.0 (UNDER vs OVER)
+   30897464 CBA        A=201.5 B=195.5 final=203.0 (OVER vs UNDER)
+   30897893 CBA        A=222.5 B=223.5 final=227.0 (OVER vs UNDER)
+   30898636 TBSL       A=196.5 B=194.5 final=197.0 (OVER vs UNDER)
+   30901747 CBA        A=235.5 B=237.5 final=237.0 (OVER vs UNDER)
+   30905563 CBA        A=192.5 B=187.5 final=191.0 (UNDER vs OVER)
+   30907528 EuroLeague A=180.5 B=182.5 final=183.0 (OVER vs UNDER)
+   30909656 NBA        A=269.5 B=270.5 final=273.0 (OVER vs UNDER)
+   30910057 CYBER      A=224.5 B=223.5 final=224.0 (UNDER vs OVER)
+   30910357 CYBER      A=207.5 B=209.5 final=206.0 (UNDER vs OVER)
+   30910642 CYBER      A=229.5 B=224.5 final=229.0 (UNDER vs OVER)
+   30910646 CYBER      A=213.5 B=210.5 final=202.0 (UNDER vs OVER)
+   30911668 TBSL       A=192.5 B=193.5 final=193.0 (OVER vs UNDER)
+   30912452 CYBER      A=220.5 B=224.5 final=224.0 (OVER vs UNDER)
+   30914767 KBL        A=184.5 B=185.5 final=186.0 (OVER vs UNDER)
+   30917813 EuroLeague A=211.5 B=208.5 final=209.0 (UNDER vs OVER)
+   30918309 EuroLeague A=197.5 B=188.5 final=202.0 (OVER vs UNDER)
+   30918877 KBL        A=192.5 B=193.5 final=193.0 (OVER vs UNDER)
+   30918990 NBA        A=278.5 B=277.5 final=283.0 (OVER vs UNDER)
+   30919028 CBA        A=237.5 B=235.5 final=243.0 (OVER vs UNDER)
+   30919168 EuroLeague A=219.5 B=215.5 final=221.0 (OVER vs UNDER)
+   30920094 KBL        A=162.5 B=156.5 final=170.0 (OVER vs UNDER)
+   30920300 CYBER      A=192.5 B=190.5 final=191.0 (UNDER vs OVER)
+   30920324 EuroLeague A=184.5 B=178.5 final=184.0 (UNDER vs OVER)
+   30922161 CYBER      A=190.5 B=197.5 final=190.0 (UNDER vs OVER)
+   30922255 CYBER      A=226.5 B=223.5 final=225.0 (UNDER vs OVER)
+   30922275 CYBER      A=208.5 B=197.5 final=211.0 (OVER vs UNDER)
+   30922426 KBL        A=180.5 B=178.5 final=182.0 (OVER vs UNDER)
+   30925041 EuroLeague A=206.5 B=207.5 final=209.0 (OVER vs UNDER)
+   30927725 CYBER      A=198.5 B=194.5 final=191.0 (UNDER vs OVER)
+   30927738 CYBER      A=194.5 B=192.5 final=183.0 (UNDER vs OVER)
+   30927754 CYBER      A=199.5 B=200.5 final=200.0 (OVER vs UNDER)
+   30927765 CYBER      A=249.5 B=244.5 final=251.0 (OVER vs UNDER)
+   30927781 CYBER      A=228.5 B=232.5 final=222.0 (UNDER vs OVER)
+   30927881 CYBER      A=213.5 B=224.5 final=208.0 (UNDER vs OVER)
+   30929227 TBSL       A=215.5 B=212.5 final=219.0 (OVER vs UNDER)
+   30929362 EuroLeague A=201.5 B=197.5 final=209.0 (OVER vs UNDER)
+   30933395 TBSL       A=185.5 B=179.5 final=182.0 (UNDER vs OVER)
+   30935960 KBL        A=178.5 B=176.5 final=170.0 (UNDER vs OVER)
+   30937964 TBSL       A=206.5 B=212.5 final=213.0 (OVER vs UNDER)
+   30938125 KBL        A=171.5 B=169.5 final=165.0 (UNDER vs OVER)
+   30939038 EuroLeague A=201.5 B=203.5 final=201.0 (UNDER vs OVER)
+   30939279 EuroLeague A=196.5 B=195.5 final=194.0 (UNDER vs OVER)
+   30944260 CYBER      A=222.5 B=221.5 final=227.0 (OVER vs UNDER)
+   30944275 CYBER      A=255.5 B=258.5 final=246.0 (UNDER vs OVER)
+   30944276 CYBER      A=218.5 B=213.5 final=226.0 (OVER vs UNDER)
+   30945573 CYBER      A=247.5 B=248.5 final=246.0 (UNDER vs OVER)
+   30945592 CYBER      A=186.5 B=185.5 final=189.0 (OVER vs UNDER)
+   30946770 EuroLeague A=183.5 B=182.5 final=184.0 (OVER vs UNDER)
+   30952742 EuroLeague A=212.5 B=214.5 final=206.0 (UNDER vs OVER)
+   30955197 CYBER      A=227.5 B=226.5 final=222.0 (UNDER vs OVER)
+   30955199 CYBER      A=219.5 B=211.5 final=221.0 (OVER vs UNDER)
+   30956179 CYBER      A=212.5 B=214.5 final=212.0 (UNDER vs OVER)
+   30956182 CYBER      A=236.5 B=234.5 final=236.0 (UNDER vs OVER)
+   30960478 TBSL       A=201.5 B=197.5 final=208.0 (OVER vs UNDER)
+   30962258 EuroLeague A=208.5 B=212.5 final=216.0 (OVER vs UNDER)
+   30963580 KBL        A=208.5 B=206.5 final=209.0 (OVER vs UNDER)
+   30965140 EuroLeague A=183.5 B=182.5 final=188.0 (OVER vs UNDER)
+
+§2 B-MISSING rows (snapshots hold no line at the boundary)
+------------------------------------------------------------------------------------------------------------
+  count: 3
+   30811707 EuroLeague A=174.5 final=173.0 (UNDER vs OVER)
+   30812748 TBSL       A=178.5 final=178.0 (UNDER vs OVER)
+   30820625 TBSL       A=155.5 final=155.0 (UNDER vs OVER)
+
+§3 SPLIT-IDENTITY flips — candidates for the settlement bridge to re-verify
+------------------------------------------------------------------------------------------------------------
+  count: 0
+
+§4 FULL FLIP LEDGER (all rows)
+------------------------------------------------------------------------------------------------------------
+     game  league          A      B   last final  frozen lastfire split  A==B
+ 30803751  CYBER       193.5  193.5  187.5 192.0  UNDER  OVER              OK
+ 30804551  TBSL        173.5  173.5  172.5 173.0  UNDER  OVER              OK
+ 30808710  TBSL        169.5  169.5  182.5 179.0  OVER   UNDER             OK
+ 30808816  EuroLeague  134.5  134.5  128.5 130.0  UNDER  OVER              OK
+ 30810222  TBSL        178.5  180.5  180.5 180.0  OVER   UNDER             NO
+ 30810546  EuroLeague  156.5  158.5  160.5 160.0  OVER   UNDER             NO
+ 30810572  KBL         151.5  151.5  146.5 148.0  UNDER  OVER              OK
+ 30810773  EuroLeague  166.5  166.5  174.5 174.0  OVER   UNDER             OK
+ 30811707  EuroLeague  174.5      -  172.5 173.0  UNDER  OVER              NO
+ 30812279  EuroLeague  196.5  196.5  209.5 204.0  OVER   UNDER             OK
+ 30812748  TBSL        178.5      -  176.5 178.0  UNDER  OVER              NO
+ 30812866  EuroLeague  169.5  169.5  170.5 170.0  OVER   UNDER             OK
+ 30813008  TBSL        164.5  166.5  171.5 167.0  OVER   UNDER             NO
+ 30813310  EuroLeague  162.5  162.5  155.5 156.0  UNDER  OVER              OK
+ 30813590  EuroLeague  182.5  182.5  185.5 184.0  OVER   UNDER             OK
+ 30814465  TBSL        178.5  178.5  172.5 177.0  UNDER  OVER              OK
+ 30814469  TBSL        169.5  169.5  173.5 171.0  OVER   UNDER             OK
+ 30815402  CYBER       207.5  211.5  202.5 205.0  UNDER  OVER              NO
+ 30817260  TBSL        150.5  150.5  139.5 150.0  UNDER  OVER              OK
+ 30817261  TBSL        154.5  156.5  167.5 162.0  OVER   UNDER             NO
+ 30817331  EuroLeague  143.5  143.5  130.5 133.0  UNDER  OVER              OK
+ 30818533  EuroLeague  151.5  151.5  157.5 154.0  OVER   UNDER             OK
+ 30818696  EuroLeague  163.5  163.5  158.5 162.0  UNDER  OVER              OK
+ 30818698  EuroLeague  193.5  193.5  190.5 193.0  UNDER  OVER              OK
+ 30818700  EuroLeague  156.5  156.5  159.5 157.0  OVER   UNDER             OK
+ 30818701  EuroLeague  192.5  192.5  188.5 189.0  UNDER  OVER              OK
+ 30818717  KBL         143.5  143.5  137.5 140.0  UNDER  OVER              OK
+ 30820625  TBSL        155.5      -  153.5 155.0  UNDER  OVER              NO
+ 30820753  EuroLeague  158.5  159.5  163.5 160.0  OVER   UNDER             NO
+ 30820756  EuroLeague  160.5  160.5  155.5 157.0  UNDER  OVER              OK
+ 30821034  KBL         179.5  173.5  164.5 168.0  UNDER  OVER              NO
+ 30821905  CYBER       211.5  209.5  216.5 216.0  OVER   UNDER             NO
+ 30824326  CYBER       217.5  216.5  154.5 170.0  UNDER  OVER              NO
+ 30824906  TBSL        202.5  204.5  194.5 195.0  UNDER  OVER              NO
+ 30824935  NBA         228.5  228.5  214.5 216.0  UNDER  OVER              OK
+ 30825210  EuroLeague  213.5  213.5  201.5 206.0  UNDER  OVER              OK
+ 30825212  EuroLeague  164.5  166.5  167.5 165.0  OVER   UNDER             NO
+ 30829334  CYBER       204.5  206.5  199.5 200.0  UNDER  OVER              NO
+ 30831245  EuroLeague  196.5  196.5  193.5 195.0  UNDER  OVER              OK
+ 30837727  CBA         185.5  185.5  187.5 186.0  OVER   UNDER             OK
+ 30837967  TBSL        191.5  191.5  186.5 188.0  UNDER  OVER              OK
+ 30839822  CYBER       212.5  203.5  202.5 208.0  UNDER  OVER              NO
+ 30849472  CYBER       228.5  224.5  236.5 234.0  OVER   UNDER             NO
+ 30849490  CYBER       221.5  224.5  213.5 216.0  UNDER  OVER              NO
+ 30849524  CYBER       225.5  227.5  213.5 220.0  UNDER  OVER              NO
+ 30849527  CYBER       248.5  248.5  243.5 247.0  UNDER  OVER              OK
+ 30849531  CYBER       221.5  221.5  212.5 213.0  UNDER  OVER              OK
+ 30849885  CYBER       210.5  210.5  208.5 210.0  UNDER  OVER              OK
+ 30849906  CYBER       213.5  214.5  215.5 214.0  OVER   UNDER             NO
+ 30852064  TBSL        174.5  174.5  172.5 174.0  UNDER  OVER              OK
+ 30853040  TBSL        159.5  159.5  156.5 158.0  UNDER  OVER              OK
+ 30853213  TBSL        170.5  170.5  169.5 170.0  UNDER  OVER              OK
+ 30854402  KBL         158.5  158.5  153.5 156.0  UNDER  OVER              OK
+ 30854588  TBSL        192.5  194.5  185.5 189.0  UNDER  OVER              NO
+ 30854654  CBA         190.5  190.5  184.5 185.0  UNDER  OVER              OK
+ 30855649  KBL         177.5  177.5  174.5 176.0  UNDER  OVER              OK
+ 30855923  CBA         188.5  190.5  192.5 189.0  OVER   UNDER             NO
+ 30857237  TBSL        153.5  153.5  142.5 147.0  UNDER  OVER              OK
+ 30863674  KBL         164.5  159.5  169.5 166.0  OVER   UNDER             NO
+ 30863748  EuroLeague  205.5  200.5  200.5 201.0  UNDER  OVER              NO
+ 30864736  KBL         184.5  184.5  189.5 188.0  OVER   UNDER             OK
+ 30864765  EuroLeague  210.5  210.5  212.5 211.0  OVER   UNDER             OK
+ 30866682  EuroLeague  214.5  208.5  215.5 215.0  OVER   UNDER             NO
+ 30866820  TBSL        177.5  173.5  176.5 177.0  UNDER  OVER              NO
+ 30866930  EuroLeague  188.5  184.5  184.5 187.0  UNDER  OVER              NO
+ 30867207  EuroLeague  182.5  182.5  185.5 183.0  OVER   UNDER             OK
+ 30868690  CBA         203.5  203.5  209.5 204.0  OVER   UNDER             OK
+ 30869166  KBL         179.5  176.5  181.5 180.0  OVER   UNDER             NO
+ 30869413  KBL         165.5  163.5  170.5 167.0  OVER   UNDER             NO
+ 30869414  KBL         170.5  171.5  174.5 172.0  OVER   UNDER             NO
+ 30869440  EuroLeague  177.5  177.5  170.5 172.0  UNDER  OVER              OK
+ 30869447  EuroLeague  195.5  189.5  200.5 197.0  OVER   UNDER             NO
+ 30869764  CYBER       225.5  210.5  220.5 221.0  UNDER  OVER              NO
+ 30870017  KBL         162.5  177.5  177.5 172.0  OVER   UNDER             NO
+ 30870315  KBL         187.5  175.5  182.5 184.0  UNDER  OVER              NO
+ 30870318  KBL         163.5  163.5  158.5 161.0  UNDER  OVER              OK
+ 30870626  CBA         210.5  210.5  203.5 207.0  UNDER  OVER              OK
+ 30870865  TBSL        170.5  167.5  174.5 173.0  OVER   UNDER             NO
+ 30870990  CBA         201.5  197.5  208.5 205.0  OVER   UNDER             NO
+ 30871278  CBA         197.5  194.5  192.5 194.0  UNDER  OVER              NO
+ 30871674  CYBER       209.5  205.5  215.5 212.0  OVER   UNDER             NO
+ 30871888  CYBER       206.5  206.5  212.5 212.0  OVER   UNDER             OK
+ 30874703  EuroLeague  215.5  220.5  224.5 222.0  OVER   UNDER             NO
+ 30875738  TBSL        190.5  190.5  194.5 193.0  OVER   UNDER             OK
+ 30876190  TBSL        189.5  188.5  184.5 188.0  UNDER  OVER              NO
+ 30876294  CYBER       246.5  243.5  236.5 245.0  UNDER  OVER              NO
+ 30876328  CYBER       216.5  210.5  209.5 216.0  UNDER  OVER              NO
+ 30877885  CBA         208.5  203.5  198.5 199.0  UNDER  OVER              NO
+ 30877886  CBA         212.5  209.5  202.5 207.0  UNDER  OVER              NO
+ 30878096  TBSL        173.5  172.5  171.5 173.0  UNDER  OVER              NO
+ 30878464  TBSL        186.5  185.5  191.5 188.0  OVER   UNDER             NO
+ 30879394  TBSL        194.5  190.5  193.5 194.0  UNDER  OVER              NO
+ 30879480  CBA         201.5  200.5  200.5 201.0  UNDER  OVER              NO
+ 30879481  CBA         218.5  217.5  220.5 219.0  OVER   UNDER             NO
+ 30880046  EuroLeague  190.5  183.5  179.5 181.0  UNDER  OVER              NO
+ 30880754  EuroLeague  164.5  156.5  168.5 168.0  OVER   UNDER             NO
+ 30880872  TBSL        171.5  180.5  169.5 170.0  UNDER  OVER              NO
+ 30887320  CBA         216.5  213.5  223.5 222.0  OVER   UNDER             NO
+ 30888789  KBL         186.5  181.5  184.5 186.0  UNDER  OVER              NO
+ 30888952  EuroLeague  201.5  195.5  206.5 206.0  OVER   UNDER             NO
+ 30889137  KBL         177.5  172.5  176.5 177.0  UNDER  OVER              NO
+ 30889427  KBL         168.5  167.5  179.5 176.0  OVER   UNDER             NO
+ 30890000  CYBER       249.5  250.5  256.5 255.0  OVER   UNDER             NO
+ 30893647  CYBER       208.5  207.5  204.5 205.0  UNDER  OVER              NO
+ 30893714  CYBER       210.5  210.5  223.5 222.0  OVER   UNDER             OK
+ 30893722  CYBER       211.5  210.5  202.5 211.0  UNDER  OVER              NO
+ 30893751  CYBER       210.5  207.5  223.5 221.0  OVER   UNDER             NO
+ 30893754  CYBER       202.5  199.5  223.5 221.0  OVER   UNDER             NO
+ 30893770  CYBER       227.5  225.5  235.5 232.0  OVER   UNDER             NO
+ 30893789  CYBER       204.5  206.5  220.5 219.0  OVER   UNDER             NO
+ 30893840  CYBER       207.5  208.5  205.5 206.0  UNDER  OVER              NO
+ 30895896  EuroLeague  188.5  200.5  187.5 188.0  UNDER  OVER              NO
+ 30897403  TBSL        172.5  171.5  171.5 172.0  UNDER  OVER              NO
+ 30897464  CBA         201.5  195.5  208.5 203.0  OVER   UNDER             NO
+ 30897893  CBA         222.5  223.5  228.5 227.0  OVER   UNDER             NO
+ 30898636  TBSL        196.5  194.5  199.5 197.0  OVER   UNDER             NO
+ 30901747  CBA         235.5  237.5  239.5 237.0  OVER   UNDER             NO
+ 30905563  CBA         192.5  187.5  187.5 191.0  UNDER  OVER              NO
+ 30907528  EuroLeague  180.5  182.5  185.5 183.0  OVER   UNDER             NO
+ 30909656  NBA         269.5  270.5  273.5 273.0  OVER   UNDER             NO
+ 30910057  CYBER       224.5  223.5  223.5 224.0  UNDER  OVER              NO
+ 30910357  CYBER       207.5  209.5  205.5 206.0  UNDER  OVER              NO
+ 30910642  CYBER       229.5  224.5  227.5 229.0  UNDER  OVER              NO
+ 30910646  CYBER       213.5  210.5  199.5 202.0  UNDER  OVER              NO
+ 30910833  CBA         189.5  189.5  192.5 190.0  OVER   UNDER             OK
+ 30911668  TBSL        192.5  193.5  195.5 193.0  OVER   UNDER             NO
+ 30912314  EuroLeague  201.5  201.5  199.5 201.0  UNDER  OVER              OK
+ 30912452  CYBER       220.5  224.5  227.5 224.0  OVER   UNDER             NO
+ 30914767  KBL         184.5  185.5  188.5 186.0  OVER   UNDER             NO
+ 30917813  EuroLeague  211.5  208.5  208.5 209.0  UNDER  OVER              NO
+ 30918309  EuroLeague  197.5  188.5  202.5 202.0  OVER   UNDER             NO
+ 30918877  KBL         192.5  193.5  194.5 193.0  OVER   UNDER             NO
+ 30918990  NBA         278.5  277.5  288.5 283.0  OVER   UNDER             NO
+ 30919028  CBA         237.5  235.5  246.5 243.0  OVER   UNDER             NO
+ 30919168  EuroLeague  219.5  215.5  223.5 221.0  OVER   UNDER             NO
+ 30920094  KBL         162.5  156.5  171.5 170.0  OVER   UNDER             NO
+ 30920300  CYBER       192.5  190.5  186.5 191.0  UNDER  OVER              NO
+ 30920324  EuroLeague  184.5  178.5  183.5 184.0  UNDER  OVER              NO
+ 30922161  CYBER       190.5  197.5  188.5 190.0  UNDER  OVER              NO
+ 30922255  CYBER       226.5  223.5  224.5 225.0  UNDER  OVER              NO
+ 30922275  CYBER       208.5  197.5  213.5 211.0  OVER   UNDER             NO
+ 30922426  KBL         180.5  178.5  183.5 182.0  OVER   UNDER             NO
+ 30922803  EuroLeague  192.5  192.5  194.5 194.0  OVER   UNDER             OK
+ 30923931  KBL         161.5  161.5  157.5 160.0  UNDER  OVER              OK
+ 30925041  EuroLeague  206.5  207.5  212.5 209.0  OVER   UNDER             NO
+ 30926871  EuroLeague  191.5  191.5  197.5 195.0  OVER   UNDER             OK
+ 30927725  CYBER       198.5  194.5  190.5 191.0  UNDER  OVER              NO
+ 30927738  CYBER       194.5  192.5  178.5 183.0  UNDER  OVER              NO
+ 30927754  CYBER       199.5  200.5  204.5 200.0  OVER   UNDER             NO
+ 30927765  CYBER       249.5  244.5  252.5 251.0  OVER   UNDER             NO
+ 30927781  CYBER       228.5  232.5  221.5 222.0  UNDER  OVER              NO
+ 30927881  CYBER       213.5  224.5  207.5 208.0  UNDER  OVER              NO
+ 30929130  EuroLeague  215.5  215.5  221.5 219.0  OVER   UNDER             OK
+ 30929227  TBSL        215.5  212.5  221.5 219.0  OVER   UNDER             NO
+ 30929362  EuroLeague  201.5  197.5  212.5 209.0  OVER   UNDER             NO
+ 30933395  TBSL        185.5  179.5  181.5 182.0  UNDER  OVER              NO
+ 30935960  KBL         178.5  176.5  168.5 170.0  UNDER  OVER              NO
+ 30937964  TBSL        206.5  212.5  216.5 213.0  OVER   UNDER             NO
+ 30938125  KBL         171.5  169.5  163.5 165.0  UNDER  OVER              NO
+ 30939038  EuroLeague  201.5  203.5  200.5 201.0  UNDER  OVER              NO
+ 30939279  EuroLeague  196.5  195.5  193.5 194.0  UNDER  OVER              NO
+ 30944224  CYBER       199.5  199.5  207.5 207.0  OVER   UNDER             OK
+ 30944260  CYBER       222.5  221.5  228.5 227.0  OVER   UNDER             NO
+ 30944275  CYBER       255.5  258.5  244.5 246.0  UNDER  OVER              NO
+ 30944276  CYBER       218.5  213.5  229.5 226.0  OVER   UNDER             NO
+ 30945573  CYBER       247.5  248.5  239.5 246.0  UNDER  OVER              NO
+ 30945592  CYBER       186.5  185.5  193.5 189.0  OVER   UNDER             NO
+ 30946770  EuroLeague  183.5  182.5  185.5 184.0  OVER   UNDER             NO
+ 30947139  EuroLeague  199.5  199.5  193.5 194.0  UNDER  OVER              OK
+ 30952467  TBSL        177.5  177.5  182.5 181.0  OVER   UNDER             OK
+ 30952742  EuroLeague  212.5  214.5  205.5 206.0  UNDER  OVER              NO
+ 30955197  CYBER       227.5  226.5  219.5 222.0  UNDER  OVER              NO
+ 30955199  CYBER       219.5  211.5  221.5 221.0  OVER   UNDER             NO
+ 30956179  CYBER       212.5  214.5  208.5 212.0  UNDER  OVER              NO
+ 30956182  CYBER       236.5  234.5  235.5 236.0  UNDER  OVER              NO
+ 30960478  TBSL        201.5  197.5  210.5 208.0  OVER   UNDER             NO
+ 30962258  EuroLeague  208.5  212.5  219.5 216.0  OVER   UNDER             NO
+ 30963580  KBL         208.5  206.5  213.5 209.0  OVER   UNDER             NO
+ 30965140  EuroLeague  183.5  182.5  190.5 188.0  OVER   UNDER             NO
+
+READ-ONLY: both DBs opened mode=ro; the only file written is this report.

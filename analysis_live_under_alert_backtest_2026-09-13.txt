@@ -1,0 +1,151 @@
+================================================================================================
+BLM V4 — LIVE UNDER ALERT BACKTEST (READ-ONLY), 2026-09-13
+  condition: actual_pts_per_min < required_pts_per_min AND actual_pts_per_min < league_average_pace
+================================================================================================
+source: /home/ubuntu/BLM/blm_pokerbet.db + /home/ubuntu/BLM/blm_metrics_clean.db (both mode=ro)
+settled games: 8617   leagues with a pace reference: 6
+
+LEAGUE-SPECIFIC AVERAGE PACE (competition_pace_reference):
+  NBA          5.6343 pts/min   (n=2450)
+  KBL          3.8881 pts/min   (n=1139)
+  CBA          4.4432 pts/min   (n=1003)
+  TBSL         4.1588 pts/min   (n=1886)
+  EUROLEAGUE   4.2980 pts/min   (n=1715)
+  CYBER(2K26)  4.4632 pts/min   (n=424)
+
+CHECKPOINT OBSERVATIONS (closest valid to target, per game):
+  25%: n=2484  window[15,35]  exact=1587  median progress=25.00
+  50%: n=4169  window[40,60]  exact=2501  median progress=50.00
+  75%: n=5593  window[65,85]  exact=3500  median progress=75.00
+
+================================================================================================
+1. LIVE ALERT POPULATION PER CHECKPOINT
+================================================================================================
+    cp  alert_N   UNDER   OVER  PUSH   UNDER%
+    25      505     245    260     0   48.51%
+    50      963     531    432     0   55.14%
+    75      837     558    279     0   66.67%
+   ALL     2305    1334    971     0   57.87%
+  (ALL CHECKPOINTS COMBINED — observation-level, as the live engine evaluates it)
+  distinct games appearing in any alert cohort: 1532
+
+================================================================================================
+2. PER-LEAGUE LIVE ALERT (all checkpoints combined)
+================================================================================================
+  League        alert_N   UNDER   OVER  PUSH   UNDER%
+  NBA               461     293    168     0   63.56%
+  KBL               255     142    113     0   55.69%
+  CBA               236     143     93     0   60.59%
+  TBSL              626     350    276     0   55.91%
+  EUROLEAGUE        604     337    267     0   55.79%
+  CYBER(2K26)       123      69     54     0   56.10%
+
+================================================================================================
+4. BASELINE COMPARISON (alert vs non-alert, same checkpoints)
+================================================================================================
+    cp  alertUNDER%  nonalertUNDER%   lift_pp   rel_lift  alert_N
+    25       48.51%          48.46%    +0.06      +0.1%      505
+    50       55.14%          48.19%    +6.95     +14.4%      963
+    75       66.67%          48.04%   +18.62     +38.8%      837
+
+================================================================================================
+5. REQUIRED > AVERAGE cohort (SEPARATE from the live alert)
+================================================================================================
+    cp        N   UNDER   OVER  PUSH   UNDER%
+    25      723     377    346     0   52.14%
+    50     1286     716    570     0   55.68%
+    75     1048     719    329     0   68.61%
+   ALL     3057    1812   1245     0   59.27%
+
+================================================================================================
+6. INTERSECTION ANALYSIS (per checkpoint)
+================================================================================================
+  ── 25% ──
+    A required>avg only                          N=   723  UNDER=  377  UNDER%= 52.14
+    B actual<req only                            N=   544  UNDER=  269  UNDER%= 49.45
+    C actual<avg only                            N=   759  UNDER=  365  UNDER%= 48.09
+    D actual<req AND actual<avg [LIVE ALERT]     N=   505  UNDER=  245  UNDER%= 48.51
+    E required>avg AND live alert                N=   150  UNDER=   81  UNDER%= 54.00
+  ── 50% ──
+    A required>avg only                          N=  1286  UNDER=  716  UNDER%= 55.68
+    B actual<req only                            N=  1130  UNDER=  630  UNDER%= 55.75
+    C actual<avg only                            N=  1604  UNDER=  831  UNDER%= 51.81
+    D actual<req AND actual<avg [LIVE ALERT]     N=   963  UNDER=  531  UNDER%= 55.14
+    E required>avg AND live alert                N=   365  UNDER=  219  UNDER%= 60.00
+  ── 75% ──
+    A required>avg only                          N=  1048  UNDER=  719  UNDER%= 68.61
+    B actual<req only                            N=  1010  UNDER=  697  UNDER%= 69.01
+    C actual<avg only                            N=  2124  UNDER= 1180  UNDER%= 55.56
+    D actual<req AND actual<avg [LIVE ALERT]     N=   837  UNDER=  558  UNDER%= 66.67
+    E required>avg AND live alert                N=   526  UNDER=  359  UNDER%= 68.25
+
+================================================================================================
+7. LEAGUE x CHECKPOINT DETAIL
+================================================================================================
+  league         cp  alert_N  UNDER  OVER  PUSH  UNDER%  base_N  baseU%  lift_pp
+  NBA            25      115     66    49     0  57.39%     760  48.16%   +9.23
+  NBA            50      223    127    96     0  56.95%    1271  48.07%   +8.88
+  NBA            75      123    100    23     0  81.30%    1637  48.20%  +33.10
+  KBL            25       55     22    33     0  40.00%     211  48.82%   -8.82
+  KBL            50      114     57    57     0  50.00%     389  47.04%   +2.96
+  KBL            75       86     63    23     0  73.26%     644  45.19%  +28.07
+  CBA            25       38     15    23     0  39.47%     236  45.34%   -5.87
+  CBA            50      114     66    48     0  57.89%     427  48.01%   +9.89
+  CBA            75       84     62    22     0  73.81%     621  46.86%  +26.95
+  TBSL           25      137     72    65     0  52.55%     385  47.01%   +5.54
+  TBSL           50      249    129   120     0  51.81%     536  48.32%   +3.49
+  TBSL           75      240    149    91     0  62.08%     919  48.20%  +13.88
+  EUROLEAGUE     25      123     53    70     0  43.09%     342  51.75%   -8.66
+  EUROLEAGUE     50      219    125    94     0  57.08%     531  48.96%   +8.11
+  EUROLEAGUE     75      262    159   103     0  60.69%     876  49.89%  +10.80
+  CYBER(2K26)    25       37     17    20     0  45.95%      45  55.56%   -9.61
+  CYBER(2K26)    50       44     27    17     0  61.36%      52  51.92%   +9.44
+  CYBER(2K26)    75       42     25    17     0  59.52%      59  57.63%   +1.90
+
+================================================================================================
+8. RAW VALIDATION ROWS — LIVE ALERT cohort (>=10, all checkpoints)
+================================================================================================
+  game_id    league       cp  prog% score   line     el    rem    act    req    avg final   out
+  30803326   NBA          25  25.00    53  213.5  10.00  30.00   5.30   5.35   5.63   227  OVER
+  30803327   CBA          25  29.38    48  168.5  11.75  28.25   4.09   4.27   4.44   184  OVER
+  30804740   CYBER(2K26)  25  25.00    51  208.5  12.00  36.00   4.25   4.38   4.46   213  OVER
+  30804787   KBL          25  26.25    37  143.5  10.50  29.50   3.52   3.61   3.89   146  OVER
+  30803248   TBSL         50  49.38    79  160.5  19.75  20.25   4.00   4.02   4.16   166  OVER
+  30803250   TBSL         50  55.00    88  162.5  22.00  18.00   4.00   4.14   4.16   154 UNDER
+  30803321   NBA          50  50.00   110  223.5  20.00  20.00   5.50   5.67   5.63   210 UNDER
+  30803331   CBA          50  49.38    71  157.5  19.75  20.25   3.59   4.27   4.44   154 UNDER
+  30803625   TBSL         75  75.62   113  155.5  30.25   9.75   3.74   4.36   4.16   156  OVER
+  30803751   CYBER(2K26)  75  73.40   141  200.5  35.23  12.77   4.00   4.66   4.46   192 UNDER
+  30804554   TBSL         75  75.00   110  150.5  30.00  10.00   3.67   4.05   4.16   154  OVER
+  30804617   CYBER(2K26)  75  75.00   143  204.5  36.00  12.00   3.97   5.12   4.46   190 UNDER
+
+================================================================================================
+9. FORMULA VALIDATION (recomputed vs stored projection fields)
+================================================================================================
+  rows checked: 12246
+  actual = round(total/elapsed,2) vs stored actual_pts_per_min:
+    mismatches(>0.02): 0   max|diff|=0.0050
+  required = round((line-total)/remaining,2) vs stored required_pts_per_min:
+    mismatches(>0.02): 0   max|diff|=0.0050
+  (live api.py rounds both to 2 dp; stored clean_projections fields are 4 dp — the tiny deltas are rounding only)
+
+================================================================================================
+10. CRITICAL ANSWER — % of live-alert games that finished UNDER
+================================================================================================
+  25% : 245/505 = 48.51% UNDER   (OVER 260, PUSH 0)
+  50% : 531/963 = 55.14% UNDER   (OVER 432, PUSH 0)
+  75% : 558/837 = 66.67% UNDER   (OVER 279, PUSH 0)
+  ALL CHECKPOINTS: 1334/2305 = 57.87% UNDER
+
+  Per league (all checkpoints combined):
+    NBA          293/461 = 63.56%
+    KBL          142/255 = 55.69%
+    CBA          143/236 = 60.59%
+    TBSL         350/626 = 55.91%
+    EUROLEAGUE   337/604 = 55.79%
+    CYBER(2K26)  69/123 = 56.10%
+
+  SEPARATION (alert UNDER% minus non-alert UNDER%):
+    25%: 48.51% - 48.46% = +0.06pp
+    50%: 55.14% - 48.19% = +6.95pp
+    75%: 66.67% - 48.04% = +18.62pp

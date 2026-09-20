@@ -1,0 +1,100 @@
+================================================================================================
+HISTORICAL PARITY CHECK — the production UNDER trigger
+================================================================================================
+trigger   : progress >= 75% AND required > league_avg * 1.04
+window    : progress in [65%, 85%], closest obs to 75%, progress < 100, non-terminal
+reference : per-competition mean realised pace over AUTHORITATIVE settled results (final_result_status='OK')
+outcome   : market UNDER = final_total < the live line in force at the checkpoint
+source DB : /home/ubuntu/BLM/blm_pokerbet.db + /home/ubuntu/BLM/blm_metrics_clean.db  (both READ-ONLY)
+
+settled games considered (OK only)   : 9984
+game_results rows NOT OK (excluded)  : 3246
+games with a valid 75% observation    : 6920
+
+LEAGUE REFERENCE USED (authoritative results only):
+  league         avg pace pts/min    games
+  NBA                      5.6367     2974
+  TBSL                     4.1683     2052
+  EUROLEAGUE               4.3009     1959
+  CBA                      4.4582     1257
+  KBL                      3.8887     1249
+  CYBER                    4.4696      493
+
+------------------------------------------------------------------------------------------------
+(1) AS THE 2026-09-13 SWEEP RAN IT — window [65%,85%]
+------------------------------------------------------------------------------------------------
+  qualifying observations : 816
+  UNDER                   : 552
+  OVER                    : 264
+  PUSH                    : 0
+  UNDER %                 : 67.65%
+
+------------------------------------------------------------------------------------------------
+(2) UNDER THE PRODUCTION DEFINITION — the SAME query restricted to
+    progress >= 75% (the strict rule the live system uses)
+------------------------------------------------------------------------------------------------
+  qualifying observations : 703
+  UNDER                   : 460
+  OVER                    : 243
+  PUSH                    : 0
+  UNDER %                 : 65.43%
+
+  NOTE: 113 of the sweep's 816 members sat at 65..75.00% progress; the strict production rule excludes them.
+  That is the ONLY difference between the two definitions — the
+  margin, the reference and the outcome rule are identical.
+
+------------------------------------------------------------------------------------------------
+(3) AS OF 2026-09-13T18:28 — when analysis_alert_threshold_sweep_2026-09-13
+    .txt was produced (the ~69.89% run).  Members settled AFTER that
+    instant are removed, so this must reproduce the original cell.
+------------------------------------------------------------------------------------------------
+  qualifying observations : 745
+  UNDER                   : 520
+  OVER                    : 225
+  PUSH                    : 0
+  UNDER %                 : 69.80%
+  the 2026-09-13 report recorded: N=754 UNDER=527 UNDER%=69.89%
+  reproduces the original cell : NO (delta N=-9, delta UNDER=-7)
+  cohort added since that run : 71 games (8.70% of the current cohort)
+
+  RESIDUAL, HONESTLY: the as-of cut does NOT land on 754/527 exactly
+  (745/520/69.80% vs 754/527/69.89%).  The gap is NOT settlement
+  timing — no cutoff between 14:00 and 24:00 on 2026-09-13 moves the
+  pre-existing set off its 745/520 plateau, so the 9 missing games
+  are pre-cutoff members the CURRENT data no longer yields: backfills
+  that inserted a closer-to-75% clean_projections row (moving which
+  observation the closest-to-target rule selects) and scorecard
+  corrections to game_results.  The TRIGGER DEFINITION, the league
+  reference rule and the outcome rule are provably identical (below);
+  the residual is database drift since the original run, and no
+  snapshot of the 2026-09-13 database exists to settle it exactly.
+
+------------------------------------------------------------------------------------------------
+LIVE REFERENCE (blm_v4.live_analytics.competition_pace) vs HISTORICAL
+------------------------------------------------------------------------------------------------
+  league           historical           live      rounding   hist n   live n  match
+  NBA            5.6366845999   5.6367000000      1.54e-05     2974     2974  YES
+  TBSL           4.1683235867   4.1683000000      2.36e-05     2052     2052  YES
+  EUROLEAGUE     4.3008933129   4.3009000000      6.69e-06     1959     1959  YES
+  CBA            4.4581941130   4.4582000000      5.89e-06     1257     1257  YES
+  KBL            3.8887309848   3.8887000000      3.10e-05     1249     1249  YES
+  CYBER          4.4696162948   4.4696000000      1.63e-05      493      493  YES
+
+  live reference == historical reference : YES
+  (identical population and statistic; the only difference is the
+   live reference's 4dp rounding — pre-existing, NOT introduced here.
+   It moves the 1.04 threshold by up to ~5e-5 pts/min, which is far
+   below the rounding of required_pts_per_min itself.)
+
+------------------------------------------------------------------------------------------------
+PRODUCTION TRIGGER DEFINITION
+------------------------------------------------------------------------------------------------
+  under_alert.ALERT_PROGRESS_PCT = 75.0
+  under_alert.REQUIRED_MARGIN    = 1.04
+  matches the historical cohort  : YES
+  shipped function agrees with the strict cohort on 703/703 members
+  ...and on the full [65,85] window it disagrees on 113/816 — exactly the progress < 75% members
+
+NOTE: the 69.89% figure is a HISTORICAL DATABASE RESULT.  It is not
+      a live win rate and nothing here claims that it is.
+

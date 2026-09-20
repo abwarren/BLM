@@ -1,0 +1,69 @@
+================================================================================================================
+A. ALL-TIME BACKTEST — NBA or KBL with required/avg margin >= 1.10 (concentrated filter)
+   production trigger mirror, frozen boundary settle line, point-in-time league mean, OK finals.
+================================================================================================================
+
+  ALL production triggers (baseline)       N= 3588  UNDER=2414  OVER=1174  win=  67.28%  [65.7,68.8%]           net=  +877.9u  ROI=+24.47%
+  ALL CLEAN (line fresh at trigger)        N= 2309  UNDER=1346  OVER= 963  win=  58.29%  [56.3,60.3%]           net=  +181.1u  ROI=+7.84%
+
+  FILTER: NBA|KBL & margin>=1.10           N=  610  UNDER= 469  OVER= 141  win=  76.89%  [73.4,80.1%]           net=  +257.6u  ROI=+42.24%
+  FILTER ... CLEAN                         N=  371  UNDER= 253  OVER= 118  win=  68.19%  [63.3,72.7%]           net=   +97.0u  ROI=+26.16%
+
+  filter components:
+      NBA & margin>=1.10                   N=  425  UNDER= 336  OVER=  89  win=  79.06%  [74.9,82.7%]           net=  +196.6u  ROI=+46.26%
+      KBL & margin>=1.10                   N=  185  UNDER= 133  OVER=  52  win=  71.89%  [65.0,77.9%]           net=   +61.0u  ROI=+33.00%
+      NBA & margin>=1.04 (all NBA trg)     N=  695  UNDER= 551  OVER= 144  win=  79.28%  [76.1,82.1%]           net=  +324.3u  ROI=+46.67%
+      KBL & margin>=1.04 (all KBL trg)     N=  478  UNDER= 324  OVER= 154  win=  67.78%  [63.5,71.8%]           net=  +121.4u  ROI=+25.40%
+
+  for contrast — the filter's exclusion zone:
+      other leagues, margin>=1.10          N= 1091  UNDER= 739  OVER= 352  win=  67.74%  [64.9,70.4%]           net=  +276.1u  ROI=+25.31%
+      NBA|KBL, thin band <1.10             N=  563  UNDER= 406  OVER= 157  win=  72.11%  [68.3,75.7%]           net=  +188.1u  ROI=+33.41%
+
+  margin-band gradient within NBA|KBL (is 1.10 doing the work?):
+      NBA|KBL margin [1.04,1.1)            N=  563  UNDER= 406  OVER= 157  win=  72.11%  [68.3,75.7%]           net=  +188.1u  ROI=+33.41%
+      NBA|KBL margin [1.1,1.2)             N=  341  UNDER= 262  OVER=  79  win=  76.83%  [72.1,81.0%]           net=  +143.7u  ROI=+42.14%
+      NBA|KBL margin [1.2,1.35)            N=  156  UNDER= 117  OVER=  39  win=  75.00%  [67.7,81.1%]           net=   +60.5u  ROI=+38.75%
+      NBA|KBL margin [1.35,99)             N=  113  UNDER=  90  OVER=  23  win=  79.65%  [71.3,86.0%]           net=   +53.5u  ROI=+47.35%
+
+  chronological thirds (same windows for filter and baseline):
+      T1 baseline (all triggers)           N= 1196  UNDER= 874  OVER= 322  win=  73.08%  [70.5,75.5%]           net=  +420.9u  ROI=+35.19%
+      T1 FILTER                            N=  184  UNDER= 152  OVER=  32  win=  82.61%  [76.5,87.4%]           net=   +97.2u  ROI=+52.83%
+      T2 baseline (all triggers)           N= 1196  UNDER= 843  OVER= 353  win=  70.48%  [67.8,73.0%]           net=  +363.5u  ROI=+30.40%
+      T2 FILTER                            N=  184  UNDER= 149  OVER=  35  win=  80.98%  [74.7,86.0%]           net=   +91.6u  ROI=+49.81%
+      T3 baseline (all triggers)           N= 1196  UNDER= 697  OVER= 499  win=  58.28%  [55.5,61.0%]           net=   +93.4u  ROI=+7.81%
+      T3 FILTER                            N=  242  UNDER= 168  OVER=  74  win=  69.42%  [63.4,74.9%]           net=   +68.8u  ROI=+28.43%
+
+================================================================================================================
+B. EUROLEAGUE AUTOPSY — since 09-16 (52.7%, below breakeven) vs the other leagues
+================================================================================================================
+
+  B1. margin mix (hypothesis: EuroLeague triggers are thinner)
+    EuroLeague           mean=1.213  median=1.080  share in thin band <1.10: 52.7%
+    all other leagues    mean=1.190  median=1.090  share in thin band <1.10: 54.5%
+      EuroLeague margin>=1.10              N=   69  UNDER=  43  OVER=  26  win=  62.32%  [50.5,72.8%]           net=   +10.5u  ROI=+15.29%
+      EuroLeague margin <1.10              N=   77  UNDER=  34  OVER=  43  win=  44.16%  [33.6,55.3%]           net=   -14.1u  ROI=-18.31%
+      others margin>=1.10                  N=  202  UNDER= 141  OVER=  61  win=  69.80%  [63.1,75.7%]           net=   +58.8u  ROI=+29.13%
+      others margin <1.10                  N=  242  UNDER= 135  OVER= 107  win=  55.79%  [49.5,61.9%]           net=    +7.8u  ROI=+3.20%
+
+  B2. line state at trigger
+      EuroLeague CLEAN                     N=  146  UNDER=  77  OVER=  69  win=  52.74%  [44.7,60.7%]           net=    -3.5u  ROI=-2.43%
+      EuroLeague STALE                     N=    0  UNDER=   0  OVER=   0  win=     n/a  -                      net=    +0.0u  ROI=n/a
+      others CLEAN                         N=  443  UNDER= 275  OVER= 168  win=  62.08%  [57.5,66.5%]           net=   +65.8u  ROI=+14.84%
+      others STALE                         N=    1  UNDER=   1  OVER=   0  win= 100.00%  [20.7,100.0%]          net=    +0.8u  ROI=+85.00%
+
+  B3. activation depth (progress at first firing observation)
+    EuroLeague           [75,80):30%  [80,85):11%  [85,90):2%  [90,100):57%
+    others               [75,80):39%  [80,85):10%  [85,90):6%  [90,100):45%
+
+  B4. market reprice (|end line - trigger line|; how far the book moved)
+    EuroLeague           mean |move|=4.55 pts  median=4.00  ended below trigger: 37.7%
+    others               mean |move|=5.36 pts  median=4.00  ended below trigger: 44.1%
+
+  B5. EuroLeague daily since 09-16
+    2026-09-16  N=  54  UNDER= 28  OVER= 26  win= 51.9%  mean margin=1.225
+    2026-09-17  N=  47  UNDER= 25  OVER= 22  win= 53.2%  mean margin=1.202
+    2026-09-18  N=  26  UNDER= 16  OVER= 10  win= 61.5%  mean margin=1.225
+    2026-09-19  N=  11  UNDER=  5  OVER=  6  win= 45.5%  mean margin=1.244
+    2026-09-20  N=   8  UNDER=  3  OVER=  5  win= 37.5%  mean margin=1.122
+
+READ-ONLY: both DBs opened mode=ro; the only file written is this report.

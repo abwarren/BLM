@@ -1,0 +1,67 @@
+BLM V4 — Q3 BREAK UNDER ALERT BACKTEST (READ-ONLY), 2026-09-18
+Phase 0 of IMPLEMENT_Q3_BREAK_UNDER_ALERT_2026-09-18.md §8
+
+PROD DB : /home/ubuntu/BLM/blm_pokerbet.db
+CLEAN DB: /home/ubuntu/BLM/blm_metrics_clean.db
+
+CONDITION (directive 2026-09-18):
+  boundary  = FIRST eligible observation with progress >= 75.0
+              (the Q3/Q4 break: 30/40 NBA, 36/48 CYBER)
+  required  = (triggered_line - boundary_score) / q_min
+  alert     = required > league_avg * 1.04   (STRICT, RELATIVE)
+  line      = last live O/U line OBSERVED AT OR BEFORE the
+              boundary (trigger_observation — never opening,
+              later, closing or reconstructed)
+  league    = game's OWN competition reference, OK finals only
+  settle    = final_total vs triggered_line (under/over/push)
+
+LEAGUE REFERENCE (competition_pace population):
+  betual-nba                             avg= 5.6449  n=3749
+  betual-kbl                             avg= 3.8914  n=1419
+  betual-cba                             avg= 4.4574  n=1605
+  betual-tbsl                            avg= 4.1716  n=2340
+  betual-euroleague                      avg= 4.3071  n=2359
+  cyber-basketball-2k26-matches          avg= 4.4749  n=602
+
+==============================================================================
+Q3 BREAK cohort — alert vs baseline (settled vs the FROZEN
+boundary line; UNDER% = UNDER / (UNDER + OVER + PUSH))
+==============================================================================
+competition                                 N   UNDER%   baseN    base%  lift pp
+betual-nba                               1638   72.28%   52857   48.25%   +24.03
+betual-kbl                                903   65.67%   10699   48.81%   +16.86
+betual-cba                               1108   46.57%   18121   49.76%    -3.19
+betual-tbsl                              2182   63.43%   20594   43.45%   +19.97
+betual-euroleague                        3031   58.79%   22455   48.57%   +10.22
+cyber-basketball-2k26-matches            4795   63.02%    6203   49.30%   +13.73
+------------------------------------------------------------------------------
+ALL                                     13657   62.10%  130929   47.86%   +14.24
+
+PUSH counts (half-point lines make pushes arithmetically
+unreachable; reported honestly): alert_push=0 base_push=0
+
+Coverage of the boundary:
+  games with eligible rows           : 566517
+  games reaching the boundary (>=75%): 152055
+  boundary line/score unprovable     : 7469 (the live rule fails closed on these — no line, no alert)
+    betual-nba                             1796
+    betual-kbl                             897
+    betual-cba                             736
+    betual-tbsl                            1663
+    betual-euroleague                      2001
+    cyber-basketball-2k26-matches          376
+  settlement unprovable (no OK final): 0
+
+PRODUCTION-CONDITION CONTEXT (directive 2026-09-14 rule at the
+boundary observation — projector required pace; NOT this
+directive's condition): prod_true_at_boundary=13832
+
+==============================================================================
+DIRECTIVE §8 READ-THROUGH
+==============================================================================
+The production condition ships with the directed 1.04 margin.
+No §8 flag condition met (flag requires N >= 300 AND
+UNDER% < 55).  Report honestly; no silent tuning either way.
+
+READ-ONLY: no database was written.  The only file produced is
+this report: /home/ubuntu/BLM/analysis_q3_break_under_alert_2026-09-18.txt

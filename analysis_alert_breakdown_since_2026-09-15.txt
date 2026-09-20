@@ -1,0 +1,70 @@
+================================================================================================
+READ-ONLY BREAKDOWN — BLM UNDER ALERTS SINCE 2026-09-15 (UTC), run 2026-09-20
+cohorts mirror audit_alert_winrate_q3break_daily_2026-09-20 (production triggers,
+point-in-time league mean, frozen trigger line, OK-settled finals). ODDS=1.85.
+================================================================================================
+
+§1 AGGREGATE SINCE 09-14 (CLEAN = fresh line <=300s)
+------------------------------------------------------------------------------------------------
+  75% projector ALL                  N=   27  U=  17  O=  10  P= 0  WIN%= 62.96%  [44.2%,78.5%]  net=   +4.45u  ROI=+16.48%
+  75% projector CLEAN                N=   27  U=  17  O=  10  P= 0  WIN%= 62.96%  [44.2%,78.5%]  net=   +4.45u  ROI=+16.48%
+  Q3_BREAK ALL                       N=  170  U= 106  O=  64  P= 0  WIN%= 62.35%  [54.9%,69.3%]  net=  +26.10u  ROI=+15.35%
+  Q3_BREAK CLEAN                     N=  169  U= 105  O=  64  P= 0  WIN%= 62.13%  [54.6%,69.1%]  net=  +25.25u  ROI=+14.94%
+
+  baseline 75% (all obs)             N= 3193  U=1708  O=1485  P= 0  WIN%= 53.49%  [51.8%,55.2%]  net=  -33.20u  ROI=-1.04%
+  baseline Q3_BREAK                  N= 3183  U=1621  O=1562  P= 0  WIN%= 50.93%  [49.2%,52.7%]  net= -184.15u  ROI=-5.79%
+
+§2 ONE-BET-PER-GAME UNION — any alert fired, one stake, settled vs the
+   Q3_BREAK frozen line (the two identities share the same boundary)
+------------------------------------------------------------------------------------------------
+  union ALL (one bet/game)           N=  186  U= 118  O=  68  P= 0  WIN%= 63.44%  [56.3%,70.0%]  net=  +32.30u  ROI=+17.37%
+  union CLEAN                        N=  185  U= 117  O=  68  P= 0  WIN%= 63.24%  [56.1%,69.9%]  net=  +31.45u  ROI=+17.00%
+
+§3 PER LEAGUE SINCE 09-15 — CLEAN cohorts
+------------------------------------------------------------------------------------------------
+  75% CLEAN:
+    75% CLEAN NBA                    N=    3  U=   3  O=   0  P= 0  WIN%=100.00%  [43.8%,100.0%]  net=   +2.55u  ROI=+85.00%
+    75% CLEAN KBL                    N=    2  U=   2  O=   0  P= 0  WIN%=100.00%  [34.2%,100.0%]  net=   +1.70u  ROI=+85.00%
+    75% CLEAN CBA                    N=    1  U=   1  O=   0  P= 0  WIN%=100.00%  [20.7%,100.0%]  net=   +0.85u  ROI=+85.00%
+    75% CLEAN TBSL                   N=    2  U=   1  O=   1  P= 0  WIN%= 50.00%  [9.5%,90.5%]  net=   -0.15u  ROI=-7.50%
+    75% CLEAN EuroLeague             N=    1  U=   0  O=   1  P= 0  WIN%=  0.00%  [0.0%,79.3%]  net=   -1.00u  ROI=-100.00%
+    75% CLEAN CYBER                  N=   18  U=  10  O=   8  P= 0  WIN%= 55.56%  [33.7%,75.4%]  net=   +0.50u  ROI=+2.78%
+
+  Q3_CLEAN:
+    Q3_CLEAN NBA                     N=   33  U=  23  O=  10  P= 0  WIN%= 69.70%  [52.7%,82.6%]  net=   +9.55u  ROI=+28.94%
+    Q3_CLEAN KBL                     N=   15  U=  10  O=   5  P= 0  WIN%= 66.67%  [41.7%,84.8%]  net=   +3.50u  ROI=+23.33%
+    Q3_CLEAN CBA                     N=   22  U=  13  O=   9  P= 0  WIN%= 59.09%  [38.7%,76.7%]  net=   +2.05u  ROI=+9.32%
+    Q3_CLEAN TBSL                    N=   16  U=  11  O=   5  P= 0  WIN%= 68.75%  [44.4%,85.8%]  net=   +4.35u  ROI=+27.19%
+    Q3_CLEAN EuroLeague              N=   45  U=  27  O=  18  P= 0  WIN%= 60.00%  [45.5%,73.0%]  net=   +4.95u  ROI=+11.00%
+    Q3_CLEAN CYBER                   N=   38  U=  21  O=  17  P= 0  WIN%= 55.26%  [39.7%,69.9%]  net=   +0.85u  ROI=+2.24%
+
+§4 DAILY SINCE 09-15
+------------------------------------------------------------------------------------------------
+  75% ALL:
+    2026-09-15  N=   6  U=  4  O=  2  WIN%= 66.67%    +1.40u
+    2026-09-16  N=   4  U=  2  O=  2  WIN%= 50.00%    -0.30u
+    2026-09-17  N=   5  U=  4  O=  1  WIN%= 80.00%    +2.40u
+    2026-09-18  N=   6  U=  4  O=  2  WIN%= 66.67%    +1.40u
+    2026-09-19  N=   6  U=  3  O=  3  WIN%= 50.00%    -0.45u
+    2026-09-20  N=   0  U=  0  O=  0  WIN%=  n/a           -
+    TOTAL        N=  27  U= 17  O= 10  WIN%= 62.96%  net=  +4.45u  ROI=+16.48%
+
+  Q3_BREAK ALL:
+    2026-09-15  N=  33  U= 21  O= 12  WIN%= 63.64%    +5.85u
+    2026-09-16  N=  40  U= 23  O= 17  WIN%= 57.50%    +2.55u
+    2026-09-17  N=  43  U= 27  O= 16  WIN%= 62.79%    +6.95u
+    2026-09-18  N=  26  U= 16  O= 10  WIN%= 61.54%    +3.60u
+    2026-09-19  N=  16  U= 12  O=  4  WIN%= 75.00%    +6.20u
+    2026-09-20  N=  12  U=  7  O=  5  WIN%= 58.33%    +0.95u
+    TOTAL        N= 170  U=106  O= 64  WIN%= 62.35%  net= +26.10u  ROI=+15.35%
+
+  union ALL:
+    2026-09-15  N=  37  U= 24  O= 13  WIN%= 64.86%    +7.40u
+    2026-09-16  N=  40  U= 23  O= 17  WIN%= 57.50%    +2.55u
+    2026-09-17  N=  46  U= 30  O= 16  WIN%= 65.22%    +9.50u
+    2026-09-18  N=  32  U= 20  O= 12  WIN%= 62.50%    +5.00u
+    2026-09-19  N=  19  U= 14  O=  5  WIN%= 73.68%    +6.90u
+    2026-09-20  N=  12  U=  7  O=  5  WIN%= 58.33%    +0.95u
+    TOTAL        N= 186  U=118  O= 68  WIN%= 63.44%  net= +32.30u  ROI=+17.37%
+
+READ-ONLY: both DBs opened mode=ro; only this report was written.

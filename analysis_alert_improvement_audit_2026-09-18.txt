@@ -1,0 +1,262 @@
+================================================================================================
+READ-ONLY AUDIT — WHY ARE BLM UNDER ALERTS APPEARING MORE ACCURATE?  2026-09-18
+production trigger mirror: progress>=75%, required > league_avg*1.04 strict,
+point-in-time league reference (result_at strictly before trigger), frozen trigger line,
+settlement = game_results final_result_status='OK' only. ODDS=1.85 breakeven 54.05%.
+================================================================================================
+settled-OK universe: 12196 games; INVALID-quality games excluded: 646
+league realised-pace references (point-in-time, strict-before):
+  CBA         n= 1612  all-time mean pace=4.457 pts/min
+  EuroLeague  n= 2385  all-time mean pace=4.307 pts/min
+  KBL         n= 1422  all-time mean pace=3.891 pts/min
+  NBA         n= 3810  all-time mean pace=5.646 pts/min
+  TBSL        n= 2359  all-time mean pace=4.172 pts/min
+  CYBER       n=  608  all-time mean pace=4.474 pts/min
+
+signals assembled: 17809 (no OK settlement/invalid: 58860; post-settlement trigger EXCLUDED: 284; no point-in-time league reference: 0)
+
+§1 CURRENT PERFORMANCE — by checkpoint tier (CLEAN = fresh line <=300s)
+------------------------------------------------------------------------------------------------
+  75% ALL triggers           N=  493  UNDER= 330  OVER= 163  PUSH=  0  UNDER%= 66.94%  [62.7%,70.9%]
+  75% CLEAN triggers         N=  256  UNDER= 152  OVER= 104  PUSH=  0  UNDER%= 59.38%  [53.3%,65.2%]  avgLineGap=+3.03  avgReqPaceGap=+3.58  avgLeagueGap=-0.54
+  75% STALE (context)        N=  237  UNDER= 178  OVER=  59  PUSH=  0  UNDER%= 75.11%  [69.2%,80.2%]
+  50% ALL triggers           N=  334  UNDER= 194  OVER= 140  PUSH=  0  UNDER%= 58.08%  [52.7%,63.3%]
+  50% CLEAN triggers         N=  253  UNDER= 140  OVER= 113  PUSH=  0  UNDER%= 55.34%  [49.2%,61.3%]  avgLineGap=+2.75  avgReqPaceGap=+1.22  avgLeagueGap=-0.46
+
+§1b Baselines (same observation universe, NO trigger condition)
+  baseline 75% (all obs)     N= 9296  UNDER=4761  OVER=4535  PUSH=  0  UNDER%= 51.22%  [50.2%,52.2%]  avgLineGap=+0.19  avgReqPaceGap=-0.58  avgLeagueGap=+0.17
+  baseline 50% (all obs)     N= 8513  UNDER=4242  OVER=4271  PUSH=  0  UNDER%= 49.83%  [48.8%,50.9%]
+
+§1c By league — 75% CLEAN triggers
+  league NBA                 N=    7  UNDER=   7  OVER=   0  PUSH=  0  UNDER%=100.00%  [64.6%,100.0%]  avgLineGap=+14.64  avgReqPaceGap=+28.08  avgLeagueGap=-0.52
+  league KBL                 N=   10  UNDER=   9  OVER=   1  PUSH=  0  UNDER%= 90.00%  [59.6%,98.2%]  avgLineGap=+8.40  avgReqPaceGap=+15.54  avgLeagueGap=-0.37
+  league CBA                 N=    3  UNDER=   2  OVER=   1  PUSH=  0  UNDER%= 66.67%  [20.8%,93.9%]  avgLineGap=+3.83  avgReqPaceGap=+0.43  avgLeagueGap=-0.08
+  league TBSL                N=   81  UNDER=  40  OVER=  41  PUSH=  0  UNDER%= 49.38%  [38.8%,60.0%]  avgLineGap=+1.13  avgReqPaceGap=+3.15  avgLeagueGap=-0.60
+  league EuroLeague          N=  121  UNDER=  71  OVER=  50  PUSH=  0  UNDER%= 58.68%  [49.8%,67.1%]  avgLineGap=+2.95  avgReqPaceGap=+2.35  avgLeagueGap=-0.58
+  league CYBER               N=   34  UNDER=  23  OVER=  11  PUSH=  0  UNDER%= 67.65%  [50.8%,80.9%]  avgLineGap=+3.79  avgReqPaceGap=+0.67  avgLeagueGap=-0.32
+
+§1d By league — 75% CLEAN baselines (same obs, no condition)
+  baseline NBA               N= 2380  UNDER=1215  OVER=1165  PUSH=  0  UNDER%= 51.05%  [49.0%,53.1%]
+  baseline KBL               N=  726  UNDER= 388  OVER= 338  PUSH=  0  UNDER%= 53.44%  [49.8%,57.0%]
+  baseline CBA               N=  980  UNDER= 507  OVER= 473  PUSH=  0  UNDER%= 51.73%  [48.6%,54.9%]
+  baseline TBSL              N= 1272  UNDER= 628  OVER= 644  PUSH=  0  UNDER%= 49.37%  [46.6%,52.1%]
+  baseline EuroLeague        N= 1538  UNDER= 815  OVER= 723  PUSH=  0  UNDER%= 52.99%  [50.5%,55.5%]
+  baseline CYBER             N=  202  UNDER= 118  OVER=  84  PUSH=  0  UNDER%= 58.42%  [51.5%,65.0%]
+
+§2 ERA COMPARISON — 75% CLEAN triggers, same definitions everywhere
+------------------------------------------------------------------------------------------------
+E1 = before 09-12 (pre live-markets-only directive) | E2 = 09-12..09-13 | E3 = from 09-14 (current: 75%-only + 1.04 margin)
+  E1_pre0912                 N=  221  UNDER= 130  OVER=  91  PUSH=  0  UNDER%= 58.82%  [52.2%,65.1%]  avgLineGap=+2.77  avgReqPaceGap=+2.95  avgLeagueGap=-0.57
+  E2_0912_0913               N=    3  UNDER=   2  OVER=   1  PUSH=  0  UNDER%= 66.67%  [20.8%,93.9%]  avgLineGap=+6.83  avgReqPaceGap=+5.58  avgLeagueGap=-0.29
+  E3_post0914_current        N=   32  UNDER=  20  OVER=  12  PUSH=  0  UNDER%= 62.50%  [45.3%,77.1%]  avgLineGap=+4.47  avgReqPaceGap=+7.69  avgLeagueGap=-0.38
+
+§2b Baseline by era (same obs universe, no condition) — separates rule change from data drift
+  E1_pre0912                 N= 3047  UNDER=1607  OVER=1440  PUSH=  0  UNDER%= 52.74%  [51.0%,54.5%]
+  E2_0912_0913               N=  694  UNDER= 347  OVER= 347  PUSH=  0  UNDER%= 50.00%  [46.3%,53.7%]
+  E3_post0914_current        N= 3357  UNDER=1717  OVER=1640  PUSH=  0  UNDER%= 51.15%  [49.5%,52.8%]
+
+§2c Month/half-day trend of 75% CLEAN baseline (is the IMPROVEMENT in the rule or in the games?)
+  2026-09-05..2026-09-08: baseline N=  804 UNDER%= 52.24   triggers N= 197 UNDER%= 55.33   triggerRate=24.5%
+  2026-09-08..2026-09-11: baseline N= 1594 UNDER%= 53.32   triggers N=  17 UNDER%= 88.24   triggerRate=1.1%
+  2026-09-11..2026-09-14: baseline N= 1343 UNDER%= 50.93   triggers N=  10 UNDER%= 80.00   triggerRate=0.7%
+  2026-09-14..2026-09-16: baseline N= 1406 UNDER%= 47.23   triggers N=  17 UNDER%= 58.82   triggerRate=1.2%
+  2026-09-16..2026-09-19: baseline N= 1951 UNDER%= 53.97   triggers N=  15 UNDER%= 66.67   triggerRate=0.8%
+
+§3 DRIVER ANALYSIS — 75% CLEAN triggers
+------------------------------------------------------------------------------------------------
+§3a League identity (already §1c). Rate of trigger per league (selection mix):
+  NBA         triggerRate=  0.3%  baseline= 51.05%  trigger-hit=100.00%  N=7/2380
+  KBL         triggerRate=  1.4%  baseline= 53.44%  trigger-hit= 90.00%  N=10/726
+  CBA         triggerRate=  0.3%  baseline= 51.73%  trigger-hit= 66.67%  N=3/980
+  TBSL        triggerRate=  6.4%  baseline= 49.37%  trigger-hit= 49.38%  N=81/1272
+  EuroLeague  triggerRate=  7.9%  baseline= 52.99%  trigger-hit= 58.68%  N=121/1538
+  CYBER       triggerRate= 16.8%  baseline= 58.42%  trigger-hit= 67.65%  N=34/202
+
+§3b Trigger-gap magnitude vs hit (grouped): required/league margin
+  req/avg in [1.04,1.1)      N=   50  UNDER=  31  OVER=  19  PUSH=  0  UNDER%= 62.00%  [48.2%,74.1%]
+  req/avg in [1.1,1.2)       N=   17  UNDER=  15  OVER=   2  PUSH=  0  UNDER%= 88.24%  [65.7%,96.7%]
+  req/avg in [1.2,1.35)      N=   68  UNDER=  33  OVER=  35  PUSH=  0  UNDER%= 48.53%  [37.1%,60.2%]
+  req/avg in [1.35,99)       N=  121  UNDER=  73  OVER=  48  PUSH=  0  UNDER%= 60.33%  [51.4%,68.6%]
+
+§3c Pace gap (actual vs required) at trigger:
+  act-req act-req < -2       N=  126  UNDER=  77  OVER=  49  PUSH=  0  UNDER%= 61.11%  [52.4%,69.2%]
+  act-req [-2,-1)            N=   75  UNDER=  37  OVER=  38  PUSH=  0  UNDER%= 49.33%  [38.3%,60.4%]
+  act-req [-1,0)             N=   54  UNDER=  37  OVER=  17  PUSH=  0  UNDER%= 68.52%  [55.3%,79.3%]
+  act-req [0,1)              N=    0  UNDER=   0  OVER=   0  PUSH=  0  UNDER%=  0.00%  -
+  act-req >=1                N=    0  UNDER=   0  OVER=   0  PUSH=  0  UNDER%=  0.00%  -
+
+§3d Market deviation |fair - line| at trigger:
+  |fair-line| in [0,2)       N=    1  UNDER=   0  OVER=   1  PUSH=  0  UNDER%=  0.00%  [0.0%,79.3%]
+  |fair-line| in [2,5)       N=   14  UNDER=  10  OVER=   4  PUSH=  0  UNDER%= 71.43%  [45.4%,88.3%]
+  |fair-line| in [5,10)      N=   35  UNDER=  23  OVER=  12  PUSH=  0  UNDER%= 65.71%  [49.2%,79.2%]
+  |fair-line| in [10,999)    N=  206  UNDER= 119  OVER=  87  PUSH=  0  UNDER%= 57.77%  [50.9%,64.3%]
+
+§3e Progress at trigger (how deep past 75%):
+  progress [75,80)           N=  239  UNDER= 139  OVER= 100  PUSH=  0  UNDER%= 58.16%  [51.8%,64.2%]
+  progress [80,90)           N=    2  UNDER=   2  OVER=   0  PUSH=  0  UNDER%=100.00%  [34.2%,100.0%]
+  progress [90,100)          N=   15  UNDER=  11  OVER=   4  PUSH=  0  UNDER%= 73.33%  [48.0%,89.1%]
+
+§3f Remaining minutes at trigger (game-state / blowout proxy):
+  remaining [0,6)            N=   17  UNDER=  13  OVER=   4  PUSH=  0  UNDER%= 76.47%  [52.7%,90.4%]
+  remaining [6,12)           N=  220  UNDER= 128  OVER=  92  PUSH=  0  UNDER%= 58.18%  [51.6%,64.5%]
+  remaining [12,24)          N=   19  UNDER=  11  OVER=   8  PUSH=  0  UNDER%= 57.89%  [36.3%,76.9%]
+
+§3g Line level (high-total vs low-total games):
+  line in [0,150)            N=   23  UNDER=  15  OVER=   8  PUSH=  0  UNDER%= 65.22%  [44.9%,81.2%]
+  line in [150,170)          N=  103  UNDER=  57  OVER=  46  PUSH=  0  UNDER%= 55.34%  [45.7%,64.6%]
+  line in [170,999)          N=  130  UNDER=  80  OVER=  50  PUSH=  0  UNDER%= 61.54%  [53.0%,69.5%]
+
+§3h Short-term trajectory at trigger (clean_projections.trajectory_state):
+  trajectory RISING          N=    0  UNDER=   0  OVER=   0  PUSH=  0  UNDER%=  0.00%  -
+  trajectory FALLING         N=    0  UNDER=   0  OVER=   0  PUSH=  0  UNDER%=  0.00%  -
+  trajectory FLAT            N=    0  UNDER=   0  OVER=   0  PUSH=  0  UNDER%=  0.00%  -
+
+§3i Recent 3-minute pace vs game pace (momentum at trigger):
+  recent3-game recent3 << game (<-0.5) N=   91  UNDER=  67  OVER=  24  PUSH=  0  UNDER%= 73.63%  [63.7%,81.6%]
+  recent3-game [-0.5,0)      N=   33  UNDER=  22  OVER=  11  PUSH=  0  UNDER%= 66.67%  [49.6%,80.2%]
+  recent3-game [0,+0.5)      N=   36  UNDER=  14  OVER=  22  PUSH=  0  UNDER%= 38.89%  [24.8%,55.1%]
+  recent3-game >=+0.5 (heating up) N=   96  UNDER=  49  OVER=  47  PUSH=  0  UNDER%= 51.04%  [41.2%,60.8%]
+
+§4 Q4 ANOMALY — Q1-Q3 avg ≈ high but Q4 book line much lower
+------------------------------------------------------------------------------------------------
+  CONSTRAINT: no quarter lines exist in the DB (market_observations has only
+  full-game MatchTotal).  Q4 book line is therefore NOT available historically.
+  Best legal proxy computed: (A) Q1-Q3 actual pace vs trigger-line implied
+  remaining requirement — the discount the book applied from Q1-Q3 scoring;
+  (B) bucketed by required-vs-actual gap at the 75% break (= the de-facto
+  Q4 line discount the market is pricing).
+  games with a pre-break (50-75%) observation: 11533
+  joined to OK settlement: 8513
+
+  Q4_LINE_DISCOUNT PROXY = (required - actual) / required at the pre-break observation
+  (how much the book has discounted Q4 scoring vs the game's own Q1-Q3 pace;
+   large positive = book expects a slow Q4 = the anomaly scenario)
+
+  bucket                 N    UNDER   UNDER%   (resulted at the FROZEN pre-break line)
+  < -10%  (anti-anomaly: book raised)  6335   2916   46.03%
+  -10%..-2%                            946    546   57.72%
+  ~0% (no discount)                    321    203   63.24%
+  +2%..+10%                            382    276   72.25%
+  +10%..+25%                           237    189   79.75%
+  > +25% (extreme discount)            292    169   57.88%
+
+  NOTE: this is a PROXY for the requested Q4 analysis (quarter lines unavailable).
+  The requested exact scenario (Q1-Q3 avg 65/qtr vs Q4 line 45) cannot be
+  measured historically; recommend adding quarter-line capture going forward.
+
+§5 LEAKAGE / POINT-IN-TIME CHECKS
+------------------------------------------------------------------------------------------------
+  (a) self-inclusion of own result in league reference: 0 violations (expected 0; avg_before is STRICT <)
+  (b) checkpoint_market rows with market_timestamp AFTER checkpoint_timestamp: 0 (must be 0)
+  (c) rows where closing==live line (would hint CL leakage): 816/6853 (equality alone is not proof; informational)
+  (d) stored checkpoint_market outcomes (signal-aware) vs recomputed: agree=16304 disagree=0 skipped=270
+  (e) post-settlement trigger rows excluded from every cohort above (no look-ahead reference possible)
+  (f) shadow_p80_3d_triggers.jsonl: 782 rows, 0 without parseable capture time
+  (g) every trigger cohort above uses: point-in-time league mean (strict <),
+      frozen live line at-or-before trigger (clean_projections.market_captured_at),
+      OK-settled finals only.  No closing lines, no future scores in any denominator.
+
+§6 VERDICT FRAMEWORK — filled in the analysis report
+------------------------------------------------------------------------------------------------
+
+================================================================================
+§7 FINAL REPORT — A–E  (READ-ONLY INVESTIGATION, no production changes)
+================================================================================
+
+A. ACCURACY COMPARISON TABLE (production-mirror trigger; OK-settled; line ≤300s = CLEAN)
+------------------------------------------------------------------------------------------------
+ cohort                        |    N | UNDER | OVER | PUSH | UNDER%    | baseline%
+-------------------------------|------|-------|------|------|-----------|----------
+ 75% ALL triggers              |  493 |   330 |  163 |    0 | 66.94%    | 51.22%
+ 75% CLEAN triggers            |  256 |   152 |  104 |    0 | 59.38%    | 51.22%
+ 75% STALE triggers (ctx)      |  237 |   178 |   59 |    0 | 75.11%    |    -
+ 50% ALL triggers              |  334 |   194 |  140 |    0 | 58.08%    | 49.83%
+ 50% CLEAN triggers            |  253 |   140 |  113 |    0 | 55.34%    | 49.83%
+ by league (75% CLEAN)         |      |       |      |      |           |
+   EuroLeague                  |  121 |    71 |   50 |    0 | 58.68%    | 52.99%
+   TBSL                        |   81 |    40 |   41 |    0 | 49.38%    | 49.37%
+   CYBER                       |   34 |    23 |   11 |    0 | 67.65%    | 58.42%
+   KBL                         |   10 |     9 |    1 |    0 | 90.00%    | 53.44%
+   NBA                         |    7 |     7 |    0 |    0 | 100.00%   | 51.05%
+   CBA                         |    3 |     2 |    1 |    0 | 66.67%    | 51.73%
+ avg gaps at 75% CLEAN trigger:  line-gap +3.03 pts | required-pace-gap +3.58 pts/min |
+ league-baseline gap −0.54 pts/min (actual pace BELOW league average at fire time)
+
+ ERA comparison (75% CLEAN triggers; same definitions applied to all eras)
+   E1 pre-09-12        N=221  58.82%
+   E2 09-12..09-13     N=  3  66.67%  (n too small)
+   E3 post-09-14       N= 32  62.50%
+   Baselines by era:   52.74% -> 50.00% -> 51.15%  (FLAT — the games did not change)
+
+ Alert volume: trigger rate among 75% observations collapsed
+   24.5% (Sep 5–8)  ->  1.1% / 0.7% / 1.2% / 0.8% (later windows)
+   with trigger hit rates 55.3% -> 88.2% / 80.0% / 58.8% / 66.7%
+
+B. Q4 ANOMALY (PROXY — quarter lines are NOT collected anywhere in the DB;
+   market_observations contains only full-game MatchTotal. The literal
+   "Q1–Q3 avg 65 vs Q4 line 45" scenario cannot be measured historically.)
+   Proxy: discount = (required − actual)/required at the last pre-break (50–75%)
+   observation = how much Q4 scoring the book is discounting vs Q1–Q3 pace.
+   Resulted at the FROZEN pre-break line (N=8513 OK-settled):
+     < −10%  (book RAISED vs pace)   N=6335  UNDER 46.03%
+     −10%..−2%                       N= 946  UNDER 57.72%
+     ~0%                             N= 321  UNDER 63.24%
+     +2%..+10%                       N= 382  UNDER 72.25%
+     +10%..+25%                      N= 237  UNDER 79.75%   <- peak
+     > +25%                          N= 292  UNDER 57.88%   <- unreliable tail
+   Monotone dose-response up to +25% discount, collapse in the extreme bucket.
+
+C. FEATURE-BY-FEATURE (75% CLEAN triggers, N=256)
+   recent-3min pace vs game pace (momentum):  STRONGEST driver
+     cooling (recent3 − game < −0.5)   73.63%  (N=91)
+     −0.5..0                            66.67%  (N=33)
+     +0..+0.5                           38.89%  (N=36)
+     heating (≥ +0.5)                   51.04%  (N=96)   -> ~25–35pp spread
+   progress depth:  [75,80) 58.16% (N=239); [90,100) 73.33% (N=15)
+   remaining minutes: <6min 76.47% (N=17); 6–12 58.18%; 12–24 57.89%
+   required/league margin: NON-monotonic (62.0 / 88.2 / 48.5 / 60.3) — no dose-response
+   actual−required pace gap: non-monotonic (61.1 / 49.3 / 68.5)
+   |fair − line| size: mildly NEGATIVE gradient (71.4 / 65.7 / 57.8)
+   line level: flat (65.2 / 55.3 / 61.5)
+   league identity: edge concentrated in EuroLeague/CYBER + NBA/KBL extreme tail;
+     TBSL triggers are a coin flip (49.38%) and dilute the cohort.
+
+D. LEAKAGE / DATA-INTEGRITY — CLEAN
+   (a) self-inclusion of a game's own result in its league reference: 0 violations
+   (b) market_timestamp after checkpoint_timestamp: 0 rows
+   (c) closing==live line: 816/6853 identical — informational, no proof of use
+   (d) stored checkpoint_market outcomes vs recomputed (signal-aware): 16304/16304 = 100.00%
+   (e) 284 post-settlement trigger rows excluded (no look-ahead-free reference possible)
+   (f) shadow triggers: 782 rows, all with parseable point-in-time capture
+   (g) all cohorts use strict point-in-time league means, frozen at-or-before lines,
+       OK-settled finals only.
+
+E. ROOT-CAUSE CONCLUSION — "Why are BLM alerts becoming more accurate?"
+
+ 1. CONFIRMED (DB-measured):
+    * TIER SWITCH: the 50% checkpoint (55.34% CLEAN / 58.08% ALL — barely above the
+      49.83% baseline) was removed on 2026-09-14; all production alerts now come from
+      the 75% tier (66.94% ALL). Average served-alert accuracy rose ~10pp mechanically.
+    * SELECTIVITY COLLAPSE: gates (live-market-only 09-12, ≤300s freshness, point-in-time
+      reference, strict ×1.04 margin) cut the trigger rate from 24.5% of games to <1.2%.
+      Fewer, more extreme alerts -> higher hit rate. Volume fell ~25x.
+    * STALE-LINE PARADOX: alerts on frozen/stale lines hit 75.11% vs 59.38% CLEAN —
+      the raw DB (checkpoint_market, all checkpoints: 7119W/2147L = 76.8%) therefore
+      OVERSTATES what production serves today; part of the perceived improvement is
+      stale rows (excluded live since 09-12) dominating historical counts.
+    * THE GAMES DID NOT CHANGE: baselines flat across eras (52.7/50.0/51.2) and
+      windows (47.2–54.0, no trend). Zero leakage found — the improvement is not
+      look-ahead, settlement drift, or reference contamination.
+ 2. PLAUSIBLE (needs more N):
+    * Momentum at fire time is the strongest in-data driver (cooling 73.6% vs
+      heating 51.0%) — a real conditioning variable, not yet in the rule.
+    * Late progress / <6min remaining hits 76.5% (small N).
+    * Extreme-gap league tail (NBA +28 pts/min required gap, 7/7) is real but fragile.
+    * Q4-discount dose-response (46% -> 80% up to +25%) suggests quarter-line capture
+      would add a genuine signal — currently UNMEASURABLE (no quarter lines collected).
+ 3. NOT CONTRIBUTING:
+    * League-pace regime drift (flat baselines).
+    * Required/league margin magnitude beyond the 1.04 gate (non-monotonic hit rates).
+    * Absolute line level, and |fair−line| size (mildly NEGATIVE — bigger deviations
+      fare slightly worse).
+================================================================================

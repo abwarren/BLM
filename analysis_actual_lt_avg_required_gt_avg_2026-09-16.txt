@@ -1,0 +1,65 @@
+====================================================================================================
+ACTUAL < LEAGUE AVG  AND  REQUIRED > LEAGUE AVG — HISTORICAL COHORT
+READ-ONLY ANALYSIS, 2026-09-16  (exact directive conditions, no margins)
+====================================================================================================
+prod DB : /home/ubuntu/BLM/blm_pokerbet.db (mode=ro)
+clean DB: /home/ubuntu/BLM/blm_metrics_clean.db (mode=ro)
+settled games (game_results OK, final>0, league+regmin known): 10359
+break-even at 1.85: 54.054%
+
+COHORT: actual < league_avg AND required > league_avg (point-in-time league averages, CLEAN observations)
+  cp         N  UNDER   OVER  PUSH   UNDER%    OVER%   PUSH%  base UND%     lift     net u      ROI    u/100
+  ----------------------------------------------------------------------------------------------------------
+  25%      185     93     92     0    50.27    49.73    0.00      47.70    +2.57    -12.95   -7.00%    -7.00
+  50%      344    189    155     0    54.94    45.06    0.00      49.09    +5.86     +5.65   +1.64%    +1.64
+  75%      279    166    113     0    59.50    40.50    0.00      50.17    +9.33    +28.10  +10.07%   +10.07
+  ALL      808    448    360     0    55.45    44.55    0.00      49.09    +6.36    +20.80   +2.57%    +2.57
+
+LEAGUE BREAKDOWN (clean cohort, all checkpoints combined)
+  league           N  UNDER   OVER   UNDER%     net u      ROI
+  --------------------------------------------------------------
+  NBA             99     52     47    52.53     -2.80   -2.83%
+  KBL             75     36     39    48.00     -8.40  -11.20%
+  CBA             63     42     21    66.67    +14.70  +23.33%
+  TBSL           205    108     97    52.68     -5.20   -2.54%
+  EuroLeague     248    146    102    58.87    +22.10   +8.91%
+  CYBER          118     64     54    54.24     +0.40   +0.34%
+  OTHER            0      -      -      n/a       n/a      n/a
+
+CHRONOLOGICAL THIRDS (clean cohort, ALL checkpoints) — split by trigger timestamp
+  T1 [2026-09-05T06:01:43.613672Z .. 2026-09-07T00:51:12.269562Z]
+  T2 [2026-09-07T01:00:13.064006Z .. 2026-09-11T10:52:41.646870Z]
+  T3 [2026-09-11T10:52:41.646870Z .. 2026-09-16T05:14:17.531357Z]
+  third       N   UNDER%     net u      ROI
+  ---------------------------------------------
+  T1        269    52.42     -8.15   -3.03%
+  T2        269    61.71    +38.10  +14.16%
+  T3        270    52.22     -9.15   -3.39%
+
+STALE-STATE FLAGGING (temporal safety, audit follow-up)
+  qualifying observations (cohort, all cps): 1226
+  of which STALE at capture (market_status=STALE or line age > 300s): 418
+  clean observations (cohort): 808
+  (all selected checkpoint observations, settled+line: stale 2989 / clean 14307; dropped for no point-in-time league reference: 0)
+
+  STALE cohort economics (REPORTED, not discarded):
+    stale cohort : N=418 UNDER=300 OVER=118 UNDER%=71.77 net=+137.00 ROI=+32.78%
+    cohort incl. stale: N=1226 UNDER%=61.01 net=+157.80 ROI=+12.87%
+  NOTE: headline tables above use the CLEAN cohort; the stale
+  cohort is quantified here, never silently discarded.
+  NOTE: settlement PUSH is structurally impossible in this data —
+  every checkpoint line is a half-point (x.5) total, so final_total
+  can never equal the line.  PUSH% is 0 by construction.
+
+ANSWERS
+  1. exact N (ACTUAL<AVG AND REQUIRED>AVG, clean, all cps): 808
+     (per checkpoint: 25%=185 50%=344 75%=279; +418 stale kept out of the headline cohort)
+  2. UNDER percentage: 55.45%  (UNDER 448 / OVER 360 / PUSH 0)
+  3. above 55%? YES
+  4. above 54.054% (1.85 break-even)? YES
+  5. net profit at 1 unit/signal: +20.80 units  (ROI +2.57%, +2.57 u/100)
+  6. above break-even in ALL chronological OOS thirds? NO  (UNDER% by third: 52.42%, 61.71%, 52.22%)
+
+PRODUCTION CHANGES: NONE (read-only analysis; report file only).
+
+GAME INDEPENDENCE NOTE: the 1,226 observations span 910 unique games (267 games qualify at more than one checkpoint) — observations are the unit of analysis per the directive ("one game/checkpoint observation per game"); they are NOT independent game-level samples.
