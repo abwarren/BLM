@@ -40,7 +40,7 @@ import re
 import sqlite3
 import statistics
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -354,6 +354,14 @@ CREATE TABLE IF NOT EXISTS checkpoint_market (
 );
 CREATE INDEX IF NOT EXISTS idx_cm_game_pct ON checkpoint_market(source_game_id, checkpoint_pct);
 CREATE INDEX IF NOT EXISTS idx_cm_pct      ON checkpoint_market(checkpoint_pct);
+
+-- Small key/value store for scorecard RUN STATE (not game data).  Today it
+-- holds one key: 'logic_revision' — the revision of the writer logic whose
+-- FULL pass last completed end-to-end.  See SCORECARD_LOGIC_REVISION.
+CREATE TABLE IF NOT EXISTS scorecard_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 _CHECKPOINTS = ("q1", "q2", "q3", "q4", "final")
@@ -567,6 +575,88 @@ MAX_DISTANCE_PCT = 5.0  # tolerance: closest snapshot must be within ±5pp
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+# ── Incremental pass gate (2026-09-20) ────────────────────────────────
+# The scorecard is a MINUTES-long monolithic pass (observed 6,446s ≈ 1h47m)
+# that re-derives the WHOLE history on every loop iteration.  Its writes are
+# idempotent and derived only from stored inputs, so a game whose inputs have
+# not moved since it was last written cannot produce a different row —
+# re-deriving it is pure cost.  The gate skips exactly those games and
+# reprocesses everything else.  Measured on the live population:
+#
+#   stage 3 capture_results     18,615 ended games re-verified
+#                               → 12,907 settled OK + 4,946 settled UNKNOWN
+#                                 skipped; 674 INVALID already skipped
+#   stage 5 market_history      11,570 settled rows re-upserted (1,182,449 of
+#                               1,611,678 snapshots re-read) → skipped
+#   stage 6 checkpoint_market   11,178 complete games re-derived → skipped
+#   genuine work per pass       ~1,346 new games + 395 incomplete ones
+#
+# Measured end-to-end on a copy of the production DB (prediction freeze on,
+# as in production): GATED pass 21.8s, second consecutive pass 12.7s — vs the
+# ungated 6,446s.  Stage 6 on the settled population alone cost 220.6s and
+# wrote ZERO rows; stage 5 re-read 1.18M snapshots to upsert 11,570 rows that
+# were already correct.
+#
+# The ungated sweep is not only slow — it is a continuous, backward-looking
+# repair pass: it re-verifies every OK/UNKNOWN verdict against the CURRENT
+# quality gate.  The gate trades that for speed, and the revision interlock
+# below is what re-triggers it.  Both residuals were measured on a copy of
+# the production DB before shipping: 0 of the 4,946 settled UNKNOWN games
+# would be promoted to OK by the current predicates, and the full domain
+# criterion in _gate_checkpoints keeps every game that could still gain a
+# row in the work set.
+#
+# SCORECARD_LOGIC_REVISION is the safety interlock.  BUMP IT whenever the
+# writer logic of any gated stage changes — _snapshot_history_quality (shared
+# with settle_worker), _final_result, the projection / fair-value definition,
+# checkpoint selection or FIXED_CHECKPOINT_PCTS, OLV/CLV selection, the
+# momentum freeze, or the analytics timezone basis.  While the revision
+# stored in scorecard_state differs from this constant every pass is FULL,
+# preserving the documented rule that "an OK recorded under an older, laxer
+# gate must not survive a now-failing history".  Only a pass that completes
+# end-to-end stores it.
+SCORECARD_LOGIC_REVISION = "1"
+
+# Grace margin: a game is never settled while its newest input is younger
+# than this.  The collector stamps captured_at at insert time, but the WS
+# market and event-view paths can insert a row a moment after the gate's
+# read; the margin makes that race unable to hide an input.  The collector
+# polls every 10s, so 120s is an order of magnitude above observed latency.
+# 0 disables the margin (sound only if every writer stamps at insert time).
+_SETTLE_GRACE_DEFAULT_S = 120.0
+
+
+def _settle_grace_s() -> float:
+    try:
+        return float(os.environ.get("BLM_SCORECARD_SETTLE_GRACE_S",
+                                    _SETTLE_GRACE_DEFAULT_S))
+    except (TypeError, ValueError):
+        return _SETTLE_GRACE_DEFAULT_S
+
+
+def _incremental_enabled() -> bool:
+    """Kill switch: BLM_SCORECARD_INCREMENTAL=0 restores the full sweep."""
+    return os.environ.get("BLM_SCORECARD_INCREMENTAL", "1").strip().lower() \
+        not in ("0", "false", "no", "off")
+
+
+def _ago(seconds: float) -> str:
+    """ISO stamp `seconds` in the past, same shape as _utcnow()."""
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _max_ts_by_game(conn, table: str, column: str = "captured_at") -> dict:
+    """{source_game_id: MAX(column)} in ONE scan.  {} when the table is
+    absent (minimal / degenerate schemas) — the gate then settles nothing."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name = ?", (table,)).fetchone() is None:
+        return {}
+    return {r[0]: r[1] for r in conn.execute(
+        f"SELECT source_game_id, MAX({column}) FROM {table} "
+        f"GROUP BY source_game_id") if r[1]}
 
 
 def _is_final_label(period_label: Optional[str]) -> bool:
@@ -1012,6 +1102,7 @@ class Scorecard:
     def __init__(self, db_path: Path | str):
         self._db_path = Path(db_path)
         self._lock = threading.Lock()
+        self._force_full = False          # set by run(incremental=False)
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
@@ -1020,6 +1111,159 @@ class Scorecard:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
+
+    # ── Incremental pass gate (2026-09-20) ────────────────────────────
+    # A game is SETTLED when the stored derivation is provably a no-op to
+    # repeat: every input the derivation reads is unchanged since it was
+    # written, and each input is old enough that no writer can still be
+    # holding it.  Gated stages then skip settled games and reprocess
+    # everything else (new games, grown histories, chained verdicts).
+    # Full rationale + the revision interlock: SCORECARD_LOGIC_REVISION.
+
+    def _gate_active(self, conn) -> bool:
+        """True when this pass may skip settled games: the env kill switch
+        is on AND the stored logic revision matches the code's."""
+        if self._force_full or not _incremental_enabled():
+            return False
+        try:
+            row = conn.execute("SELECT value FROM scorecard_state "
+                               "WHERE key = 'logic_revision'").fetchone()
+        except sqlite3.OperationalError:      # pre-migration database
+            return False
+        return bool(row) and row[0] == SCORECARD_LOGIC_REVISION
+
+    def _store_revision(self) -> None:
+        """Stamp the revision a completed FULL pass just validated.  Only
+        called after every stage returned, so a failed pass leaves the
+        interlock open and the next pass is FULL again."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO scorecard_state (key, value)
+                   VALUES ('logic_revision', ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (SCORECARD_LOGIC_REVISION,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _gate_results(self, conn) -> set[str]:
+        """capture_results gate — settled game_ids, or an empty set when
+        the gate is off.
+
+        THE EXACT INPUT TEST: capture_results derives a result from the
+        snapshots of ONE game row (`WHERE game_id = ?`).  It stores
+        result_at = the last of those snapshots, so `result_at ==
+        max(captured_at)` proves the stored verdict was derived from
+        precisely the snapshot list present now — repeating the identical
+        predicate over the identical list cannot change the verdict
+        (OK, UNKNOWN or the NULL finals that accompany them).
+
+        Both directions of inequality keep the game UNSETTLED: a newer
+        snapshot (history grew — the reason UNKNOWN rows are re-verified
+        each run) and an OLDER one (the verdict came from a sibling
+        `base#iN` chain, which this stage never reads — preserving the
+        sweep's existing treatment of chained verdicts).
+        """
+        if not self._gate_active(conn):
+            return set()
+        max_snap = _max_ts_by_game(conn, "snapshots")
+        cut = _ago(_settle_grace_s())
+        out: set[str] = set()
+        for sid, status, result_at in conn.execute(
+                "SELECT source_game_id, final_result_status, result_at "
+                "FROM game_results"):
+            if status not in ("OK", "UNKNOWN"):
+                continue                      # INVALID is final and skipped
+            if result_at != max_snap.get(sid):
+                continue                      # chained verdict or grown history
+            if result_at > cut:
+                continue                      # newer than the grace margin
+            out.add(sid)
+        return out
+
+    def _gate_market(self, conn) -> set[str]:
+        """record_market_history gate.
+
+        The row upserts values derived from game_results + games +
+        snapshots + market_observations (OLV/CLV fallback) + predictions
+        (model_versions).  Any one of them newer than the row's own
+        recorded_at means the derivation read a smaller input set than the
+        one present now, so the stored row cannot be trusted — reprocess.
+        A changed analytics timezone invalidates the local hour/day/date
+        fields under the same rule.
+        The final result itself is an input: settle_worker can re-settle a
+        game from a sibling `base#iN` chain, which rewrites game_results
+        WITHOUT adding a snapshot to the base row, so the result's own
+        result_at is compared as well.
+        """
+        if not self._gate_active(conn):
+            return set()
+        max_snap = _max_ts_by_game(conn, "snapshots")
+        max_obs = _max_ts_by_game(conn, "market_observations")
+        max_pred = _max_ts_by_game(conn, "predictions", "predicted_at")
+        cut = _ago(_settle_grace_s())
+        try:
+            tz_name = analytics_tz()
+        except Exception:
+            return set()                      # unknown basis -> full sweep
+        out: set[str] = set()
+        for sid, rec, tz, result_at in conn.execute(
+                """SELECT m.source_game_id, m.recorded_at, m.analytics_tz,
+                          r.result_at
+                     FROM market_history m
+                     JOIN game_results r
+                       ON r.source_game_id = m.source_game_id
+                    WHERE r.final_result_status = 'OK'"""):
+            if tz != tz_name:
+                continue
+            if result_at > rec:
+                continue                      # result re-settled after the write
+            if max_snap.get(sid, "") > rec or max_obs.get(sid, "") > rec \
+                    or max_pred.get(sid, "") > rec:
+                continue                      # an input moved after the write
+            if max(max_snap.get(sid) or "", max_obs.get(sid) or "") > cut:
+                continue                      # inside the grace margin
+            out.add(sid)
+        return out
+
+    def _gate_checkpoints(self, conn) -> set[str]:
+        """record_checkpoint_market gate.
+
+        PROVABLY SUFFICIENT, by construction rather than by re-derivation
+        identity: the checkpoint domain is the FIXED list
+        FIXED_CHECKPOINT_PCTS + [100] — 10 values — and
+        UNIQUE(source_game_id, checkpoint_pct) forbids duplicates.  A game
+        holding all 10 rows therefore has NO row the stage could add, under
+        ANY selection logic, and INSERT OR IGNORE means no existing row can
+        change.  The write is a no-op; nothing else about these rows is even
+        read.
+
+        Deliberately NOT keyed on staleness: a snapshot arriving later (or a
+        line observed later) cannot alter or extend a complete set, because
+        the stage never updates and never deletes.  That is the same
+        immutability contract the table is built on.
+
+        Games with FEWER than the full domain stay in the work set — a pct
+        that fell outside the MAX_DISTANCE_PCT tolerance is still addable —
+        so the sweep keeps its ability to fill in a checkpoint row the
+        current tolerance accepts.  11,178 of 11,573 games are complete;
+        395 stay in the work set.
+
+        A future change to FIXED_CHECKPOINT_PCTS (or to any writer that
+        could UPDATE these rows) changes what "complete" means and must bump
+        SCORECARD_LOGIC_REVISION.
+        """
+        if not self._gate_active(conn):
+            return set()
+        expected = len(FIXED_CHECKPOINT_PCTS) + 1        # 10..90 + 100
+        out: set[str] = set()
+        for sid, n in conn.execute(
+                "SELECT source_game_id, COUNT(*) FROM checkpoint_market "
+                "GROUP BY source_game_id"):
+            if n == expected:
+                out.add(sid)
+        return out
 
     def _init(self) -> None:
         with self._lock:
@@ -1341,10 +1585,12 @@ class Scorecard:
         (ordering, identity, monotonicity) is recorded as UNKNOWN and
         never scored.
         """
-        stats = {"checked": 0, "ok": 0, "unknown": 0, "invalid": 0}
+        stats = {"checked": 0, "ok": 0, "unknown": 0, "invalid": 0,
+                 "skipped_settled": 0}
         with self._lock:
             conn = self._connect()
             try:
+                settled = self._gate_results(conn)
                 games = conn.execute(
                     "SELECT id, source_game_id, classification, status FROM games"
                 ).fetchall()
@@ -1354,6 +1600,9 @@ class Scorecard:
                     # holding one tx across every game in the table.
                     conn.commit()
                     if g["status"] != "ended":
+                        continue
+                    if g["source_game_id"] in settled:
+                        stats["skipped_settled"] += 1
                         continue
                     stats["checked"] += 1
                     has = conn.execute(
@@ -1591,10 +1840,11 @@ class Scorecard:
         the configured analytics timezone.  Idempotent upsert — re-runs
         never duplicate.  Fragments/INVALID games never enter the table
         (they would poison the historical base)."""
-        stats = {"recorded": 0, "skipped_fragment": 0}
+        stats = {"recorded": 0, "skipped_fragment": 0, "skipped_settled": 0}
         with self._lock:
             conn = self._connect()
             try:
+                settled = self._gate_market(conn)
                 comp = {}
                 for r in conn.execute(
                         f"""SELECT g.source_game_id,
@@ -1620,6 +1870,9 @@ class Scorecard:
                     # Per-game commit: release the write lock after each
                     # market_history upsert (see record_predictions).
                     conn.commit()
+                    if r["source_game_id"] in settled:
+                        stats["skipped_settled"] += 1
+                        continue
                     n, starts_q1 = comp.get(r["source_game_id"], (0, 0))
                     if not (n >= 15 and starts_q1):
                         stats["skipped_fragment"] += 1
@@ -1743,11 +1996,13 @@ class Scorecard:
         contaminated games never enter (they would poison the edge
         statistics).
         """
-        stats = {"checked": 0, "recorded": 0, "skipped_ineligible": 0}
+        stats = {"checked": 0, "recorded": 0, "skipped_ineligible": 0,
+                 "skipped_settled": 0}
         with self._lock:
             conn = self._connect()
             try:
                 _ensure_cm_columns(conn)
+                settled = self._gate_checkpoints(conn)
                 games = conn.execute(
                     f"""SELECT g.id, g.source_game_id, g.classification,
                                (SELECT COUNT(*) FROM snapshots s
@@ -1765,6 +2020,9 @@ class Scorecard:
                     # Per-game commit: release the write lock after each
                     # game's checkpoint_market rows (see record_predictions).
                     conn.commit()
+                    if g["source_game_id"] in settled:
+                        stats["skipped_settled"] += 1
+                        continue
                     stats["checked"] += 1
                     if not (g["n"] >= 15 and g["starts_q1"] and not g["bad_quality"]):
                         stats["skipped_ineligible"] += 1
@@ -1895,16 +2153,42 @@ class Scorecard:
 
     # ── Run all phases ─────────────────────────────────────────────
 
-    def run(self) -> dict[str, Any]:
+    def run(self, *, incremental: Optional[bool] = None) -> dict[str, Any]:
+        """One full accounting pass.
+
+        ``incremental`` selects the gate policy for THIS pass:
+          None (default)  use the gate when the revision interlock allows
+          True            same as None (the interlock always wins)
+          False           FORCE a full sweep — every game re-derived
+
+        The gate only ever skips games whose stored rows are provably a
+        no-op to re-derive (see _gate_results / _gate_market /
+        _gate_checkpoints).  The revision is stamped only after every
+        stage returns, so an interrupted or failed pass leaves the next
+        pass FULL.
+        """
         frozen = _prediction_freeze_active()
-        rec = self.record_predictions()
-        fx = self.record_fixed_checkpoints()
-        res = self.capture_results()
-        sco = self.score_all()
-        mkt = self.record_market_history()
-        cm = self.record_checkpoint_market()
+        prev_force = self._force_full
+        self._force_full = (incremental is False)
+        try:
+            probe = self._connect()
+            try:
+                gated = self._gate_active(probe)
+            finally:
+                probe.close()
+            rec = self.record_predictions()
+            fx = self.record_fixed_checkpoints()
+            res = self.capture_results()
+            sco = self.score_all()
+            mkt = self.record_market_history()
+            cm = self.record_checkpoint_market()
+            self._store_revision()
+        finally:
+            self._force_full = prev_force
         return {"recorded": rec, "fixed": fx, "results": res,
                 "scored": sco, "market": mkt, "checkpoint_market": cm,
+                "incremental": gated,
+                "revision": SCORECARD_LOGIC_REVISION,
                 "prediction_freeze": frozen,
                 "prediction_freeze_reason": FREEZE_REASON if frozen else None}
 
