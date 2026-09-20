@@ -23,7 +23,12 @@ import contextvars
 from typing import Optional
 
 import structlog
-from structlog.processors import JSONRenderer, TimeStamper, StackInfoRenderer
+from structlog.processors import (
+    JSONRenderer,
+    StackInfoRenderer,
+    TimeStamper,
+    format_exc_info,
+)
 from structlog.stdlib import ProcessorFormatter, BoundLogger
 
 # ── Correlation ID context ────────────────────────────────────────────
@@ -58,6 +63,12 @@ def _shared_processors(timestamp: bool = True) -> list:
         structlog.dev.set_exc_info,
         _add_correlation_id,
         structlog.processors.UnicodeDecoder(),
+        # MUST follow set_exc_info, which only sets a BOOLEAN flag; this
+        # consumes the flag and emits the actual traceback in its place.
+        # Without it every exception rendered as a bare `"exc_info": true`
+        # and its traceback was silently dropped — which is why the 17:46
+        # scorecard_run_failed crash of 2026-09-20 was undiagnosable.
+        format_exc_info,
     ]
     if timestamp:
         procs.insert(0, TimeStamper(fmt="iso", utc=True))
