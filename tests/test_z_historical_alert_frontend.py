@@ -114,10 +114,14 @@ def test_alert_label_is_distinct(client):
     context indicator owns UNDER CONDITION — so a user never reads two
     different conditions under one name."""
     js = _js(client)
-    # exactly one LABEL claims the actionable name (the "UNDER ALERTS"
-    # section comment is not a label, hence the em-dash-anchored count)
-    assert js.count("UNDER ALERT — ") == 1, js.count("UNDER ALERT — ")
+    # the production checkpoint headline claims the actionable name; the Q3
+    # BREAK headline (directive 2026-09-18) is the SAME alert's second
+    # checkpoint kind in the SAME panel, not a second condition under one
+    # name — so the count is anchored to the checkpoint form (the "UNDER
+    # ALERTS" section comment is not a label).
+    assert js.count("UNDER ALERT — ") == 2, js.count("UNDER ALERT — ")
     assert '🔥 UNDER ALERT — ${a.checkpoint}%' in js
+    assert '🔥 UNDER ALERT — Q3 BREAK' in js
     # no historical tier may claim the actionable name
     for stale in ("UNDER ALERT — STRONG", "UNDER ALERT — VERY STRONG"):
         assert stale not in js, stale
@@ -158,7 +162,10 @@ def test_no_over_anywhere(client):
     alert direction.  The active-alert surface must stay OVER-free.
     """
     js = _js(client)
-    active = js[js.index("activeAlertsHTML"):js.index("historyAlertsHTML")]
+    # the ACTIVE surface proper ends where the resulted-panel FILTERS block
+    # begins (display controls whose labels legitimately name the verdicts)
+    active = js[js.index("activeAlertsHTML")
+                :js.index("RESULTED-PANEL FILTERS")]
     assert "OVER" not in active
     # the removed opposite-direction context classifier is gone
     assert "zContextBin" not in js

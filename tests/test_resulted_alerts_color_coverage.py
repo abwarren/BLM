@@ -280,7 +280,9 @@ def test_zero_uncoloured_resulted_rows_across_every_status(tmp_path):
 
 @node
 def test_genuinely_pending_rows_render_pending_styling_only(tmp_path):
-    """A record with no settled outcome (game still running) renders PENDING
+    """A record with no settled outcome renders the explicit no-verdict word
+    — PENDING while it may still settle (unresolved), NO FINAL once the
+    record has resolved and the backend proves neither final nor line —
     with no verdict colour class and no fake verdict word."""
     r = _run(_js(), tmp_path, """
       seed([rec(undefined)]);                       // no outcome block at all
@@ -295,9 +297,15 @@ def test_genuinely_pending_rows_render_pending_styling_only(tmp_path):
     for html in (r["noneHtml"], r["nullHtml"], r["pendingHtml"]):
         assert colourClasses(rowClassOf(html)) == [], html
         assert "al-under" not in html and "al-over" not in html, html
+    # the fixture records are RESOLVED (this is the resulted panel), so the
+    # no-verdict record shows the explicit NO FINAL state, styled as pending
+    # — while a literal "pending" STATUS is the pending family and words
+    # PENDING.  Neither ever carries a coloured verdict.
     for word in (r["noneWord"], r["pendingWord"]):
-        assert "PENDING" in word and "al-pending" in word, word
+        assert "al-pending" in word, word
         assert "al-outcome" not in word, word    # never a coloured verdict
+    assert "NO FINAL" in r["noneWord"] and "al-nofinal" in r["noneWord"], r
+    assert "PENDING" in r["pendingWord"], r
 
 
 # ══════════════════════════════════════════════════════════════════════

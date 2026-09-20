@@ -35,6 +35,14 @@ when the alert's checkpoint was reached — supplied by the caller from the
 same ``trigger_observation`` authority settlement reads.  It is what the
 frontend shows and what the eventual verdict is measured against; it never
 moves when the market does.
+
+Q3 BREAK (directive 2026-09-18) — an ADDITIONAL checkpoint, additive to and
+never replacing the 75% production trigger above.  The Q3/Q4 break sits at
+exactly 75.0% progress (3 of 4 regulation quarters); the boundary is the
+FIRST observation at/after that progress, so it fires at the Q3-end sentinel
+or the first instants of Q4, never mid-Q3.  The condition is THE SAME:
+``required_pts_per_min > league_average_pace * REQUIRED_MARGIN`` (strict).
+See :func:`q3_break_snapshot` below.
 """
 from __future__ import annotations
 
@@ -53,6 +61,15 @@ ALERT_PROGRESS_PCT = 75.0
 #: REQUIRED must exceed the league average by this RELATIVE margin,
 #: STRICTLY.  Never an absolute pts/min offset.
 REQUIRED_MARGIN = 1.04
+
+# ── Q3 BREAK (directive 2026-09-18) — an ADDITIONAL checkpoint ─────────
+#: The progress the Q3/Q4 break sits at: 3 of 4 regulation quarters.  The
+#: boundary is the FIRST observation at/after this progress — the Q3-end
+#: sentinel or the first instants of Q4, never mid-Q3.
+Q3_BREAK_PROGRESS = 75.0
+#: The Q3_BREAK checkpoint identity — a STRING, deliberately NOT part of
+#: the numeric ``CHECKPOINTS`` tuple (25/50/75 keep their own semantics).
+Q3_BREAK_CHECKPOINT = "Q3_BREAK"
 
 # ── Eligibility vocabulary (LIVE MARKETS ONLY directive, 2026-09-12) ──
 ELIGIBLE_MARKET_LIVE = "market_live"
@@ -195,6 +212,76 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
         #    never rewritten once an alert has activated.
         "trigger_line": _finite(trigger_line),
         "trigger_progress": _finite(trigger_progress),
+        "trigger_captured_at": (trigger_captured_at
+                                if isinstance(trigger_captured_at, str)
+                                else None),
+    }
+
+
+def q3_break_snapshot(score_at_trigger: Any, triggered_line: Any,
+                      league_average_pace: Any, quarter_minutes: Any,
+                      eligible: Any = True,
+                      trigger_progress: Any = None,
+                      trigger_captured_at: Any = None) -> dict:
+    """The Q3_BREAK checkpoint state for one game (directive 2026-09-18).
+
+    The Q3/Q4 break — progress 75.0%, three of four regulation quarters —
+    is an ADDITIONAL checkpoint identity, additive to the production 75%
+    trigger and never a replacement for it.  The CONDITION is the same
+    production rule, applied at the break with the break's own geometry::
+
+        remaining_minutes    = quarter_minutes      (one full quarter left)
+        required_pts_per_min = (triggered_line - score_at_trigger)
+                               / remaining_minutes
+        active = eligible AND required > league_average_pace * 1.04 (STRICT)
+
+    ALL inputs must be finite and ``eligible`` must be True (the caller's
+    genuine-live / LIVE-market / state-freshness gate — it can only
+    suppress, never create).  A missing league reference, a missing or
+    unprovable ``triggered_line``, or any non-finite operand yields
+    ``active=False`` — fail closed, never fabricated.
+
+    ``quarter_minutes`` is the game's OWN classification quarter length
+    (``projection.duration_for(classification)[0]`` — 10 min BETUAL_NBA,
+    12 min CYBER_2K26), never a hardcoded value and never shared across
+    classifications.
+
+    ``triggered_line`` is the FROZEN market total in force at the boundary
+    — the last line observed at-or-before the boundary observation, from
+    the same ``trigger_observation`` authority settlement reads.  The
+    returned snapshot is immutable downstream: it is written once and
+    never rewritten when the market moves later.
+
+    ``checkpoint`` is the string ``"Q3_BREAK"`` — its own identity, never
+    colliding with the numeric checkpoints.
+    """
+    score = _finite(score_at_trigger)
+    line = _finite(triggered_line)
+    league = _finite(league_average_pace)
+    qmin = _finite(quarter_minutes)
+    prog = _finite(trigger_progress)
+    required = None
+    if (line is not None and score is not None and qmin is not None
+            and qmin > 0):
+        required = (line - score) / qmin
+    active = bool(
+        eligible is True
+        and required is not None and league is not None
+        and required > league * REQUIRED_MARGIN
+    )
+    return {
+        "active": active,
+        "checkpoint": Q3_BREAK_CHECKPOINT,
+        "score_at_trigger": score,
+        "triggered_line": line,
+        "remaining_minutes": qmin,
+        "required_pts_per_min": required,
+        "league_average_pace": league,
+        # Derived here, by the same authority that decides ``active``, so
+        # the displayed gap and the verdict can never disagree.
+        "gap": (league - required if required is not None
+                and league is not None else None),
+        "trigger_progress": prog,
         "trigger_captured_at": (trigger_captured_at
                                 if isinstance(trigger_captured_at, str)
                                 else None),

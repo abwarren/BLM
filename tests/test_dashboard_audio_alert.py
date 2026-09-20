@@ -278,7 +278,10 @@ def test_audio_introduces_no_over_and_no_banned_vocabulary(client):
     # "OVER" is reserved for the final-outcome classification of a RESOLVED
     # history record (UNDER ALERT HISTORY — FINAL OUTCOME COLORING);
     # no OVER-direction ALERT exists.  Guard the active-alert surface.
-    active = js[js.index("activeAlertsHTML"):js.index("historyAlertsHTML")]
+    # the ACTIVE surface proper ends where the resulted-panel FILTERS block
+    # begins (display controls whose labels legitimately name the verdicts)
+    active = js[js.index("activeAlertsHTML")
+                :js.index("RESULTED-PANEL FILTERS")]
     assert "OVER" not in active
     low = js.lower()
     for banned in ("edge", "signal", "momentum", "win rate", "probab",

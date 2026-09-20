@@ -946,7 +946,8 @@ def test_active_surface_consumes_the_result_renderer():
     assert "alertResultHTML(a)" in active
     assert "Triggered Line:" in active
     assert "triggered_line" in active
-    assert "PENDING" not in active        # the word lives in the renderer
+    assert "PENDING" not in active.split("RESULTED-PANEL FILTERS")[0]
+        # the word lives in the renderer (and the filter bar's option list)
     assert "alertOutcomeClass(a.outcome)" in active
 
 

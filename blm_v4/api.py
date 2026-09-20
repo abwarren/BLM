@@ -49,10 +49,12 @@ from blm_v4.live_analytics.historical_context import (
     ANALYTICAL_MIN_REMAINING_MINUTES)
 from blm_v4.live_analytics.under_alert import (
     checkpoint_for,
+    q3_break_snapshot,
     under_alert_eligibility,
     under_alert_state,
 )
 from blm_v4.live_analytics.under_outcome import (outcome_status,
+                                                 score_at_observation,
                                                  trigger_observation,
                                                  under_alert_outcome)
 from blm_v4.projection import (clock_minutes, closing_snapshot, duration_for,
@@ -1702,6 +1704,91 @@ def _settled_result_map(source_game_ids: list) -> dict:
     return out
 
 
+# ── CANONICAL TRIGGER-LINE STORE (ruling 2026-09-20) ───────────────────
+# The pace projector's clean_projections store is the canonical source of
+# the FROZEN trigger line (the 218-flip audit found the snapshots series
+# and clean_projections disagreeing at the same boundary instant in 121
+# verified cases).  trigger_observation now takes the projector rows as
+# the primary line feed with the snapshots as fallback; this loader is the
+# ONE place that reads them, batched per poll and TTL-cached like the
+# historical-context block (display-adjacent provenance, immaterial
+# staleness; errors are never cached).
+_PROJ_LINE_CACHE: dict[str, tuple[float, list]] = {}
+_PROJ_LINE_LOCK = threading.Lock()
+_PROJ_LINE_TTL_S = 60.0
+
+
+def _projection_lines_map_uncached(source_game_ids: list) -> dict:
+    """Batched clean_projections line series per game — READ-ONLY,
+    failure-isolated.  Only the fields the line authority consumes are
+    selected (live_total_line, captured_at, progress_pct,
+    elapsed_game_minutes), ordered ascending by capture.  Games without
+    clean_projections rows are simply absent — trigger_observation then
+    falls back to the snapshots series."""
+    ids = [i for i in source_game_ids if i]
+    if not ids:
+        return {}
+    clean_path = _db_path().parent / "blm_metrics_clean.db"
+    if not clean_path.exists():
+        return {}
+    marks = ",".join("?" for _ in ids)
+    try:
+        conn = sqlite3.connect(f"file:{clean_path}?mode=ro", uri=True,
+                               timeout=30)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"SELECT p.source_game_id, p.live_total_line, p.captured_at, "
+                f"p.progress_pct, p.elapsed_game_minutes, "
+                f"o.classification AS classification "
+                f"FROM clean_projections p "
+                f"LEFT JOIN clean_observations o ON o.id = p.observation_id "
+                f"WHERE p.source_game_id IN ({marks}) "
+                f"ORDER BY p.source_game_id, p.captured_at, p.id",
+                ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    out: dict[str, list] = {}
+    for r in rows:
+        out.setdefault(r["source_game_id"], []).append({
+            "live_total_line": r["live_total_line"],
+            "captured_at": r["captured_at"],
+            "progress_pct": r["progress_pct"],
+            "elapsed_game_minutes": r["elapsed_game_minutes"],
+            "classification": r["classification"],
+        })
+    return out
+
+
+def _projection_lines_map(source_game_ids: list) -> dict:
+    """``_projection_lines_map_uncached`` behind a short per-process TTL
+    cache (the historical-context pattern).  Failure semantics unchanged:
+    errors are not cached, so a transient clean-DB failure retries on the
+    next poll."""
+    ids = [i for i in source_game_ids if i]
+    if not ids:
+        return {}
+    now = time.monotonic()
+    with _PROJ_LINE_LOCK:
+        hit = _PROJ_LINE_CACHE.get(ids[0])
+        if hit and now - hit[0] < _PROJ_LINE_TTL_S \
+                and set(ids) <= set(hit[1].keys()):
+            return {i: hit[1][i] for i in ids if i in hit[1]}
+    fresh = _projection_lines_map_uncached(ids)
+    if fresh:
+        with _PROJ_LINE_LOCK:
+            _PROJ_LINE_CACHE[ids[0]] = (now, fresh)
+            if len(_PROJ_LINE_CACHE) > 64:
+                cutoff = now - _PROJ_LINE_TTL_S
+                for k in [k for k, (t, _) in _PROJ_LINE_CACHE.items()
+                          if t < cutoff]:
+                    del _PROJ_LINE_CACHE[k]
+    return {i: fresh[i] for i in ids if i in fresh}
+
+
 @router.get("/live")
 def v4_live(classification: Optional[str] = Query(None)) -> dict:
     """LIVE view — CLEAN post-epoch games ONLY (the frontend's current
@@ -1719,6 +1806,11 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
         # authoritative settled finals (scorecard game_results, OK rows):
         # the backend's game-final data of record for outcome settlement
         settled = _settled_result_map([g["source_game_id"] for g in games])
+        # canonical trigger-line store (ruling 2026-09-20): the pace
+        # projector's clean_projections series per game — the line feed
+        # trigger_observation reads FIRST, snapshots as fallback
+        proj_lines = _projection_lines_map(
+            [g["source_game_id"] for g in games])
         # full post-epoch timeline per game, newest-first (settlement tail
         # preserved even when the timeline exceeds _load_snapshots' window)
         tails = {g["source_game_id"]:
@@ -1766,7 +1858,8 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
         try:
             g["under_alert_outcome"] = under_alert_outcome(
                 rows_asc, g.get("classification"),
-                settled=settled.get(g.get("game_id")))
+                settled=settled.get(g.get("game_id")),
+                projection_rows=proj_lines.get(g.get("game_id")))
         except Exception:
             g["under_alert_outcome"] = {"status": None}
         # The actionable UNDER verdict, computed HERE and consumed verbatim
@@ -1784,7 +1877,9 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
             # Derived here, OUTSIDE the market gate below: the gate decides
             # liveness and never re-selects a line.
             cp = checkpoint_for(proj.get("progress_pct"))
-            trig = (trigger_observation(rows_asc, cp, g.get("classification"))
+            trig = (trigger_observation(rows_asc, cp, g.get("classification"),
+                                        projection_rows=proj_lines.get(
+                                            g.get("game_id")))
                     if cp is not None else {})
             trigger = {"trigger_line": trig.get("total_line"),
                        "trigger_progress": trig.get("progress"),
@@ -1822,11 +1917,44 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 entry.get("avg_pace"), proj.get("progress_pct"),
                 entry.get("games"), eligible=eligibility["eligible"],
                 **trigger)
+            # ── Q3 BREAK checkpoint (directive 2026-09-18) — ADDITIVE, a
+            # sibling of the production alert above, never a replacement.
+            # The Q3/Q4 break sits at exactly 75.0% progress (3 of 4
+            # regulation quarters); the SAME eligibility verdict — genuine-
+            # live, LIVE market, stale-state — that governs the production
+            # alert governs this one.  The frozen line and the score BOTH
+            # come from the boundary observation trigger_observation
+            # attributes (score_at_observation reads the SAME row), so line
+            # and score can never come from different moments.  The
+            # condition is the production rule at the break's own geometry:
+            # required = (line - Q3-end score) / one quarter, STRICTLY above
+            # the game's OWN competition reference * 1.04.  Fail closed on
+            # any missing operand — no boundary, no line, no league
+            # reference, no alert.
+            _qmin, _full = duration_for(g.get("classification"))
+            _tq3 = (trigger_observation(rows_asc, 75, g.get("classification"),
+                                        projection_rows=proj_lines.get(
+                                            g.get("game_id")))
+                    if _full else {})
+            g["under_alert_q3_break"] = q3_break_snapshot(
+                score_at_observation(rows_asc, 75, g.get("classification")),
+                _tq3.get("total_line"),
+                entry.get("avg_pace"),
+                _qmin,
+                eligible=eligibility["eligible"],
+                trigger_progress=(
+                    _tq3.get("progress") if _tq3 else None),
+                trigger_captured_at=(
+                    _tq3.get("captured_at") if _tq3 else None))
         except Exception:
             g["under_alert_eligibility"] = under_alert_eligibility(
                 None, False, None)
             g["under_alert"] = under_alert_state(
                 None, None, None, eligible=False)
+            # Q3 BREAK fails closed identically — an absent block is never
+            # served, a present-but-inactive one is.
+            g["under_alert_q3_break"] = q3_break_snapshot(
+                None, None, None, None, eligible=False)
         # ── FINAL RESULT STATE (directive EVERY ENDED GAME ONCE RESULTED,
         # 2026-09-13): how an ENDED game is coloured once its authoritative
         # final is known.  Deliberately SEPARATE from the live alert above —
@@ -1934,6 +2062,7 @@ def v4_alert_outcomes(
             f"SELECT source_game_id, classification FROM games "
             f"WHERE source_game_id IN ({marks})", wanted)}
         settled = _settled_result_map([i for i in wanted if i in meta])
+        proj_lines = _projection_lines_map(wanted)
         outcomes: dict = {}
         for gid in wanted:
             cls = meta.get(gid)
@@ -1941,8 +2070,9 @@ def v4_alert_outcomes(
                 continue        # unknown game — no block is invented for it
             try:
                 rows = list(reversed(_load_snapshot_tail(conn, gid, limit=500)))
-                outcomes[gid] = under_alert_outcome(rows, cls,
-                                                    settled=settled.get(gid))
+                outcomes[gid] = under_alert_outcome(
+                    rows, cls, settled=settled.get(gid),
+                    projection_rows=proj_lines.get(gid))
             except Exception:
                 # failure-isolated exactly like /live: one unreadable game
                 # yields no block rather than breaking the batch

@@ -471,6 +471,11 @@ details > summary::marker { content: ""; }
    condition: visible, honest, never styled as a validated alert */
 .al-audit { color: #fbbf24; font-size: 11.5px; font-style: italic; }
 
+/* RE-FIRE tag — a re-armed activation of the SAME record identity.  The
+   bet and its settle line stay pinned to the FIRST trigger; the tag is
+   information, never a second bet or a second settle line. */
+.al-refire { color: #60a5fa; font-size: 11.5px; font-style: italic; }
+
 /* ── UNDER ALERT HISTORY — final-outcome coloring ─────────────
    GREEN = successful UNDER (final total below the trigger line),
    RED   = OVER, neutral = PUSH, active = the existing amber row.
@@ -490,6 +495,33 @@ details > summary::marker { content: ""; }
 .al-row.al-unknown .al-headline { color: #f59e0b; }
 .al-unknown .al-outcome, .al-row.al-unknown .al-result { color: #f59e0b; }
 .al-pending { color: var(--muted, #94a3b8); font-weight: 700; letter-spacing: .03em; }
+/* UNPROVABLE-RESULT states — explicit words for a row that can carry no
+   verdict: NO LINE (final provable, no market line ever observed at the
+   checkpoint boundary) and NO FINAL (resolved, backend proves neither).
+   Display states only — deliberately NOT verdict colours: a row here has no
+   settled verdict, so it never receives a green/red/neutral verdict class. */
+.al-noline, .al-row .al-outcome[data-noline] { color: #fbbf24; }
+.al-nofinal, .al-row .al-outcome[data-nofinal] { color: var(--muted, #94a3b8); }
+
+/* ── RESULTED-PANEL FILTER BAR — display-only controls ──────────
+   Selects/inputs filter WHICH rows the panel renders; they never mutate the
+   stores or settlement.  Styled to read as a tool strip, not an alert. */
+.rf-bar { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 14px;
+  padding: 8px 10px; border: 1px solid var(--line, rgba(148, 163, 184, .25));
+  border-radius: 8px; background: var(--panel2, #0d1420); margin-bottom: 8px; }
+.rf-item { display: flex; flex-direction: column; gap: 3px;
+  font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--muted, #94a3b8); }
+.rf-item select, .rf-item input {
+  background: var(--panel, #0b111c); color: var(--fg, #e2e8f0);
+  border: 1px solid var(--border, #1e2a3a); border-radius: 6px;
+  padding: 4px 7px; font: inherit; font-size: 12.5px; min-width: 120px;
+  color-scheme: dark; }
+.rf-clear { background: none; border: 1px solid var(--border, #1e2a3a);
+  color: var(--fg, #e2e8f0); border-radius: 6px; padding: 5px 10px;
+  font: inherit; font-size: 12px; cursor: pointer; }
+.rf-clear:hover { border-color: var(--muted, #94a3b8); }
+.rf-note { font-size: 11px; margin-left: auto; }
 .al-outcome { font-weight: 700; letter-spacing: .03em; }
 .al-under .al-outcome { color: #22c55e; }
 .al-over .al-outcome { color: #ef4444; }

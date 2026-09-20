@@ -320,6 +320,30 @@ const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
      anything else → al-unknown (the explicit fallback state — an
        unknown/malformed status is never silently rendered as an uncoloured
        settled row and never faked as a verdict) */
+/* UNPROVABLE-RESULT logging — a settled-looking row that still carries no
+   verdict is never silent: each distinct cause is reported once per page load
+   (console only — never a visual or data mutation) so the data-path defect
+   behind an unclassified row is visible in the browser log for diagnosis.
+     NO LINE  — the game HAS a final, but no market line was ever observed by
+                the checkpoint boundary, so no verdict can exist for that line
+     NO FINAL — the record has resolved (its game ended / left the window)
+                and NEITHER a final NOR a line is provable
+   A record that may still settle (nothing resolved yet) is ordinary PENDING
+   and is never logged — that is the normal pre-outcome state. */
+const UNPROVABLE_WARNED = new Set();
+function warnUnprovableResult(where, kind, rec) {
+  try {
+    const key = kind + ":" + (rec && (rec.game_id != null ? rec.game_id : rec.id));
+    if (UNPROVABLE_WARNED.has(key)) return;
+    UNPROVABLE_WARNED.add(key);
+    console.warn(`[alerts] ${where}: ${kind}`
+      + ` — game ${JSON.stringify(rec && rec.game_id)} checkpoint`
+      + ` ${JSON.stringify(rec && rec.checkpoint)}`
+      + ` triggered ${JSON.stringify(rec && rec.triggered_at)}`
+      + `: verdict unprovable (no market line at the checkpoint boundary)`);
+  } catch (_) { /* diagnostics must never break rendering */ }
+}
+
 function resultColorClass(status) {
   const s = String(status == null ? "" : status).trim()
     .replace(/^[\"'`]+|[\"'`]+$/g, "").trim().toLowerCase();
@@ -359,15 +383,43 @@ function warnUnknownResult(where, status) {
   } catch (_) { /* diagnostics must never break rendering */ }
 }
 
-/* One VERDICT state for every record that carries a status — the result
-   line's colour AND word, and the row's class, all come from this, so a
-   RESULTED row can never render without its result colour:
+/* One VERDICT state for every record — the result line's colour AND word,
+   and the row's class, all come from this, so a RESULTED row can never
+   render without its result colour:
      under/over/push → the verdict class + word
      anything else   → al-unknown + RESULT UNKNOWN (explicit fallback state)
-   Null only while a record has NO status at all (game not yet finished) —
-   that is a genuinely PENDING row, not a bypassed result. */
+     no status at all → the explicit UNPROVABLE states (NO LINE / NO FINAL /
+       PENDING — see alertVerdictStateFor), never an anonymous blank */
 function alertVerdictState(oc) {
-  if (!oc || oc.status == null) return null;   // no status at all — PENDING
+  return alertVerdictStateFor(oc, null);
+}
+
+/* The FULL verdict state, with the two UNPROVABLE-RESULT refinements: a
+   record whose status is null is not left as an anonymous blank — the block's
+   own fields say WHY there is no verdict, and the row shows that state
+   explicitly instead of looking like an unstyled settled row.
+     status != null             → the verdict (coloured; unchanged rule)
+     status == null + final     → NO LINE  (final provable, line never
+                                  observed at the boundary — a real cause,
+                                  logged once per game, never colourable)
+     status == null, resolved   → NO FINAL (the record has closed and the
+                                  backend still proves neither final nor line)
+     status == null, unresolved → PENDING  (may still settle — never logged)
+   Every branch here is still the PENDING family for COLOURING: none of these
+   rows ever receives a verdict colour class, so the acceptance invariant
+   (a colour only from a settled verdict) is untouched. */
+function alertVerdictStateFor(oc, why) {
+  if (!oc || oc.status == null) {
+    if (oc && oc.final_total != null) {
+      if (why && why.onUnprovable) why.onUnprovable("NO LINE", why.rec);
+      return { cls: null, word: "NO LINE", kind: "noline" };
+    }
+    if (why && why.resolved) {
+      if (why && why.onUnprovable) why.onUnprovable("NO FINAL", why.rec);
+      return { cls: null, word: "NO FINAL", kind: "nofinal" };
+    }
+    return { cls: null, word: "PENDING" };   // may still settle
+  }
   const cls = resultColorClass(oc.status);
   if (cls === "al-unknown") {
     warnUnknownResult("resulted alert", oc.status);
@@ -399,7 +451,21 @@ function alertOutcomeClass(oc) {
    came from, side by side. */
 function alertOutcomeLine(rec) {
   const oc = rec.outcome;
-  if (!oc || oc.status == null) return "";
+  // EXPLICIT UNPROVABLE-RESULT STATES: a resolved record with no verdict is
+  // never an empty line — it states WHY there is no verdict (NO LINE / NO
+  // FINAL) instead of rendering as a bare, unstyled row.
+  if (!oc || oc.status == null) {
+    const st2 = alertVerdictStateFor(oc, { resolved: !!rec.resolved_at,
+      rec, onUnprovable: (kind, r) => warnUnprovableResult(
+        "resulted alert", kind, r) });
+    return `<div class="al-line"><span class="al-outcome"
+      ${st2.kind === "noline" ? "data-noline" : ""}
+      ${st2.kind === "nofinal" ? "data-nofinal" : ""}
+      >${st2.word}</span>${st2.kind === "noline" && oc.final_total != null
+      ? ` · Final: <span class="al-num">${
+        ((v) => (v == null || !isFinite(v)) ? "–" : v.toFixed(1))(
+          oc.final_total)}</span> · no line captured` : ""}</div>`;
+  }
   const t = (v) => (v == null || !isFinite(v)) ? "–" : v.toFixed(1);
   const st = alertVerdictState(oc);
   const line = triggeredLineOf(rec);
@@ -422,12 +488,15 @@ function alertOutcomeLine(rec) {
    live line is NEVER used to infer or imply a result. */
 function alertResultHTML(rec) {
   const oc = rec && rec.outcome;
-  const st = alertVerdictState(oc);
-  if (!st) {
+  const st = alertVerdictStateFor(oc, { resolved: !!(rec && rec.resolved_at),
+    rec, onUnprovable: (kind, r) => warnUnprovableResult(
+      "active alert", kind, r) });
+  if (!st || (st.cls == null && !st.kind)) {
     return `<span class="al-pending">PENDING</span>`;
   }
   if (st.cls == null) {
-    return `<span class="al-pending">${st.word}</span>`;   // pending family
+    return `<span class="al-pending ${st.kind === "noline" ? "al-noline"
+      : st.kind === "nofinal" ? "al-nofinal" : ""}">${st.word}</span>`;
   }
   const t = (v) => (v == null || !isFinite(v)) ? "–" : v.toFixed(1);
   const word = st.word;
@@ -596,6 +665,251 @@ function syncActiveSealed() {
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   Q3 BREAK UNDER ALERT (directive 2026-09-18) — a SECOND checkpoint kind.
+   The Q3/Q4 break sits at exactly 75.0% progress; the backend evaluates
+   the SAME production condition there (required = (frozen line − Q3-end
+   score) / one quarter, STRICTLY above the game's own league average ×
+   1.04) and serves it per game as `under_alert_q3_break`.  The browser
+   consumes that verdict verbatim — it NEVER re-derives the condition.
+
+   The store is deliberately SEPARATE from UNDER_ALERTS: the production
+   sweep closes an active record when the checkpoint passed (75 → beyond
+   75), which for the break is one tick later — same numbers, different
+   identity.  Q3 records carry checkpoint "Q3_BREAK" (a string), their own
+   rule stamp, their own localStorage key, and are reconciled by the same
+   lifecycle (INACTIVE → ACTIVE → RESOLVED, one record per identity,
+   FALSE→TRUE opens, TRUE→TRUE refreshes, TRUE→FALSE resolves, never
+   deleted, never duplicated).
+   ═══════════════════════════════════════════════════════════════════ */
+const Q3B_ALERT_RULE_ID = "q3-break-margin-2026-09-18";
+const Q3B_ALERT_HISTORY_KEY = "pz.underAlertHistoryQ3Break";
+const Q3B_ALERTS = { active: new Map(), history: [] };
+const q3bAlertId = (gameId) => `${gameId}|Q3_BREAK`;
+
+function loadQ3BreakHistory() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(Q3B_ALERT_HISTORY_KEY) || "[]");
+    const list = Array.isArray(arr) ? arr : [];
+    const first = new Map();
+    for (const r of list) {
+      const prev = first.get(r.id);
+      if (!prev || Date.parse(r.triggered_at || 0)
+        < Date.parse(prev.triggered_at || 0)) first.set(r.id, r);
+    }
+    Q3B_ALERTS.history = Array.from(first.values());
+  } catch (_) { Q3B_ALERTS.history = []; }
+}
+function saveQ3BreakHistory() {
+  try {
+    localStorage.setItem(Q3B_ALERT_HISTORY_KEY,
+      JSON.stringify(Q3B_ALERTS.history.slice(-ALERT_HISTORY_MAX)));
+  } catch (_) { /* storage unavailable — history stays in memory */ }
+}
+
+function q3BreakValues(g, qb, labels) {
+  return {
+    checkpoint: qb.checkpoint,
+    league: (labels && labels[g.competition_slug]) || g.competition_slug || "—",
+    competition_slug: g.competition_slug || null,
+    home_team: g.home_team || "",
+    away_team: g.away_team || "",
+    // the condition's OWN numbers, served by the backend and consumed
+    // verbatim — never recomputed here
+    score_at_trigger: qb.score_at_trigger,
+    triggered_line: qb.triggered_line,
+    remaining_minutes: qb.remaining_minutes,
+    required_pts_per_min: qb.required_pts_per_min,
+    league_average_pace: qb.league_average_pace,
+    pace_gap: qb.gap,
+    required_vs_league_avg_pct: qb.league_average_pace
+      ? (qb.required_pts_per_min - qb.league_average_pace)
+        / qb.league_average_pace * 100 : null,
+    trigger_progress: qb.trigger_progress,
+    trigger_captured_at: qb.trigger_captured_at,
+    outcome: ((g.under_alert_outcome || {}).by_checkpoint || {})["Q3_BREAK"]
+      || null,
+  };
+}
+
+function reconcileQ3BreakAlerts(games, labels) {
+  const now = Date.now();
+  const trueNow = new Set();
+  // game-over lifecycle reconciliation — the SAME audit §9 shape as the
+  // production store: consumes the backend's authoritative state verdict,
+  // can only CLOSE, never decides eligibility.
+  const gameOverIds = new Set();
+  for (const g of games || []) {
+    const reason = String((g && g.live_reason) || "");
+    const over = (g && (g.status === "ended" || g.live === false
+      || reason === "game_finished" || reason.startsWith("terminal_")));
+    if (over) gameOverIds.add(g.game_id);
+  }
+  for (const [id, act] of Array.from(Q3B_ALERTS.active)) {
+    if (!gameOverIds.has(act.game_id)) continue;
+    q3Close(id, act, { live: false, reason: "game_finished" }, now);
+  }
+  for (const g of games || []) {
+    const qb = g.under_alert_q3_break || {};
+    const gameOver = gameOverIds.has(g.game_id);
+    const ok = qb.checkpoint === "Q3_BREAK" && qb.active === true && !gameOver;
+    if (!ok) continue;
+    const id = q3bAlertId(g.game_id);
+    trueNow.add(id);
+    const vals = q3BreakValues(g, qb, labels);
+    const act = Q3B_ALERTS.active.get(id);
+    if (act) {
+      // TRUE → TRUE — refresh the ACTIVE display values only; the history
+      // record keeps its original trigger snapshot untouched
+      Object.assign(act, vals);
+      act.updated_at = new Date(now).toISOString();
+      continue;
+    }
+    // FALSE → TRUE — ONE record per identity, EVER: reopen resolved ones,
+    // open only brand-new identities (sealed line, sealed verdict)
+    let rec = Q3B_ALERTS.history.find((r) => r.id === id);
+    if (!rec) {
+      rec = Object.assign({
+        id, game_id: g.game_id,
+        triggered_at: new Date(now).toISOString(),
+        triggered_line: null,
+        resolved_at: null, duration_ms: null, resolved_reason: null,
+        alert_rule: Q3B_ALERT_RULE_ID,
+      }, vals);
+      sealTriggeredLine(rec, vals.triggered_line);
+      sealOutcome(rec, vals.outcome);
+      Q3B_ALERTS.history.push(rec);
+      saveQ3BreakHistory();
+    } else if (rec.resolved_at) {
+      // RE-FIRE TAG (policy 2026-09-20): same rule as the 75% records —
+      // a re-armed Q3 break is counted on the SAME record, never a new one.
+      rec.refire_count = (rec.refire_count || 0) + 1;
+      rec.last_refire_at = new Date(now).toISOString();
+      rec.resolved_at = null;
+      rec.duration_ms = null;
+      rec.resolved_reason = null;
+      saveQ3BreakHistory();
+    }
+    sealTriggeredLine(rec, vals.triggered_line);
+    sealOutcome(rec, vals.outcome);
+    Q3B_ALERTS.active.set(id, Object.assign({
+      id, game_id: g.game_id, triggered_at: rec.triggered_at,
+      updated_at: new Date(now).toISOString(),
+    }, vals, {
+      triggered_line: rec.triggered_line == null ? null : rec.triggered_line,
+      outcome: rec.outcome || null,
+    }));
+  }
+  // TRUE → FALSE — resolve; history is never removed
+  for (const [id, act] of Array.from(Q3B_ALERTS.active)) {
+    if (trueNow.has(id)) continue;
+    q3Close(id, act, null, now);
+  }
+  q3SyncActiveSealed();
+}
+
+function q3SyncActiveSealed() {
+  for (const [id, act] of Q3B_ALERTS.active) {
+    const rec = Q3B_ALERTS.history.find((r) => r.id === id);
+    if (!rec) continue;
+    if (act.triggered_line !== rec.triggered_line) {
+      act.triggered_line = rec.triggered_line == null
+        ? null : rec.triggered_line;
+    }
+    if (act.outcome !== rec.outcome) act.outcome = rec.outcome || null;
+  }
+}
+
+function q3Close(id, act, game, now) {
+  Q3B_ALERTS.active.delete(id);
+  const rec = Q3B_ALERTS.history.find((r) => r.id === id && !r.resolved_at);
+  if (!rec) return;
+  let reason = "condition_false";
+  if (!game) reason = "no_longer_monitored";
+  else if (!game.live) reason = game.reason || "not_live";
+  rec.resolved_at = new Date(now).toISOString();
+  rec.duration_ms = now - Date.parse(act.triggered_at);
+  rec.resolved_reason = reason;
+  let oc = act.outcome || null;
+  if (oc) {
+    if (oc.final_total == null && oc.status != null) {
+      oc = Object.assign({}, oc, {
+        resolved_at: rec.resolved_at, duration_ms: rec.duration_ms });
+    } else if (oc.duration_ms == null) {
+      oc = Object.assign({}, oc, { duration_ms: rec.duration_ms });
+    }
+  }
+  sealOutcome(rec, oc);
+  sealTriggeredLine(rec, act.triggered_line != null
+    ? act.triggered_line : triggeredLineOf(oc));
+  saveQ3BreakHistory();
+}
+
+/* FINAL OUTCOME delivery for Q3 BREAK records — the SAME seal, the SAME
+   per-checkpoint authority (by_checkpoint["Q3_BREAK"]), consumed from the
+   same poll and the same out-of-window hydration. */
+function applyQ3BreakOutcomes(games) {
+  let changed = false;
+  for (const g of games || []) {
+    const ocBlock = g.under_alert_outcome;
+    if (!ocBlock) continue;
+    const one = (ocBlock.by_checkpoint || {})["Q3_BREAK"];
+    if (!one) continue;
+    const auth = ocBlock.authoritative === true;
+    for (const r of Q3B_ALERTS.history) {
+      if (r.game_id !== g.game_id) continue;
+      if (sealTriggeredLine(r, triggeredLineOf(one))) changed = true;
+      if (one.status == null) continue;
+      const merged = Object.assign({}, one, { authoritative: auth },
+        (r.duration_ms != null && one.duration_ms == null)
+          ? { duration_ms: r.duration_ms } : {});
+      if (sealOutcome(r, merged)) changed = true;
+      if (correctOutcome(r, merged)) changed = true;
+    }
+  }
+  if (changed) saveQ3BreakHistory();
+}
+
+function q3ActiveRowHTML(a) {
+  const ocClass = alertOutcomeClass(a.outcome);
+  return `
+    <li class="al-row${ocClass ? " " + ocClass : ""}" data-alert-id="${esc(a.id)}">
+      <div class="al-headline">🔥 UNDER ALERT — Q3 BREAK</div>
+      <div class="al-ident">${a.home_team || a.away_team
+        ? `${esc(a.home_team)} vs ${esc(a.away_team)}` : alertIdent(a)}</div>
+      <div class="al-line">League: <span class="al-num">${esc(a.league)}</span> | Market: <span class="al-num">${UNDER_ALERT_MARKET}</span></div>
+      <div class="al-line">Triggered Line: <span class="al-trigger-line">${num1(a.triggered_line)}</span> <span class="muted">· live market line at the Q3/Q4 break (immutable)</span></div>
+      <div class="al-line">Triggered: <span class="al-num">${fmtTime(a.triggered_at)}</span> | State: <span class="al-num">ACTIVE</span></div>
+      <div class="al-line">Score at Trigger: <span class="al-num">${num1(a.score_at_trigger)}</span> | Required: <span class="al-num">${num2(a.required_pts_per_min)}</span> | League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></div>
+      <div class="al-line">Gap: <span class="al-neg">${num2(a.pace_gap)}</span> <span class="muted">(required ${num1(a.required_vs_league_avg_pct)}% above league avg)</span></div>
+      <div class="al-line">Result: ${alertResultHTML(a)}</div>
+    </li>`;
+}
+
+function q3HistoryRowHTML(rec) {
+  const running = !rec.resolved_at;
+  const dur = running ? (Date.now() - Date.parse(rec.triggered_at)) : rec.duration_ms;
+  const ocClass = alertOutcomeClass(rec.outcome);
+  return `
+    <li class="al-row${running ? "" : " al-resolved"}${ocClass ? " " + ocClass : ""}">
+      <div class="al-ident">[Q3 BREAK] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
+      ${(rec.home_team || rec.away_team)
+        ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
+      ${rec.alert_rule !== Q3B_ALERT_RULE_ID
+        ? `<div class="al-audit">AUDIT · triggered under the superseded condition — not a validated alert under the current rule</div>` : ""}
+      ${(rec.refire_count)
+        ? `<div class="al-refire">RE-FIRED ×${rec.refire_count}${rec.last_refire_at ? ` · last ${fmtTime(rec.last_refire_at)}` : ""} · re-arms are monitoring events — the bet and its settle line stay pinned to the FIRST trigger</div>` : ""}
+      <div class="al-times">
+        <span>Triggered: ${fmtTime(rec.triggered_at)}</span>
+        <span>Ended: ${running ? "—" : fmtTime(rec.resolved_at)}</span>
+        <span>Duration: ${fmtDuration(dur)}${running ? ` <span class="al-running">(still active)</span>` : ""}</span>
+      </div>
+      <div class="al-line">Score at Trigger: <span class="al-num">${num1(rec.score_at_trigger)}</span> | Required: <span class="al-num">${num2(rec.required_pts_per_min)}</span> | Avg: <span class="al-num">${num2(rec.league_average_pace)}</span></div>
+      <div class="al-line">Strength: <span class="al-num">${esc(marginBand(rec.required_pts_per_min, rec.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band (higher = stronger condition)</span></div>
+      ${alertOutcomeLine(rec)}
+    </li>`;
+}
+
 // Every value comes from the authoritative /live payload — the game's own
 // `under_alert` block, evaluated server-side.  Nothing is scraped back out
 // of the rendered page, nothing is recalculated here, and the condition is
@@ -748,7 +1062,13 @@ function reconcileUnderAlerts(games, labels) {
       saveAlertHistory();
     } else if (rec.resolved_at) {
       // same identity re-firing: reopen the SAME record — the checkpoint
-      // itself never drifts, and no duplicate history is created
+      // itself never drifts, and no duplicate history is created.
+      // RE-FIRE TAG (policy 2026-09-20): a re-armed activation is a
+      // monitoring event, never a second bet — count it and stamp when,
+      // so the panel shows which records re-fired without inventing a
+      // second record or a second settle line.
+      rec.refire_count = (rec.refire_count || 0) + 1;
+      rec.last_refire_at = new Date(now).toISOString();
       rec.resolved_at = null;
       rec.duration_ms = null;
       rec.resolved_reason = null;
@@ -900,7 +1220,12 @@ const alertIdent = (r) => `${esc(r.league)} | Game ${esc(r.game_id)}`;
 function activeAlertsHTML() {
   const rows = Array.from(UNDER_ALERTS.active.values())
     .sort((a, b) => b.checkpoint - a.checkpoint);
-  if (!rows.length) {
+  // Q3 BREAK records (directive 2026-09-18) render in the SAME panel — the
+  // actionable surface is one panel, with one row anatomy per checkpoint
+  // kind.  An empty Q3 store changes nothing for the existing rows.
+  const q3rows = Array.from(Q3B_ALERTS.active.values())
+    .sort((a, b) => String(a.triggered_at).localeCompare(String(b.triggered_at)));
+  if (!rows.length && !q3rows.length) {
     return `<div class="alerts-empty">No active UNDER alerts</div>`;
   }
   // The ACTIVE view answers "what needs attention now", so it shows BOTH
@@ -925,10 +1250,25 @@ function activeAlertsHTML() {
         : ""}
       <div class="al-line">Triggered: <span class="al-num">${fmtTime(a.triggered_at)}</span> | State: <span class="al-num">ACTIVE</span></div>
       <div class="al-line">Actual: <span class="al-num">${num2(a.actual_pace)}</span> | Required: <span class="al-num">${num2(a.required_pace)}</span> | League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></div>
+      <div class="al-line">Strength: <span class="al-num">${esc(marginBand(a.required_pace, a.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band</span></div>
       <div class="al-line">Gap: <span class="al-neg">${num2(a.pace_gap)}</span> <span class="muted">(${num1(a.actual_vs_required_pct)}% vs required · ${num1(a.required_vs_league_avg_pct)}% vs avg)</span></div>
       <div class="al-line">Result: ${alertResultHTML(a)}</div>
     </li>`;
-  }).join("") + `</ul>`;
+  }).join("") + q3rows.map(q3ActiveRowHTML).join("") + `</ul>`;
+}
+
+/* Trigger strength — the required/league-avg margin reduced to the four
+   audited bands (analysis_filter_backtest_euro_autopsy_2026-09-20 §A): the
+   descriptive outcome concentrates monotonically in the higher bands, so
+   the band is the single most informative number on the row.  Pure. */
+function marginBand(required, avg) {
+  if (required == null || avg == null || !isFinite(required)
+    || !isFinite(avg) || avg <= 0) return null;
+  const m = required / avg;
+  if (m >= 1.35) return "≥1.35";
+  if (m >= 1.20) return "1.20–1.35";
+  if (m >= 1.10) return "1.10–1.20";
+  return "<1.10";
 }
 
 function historyRowHTML(rec) {
@@ -945,6 +1285,8 @@ function historyRowHTML(rec) {
         ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
       ${rec.alert_rule !== ALERT_RULE_ID
         ? `<div class="al-audit">AUDIT · triggered under the superseded condition — not a validated alert under the current rule</div>` : ""}
+      ${(rec.refire_count)
+        ? `<div class="al-refire">RE-FIRED ×${rec.refire_count}${rec.last_refire_at ? ` · last ${fmtTime(rec.last_refire_at)}` : ""} · re-arms are monitoring events — the bet and its settle line stay pinned to the FIRST trigger</div>` : ""}
       ${rec.outcome_corrected
         ? `<div class="al-corrected">AUTHORITATIVE FINAL-RESULT CORRECTION · the settled final was revised by the backend's verified game result — the triggered line is unchanged</div>` : ""}
       <div class="al-times">
@@ -953,17 +1295,161 @@ function historyRowHTML(rec) {
         <span>Duration: ${fmtDuration(dur)}${running ? ` <span class="al-running">(still active)</span>` : ""}</span>
       </div>
       <div class="al-line">Actual: <span class="al-num">${num2(rec.actual_pace)}</span> | Required: <span class="al-num">${num2(rec.required_pace)}</span> | Avg: <span class="al-num">${num2(rec.league_average_pace)}</span></div>
+      <div class="al-line">Strength: <span class="al-num">${esc(marginBand(rec.required_pace, rec.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band (higher = stronger condition)</span></div>
       ${moved ? `<div class="al-line">Final: <span class="al-num">${num2(rec.final_actual_pace)}</span> | <span class="al-num">${num2(rec.final_required_pace)}</span></div>` : ""}
       ${alertOutcomeLine(rec)}
     </li>`;
 }
 
+/* ── RESULTED-PANEL FILTERS — display state only, never a data filter ──
+   The filters select which RESULTED rows are SHOWN; they never touch the
+   stores, the settlement path (applyFinalOutcomes / sealOutcome /
+   correctOutcome) or the alert condition — a hidden row is still stored,
+   still settled, still persisted, and restoring the filter restores every
+   row.  Filter state lives in module state (not localStorage): a reload
+   resets to unfiltered.
+     league   — the record's own competition slug ('' = all)
+     date     — YYYY-MM-DD in UTC, matched against the record's TRIGGER time
+                (the alert's own timestamp — the one the row displays)
+     time     — HH:MM window in UTC on top of the date (records that fired
+                entirely outside a [from, to] window are hidden; '' = open)
+     result   — the verdict class computed by the SAME classifier the rows
+                render with (alertVerdictStateFor): UNDER / OVER / PUSH map
+                to the settled statuses; NO LINE / NO FINAL map to the
+                explicit unprovable kinds; PENDING covers everything still
+                awaiting settlement; ALL disables the filter.
+   A record LACKING the compared field (e.g. no triggered_at) fails the
+   date/time match and is hidden while that filter is active — a filter
+   narrows strictly, and clearing it restores every record. */
+const RESULT_FILTER_STATES = ["under", "over", "push", "noline", "nofinal",
+  "pending"];
+const resultFilters = { league: "", date: "", timeFrom: "", timeTo: "",
+  result: "" };
+
+/* A record's filter-identity — computed ONCE from the record itself, with
+   the SAME verdict-state function the rendered row uses, so what the filter
+   matches is exactly what the row shows.  Pure: no mutation. */
+function resultedRowFilterFacts(rec) {
+  const st = alertVerdictStateFor(rec.outcome || null,
+    { resolved: !!rec.resolved_at, rec, onUnprovable: () => {} });
+  return {
+    league: rec.competition_slug || "",
+    date: (rec.triggered_at ? String(rec.triggered_at) : "").slice(0, 10),
+    minutes: triggeredMinutesUTC(rec.triggered_at),
+    result: st.kind || (st.cls == null ? "pending"
+      : normalizedResultStatus((rec.outcome || {}).status)),
+  };
+}
+
+/* A record's trigger time as minutes-after-midnight UTC, or null when the
+   record carries no provable trigger timestamp. */
+function triggeredMinutesUTC(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return null;
+  return Math.floor(t / 60000) % 1440;
+}
+
+/* The ONE row-visibility predicate.  A row is shown only when every active
+   filter matches; an undecidable record is never hidden by the filters that
+   need its missing fields. */
+function resultedRowVisible(rec, f) {
+  const facts = resultedRowFilterFacts(rec);
+  if (f.league && facts.league !== f.league) return false;
+  if (f.date && facts.date !== f.date) return false;
+  if (f.result && facts.result !== f.result) return false;
+  if ((f.timeFrom || f.timeTo) && facts.minutes == null) return false;
+  if (f.timeFrom) {
+    const from = timeWindowMinutes(f.timeFrom);
+    if (from != null && facts.minutes < from) return false;
+  }
+  if (f.timeTo) {
+    const to = timeWindowMinutes(f.timeTo);
+    if (to != null && facts.minutes > to) return false;
+  }
+  return true;
+}
+
+/* "HH:MM" → minutes-after-midnight (UTC — the same clock every timestamp
+   on the panel is rendered in), or null when unparseable. */
+function timeWindowMinutes(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || "").trim());
+  if (!m) return null;
+  const h = +m[1], min = +m[2];
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+function anyResultFilterActive(f) {
+  return !!(f.league || f.date || f.timeFrom || f.timeTo || f.result);
+}
+
+function clearResultFilters() {
+  resultFilters.league = "";
+  resultFilters.date = "";
+  resultFilters.timeFrom = "";
+  resultFilters.timeTo = "";
+  resultFilters.result = "";
+}
+
+/* Pure filter application — returns the rows to RENDER.  The stores are
+   never sliced, never reordered, never rewritten: filtering re-derives the
+   visible subset on each repaint from the FULL history. */
+function filterResultedRows(rows, f) {
+  if (!anyResultFilterActive(f)) return rows;
+  return rows.filter((r) => resultedRowVisible(r, f));
+}
+
+function resultedFilterBarHTML() {
+  const leagues = Array.from(new Set(UNDER_ALERTS.history
+    .concat(Q3B_ALERTS.history)
+    .map((r) => r.competition_slug || "")))
+    .filter(Boolean).sort();
+  const opts = (list, cur, all) => [`<option value="">${all}</option>`]
+    .concat(list.map((v) => `<option value="${esc(v)}"${
+      v === cur ? " selected" : ""}>${esc(v)}</option>`)).join("");
+  const stateOpts = RESULT_FILTER_STATES.map((s) =>
+    `<option value="${s}"${resultFilters.result === s ? " selected" : ""}>
+      ${s.toUpperCase()}</option>`).join("");
+  return `
+    <div class="rf-bar" id="resultedFilters">
+      <label class="rf-item">League
+        <select id="rfLeague">${opts(leagues, resultFilters.league,
+          "All leagues")}</select></label>
+      <label class="rf-item">Date (UTC)
+        <input type="date" id="rfDate" value="${esc(resultFilters.date)}">
+      </label>
+      <label class="rf-item">Time from
+        <input type="time" id="rfTimeFrom"
+          value="${esc(resultFilters.timeFrom)}"></label>
+      <label class="rf-item">Time to
+        <input type="time" id="rfTimeTo"
+          value="${esc(resultFilters.timeTo)}"></label>
+      <label class="rf-item">Result
+        <select id="rfResult">
+          <option value="">ALL RESULTS</option>${stateOpts}</select></label>
+      <button class="rf-clear" id="rfClear"${
+        anyResultFilterActive(resultFilters) ? "" : " hidden"
+      }>Clear filters</button>
+      <span class="rf-note muted">UTC · trigger-time based · display only</span>
+    </div>`;
+}
+
 function historyAlertsHTML() {
-  if (!UNDER_ALERTS.history.length) {
+  const f = resultFilters;
+  const q3rows = filterResultedRows(
+    Q3B_ALERTS.history.slice().reverse(), f);
+  if (!UNDER_ALERTS.history.length && !Q3B_ALERTS.history.length) {
     return `<div class="alerts-empty">No alerts triggered</div>`;
   }
-  const rows = UNDER_ALERTS.history.slice().reverse();
-  return `<ul>` + rows.map(historyRowHTML).join("") + `</ul>`;
+  const rows = filterResultedRows(UNDER_ALERTS.history.slice().reverse(), f);
+  const bar = resultedFilterBarHTML();
+  if (!rows.length && !q3rows.length) {
+    return bar
+      + `<div class="alerts-empty">No alerts match the active filters</div>`;
+  }
+  return bar + `<ul>` + rows.map(historyRowHTML).join("")
+    + q3rows.map(q3HistoryRowHTML).join("") + `</ul>`;
 }
 
 function paintAlerts(elId, html) {
@@ -996,6 +1482,14 @@ function pendingOutcomeProbe(liveGameIds, now) {
         && (now - r.outcome_probe_at) < OUTCOME_PROBE_MIN_MS) continue;
     if (out.indexOf(r.game_id) === -1) out.push(r.game_id);
   }
+  // Q3 BREAK records settled from the SAME out-of-window route
+  for (const r of Q3B_ALERTS.history) {
+    if (live.has(r.game_id)) continue;
+    if (r.outcome && r.outcome.status != null) continue;
+    if (r.outcome_probe_at
+        && (now - r.outcome_probe_at) < OUTCOME_PROBE_MIN_MS) continue;
+    if (out.indexOf(r.game_id) === -1) out.push(r.game_id);
+  }
   return out.slice(0, 200);
 }
 
@@ -1010,7 +1504,11 @@ async function hydrateResultedOutcomes(liveGameIds) {
   for (const r of UNDER_ALERTS.history) {
     if (ids.indexOf(r.game_id) !== -1) r.outcome_probe_at = now;
   }
+  for (const r of Q3B_ALERTS.history) {
+    if (ids.indexOf(r.game_id) !== -1) r.outcome_probe_at = now;
+  }
   saveAlertHistory();                    // the throttle survives a reload
+  saveQ3BreakHistory();
   let data = null;
   try {
     const resp = await fetch(API_ALERT_OUTCOMES(ids));
@@ -1025,8 +1523,10 @@ async function hydrateResultedOutcomes(liveGameIds) {
     if (blocks[gid]) {
       games.push({ game_id: gid, under_alert_outcome: blocks[gid] });
     }
-  }
-  if (games.length) applyFinalOutcomes(games);   // the SAME seal
+  }    if (games.length) {
+      applyFinalOutcomes(games);        // the SAME seal
+      applyQ3BreakOutcomes(games);      // ...for the Q3 BREAK records too
+    }
   return games.length > 0;
 }
 
@@ -1036,9 +1536,69 @@ function paintResultedPanel() {
   paintAlerts("alertHistory", historyAlertsHTML());
   const hc = $("alertHistoryCount");
   if (hc) {
-    const open = UNDER_ALERTS.history.filter((r) => !r.resolved_at).length;
-    hc.textContent = UNDER_ALERTS.history.length
-      ? `${UNDER_ALERTS.history.length} triggered · ${open} still active` : "";
+    const shown = filterResultedRows(
+      UNDER_ALERTS.history, resultFilters).length
+      + filterResultedRows(Q3B_ALERTS.history, resultFilters).length;
+    const total = UNDER_ALERTS.history.length + Q3B_ALERTS.history.length;
+    hc.textContent = total
+      ? (anyResultFilterActive(resultFilters)
+        ? `${shown} of ${total} shown · filters active`
+        : `${total} triggered · ${
+          UNDER_ALERTS.history.filter((r) => !r.resolved_at).length
+          + Q3B_ALERTS.history.filter((r) => !r.resolved_at).length
+          } still active`)
+      : "";
+  }
+  bindResultedFilters();
+}
+
+/* Wire the filter bar AFTER each repaint (paintAlerts replaces the nodes).
+   Every control writes ONLY its own field of resultFilters and triggers a
+   repaint of the panel — it never touches the stores, settlement or the
+   alert condition.  Clear restores the complete unfiltered panel. */
+function bindResultedFilters() {
+  const bar = $("resultedFilters");
+  if (!bar) return;
+  const repaint = () => {
+    paintAlerts("alertHistory", historyAlertsHTML());
+    bindResultedFilters();
+    const hc = $("alertHistoryCount");
+    if (hc) {
+      const shown = filterResultedRows(
+        UNDER_ALERTS.history, resultFilters).length
+        + filterResultedRows(Q3B_ALERTS.history, resultFilters).length;
+      const total = UNDER_ALERTS.history.length + Q3B_ALERTS.history.length;
+      hc.textContent = total
+        ? (anyResultFilterActive(resultFilters)
+          ? `${shown} of ${total} shown · filters active`
+          : `${total} triggered`)
+        : "";
+    }
+  };
+  const bind = (id, key) => {
+    const el = $(id);
+    if (el && typeof el.addEventListener === "function"
+        && !el.dataset.bound) {
+      el.dataset.bound = "1";
+      el.addEventListener("change", () => {
+        resultFilters[key] = el.value;
+        repaint();
+      });
+    }
+  };
+  bind("rfLeague", "league");
+  bind("rfDate", "date");
+  bind("rfTimeFrom", "timeFrom");
+  bind("rfTimeTo", "timeTo");
+  bind("rfResult", "result");
+  const clear = $("rfClear");
+  if (clear && typeof clear.addEventListener === "function"
+      && !clear.dataset.bound) {
+    clear.dataset.bound = "1";
+    clear.addEventListener("click", () => {
+      clearResultFilters();
+      repaint();
+    });
   }
 }
 
@@ -1046,6 +1606,9 @@ function paintResultedPanel() {
 // payload the cards were rendered from.
 function renderUnderAlerts(games, labels) {
   reconcileUnderAlerts(games, labels || LEAGUE_LABELS);
+  // Q3 BREAK checkpoint (directive 2026-09-18) — reconciled from the SAME
+  // payload in the SAME poll, painted into the SAME panels.
+  reconcileQ3BreakAlerts(games, labels || LEAGUE_LABELS);
   paintAlerts("activeAlerts", activeAlertsHTML());
   paintResultedPanel();
   const ac = $("activeAlertsCount");
@@ -2498,6 +3061,7 @@ const armAudio = () => { if (!audioReady) unlockAudio(); };
 // reload can never promote a resolved record back to active.  Competition
 // display labels come from the filter buttons already in the page.
 loadAlertHistory();
+loadQ3BreakHistory();
 Object.assign(LEAGUE_LABELS, leagueLabelsFrom(document));
 refresh();
 setInterval(refresh, POLL_MS);

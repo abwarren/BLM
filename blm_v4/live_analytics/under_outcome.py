@@ -20,12 +20,39 @@ the backend's game-final data where available (the scorecard's settled
 the stored terminal observation only when no settled result exists.
 This module computes the verdict from stored data only; the frontend
 consumes it verbatim and never reconstructs the quantitative condition.
+
+Q3 BREAK (directive 2026-09-18): the Q3/Q4 break is an ADDITIONAL
+checkpoint identity (the string ``"Q3_BREAK"``), additive to the numeric
+checkpoints.  It settles by the SAME rule — final vs the line in force
+when the game crossed 75.0% progress, which for the break IS the Q3/Q4
+boundary — so it appears in ``by_checkpoint`` under its own key, settled
+by the same ``trigger_observation`` authority, never a different one.
+
+CANONICAL TRIGGER-LINE STORE (ruling 2026-09-20): the 218-flip audit found
+the snapshots series and the pace projector's ``clean_projections`` store
+carrying different lines at the same boundary instant (121 of 179 verified
+flips).  ``clean_projections`` is ruled CANONICAL for the trigger line.
+``trigger_observation`` therefore accepts an optional ``projection_rows``
+feed (the game's clean_projections rows, ascending).  Precedence:
+
+  1. ``projection_rows`` — the canonical store; the boundary line comes
+     from the last non-null ``live_total_line`` observed at-or-before the
+     boundary (same at-or-before semantics as snapshots).
+  2. ``rows`` — the snapshot fallback, unchanged, when the canonical store
+     has no line by the boundary (gap tolerance: a missing projector row
+     must never unalert a live trigger that the snapshots can prove).
+  3. ``None`` — no line anywhere: unprovable, never fabricated.
+
+The FINAL side of every verdict is untouched: ``game_results`` (settled)
+and terminal observations remain the final authorities.  Only the LINE
+side is re-homed.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from blm_v4.live_analytics.under_alert import CHECKPOINTS
+from blm_v4.live_analytics.under_alert import (CHECKPOINTS,
+                                               Q3_BREAK_CHECKPOINT)
 from blm_v4.projection import (duration_for, period_quarter,
                                row_elapsed_minutes)
 from blm_v4.terminal_eligibility import is_terminal_checkpoint
@@ -71,8 +98,46 @@ def _terminal_row(row: dict, classification: Optional[str]) -> bool:
         game_status=row.get("game_status"))
 
 
+def _projection_progress(row: dict) -> Optional[float]:
+    """Progress (0..1) for one clean_projections row.  The store carries
+    ``progress_pct`` directly (the projector's own game-time computation);
+    when absent it is recomputed from ``elapsed_game_minutes`` and the
+    classification's regulation length — the same authority every other
+    consumer uses.  None when neither is available."""
+    p = _f(row.get("progress_pct"))
+    if p is not None:
+        return min(1.0, max(0.0, p / 100.0))
+    q_min, full = duration_for(row.get("classification"))
+    elapsed = _f(row.get("elapsed_game_minutes"))
+    if elapsed is None or not full:
+        return None
+    return min(1.0, max(0.0, elapsed / full))
+
+
+def _projection_line_at(rows: list[dict],
+                        max_progress: float) -> Optional[float]:
+    """The canonical store's line IN FORCE at ``max_progress`` — the last
+    non-null ``live_total_line`` among clean_projections rows whose own
+    progress is at-or-before that instant.  A line first observed AFTER
+    the boundary can never leak into the frozen trigger (the same rule
+    the snapshot authority applies to itself).  Rows without a usable
+    progress never extend the line (fail closed against a malformed
+    store, never a guessed read).  None when the store yields no line by
+    the boundary — the caller falls back to the snapshots series."""
+    last_line: Optional[float] = None
+    for row in list(rows):
+        progress = _projection_progress(row)
+        if progress is None or progress > max_progress:
+            continue
+        line = _f(row.get("live_total_line"))
+        if line is not None:
+            last_line = line
+    return last_line
+
+
 def trigger_observation(rows: list[dict], checkpoint: int,
-                        classification: Optional[str] = None) -> dict:
+                        classification: Optional[str] = None,
+                        projection_rows: Optional[list[dict]] = None) -> dict:
     """The observation that REACHED ``checkpoint`` — the authoritative
     triggering observation the live alert and the settlement BOTH read.
 
@@ -81,14 +146,26 @@ def trigger_observation(rows: list[dict], checkpoint: int,
     observation whose game progress >= checkpoint/100 — phase-based
     attribution, mirroring the alert layer.
 
+    ``projection_rows`` (optional) is the game's ``clean_projections``
+    series ascending — the CANONICAL trigger-line store (ruling
+    2026-09-20).  When supplied, the canonical line is the store's last
+    non-null ``live_total_line`` AT OR BEFORE the boundary instant — the
+    line in force when the game reached the checkpoint, per the projector's
+    own captures; a line first observed after the boundary never leaks in.
+    When the store carries no line by the boundary (missing rows, no line
+    observed yet), the snapshot series in ``rows`` is the fallback so a
+    projector gap never unproves a live trigger the snapshots can prove.
+    The boundary itself (progress, captured_at) stays the SNAPSHOT
+    observation's: one game-time geometry for every consumer.
+
     Returns ``{"total_line", "progress", "captured_at"}``:
 
       * ``total_line`` — the live market O/U line in force at the boundary:
         the most recent line OBSERVED AT OR BEFORE it (the bookmaker line
         persists between captures), never the opening line, a later live
         line, the closing line or any reconstructed value.  ``None`` when no
-        line had been observed by the boundary — the trigger is then
-        unprovable, never fabricated.
+        line had been observed by the boundary in either store — the
+        trigger is then unprovable, never fabricated.
       * ``progress`` — that boundary observation's own progress (0..1).
       * ``captured_at`` — when that boundary observation was captured.
 
@@ -97,6 +174,20 @@ def trigger_observation(rows: list[dict], checkpoint: int,
     ``by_checkpoint[cp].trigger_total`` are the same value from here, so the
     line on screen and the verdict behind it can never disagree.
     """
+    base = _snapshot_trigger(rows, checkpoint, classification)
+    if projection_rows and base["progress"] is not None:
+        line = _projection_line_at(projection_rows, base["progress"])
+        if line is not None:
+            return {"total_line": line,
+                    "progress": base["progress"],
+                    "captured_at": base["captured_at"]}
+    return base
+
+
+def _snapshot_trigger(rows: list[dict], checkpoint: int,
+                      classification: Optional[str] = None) -> dict:
+    """The original snapshot-series authority, verbatim (the fallback leg
+    of the canonical-store precedence)."""
     target = checkpoint / 100.0
     last_line: Optional[float] = None
     for row in list(rows):
@@ -112,12 +203,35 @@ def trigger_observation(rows: list[dict], checkpoint: int,
 
 
 def trigger_market_total(rows: list[dict], checkpoint: int,
-                         classification: Optional[str] = None
+                         classification: Optional[str] = None,
+                         projection_rows: Optional[list[dict]] = None
                          ) -> Optional[float]:
     """The live market total the game carried when it REACHED ``checkpoint``
     — the ``total_line`` of :func:`trigger_observation`.  A later line is
     never used: nothing captured after the boundary can leak in."""
-    return trigger_observation(rows, checkpoint, classification)["total_line"]
+    return trigger_observation(rows, checkpoint, classification,
+                               projection_rows=projection_rows)["total_line"]
+
+
+def score_at_observation(rows: list[dict], checkpoint: int,
+                         classification: Optional[str] = None
+                         ) -> Optional[float]:
+    """The combined score at the observation that REACHED ``checkpoint`` —
+    the same boundary observation :func:`trigger_observation` attributes,
+    so the score and the frozen line can never come from different moments.
+    Q3 BREAK (directive 2026-09-18) uses this with checkpoint 75: the score
+    at the Q3/Q4 break is the Q3-end score.  ``None`` when the boundary is
+    never reached or the boundary observation carries no provable score —
+    never guessed, never reconstructed."""
+    target = checkpoint / 100.0
+    for row in list(rows):
+        progress = _row_progress(row, classification)
+        if progress is None or progress < target:
+            continue
+        h = _f(row.get("home_score"))
+        a = _f(row.get("away_score"))
+        return h + a if (h is not None and a is not None) else None
+    return None
 
 
 def final_total_for(rows: list[dict],
@@ -173,7 +287,8 @@ def outcome_status(trigger_total, final_total) -> Optional[str]:
 
 def under_alert_outcome(rows: list[dict],
                         classification: Optional[str] = None,
-                        settled: Optional[tuple] = None) -> dict:
+                        settled: Optional[tuple] = None,
+                        projection_rows: Optional[list[dict]] = None) -> dict:
     """The sibling ``under_alert_outcome`` payload for one game.
 
     One settlement entry per alert checkpoint (by_checkpoint)::
@@ -216,13 +331,26 @@ def under_alert_outcome(rows: list[dict],
                     else ("observation" if final is not None else None))
     by_checkpoint = {}
     for cp in CHECKPOINTS:
-        trig = trigger_market_total(rows, cp, classification)
+        trig = trigger_market_total(rows, cp, classification,
+                                    projection_rows=projection_rows)
         by_checkpoint[cp] = {
             "status": outcome_status(trig, final),
             "trigger_total": trig,
             "final_total": final,
             "resolved_at": resolved_at,
         }
+    # Q3 BREAK (directive 2026-09-18): the Q3/Q4 break sits at exactly 75.0%
+    # progress, so its settlement reuses the SAME boundary line as the 75%
+    # checkpoint — one authority, one line, one verdict — under its OWN
+    # string identity ("Q3_BREAK"), additive to the numeric checkpoints.
+    trig_q3b = trigger_market_total(rows, 75, classification,
+                                    projection_rows=projection_rows)
+    by_checkpoint[Q3_BREAK_CHECKPOINT] = {
+        "status": outcome_status(trig_q3b, final),
+        "trigger_total": trig_q3b,
+        "final_total": final,
+        "resolved_at": resolved_at,
+    }
     return {
         "status": "resolved" if final is not None else "pending",
         "final_total": final,

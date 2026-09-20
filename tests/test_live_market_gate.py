@@ -269,7 +269,12 @@ def test_opening_line_is_never_substituted_for_a_stale_live_line():
     opening line, and never fabricates numbers from one."""
     src = (HERE.parent / "blm_v4" / "api.py").read_text(encoding="utf-8")
     i = src.index("# AUTHORITATIVE MARKET GATE")
-    gate = src[i:src.index("return {", i)]
+    # The GATE proper ends where the ADDITIVE Q3 BREAK snapshot begins
+    # (directive 2026-09-18): the snapshot legitimately reads the frozen
+    # boundary line from trigger_observation — the SAME authority settlement
+    # uses, never a re-selection — so the no-line rule is pinned on the gate
+    # itself, not on the sibling block that follows it.
+    gate = src[i:src.index("── Q3 BREAK checkpoint", i)]
     assert "opening_line" not in gate
     assert "opening_snapshot" not in gate
     assert "total_line" not in gate          # the line is never re-selected

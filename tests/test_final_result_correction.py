@@ -690,7 +690,15 @@ def test_correction_path_is_separate_from_the_write_once_seal():
     assert "rec.outcome = Object.assign({}, cand);" in body
     assert "rec.outcome_corrected = true;" in body
     # exactly ONE writer of a RECORD's triggered line (the write-once seal)
-    # and one publisher that copies it onto the active row
+    # and one publisher that copies it onto the active row, PER STORE — the
+    # Q3 BREAK store (directive 2026-09-18) has its own independent sync
+    # (q3SyncActiveSealed), the same one-publisher shape, not a second
+    # writer of the production store's records.
     store = _block(js, STORE_BEGIN, STORE_END)
     assert store.count("rec.triggered_line = ") == 1
-    assert store.count("act.triggered_line = ") == 1
+    prod_sync = js[js.index("function syncActiveSealed")
+                   :js.index("function q3SyncActiveSealed")]
+    assert prod_sync.count("act.triggered_line = ") == 1
+    q3_sync = js[js.index("function q3SyncActiveSealed"):]
+    q3_sync = q3_sync[:q3_sync.index("\n}\n")]
+    assert q3_sync.count("act.triggered_line = ") == 1
