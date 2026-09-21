@@ -295,6 +295,15 @@ const ALERT_HISTORY_KEY = "pz.underAlertHistory";
    tier, plus an actual<average leg below 75%) is SUPERSEDED, so every
    v3-stamped record is audited rather than presented as a validated alert. */
 const ALERT_RULE_ID = "v4-progress-75-margin-2026-09-14";
+/* RE-FIRE COOLING-OFF — the ONE time-based suppression on this path.
+   A RE-FIRE is reopening a record whose condition already fired once.  A
+   first activation is NEVER cooled (the first alert must be immediate), and
+   a standing alert is never cooled either — only the reopen is.  The window
+   is measured from the record's LAST ACTIVATION (its first trigger, or its
+   most recent legitimate re-fire), never from the moment the condition went
+   false, so a flicker cannot restart the clock.  Policy 2026-09-20. */
+const UNDER_ALERT_REFIRES_COOLDOWN_S = 300;
+const UNDER_ALERT_REFIRES_COOLDOWN_MS = UNDER_ALERT_REFIRES_COOLDOWN_S * 1000;
 
 const num2 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(2);
 const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
@@ -536,6 +545,42 @@ function saveAlertHistory() {
     localStorage.setItem(ALERT_HISTORY_KEY,
       JSON.stringify(UNDER_ALERTS.history.slice(-ALERT_HISTORY_MAX)));
   } catch (_) { /* storage unavailable — history stays in memory */ }
+}
+
+/* ── the cooling-off clock — DERIVED, never stored separately ─────────
+   The cooldown needs no state of its own: the record already persists its
+   last activation (triggered_at, then last_refire_at per re-fire), so the
+   window is a pure function of the history record.  That is why it survives
+   a dashboard reload and a browser restart for free — loadAlertHistory()
+   restores those timestamps with the rest of the record. */
+// the LAST ACTUAL ACTIVATION — first trigger, or the most recent re-fire.
+// Deliberately NOT resolved_at: resolving is not an activation.
+function underAlertLastActivationMs(rec) {
+  if (!rec) return null;
+  const t = Date.parse(rec.last_refire_at || rec.triggered_at || "");
+  return isFinite(t) ? t : null;
+}
+// ms of cooling-off left for an identity; 0 means a re-fire is ALLOWED.
+// Only a RESOLVED record can be in cooldown — an unresolved one is standing,
+// not re-firing, and is never suppressed.  A record with no readable
+// activation time is not suppressed either (fail open: never lose an alert
+// to an unparseable timestamp).
+function underAlertCooldownRemainingMs(id, now) {
+  const rec = UNDER_ALERTS.history.find((r) => r.id === id);
+  if (!rec || !rec.resolved_at) return 0;
+  const last = underAlertLastActivationMs(rec);
+  if (last == null) return 0;
+  const left = UNDER_ALERT_REFIRES_COOLDOWN_MS - (now - last);
+  return left > 0 ? left : 0;
+}
+// is the cue for THIS game's standing UNDER identity cooling off?  The
+// identity is the same one reconcileUnderAlerts uses, so the cue and the
+// store can never disagree about which alert is being suppressed.
+function underAlertRefireCooling(g) {
+  const ua = (g && g.under_alert) || {};
+  if (ua.checkpoint == null) return false;
+  return underAlertCooldownRemainingMs(
+    underAlertId(g.game_id, ua.checkpoint), Date.now()) > 0;
 }
 
 /* ── THE TRIGGERED LINE — the live market line the alert fired against ──
@@ -950,7 +995,63 @@ function underAlertValues(g, ua, labels) {
     outcome: (g.under_alert_outcome || {}).by_checkpoint
       ? (g.under_alert_outcome.by_checkpoint[ua.checkpoint] || null)
       : (g.under_alert_outcome || null),
+    // HISTORICAL_UNDER_FINGERPRINT_C5 (authorization 2026-09-21) — the
+    // backend's three-state verdict (TRUE / FALSE / UNAVAILABLE) consumed
+    // verbatim: an ENRICHMENT LABEL on this alert, never part of the
+    // condition, never a second alert source.  Sealed onto the history
+    // record with the rest of the trigger snapshot by Object.assign.
+    fingerprint: g.under_alert_fingerprint || null,
   };
+}
+
+/* HISTORICAL UNDER FINGERPRINT LINES (authorization 2026-09-21) — the
+   approved context set C1..C6 + R2, consumed verbatim from the backend's
+   three-state evaluation.  The fired fingerprints are listed beside the
+   alert (HISTORICAL FINGERPRINTS: N, one ✓ per fired key); a fingerprint
+   with unprovable data renders UNAVAILABLE honestly, never as a pass.
+   Pure display: the layer never creates, suppresses or re-fires an alert
+   and fingerprint_count is never a threshold here. */
+const FINGERPRINT_KEYS = ["C1", "C2", "C3", "C4", "C5", "C6", "R2"];
+const FINGERPRINT_LABELS = {
+  C1: "Required pace 1.10–1.20x league avg",
+  C2: "Recent deceleration",
+  C3: "Required pace >1.04x + Q3 below average",
+  C4: "Required 1.10–1.20x + recent deceleration",
+  C5: "Required pace >1.10x + Q3 below average",
+  C6: "Recent deceleration + Q3 below average",
+  R2: "Q3 <0.90x league Q3 average",
+};
+
+function fingerprintLineHTML(fp) {
+  if (!fp) return "";
+  const xx = (x) => (x == null || !isFinite(x)) ? "–" : `${x.toFixed(2)}x`;
+  // LEGACY records — history snapshots sealed before the layer shipped
+  // carry only the C5 block.  Render that shape as it was served; it is
+  // never re-derived and never upgraded in place.
+  if (fp.fingerprint_count == null) {
+    const st = fp.fingerprint_c5 || "UNAVAILABLE";
+    return `<div class="al-line al-fingerprint">Historical Fingerprint: <span class="al-num">C5</span>` +
+      ` <span class="muted">(${esc(st)})</span>` +
+      ` | Required/Avg: <span class="al-num">${xx(fp.fingerprint_c5_req_ratio)}</span>` +
+      ` <span class="muted">(req ${num2(fp.required_pts_per_min)} vs avg ${num2(fp.league_average_pace)})</span>` +
+      ` | Q3 Ratio: <span class="al-num">${xx(fp.fingerprint_c5_q3_ratio)}</span>` +
+      ` <span class="muted">(Q3 ${num2(fp.q3_ppm)} vs league ${num2(fp.q3_league_avg)} pts/min)</span></div>`;
+  }
+  // the layer block — count + the exact fired fingerprints
+  const fired = Array.isArray(fp.fingerprints_fired) ? fp.fingerprints_fired : [];
+  const unavailable = FINGERPRINT_KEYS
+    .filter((k) => fp[`fingerprint_${k.toLowerCase()}`] === "UNAVAILABLE");
+  const firedHTML = fired.map((k) =>
+    `<div class="al-line al-fingerprint al-fp-fired">✓ ${esc(k)} — ${esc(FINGERPRINT_LABELS[k] || k)}</div>`).join("");
+  // unprovable data is REPORTED, never silently absorbed into the count
+  const unavailHTML = unavailable.length
+    ? `<div class="al-line al-fingerprint muted">UNAVAILABLE: ${unavailable.map((k) => esc(k)).join(", ")} <span class="muted">· operands missing — never treated as TRUE</span></div>`
+    : "";
+  return `<div class="al-line al-fingerprint">HISTORICAL FINGERPRINTS: <span class="al-num">${fp.fingerprint_count}</span></div>` +
+    firedHTML + unavailHTML +
+    `<div class="al-line al-fingerprint muted">Required/Avg: <span class="al-num">${xx(fp.req_ratio)}</span>` +
+    ` | Q3 Ratio: <span class="al-num">${xx(fp.q3_ratio)}</span>` +
+    ` | Recent-3min vs Game: <span class="al-num">${fp.recent3_minus_act == null ? "–" : num2(fp.recent3_minus_act)}</span> pts/min</div>`;
 }
 
 function reconcileUnderAlerts(games, labels) {
@@ -1018,13 +1119,23 @@ function reconcileUnderAlerts(games, labels) {
     if (!ok) continue;
 
     const id = underAlertId(g.game_id, cp);
+    const act = UNDER_ALERTS.active.get(id);
+    // RE-FIRE COOLING-OFF (policy 2026-09-20).  A record that is RESOLVED
+    // and whose last activation is inside the cooldown stays resolved: no
+    // reopen, no refire_count, no last_refire_at, no cue, no new record.
+    // The condition may keep reading TRUE on every later poll and the
+    // suppression simply re-evaluates until the window elapses.  This is NOT
+    // a second eligibility decision — `ok` above already consumed the
+    // backend's authoritative verdict verbatim, and this only decides WHEN a
+    // repeat of a decision already made may be shown again.  A standing
+    // alert (act) and a first activation (no record) are never suppressed.
+    if (!act && underAlertCooldownRemainingMs(id, now) > 0) continue;
     trueNow.add(id);
     const vals = underAlertValues(g, ua, labels);
     // the trigger line this poll reports for THIS record's own checkpoint —
     // sealed onto the record, never refreshed by a later poll (see
     // sealTriggeredLine)
     const lineNow = triggeredLineFrom(g, cp);
-    const act = UNDER_ALERTS.active.get(id);
     if (act) {
       // TRUE → TRUE — refresh what the ACTIVE panel shows.  The history
       // record keeps its original trigger snapshot untouched; the sealed
@@ -1252,6 +1363,7 @@ function activeAlertsHTML() {
       <div class="al-line">Actual: <span class="al-num">${num2(a.actual_pace)}</span> | Required: <span class="al-num">${num2(a.required_pace)}</span> | League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></div>
       <div class="al-line">Strength: <span class="al-num">${esc(marginBand(a.required_pace, a.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band</span></div>
       <div class="al-line">Gap: <span class="al-neg">${num2(a.pace_gap)}</span> <span class="muted">(${num1(a.actual_vs_required_pct)}% vs required · ${num1(a.required_vs_league_avg_pct)}% vs avg)</span></div>
+      ${fingerprintLineHTML(a.fingerprint)}
       <div class="al-line">Result: ${alertResultHTML(a)}</div>
     </li>`;
   }).join("") + q3rows.map(q3ActiveRowHTML).join("") + `</ul>`;
@@ -1297,6 +1409,7 @@ function historyRowHTML(rec) {
       <div class="al-line">Actual: <span class="al-num">${num2(rec.actual_pace)}</span> | Required: <span class="al-num">${num2(rec.required_pace)}</span> | Avg: <span class="al-num">${num2(rec.league_average_pace)}</span></div>
       <div class="al-line">Strength: <span class="al-num">${esc(marginBand(rec.required_pace, rec.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band (higher = stronger condition)</span></div>
       ${moved ? `<div class="al-line">Final: <span class="al-num">${num2(rec.final_actual_pace)}</span> | <span class="al-num">${num2(rec.final_required_pace)}</span></div>` : ""}
+      ${fingerprintLineHTML(rec.fingerprint)}
       ${alertOutcomeLine(rec)}
     </li>`;
 }
@@ -2102,7 +2215,10 @@ function renderCards(payload) {
     const alLvl = alertEligible(g) ? (ctxLvl || legacyLvl) : null;
     const entered = alertEscalation(card.prevAlert, alLvl);
     card.prevAlert = alLvl;
-    if (entered) alertAudio(entered);
+    // the cue obeys the re-fire cooling-off: a suppressed re-fire is silent.
+    // The badge and its pulse are untouched — they report the live condition,
+    // which is exactly what stays true during a cooldown.
+    if (entered && !underAlertRefireCooling(g)) alertAudio(entered);
     // re-render while preserving each card's CHARTS / DETAILS state
     card.el.innerHTML = cardHTML(g, { detOpen: card.detOpen, chartsOpen: card.chartsOpen }, entered);
     bindCardSections(card.el, card);
@@ -2455,7 +2571,9 @@ function refreshHistAlert(g) {
     void panel.offsetWidth;                            // restart the one-shot pulse
     panel.classList.add("al-in");
   }
-  if (rose) alertAudio(rose);                          // same transition → same cue
+  if (rose && !underAlertRefireCooling(g)) {
+    alertAudio(rose);                     // same transition → same cue,
+  }                                       // silenced while cooling off
 }
 
 // explicit no-context panel — shown when the live state is eligible but

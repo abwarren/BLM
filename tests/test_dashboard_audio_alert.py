@@ -194,11 +194,16 @@ def test_three_distinguishable_cues(client, tmp_path):
 
 def test_sound_only_from_alert_escalation(client):
     js = _js(client)
-    # the two existing transition sites, each passing its escalation result
+    # the two existing transition sites, each passing its escalation result.
+    # A cue is ALSO gated by the re-fire cooling-off (policy 2026-09-20): a
+    # suppressed re-fire must be SILENT.  The transition remains the only
+    # trigger, and the gate never suppresses a first activation or a standing
+    # alert — only a reopen inside the 300 s window.
     assert "const entered = alertEscalation(card.prevAlert, alLvl);" in js
-    assert "if (entered) alertAudio(entered);" in js
+    assert ("if (entered && !underAlertRefireCooling(g))"
+            " alertAudio(entered);") in js
     assert "const rose = alertEscalation(priorLevel, lvl);" in js
-    assert "if (rose) alertAudio(rose);" in js
+    assert "if (rose && !underAlertRefireCooling(g)) {" in js
     # SINGLE audio entry point: its definition + exactly those two call sites
     assert js.count("alertAudio(") == 3
     # and it is the only route to the cue synthesiser

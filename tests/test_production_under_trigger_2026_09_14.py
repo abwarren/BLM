@@ -285,7 +285,7 @@ function isActuallyLive(g) { return !!(g && g.live === true); }
 
 EXPORTS = """
 module.exports = { UNDER_ALERTS, reconcileUnderAlerts, renderUnderAlerts,
-  activeAlertsHTML };
+  activeAlertsHTML, __setT: (t) => { __T = t; }, __getT: () => __T };
 """
 
 # The server's verdict is supplied EXPLICITLY — the store is a pure consumer
@@ -319,6 +319,9 @@ out.active_false_records = m.UNDER_ALERTS.active.size;
 //     be displayed — no second ELIGIBILITY decision may suppress it.
 //     (audit 2026-09-16 §9: a game the authoritative state marks OVER is
 //     lifecycle reconciliation, not eligibility — covered by N2 below.)
+// the reopen must clear the 300 s re-fire cooling-off (policy 2026-09-20);
+// the gate under test here is the ELIGIBILITY gate, not the cooling window
+m.__setT(m.__getT() + 300000);
 out.active_true_despite_gate = show(game({
   alert: { eligible: false, reason: "below_min_remaining" },
   under_alert_eligibility: { eligible: false, reason: "market_stale" },

@@ -354,7 +354,8 @@ function isActuallyLive(g) { return !!(g && g.live === true); }
 """
 
 EXPORTS = """
-module.exports = { UNDER_ALERTS, renderUnderAlerts, activeAlertsHTML };
+module.exports = { UNDER_ALERTS, renderUnderAlerts, activeAlertsHTML,
+  __setT: (t) => { __T = t; }, __getT: () => __T };
 """
 
 # a qualifying live game, driven through LIVE -> STALE -> LIVE.  The server
@@ -392,6 +393,9 @@ out.stale_hist = m.UNDER_ALERTS.history.length;
 out.stale_resolved = m.UNDER_ALERTS.history[0].resolved_at !== null;
 out.stale_reason = m.UNDER_ALERTS.history[0].resolved_reason;
 
+// LIVE again -> ACTIVE.  The record last activated at T0, so this reopen
+// must clear the 300 s re-fire cooling-off (policy 2026-09-20) first.
+m.__setT(m.__getT() + 300000);
 m.renderUnderAlerts([base()], LABELS);
 out.back_active = m.UNDER_ALERTS.active.size;
 out.back_shown = m.activeAlertsHTML().indexOf("UNDER ALERT") !== -1;

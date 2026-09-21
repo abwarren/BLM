@@ -854,6 +854,9 @@ poll([]);
 tr.push(snap("poll9-empty-payload"));
 
 // two independent games, each with its own identity
+// G1|25 last activated at poll5, so it must clear the 300 s re-fire
+// cooling-off before it may reopen here (policy 2026-09-20)
+m.__setT(m.__getT() + 300000);
 const g2 = (over) => Object.assign({
   game_id: "G2", competition_slug: "betual-nba", live: true, live_reason: null,
   alert: { eligible: true },
@@ -1022,7 +1025,10 @@ def test_same_checkpoint_never_creates_duplicate_history(client, tmp_path):
         m.reconcileUnderAlerts([G]);          // 1st (and only) trigger
         const t0 = m.UNDER_ALERTS.history[0].triggered_at;
         m.reconcileUnderAlerts([]);           // flicker -> record resolves
-        m.__setT(m.__getT() + 61000);         // a minute of polls passes
+        // the gap must clear the 300 s RE-FIRE cooling-off (policy
+        // 2026-09-20): a reopen inside the window is suppressed, so a
+        // shorter gap would prove the cooldown, not the dedup.
+        m.__setT(m.__getT() + 300000);        // five minutes of polls
         m.reconcileUnderAlerts([G]);          // re-fire -> reopen SAME record
         m.reconcileUnderAlerts([G]);          // TRUE -> TRUE
         const recs = m.UNDER_ALERTS.history.filter(

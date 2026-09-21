@@ -53,6 +53,8 @@ from blm_v4.live_analytics.under_alert import (
     under_alert_eligibility,
     under_alert_state,
 )
+from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
+from blm_v4.live_analytics.under_fingerprints import evaluate_fingerprints
 from blm_v4.live_analytics.under_outcome import (outcome_status,
                                                  score_at_observation,
                                                  trigger_observation,
@@ -1179,6 +1181,56 @@ _HCTX_LOCK = threading.Lock()
 _HCTX_TTL_S = 120.0
 
 
+def _q3_pace_reference(conn: sqlite3.Connection) -> dict:
+    """Per-competition average Q3 pace for the WHOLE payload, keyed by
+    canonical competition slug — failure-isolated ({} on any gap).  One
+    grouped scan, cached in-process by the engine below, so the per-poll
+    cost does not scale with the number of games or competitions.  The
+    fingerprint_c5 module holds its own cache; this wrapper exists so
+    tests can stub the reference the way ``_pace_reference`` is stubbed.
+    """
+    try:
+        return q3_pace_reference(conn)
+    except Exception:
+        return {}
+
+
+def _q3_game_ppm(game: dict, rows_asc: list) -> Optional[float]:
+    """The game's OWN third-quarter pace (pts/min) from its observation
+    stream — cumulative score at the Q3 end minus cumulative at the Q2
+    end, over the classification's quarter minutes (``duration_for``).
+
+    ONLY '2nd Quarter'/'3rd Quarter' rows are read.  The Q3 end is
+    at-or-before the 75% boundary by construction, so no observation
+    after the trigger can change it: Q4/future rows are excluded by
+    label and the cumulative maxima are historical facts at the trigger
+    instant (point-in-time guarantee — no post-trigger input).
+
+    None when either segment boundary is unprovable (never guessed) or
+    the series is non-monotonic across the Q3 boundary.
+    """
+    try:
+        q2_end = q3_end = None
+        for r in rows_asc or []:
+            label = (r.get("period_label") or "").strip()
+            h, a = r.get("home_score"), r.get("away_score")
+            if h is None or a is None:
+                continue
+            cum = float(h) + float(a)
+            if label == "2nd Quarter":
+                q2_end = cum if q2_end is None else max(q2_end, cum)
+            elif label == "3rd Quarter":
+                q3_end = cum if q3_end is None else max(q3_end, cum)
+        if q2_end is None or q3_end is None or q3_end < q2_end:
+            return None
+        qm, _full = duration_for(game.get("classification"))
+        if not qm or qm <= 0:
+            return None
+        return (q3_end - q2_end) / float(qm)
+    except Exception:
+        return None
+
+
 def _historical_context_for(source_game_id: str) -> dict:
     """``_historical_context_for_uncached`` behind a short per-process TTL
     cache.
@@ -1836,6 +1888,7 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
         # isolated: an unreadable population yields {} and the alert
         # layer then produces nothing rather than borrowing a number.
         pace_reference = _pace_reference(conn)
+        q3_reference = _q3_pace_reference(conn)
     finally:
         conn.close()
     out.sort(key=lambda g: (not g["live"], -(g["age_s"] or 0)))
@@ -1917,6 +1970,25 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 entry.get("avg_pace"), proj.get("progress_pct"),
                 entry.get("games"), eligible=eligibility["eligible"],
                 **trigger)
+            # ── HISTORICAL UNDER FINGERPRINT LAYER (authorization
+            # 2026-09-21) — the approved set C1..C6 + R2 evaluated as
+            # CONTEXT on every UNDER evaluation, NEVER a second alert
+            # source and never a loosening of the condition above (the
+            # active verdict was already decided verbatim by
+            # under_alert_state).  Evaluated at the SAME checkpoint with
+            # the SAME inputs the alert consumed (projector required
+            # pace, competition_pace league average, trailing recent3
+            # window, the game's Q3 pace vs its competition's settled Q3
+            # archive) — all available at the trigger instant.  Each
+            # fingerprint is TRUE / FALSE / UNAVAILABLE; missing data is
+            # reported, never silently treated as a pass.
+            # fingerprint_count is RECORDED, never a threshold.
+            g["under_alert_fingerprint"] = evaluate_fingerprints(
+                proj.get("required_pts_per_min"), entry.get("avg_pace"),
+                _q3_game_ppm(g, rows_asc),
+                (q3_reference.get(g.get("competition_slug")) or {})
+                .get("avg_q3_pace"),
+                proj.get("recent_pace_3m"), proj.get("actual_pts_per_min"))
             # ── Q3 BREAK checkpoint (directive 2026-09-18) — ADDITIVE, a
             # sibling of the production alert above, never a replacement.
             # The Q3/Q4 break sits at exactly 75.0% progress (3 of 4
