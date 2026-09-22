@@ -563,3 +563,62 @@ details > summary::marker { content: ""; }
 .card.card-result-under { border-left: 3px solid #22c55e; }
 .card.card-result-over { border-left: 3px solid #ef4444; }
 .card.card-result-push { border-left: 3px solid var(--muted, #94a3b8); }
+
+
+/* ═══════════ AUTO BETTING panel (directive 2026-09-21) ═══════════
+   Kill switch + unit price + today's stats + recent executions.
+   Display only: every limit is server-side authority. */
+.ab-grid {
+  display: flex; gap: 24px; flex-wrap: wrap;
+  padding: 8px 4px 4px;
+}
+.ab-settings, .ab-today { min-width: 260px; }
+.ab-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 3px 0; justify-content: space-between;
+}
+.ab-input-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.ab-input-wrap input {
+  width: 90px; background: transparent; color: var(--fg, #e5e7eb);
+  border: 1px solid var(--border, #374151); border-radius: 6px;
+  padding: 4px 8px; font: inherit;
+}
+.ab-input-wrap button, .ab-switch-wrap button {
+  background: var(--border, #374151); color: inherit; border: 0;
+  border-radius: 6px; padding: 4px 12px; cursor: pointer; font: inherit;
+}
+.ab-note { font-size: 11px; padding: 2px 0; }
+.ab-switch-wrap {
+  display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer; font-size: 13px;
+}
+.ab-switch-wrap input[type="checkbox"] { width: 18px; height: 18px; }
+.ab-exec-head {
+  font-size: 11px; letter-spacing: 0.08em; padding: 10px 4px 4px;
+  border-top: 1px solid var(--border, #374151); margin-top: 8px;
+}
+.ab-exec-list { list-style: none; margin: 0; padding: 0 4px; }
+.ab-exec {
+  display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline;
+  padding: 6px 8px; margin: 4px 0; border-radius: 6px;
+  border-left: 3px solid var(--border, #374151);
+  background: var(--bg-soft, rgba(255,255,255,0.03));
+  font-size: 12px;
+}
+.ab-exec .ab-game { font-weight: 600; }
+.ab-exec .ab-alert { color: var(--muted, #9ca3af); }
+.ab-exec .ab-status { font-weight: 700; }
+/* status colours — ACCEPTED green, REJECTED amber, FAILED red,
+   UNKNOWN neutral grey; PENDING/SUBMITTED blue-ish */
+.ab-exec.st-accepted { border-left-color: #22c55e; }
+.ab-exec.st-accepted .ab-status { color: #22c55e; }
+.ab-exec.st-rejected { border-left-color: #f59e0b; }
+.ab-exec.st-rejected .ab-status { color: #f59e0b; }
+.ab-exec.st-failed { border-left-color: #ef4444; }
+.ab-exec.st-failed .ab-status { color: #ef4444; }
+.ab-exec.st-unknown { border-left-color: #9ca3af; }
+.ab-exec.st-unknown .ab-status { color: #9ca3af; }
+.ab-exec.st-pending, .ab-exec.st-submitted { border-left-color: #3b82f6; }
+.ab-exec.st-pending .ab-status, .ab-exec.st-submitted .ab-status { color: #3b82f6; }
+.ab-exec.st-cancelled { border-left-color: #6b7280; }
+.ab-exec.st-cancelled .ab-status { color: #6b7280; }

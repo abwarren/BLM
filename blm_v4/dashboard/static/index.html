@@ -59,6 +59,41 @@
     <div class="empty" id="empty">Waiting for live data…</div>
   </main>
 
+  <!-- ═══════════ AUTO BETTING — kill switch + status (DRY_RUN server-side) ═══════════ -->
+  <section class="alerts" id="autoBettingSection">
+    <div class="alerts-head">
+      <span class="alerts-title">AUTO BETTING</span>
+      <span class="pill" id="abModePill">--</span>
+      <label class="ab-switch-wrap muted">
+        <input type="checkbox" id="abSwitch" disabled>
+        <span id="abSwitchLabel">AUTO BETTING: --</span>
+      </label>
+    </div>
+    <div class="alerts-body" id="autoBettingBody">
+      <div class="ab-grid">
+        <div class="ab-settings">
+          <div class="ab-row">
+            <label for="abUnitPrice">Unit Price:</label>
+            <span class="ab-input-wrap">R <input type="number" id="abUnitPrice" min="1" step="0.50" disabled>
+              <button id="abSaveUnit" disabled>Save</button></span>
+          </div>
+          <div class="ab-note muted" id="abLimitsNote">limits: --</div>
+          <div class="ab-note muted">stake = unit price × 1 unit · server-side limits cannot be raised from this page</div>
+        </div>
+        <div class="ab-today">
+          <div class="ab-row"><span>Today's Bets:</span><span class="al-num" id="abTodayBets">–</span></div>
+          <div class="ab-row"><span>Units:</span><span class="al-num" id="abTodayUnits">–</span></div>
+          <div class="ab-row"><span>Amount wagered:</span><span class="al-num" id="abTodayAmount">–</span></div>
+          <div class="ab-row"><span>Remaining daily exposure:</span><span class="al-num" id="abTodayRemaining">–</span></div>
+        </div>
+      </div>
+      <div class="ab-exec-head muted">RECENT EXECUTIONS</div>
+      <ul class="ab-exec-list" id="abExecList">
+        <li class="alerts-empty">No executions yet</li>
+      </ul>
+    </div>
+  </section>
+
   <!-- ═══════════ ACTIVE UNDER ALERTS — what needs attention NOW ═══════════ -->
   <section class="alerts" id="activeAlertsSection">
     <div class="alerts-head">

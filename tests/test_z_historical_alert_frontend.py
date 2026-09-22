@@ -145,8 +145,11 @@ def test_alert_terminology_descriptive_only(client):
                  "mean per-game UNDER rate", "settled games",
                  "LIMITED SAMPLE", "SETTLED GAMES"):
         assert word in js, word
-    # never presented as guidance / no old or betting vocabulary
-    low = js.lower()
+    # never presented as guidance / no old or betting vocabulary.
+    # The vocabulary ban guards the ALERT/ANALYTICS surface; the AUTO
+    # BETTING operations panel (directive 2026-09-21, appended at EOF,
+    # delimited by its own marker) legitimately names itself — excluded.
+    low = js[:js.index("AUTO BETTING panel (directive")].lower()
     for banned in ("edge", "signal", "momentum", "win rate", "probab",
                    "calibrat", "forecast", "predict", "fair", "z_score",
                    "betting", "staking"):

@@ -1841,6 +1841,7 @@ def _projection_lines_map(source_game_ids: list) -> dict:
     return {i: fresh[i] for i in ids if i in fresh}
 
 
+# a module-level sentinel so the in-process betting worker can pass an
 @router.get("/live")
 def v4_live(classification: Optional[str] = Query(None)) -> dict:
     """LIVE view — CLEAN post-epoch games ONLY (the frontend's current
@@ -1848,6 +1849,7 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
     data is reachable only through explicitly labeled legacy paths.
     Analysis is computed exclusively from post-epoch observations."""
     now = datetime.now(timezone.utc)
+    own_conn = True
     conn = _connect()
     try:
         games = _load_games(conn, classification)
@@ -1890,7 +1892,8 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
         pace_reference = _pace_reference(conn)
         q3_reference = _q3_pace_reference(conn)
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
     out.sort(key=lambda g: (not g["live"], -(g["age_s"] or 0)))
     for g in out:
         g["data_quality"] = CLEAN

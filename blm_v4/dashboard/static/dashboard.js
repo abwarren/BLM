@@ -3174,6 +3174,97 @@ const armAudio = () => { if (!audioReady) unlockAudio(); };
 ["pointerdown", "keydown", "touchstart"].forEach((ev) =>
   window.addEventListener(ev, armAudio, { passive: true }));
 
+/* ── AUTO BETTING panel (directive 2026-09-21) ───────────────
+   The kill switch and unit price are consumed by the SERVER's betting
+   layer; this panel only displays its authoritative status and sends
+   explicitly-validated settings.  Nothing here can raise a limit, touch
+   dry-run mode, or place a bet — the execution worker and its limits are
+   entirely server-side.  Credential material never exists in this file. */
+const BETTING_API = "/api/v4/betting";
+
+function money(v) {
+  return (v == null || !isFinite(v)) ? "–" : `R${Number(v).toFixed(2)}`;
+}
+
+function abStatusHTML(st) {
+  $("abModePill").textContent = st.mode || "--";
+  $("abModePill").className = "pill " + (st.dry_run ? "muted" : "bad");
+  const sw = $("abSwitch");
+  sw.disabled = false;
+  sw.checked = st.enabled === true;
+  $("abSwitchLabel").textContent =
+    `AUTO BETTING: ${st.enabled ? "ON" : "OFF"}${st.dry_run ? " (DRY RUN)" : ""}`;
+  const up = $("abUnitPrice");
+  if (document.activeElement !== up) up.value = st.unit_price ?? "";
+  $("abSaveUnit").disabled = false;
+  const lim = [];
+  if (st.max_stake_per_bet != null) lim.push(`max stake ${money(st.max_stake_per_bet)}`);
+  if (st.max_bets_per_day != null) lim.push(`max ${st.max_bets_per_day} bets/day`);
+  if (st.max_daily_exposure != null) lim.push(`max exposure ${money(st.max_daily_exposure)}`);
+  $("abLimitsNote").textContent =
+    "limits: " + (lim.length ? lim.join(" · ") : "NOT CONFIGURED — betting blocked (set BETTING_* env vars)");
+  const t = st.today || {};
+  $("abTodayBets").textContent = t.bets ?? "–";
+  $("abTodayUnits").textContent = t.units ?? "–";
+  $("abTodayAmount").textContent = money(t.amount);
+  $("abTodayRemaining").textContent =
+    t.remaining_exposure != null ? money(t.remaining_exposure) : "–";
+  const list = $("abExecList");
+  if (!st.recent || !st.recent.length) {
+    list.innerHTML = '<li class="alerts-empty">No executions yet</li>';
+  } else {
+    list.innerHTML = st.recent.map((r) => `
+      <li class="ab-exec st-${esc((r.status || "UNKNOWN").toLowerCase())}">
+        <span class="ab-game">${esc(r.game_id)}</span>
+        <span class="ab-alert">${esc(r.alert_id || "")}</span>
+        <span>${esc(r.selection || "")}</span>
+        <span class="al-num">${num1(r.price)}</span>
+        <span class="al-num">${num1(r.stake_units)}</span>
+        <span class="al-num">${money(r.stake_amount)}</span>
+        <span class="ab-status">${esc(r.status || "")}</span>
+        <span class="muted">${esc((r.requested_at_utc || "").replace("T", " ").slice(0, 19))}</span>
+      </li>`).join("");
+  }
+}
+
+async function refreshBettingStatus() {
+  try {
+    const resp = await fetch(`${BETTING_API}/status`);
+    if (!resp.ok) return;
+    abStatusHTML(await resp.json());
+  } catch (_) { /* betting panel is best-effort; never breaks the board */ }
+}
+
+$("abSwitch").addEventListener("change", async (ev) => {
+  const want = ev.target.checked ? "ON" : "OFF";
+  ev.target.disabled = true;
+  try {
+    const resp = await fetch(`${BETTING_API}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_betting: want }),
+    });
+    if (!resp.ok) console.warn("auto-betting switch refused", resp.status);
+  } catch (_) {}
+  refreshBettingStatus();
+});
+
+$("abSaveUnit").addEventListener("click", async () => {
+  const raw = $("abUnitPrice").value;
+  const v = parseFloat(raw);
+  if (!isFinite(v) || v <= 0) { refreshBettingStatus(); return; }
+  try {
+    await fetch(`${BETTING_API}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ unit_price: v }),
+    });
+  } catch (_) {}
+  refreshBettingStatus();
+});
+
+refreshBettingStatus();
+
 // Alert history is restored from local storage; the ACTIVE store is never
 // restored from it — it is always re-derived from live observations, so a
 // reload can never promote a resolved record back to active.  Competition
@@ -3183,3 +3274,4 @@ loadQ3BreakHistory();
 Object.assign(LEAGUE_LABELS, leagueLabelsFrom(document));
 refresh();
 setInterval(refresh, POLL_MS);
+setInterval(refreshBettingStatus, POLL_MS);

@@ -119,6 +119,22 @@ def main() -> None:
     from blm_v4.api import router as v4_router
     app.include_router(v4_router)
 
+    # ── AUTO-BETTING execution layer (directive 2026-09-21) ──
+    # DRY_RUN by default; the kill switch persists OFF; credentials
+    # are read from the environment at runtime only and are never
+    # logged, served or stored.  The worker evaluates the SAME live
+    # payload the dashboard consumes and can only ADD an execution
+    # ledger — the alert logic itself is untouched.
+    from blm_v4.betting.api import configure_betting, router as betting_router
+    from blm_v4.betting.config import BettingConfig
+    from blm_v4.betting.store import BettingStore
+    from blm_v4.betting.worker import BettingWorker
+    betting_cfg = BettingConfig.from_env(root)
+    betting_store = BettingStore(betting_cfg.db_path)
+    configure_betting(betting_store, betting_cfg)
+    app.include_router(betting_router)
+
+
     # ── Operator dashboard at the root ───────────────────────
     # http://<host>:2262/ is the live analytics terminal;
     # /api/v2/live and /api/v4/* remain the API/debug endpoints.
@@ -278,6 +294,32 @@ def main() -> None:
         settle_worker.start()
         app.state._settle_worker = settle_worker
         logger.info("settle_worker_started", interval_s=SETTLE_INTERVAL_S)
+
+        # ── AUTO-BETTING WORKER (directive 2026-09-21) ─────────────
+        # DRY_RUN by default; the persisted kill switch defaults OFF.
+        # The worker evaluates the SAME /api/v4/live payload the dashboard
+        # consumes and can only ADD execution-ledger rows — the alert
+        # logic is untouched.  Credentials are read from the environment
+        # at runtime only; nothing is logged or stored.
+        def _live_games_for_betting() -> list:
+            """The current /api/v4/live games list, computed in-process
+            (the same authority the dashboard renders).  Failure-isolated:
+            an error yields [] and the worker simply finds no candidates —
+            never a stale evaluation."""
+            from blm_v4.api import v4_live as _v4_live
+            try:
+                return (_v4_live(classification=None).get("games") or [])
+            except Exception:
+                return []
+
+        betting_worker = BettingWorker(
+            betting_cfg, betting_store, _live_games_for_betting,
+            poll_interval_s=5.0)
+        betting_worker.start()
+        app.state._betting_worker = betting_worker
+        logger.info("betting_worker_started",
+                    dry_run=betting_cfg.dry_run,
+                    enabled=betting_store.is_enabled())
         logger.info("pipeline_started")
 
     @app.on_event("shutdown")
@@ -294,6 +336,9 @@ def main() -> None:
         settle_worker = getattr(app.state, "_settle_worker", None)
         if settle_worker is not None:
             settle_worker.stop(timeout=2)
+        betting_worker = getattr(app.state, "_betting_worker", None)
+        if betting_worker is not None:
+            betting_worker.stop(timeout=2)
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
             sct.cancel()

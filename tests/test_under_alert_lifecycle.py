@@ -728,7 +728,10 @@ def test_no_alert_vocabulary_regression(client):
     active = js[js.index("activeAlertsHTML")
                 :js.index("RESULTED-PANEL FILTERS")]
     assert "OVER" not in active
-    low = js.lower()
+    # vocabulary ban guards the ALERT/ANALYTICS surface; the AUTO BETTING
+    # operations panel (directive 2026-09-21, appended at EOF, delimited by
+    # its own marker) legitimately names itself — excluded from the scan.
+    low = js[:js.index("AUTO BETTING panel (directive")].lower()
     for banned in ("edge", "signal", "momentum", "win rate", "probab",
                    "calibrat", "forecast", "predict", "fair", "z_score",
                    "betting", "staking"):

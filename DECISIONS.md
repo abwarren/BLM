@@ -1494,3 +1494,32 @@ UNDER alert — NOT new alerts, NOT a loosening of the alert condition
 Small-sample caveats carry over unchanged: C1 (N=17) and C4 (N=7) are
 NOT established production accuracies.  No alert volume, threshold,
 margin or pace range was changed; no fingerprint fires an alert.
+
+## 2026-09-21 — AUTO-BETTING EXECUTION LAYER (directive; DRY_RUN, OFF by default)
+
+Implemented the auto-betting execution architecture per directive:
+
+- `blm_v4/betting/` — config (env-driven, `BETTING_DRY_RUN` default true),
+  store (`blm_betting.db`: config/bet_executions/bet_audit; UNIQUE
+  idempotency key `game_id|checkpoint|alert_id`), provider (DryRun +
+  PokerBet stub reading `POKERBET_USERNAME`/`POKERBET_PASSWORD` from the
+  environment at runtime only), executor (10-condition gate, unit-based
+  staking, server-side risk limits, fail-safe NO BET), worker (5 s poll,
+  switch read fresh each pass), API router (status/settings/execution).
+- Wired into `server.py` (in-process `/api/v4/live` payload; `v4_live`
+  kept its original signature after the `**kwargs` FastAPI experiment
+  was reverted — HTTP 422 regression caught by `test_v4_api`).
+- Dashboard AUTO BETTING panel: kill switch (default OFF, defaults OFF
+  after restart unless persisted ON), unit price, today's stats, recent
+  executions with status colours.
+- Tests: 45 in `tests/test_betting_execution.py` (all directive matrix
+  cases incl. concurrency exactly-one, restart→OFF, provider FAILED/
+  UNKNOWN, credential-exposure scan).  Vocabulary guards scoped past the
+  betting-operations panel marker (their intent — alert-surface purity —
+  unchanged).
+- Verification: dry-run end-to-end (WOULD BET recorded with trigger,
+  fingerprints, stake calc; duplicate poll refused — exactly 1 record);
+  credential scan: both values ONLY in gitignored `.env`, 0 sites in
+  tracked files or tree.
+- Status: DRY_RUN stays on; no real bet can be placed; alert logic
+  untouched; fingerprints remain contextual only; R1 remains excluded.
