@@ -1011,14 +1011,11 @@ function underAlertValues(g, ua, labels) {
    with unprovable data renders UNAVAILABLE honestly, never as a pass.
    Pure display: the layer never creates, suppresses or re-fires an alert
    and fingerprint_count is never a threshold here. */
-const FINGERPRINT_KEYS = ["C1", "C2", "C3", "C4", "C5", "C6", "R2"];
+const FINGERPRINT_KEYS = ["C1", "C3", "C5", "R2"];
 const FINGERPRINT_LABELS = {
   C1: "Required pace 1.10–1.20x league avg",
-  C2: "Recent deceleration",
   C3: "Required pace >1.04x + Q3 below average",
-  C4: "Required 1.10–1.20x + recent deceleration",
   C5: "Required pace >1.10x + Q3 below average",
-  C6: "Recent deceleration + Q3 below average",
   R2: "Q3 <0.90x league Q3 average",
 };
 
