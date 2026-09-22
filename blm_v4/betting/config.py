@@ -50,6 +50,27 @@ def _env_int(name: str, default: str) -> Optional[int]:
         return None
 
 
+def _load_env_file(path: Path) -> None:
+    """Load KEY=VALUE lines from ``path`` into the environment WITHOUT
+    overriding variables that are already set.  Missing file → no-op;
+    parse problems → skip the line; never raises.  Values are quoted-
+    aware (strips matching single/double quotes)."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 @dataclass(frozen=True)
 class BettingConfig:
     """The immutable server-side betting configuration.
@@ -88,6 +109,11 @@ class BettingConfig:
     def from_env(root: Optional[Path] = None) -> "BettingConfig":
         """Build the configuration from the environment.
 
+        The gitignored ``.env`` file at the project root is loaded first
+        (existing environment variables always WIN — the file only fills
+        gaps), so credentials and limits staged there reach the provider
+        without ever entering source control.
+
         Missing values mean "no limit configured" (None) and the executor
         treats a missing limit as UNVERIFIABLE → NO BET (fail-safe §9).
         ``DRY_RUN`` defaults true: live submission requires an explicit
@@ -95,6 +121,7 @@ class BettingConfig:
         """
         if root is None:
             root = Path(__file__).resolve().parent.parent.parent
+        _load_env_file(root / ".env")
         return BettingConfig(
             dry_run=_env_bool("BETTING_DRY_RUN", "true"),
             max_stake_per_bet=_env_float("BETTING_MAX_STAKE_PER_BET", ""),
