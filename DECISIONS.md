@@ -1523,3 +1523,18 @@ Implemented the auto-betting execution architecture per directive:
   tracked files or tree.
 - Status: DRY_RUN stays on; no real bet can be placed; alert logic
   untouched; fingerprints remain contextual only; R1 remains excluded.
+
+## 2026-09-22 — NO FINAL result-resolution fix (collector + scorecard)
+- Root cause (read-only diagnostic): collector untracked games ~60s after
+  they left the source panel; the last captured snapshot was frequently
+  degenerate (NULL scores / mid-quarter), and scorecard.capture_results
+  graded rows[-1] only -> chronic UNKNOWN/INVALID game_results rows ->
+  dashboard NO FINAL.
+- Fix: (1) collector final-capture window — grace extension + priority
+  re-queue while still tracked, freshness bypass, cleanup; (2) scorecard
+  degenerate-tail grading rule — settle only on a scored basis.
+- Backlog self-heals: UNKNOWN rows re-verify every settle pass.
+- Tests: tests/test_final_result_recovery.py 14/14 (TDD, red->green);
+  touched-surface suites green; the 4 known pre-existing archive-drift
+  failures remain (stash-verified on clean HEAD, incl.
+  test_forensic_relative_pace_freeze.py::test_same_game_exclusion...).

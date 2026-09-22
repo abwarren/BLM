@@ -659,6 +659,28 @@ def _max_ts_by_game(conn, table: str, column: str = "captured_at") -> dict:
         f"GROUP BY source_game_id") if r[1]}
 
 
+def _max_scored_ts_by_game(conn) -> dict:
+    """{source_game_id: MAX(captured_at) over FULLY-SCORED rows} in ONE
+    scan; {} when the snapshots table is absent.
+
+    The capture_results settle gate's exact-input basis (NO FINAL defect,
+    2026-09-22): grading reads the LAST FULLY-SCORED row — trailing
+    degenerate (NULL-score) rows cannot change the verdict — so only a
+    NEW SCORED row is new input.  A stored verdict whose history merely
+    grew blank rows stays settled; a game with no scored row at all is
+    never settled (its verdict can still improve)."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name = 'snapshots'").fetchone() is None:
+        return {}
+    try:
+        return {r[0]: r[1] for r in conn.execute(
+            """SELECT source_game_id, MAX(captured_at) FROM snapshots
+               WHERE home_score IS NOT NULL AND away_score IS NOT NULL
+               GROUP BY source_game_id""")}
+    except sqlite3.OperationalError:      # pre-migration schema
+        return {}
+
+
 def _is_final_label(period_label: Optional[str]) -> bool:
     p = (period_label or "").lower()
     return any(k in p for k in ("full time", "finished", "end of match", "match ended"))
@@ -1167,7 +1189,12 @@ class Scorecard:
         """
         if not self._gate_active(conn):
             return set()
-        max_snap = _max_ts_by_game(conn, "snapshots")
+        # Scored-basis exact-input test: the verdict grades the last
+        # FULLY-SCORED snapshot row, so trailing degenerate (blank) rows
+        # are NOT new input (NO FINAL defect, 2026-09-22 — otherwise a
+        # game graded OK would be re-read forever as the collector's
+        # blank tail rows arrived).
+        max_snap = _max_scored_ts_by_game(conn)
         cut = _ago(_settle_grace_s())
         out: set[str] = set()
         for sid, status, result_at in conn.execute(
@@ -1648,11 +1675,33 @@ class Scorecard:
                             (g["source_game_id"], g["classification"], rows[-1]["captured_at"]),
                         )
                         continue
+                    # Grade from the LAST FULLY-SCORED row (NO FINAL
+                    # defect, 2026-09-22): the collector's final look at a
+                    # game can be a degenerate SPA row — scores and period
+                    # all NULL — because the source panel renders blanks
+                    # before the row disappears.  Grading rows[-1] alone
+                    # sent such games to UNKNOWN with NULL finals forever
+                    # (12 of 57 ended games on 2026-09-21/22), and the
+                    # dashboard honestly rendered NO FINAL.  A scored row
+                    # IS the last authoritative state the game reported;
+                    # trailing blank rows add nothing.  The verdict rules
+                    # themselves are UNTOUCHED — a mid-quarter scored tail
+                    # still stays UNKNOWN (never a guessed final) — and
+                    # result_at points at the graded row, the verdict's
+                    # exact input.
                     last = rows[-1] if rows else None
                     if not last:
                         continue
+                    graded = last
+                    if (graded.get("home_score") is None
+                            or graded.get("away_score") is None):
+                        for r in reversed(rows):
+                            if (r.get("home_score") is not None
+                                    and r.get("away_score") is not None):
+                                graded = r
+                                break
                     nsnaps = len(rows)
-                    status, fh, fa = self._final_result(last, nsnaps)
+                    status, fh, fa = self._final_result(graded, nsnaps)
                     conn.execute(
                         """INSERT INTO game_results (
                             source_game_id, classification, final_home, final_away,
@@ -1667,7 +1716,7 @@ class Scorecard:
                         (
                             g["source_game_id"], g["classification"],
                             fh, fa, (fh + fa) if (fh is not None and fa is not None) else None,
-                            last["captured_at"], status,
+                            graded["captured_at"], status,
                         ),
                     )
                     stats[status.lower()] += 1

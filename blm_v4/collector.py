@@ -101,7 +101,7 @@ from blm_v4.discovery import (
     find_relevant_competitions,
 )
 from blm_v4.event_parser import parse_event_view
-from blm_v4.projection import clock_minutes
+from blm_v4.projection import clock_minutes, duration_for
 from blm_v4.models import (
     SOURCE_POKERBET,
     MarketObservation,
@@ -616,7 +616,25 @@ class PokerBetCollector:
             "ticks": 0, "games_seen": 0, "snapshots": 0,
             "games_resolved": 0, "reconciliations": 0, "errors": 0,
             "instances_split": 0, "games_ended_final": 0,
+            "final_capture_retries": 0,
         }
+        # NO FINAL defect (2026-09-22): the last look at a game can be a
+        # degenerate SPA row (scores/period NULL) — the list page renders
+        # blanks before the row disappears — so the scorecard grades
+        # UNKNOWN with NULL finals forever and the dashboard renders NO
+        # FINAL.  A game at grace expiry whose tail cannot prove a final
+        # gets ONE bounded final-capture window: it stays tracked and is
+        # prioritized in the slow event-view rotation (the verified DOM
+        # path returns real scores when the list page renders blank).
+        # BLM_FINAL_CAPTURE_GRACE_S=0 restores the old behavior exactly.
+        try:
+            self._final_capture_grace_s = abs(float(
+                os.environ.get("BLM_FINAL_CAPTURE_GRACE_S", "120") or 0))
+        except (TypeError, ValueError):
+            self._final_capture_grace_s = 120.0
+        self._final_capture_gids: set[str] = set()    # window currently open
+        self._final_capture_armed: set[str] = set()   # armed exactly once
+        self._final_capture_until: dict[str, float] = {}
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -2264,6 +2282,10 @@ class PokerBetCollector:
             self._unseen_ticks.get(cls_val, {}).pop(key, None)
             if game.source_game_id in self._market_queue:
                 self._market_queue.remove(game.source_game_id)
+            # a verified final supersedes any open final-capture window
+            self._final_capture_gids.discard(game.source_game_id)
+            self._final_capture_until.pop(game.source_game_id, None)
+            self._final_capture_armed.discard(game.source_game_id)
         last = self.store.get_snapshots(game.source_game_id, limit=1)
         lr = last[0] if last else {}
         logger.info(
@@ -2480,6 +2502,10 @@ class PokerBetCollector:
             gid = self._market_queue.pop(0)
             self._market_queue.append(gid)
             last = self._last_market_at.get(gid)
+            # NO FINAL fix: a game inside its final-capture window is
+            # visited REGARDLESS of the freshness gate — the whole point
+            # is to capture the terminal state before the window ends.
+            final_capture = gid in self._final_capture_gids
             # Early-checkpoint priority: a game that has NEVER had a
             # verified market total line is not-yet-covered — visit it
             # regardless of the freshness gate (unless we captured it
@@ -2489,7 +2515,8 @@ class PokerBetCollector:
                 if last and _ts_age_s(last) < 15:
                     self._market_stats["skipped_fresh_arms"] += 1
                     continue  # just visited; avoid a hot loop
-            elif last and _ts_age_s(last) < MARKET_REFRESH_S:
+            elif (last and _ts_age_s(last) < MARKET_REFRESH_S
+                  and not final_capture):
                 # Fresh-observation gate: armed ONLY by an actual observed
                 # market capture (attempt != observation).  While the
                 # gate is open (no successful observation yet) the game
@@ -2859,9 +2886,52 @@ class PokerBetCollector:
 
     # ── Game lifecycle ───────────────────────────────────────────
 
+    def _tail_provable_final(self, gid: str) -> bool:
+        """True when the stored snapshot tail can already prove a final —
+        the newest FULLY-SCORED row is a final-labeled or 4th-quarter
+        ending by the SAME rules the scorecard's ``_final_result`` uses.
+        Degenerate (NULL-score) rows are skipped: they carry no state.
+        A mid-quarter scored tail is NOT provable — that is exactly the
+        case the final-capture window exists for."""
+        try:
+            rows = self.store.get_snapshots(gid, limit=25)
+        except Exception:
+            return True          # fail safe: behave exactly as before
+        scored = None
+        for r in rows:           # newest-first
+            if r.get("home_score") is not None and r.get("away_score") is not None:
+                scored = r
+                break
+        if scored is None:
+            return False         # nothing scored: try the window
+        period = (scored.get("period_label") or "").lower()
+        clock = (scored.get("clock") or "").strip()
+        if any(k in period for k in ("full time", "finished",
+                                     "end of match", "match ended")):
+            return True
+        quarter = scored.get("quarter")
+        if period.startswith("4th") or (quarter is not None and quarter >= 4):
+            q_min, full = duration_for(
+                scored.get("classification") or None)
+            el = clock_minutes(quarter if quarter is not None else 4,
+                               clock, q_min) if clock else None
+            if clock in ("00:00", "0:00", "") or el is None \
+                    or el >= full - 2.0:
+                return True
+        return False
+
     def _mark_ended(self, seen_keys: dict[str, set[str]]) -> None:
         """Grace-based end detection (fast path).  DB writes happen
-        OUTSIDE the track lock — only the map mutations are guarded."""
+        OUTSIDE the track lock — only the map mutations are guarded.
+
+        NO FINAL fix (2026-09-22): at grace expiry a game whose tail
+        cannot prove a final is kept tracked for ONE bounded final-
+        capture window instead of being ended on a degenerate tail; the
+        slow rotation is asked to capture its event view (verified scores
+        even when the list page renders blank).  Window expiry (or
+        BLM_FINAL_CAPTURE_GRACE_S=0, or an already-provable tail) runs
+        the normal ended path unchanged."""
+        now_m = time.monotonic()
         with self._track_lock:
             to_end: list[PokerBetGame] = []
             for cls_val, games in self._tracked.items():
@@ -2872,18 +2942,44 @@ class PokerBetCollector:
                     self._unseen_ticks[cls_val][key] = (
                         self._unseen_ticks[cls_val].get(key, 0) + 1
                     )
-                    if self._unseen_ticks[cls_val][key] >= self._ended_grace_ticks:
-                        if game.status != "ended":
-                            game.status = "ended"
-                            to_end.append(game)
-                        # keep the game record; drop from live tracking
-                        del games[key]
-                        if game.source_game_id in self._market_queue:
-                            self._market_queue.remove(game.source_game_id)
-        for game in to_end:
-            self.store.upsert_game(game)
-            logger.info("game ended (disappeared): %s", game.source_game_id)
-            self._finalize_clean(game)
+                    if self._unseen_ticks[cls_val][key] < self._ended_grace_ticks:
+                        continue
+                    gid = game.source_game_id
+                    until = self._final_capture_until.get(gid)
+                    if (game.status != "ended"
+                            and self._final_capture_grace_s > 0
+                            and gid not in self._final_capture_armed
+                            and not self._tail_provable_final(gid)):
+                        # arm ONCE: keep tracked, prioritize the capture
+                        self._final_capture_armed.add(gid)
+                        self._final_capture_gids.add(gid)
+                        self._final_capture_until[gid] = (
+                            now_m + self._final_capture_grace_s)
+                        if gid in self._market_queue:
+                            self._market_queue.remove(gid)
+                        self._market_queue.insert(0, gid)
+                        self.stats["final_capture_retries"] += 1
+                        logger.info(
+                            "final-capture window armed for %s (tail cannot "
+                            "prove a final) — keeping tracked %.0fs",
+                            gid, self._final_capture_grace_s)
+                        continue
+                    if until is not None and now_m < until:
+                        continue     # window still open — keep tracked
+                    if game.status != "ended":
+                        game.status = "ended"
+                        to_end.append(game)
+                    # keep the game record; drop from live tracking
+                    del games[key]
+                    if game.source_game_id in self._market_queue:
+                        self._market_queue.remove(game.source_game_id)
+                    self._final_capture_gids.discard(gid)
+                    self._final_capture_until.pop(gid, None)
+                    self._final_capture_armed.discard(gid)
+            for game in to_end:
+                self.store.upsert_game(game)
+                logger.info("game ended (disappeared): %s", game.source_game_id)
+                self._finalize_clean(game)
 
     def _find_tracked(self, source_game_id: str) -> Optional[PokerBetGame]:
         """Lock-guarded scan (dict-only) — safe from any thread.  Callers
