@@ -1,4 +1,4 @@
-"""THE HISTORICAL UNDER FINGERPRINT LAYER — C1..C6 + R2 (authorization
+"""THE HISTORICAL UNDER FINGERPRINT LAYER — C1, C3, C5 + R2 (authorization
 2026-09-21).
 
 Locks the approved fingerprints as production code:
@@ -30,7 +30,6 @@ from blm_v4.live_analytics.under_alert import under_alert_state
 from blm_v4.live_analytics.under_fingerprints import (
     C1_REQ_RATIO_MAX,
     C1_REQ_RATIO_MIN,
-    C2_MOMENTUM_MAX,
     C3_REQ_RATIO_MIN,
     FP_FALSE,
     FP_TRUE,
@@ -77,19 +76,6 @@ def test_c1_directive_boundary_values():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# C2 — recent3_minus_act <= -0.5  (INCLUSIVE at the edge)
-# ══════════════════════════════════════════════════════════════════════
-
-def test_c2_directive_boundary_values():
-    assert fp(recent3=3.0, actual=3.5)["fingerprint_c2"] == FP_TRUE      # -0.5 -> TRUE
-    assert fp(recent3=3.0, actual=3.5001)["fingerprint_c2"] == FP_TRUE   # -0.5001 -> TRUE
-    assert fp(recent3=3.0, actual=3.4999)["fingerprint_c2"] == FP_FALSE  # -0.4999 -> FALSE
-    # heating (positive momentum) is FALSE
-    assert fp(recent3=3.5, actual=3.0)["fingerprint_c2"] == FP_FALSE
-    assert C2_MOMENTUM_MAX == -0.5
-
-
-# ══════════════════════════════════════════════════════════════════════
 # C3 — req_ratio > 1.04 AND q3_ratio < 1.00  (both STRICT)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -105,8 +91,6 @@ def test_c3_both_legs_strict():
     assert fp(required=req_for(1.05), q3=3.1)["fingerprint_c3"] == FP_FALSE
 
 
-# ══════════════════════════════════════════════════════════════════════
-# C4 — C1 AND C2
 # ══════════════════════════════════════════════════════════════════════
 
 def test_c4_is_c1_and_c2():
@@ -145,8 +129,6 @@ def test_c5_both_legs_strict_and_matches_fingerprint_c5_module():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# C6 — C2 AND q3_ratio < 1.00
-# ══════════════════════════════════════════════════════════════════════
 
 def test_c6_is_c2_and_q3_below_average():
     assert fp(recent3=3.0, actual=3.5, q3=2.9)["fingerprint_c6"] == FP_TRUE
@@ -179,8 +161,7 @@ def test_missing_req_ratio_is_unavailable_where_applicable():
     assert b["fingerprint_c1"] == FP_UNAVAILABLE
     assert b["fingerprint_c3"] == FP_UNAVAILABLE
     assert b["fingerprint_c5"] == FP_UNAVAILABLE
-    assert b["fingerprint_c4"] == FP_UNAVAILABLE
-    assert b["req_ratio"] is None
+        assert b["req_ratio"] is None
     # fingerprints that need no required pace stay decidable: the default
     # Q3 pair is provable (ratio 1.0) so R2 is FALSE, not UNAVAILABLE
     assert b["fingerprint_r2"] == FP_FALSE
@@ -192,18 +173,15 @@ def test_missing_q3_ratio_is_unavailable_where_applicable():
     b = fp(q3=None)
     assert b["fingerprint_c3"] == FP_UNAVAILABLE
     assert b["fingerprint_c5"] == FP_UNAVAILABLE
-    assert b["fingerprint_c6"] == FP_UNAVAILABLE
-    assert b["fingerprint_r2"] == FP_UNAVAILABLE
+        assert b["fingerprint_r2"] == FP_UNAVAILABLE
     # required-pace-only fingerprints stay decidable (default req 1.0x)
     assert b["fingerprint_c1"] == fp()["fingerprint_c1"]
     assert b["fingerprint_c1"] == FP_FALSE
-    assert b["fingerprint_c2"] == fp()["fingerprint_c2"]
-
+    
 
 def test_missing_momentum_is_unavailable_where_applicable():
     b = fp()                                  # no recent3/actual supplied
-    assert b["fingerprint_c2"] == FP_UNAVAILABLE
-    assert b["fingerprint_c4"] == FP_UNAVAILABLE
+        assert b["fingerprint_c4"] == FP_UNAVAILABLE
     assert b["fingerprint_c6"] == FP_UNAVAILABLE
     # required-pace and Q3 fingerprints stay decidable
     assert b["fingerprint_c1"] == FP_FALSE
@@ -216,9 +194,7 @@ def test_non_finite_operands_fail_closed():
     for bad in (float("nan"), float("inf"), float("-inf"), True, "x", ""):
         assert fp(required=bad)["fingerprint_c1"] == FP_UNAVAILABLE
         assert fp(q3=bad)["fingerprint_r2"] == FP_UNAVAILABLE
-        assert fp(recent3=bad, actual=3.5)["fingerprint_c2"] == FP_UNAVAILABLE
-        assert fp(recent3=3.0, actual=bad)["fingerprint_c2"] == FP_UNAVAILABLE
-        assert fp(league=bad)["fingerprint_c1"] == FP_UNAVAILABLE
+                        assert fp(league=bad)["fingerprint_c1"] == FP_UNAVAILABLE
         assert fp(q3avg=bad)["fingerprint_r2"] == FP_UNAVAILABLE
 
 
@@ -255,31 +231,25 @@ def test_zero_league_average_is_unavailable_not_crash():
 # ══════════════════════════════════════════════════════════════════════
 
 def test_fingerprint_count_counts_true_only():
-    # req_ratio 1.15, Q3 0.9x, deceleration -> C1 C2 C3 C4 C5 C6 TRUE,
-    # R2 needs < 0.90 (0.90 exactly is FALSE): q3=2.7/3.0 -> 0.9 -> R2 FALSE
-    b = fp(required=req_for(1.15), q3=2.7, recent3=3.0, actual=3.5)
-    assert b["fingerprints_fired"] == ["C1", "C2", "C3", "C4", "C5", "C6"]
-    assert b["fingerprint_count"] == 6
-    # deep Q3 slump (2.5/3.0 = 0.833) fires R2 as well
-    b = fp(required=req_for(1.15), q3=2.5, recent3=3.0, actual=3.5)
-    assert b["fingerprints_fired"] == ["C1", "C2", "C3", "C4", "C5", "C6", "R2"]
-    assert b["fingerprint_count"] == 7
+    b = fp(required=req_for(1.15), q3=2.7)
+    assert b["fingerprints_fired"] == ["C1", "C3", "C5"]
+    assert b["fingerprint_count"] == 3
+    b = fp(required=req_for(1.15), q3=2.5)
+    assert b["fingerprints_fired"] == ["C1", "C3", "C5", "R2"]
+    assert b["fingerprint_count"] == 4
 
 
 def test_fingerprints_fired_order_is_canonical():
-    b = fp(required=req_for(1.12), q3=2.5, recent3=3.0, actual=3.6)
+    b = fp(required=req_for(1.12), q3=2.5)
     assert b["fingerprints_fired"] == [k for k in FINGERPRINT_KEYS
                                        if k in b["fingerprints_fired"]]
     assert set(b["fingerprints_fired"]) <= set(FINGERPRINT_KEYS)
 
 
-def test_directive_example_shape_four_fingerprints():
-    # momentum + Q3 slump WITHOUT the C1 band: req_ratio 1.05 (above the
-    # C3 margin but below C5's 1.10 edge), Q3 0.8x, decelerating —
-    # C1 FALSE, C2 TRUE, C3 TRUE, C4 FALSE, C5 FALSE, C6 TRUE, R2 TRUE
-    b = fp(required=req_for(1.05), q3=2.4, recent3=3.0, actual=3.5)
-    assert b["fingerprints_fired"] == ["C2", "C3", "C6", "R2"]
-    assert b["fingerprint_count"] == 4
+def test_directive_example_shape_two_fingerprints():
+    b = fp(required=req_for(1.05), q3=2.4)
+    assert b["fingerprints_fired"] == ["C3", "R2"]
+    assert b["fingerprint_count"] == 2
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -302,7 +272,7 @@ def test_under_alert_contract_untouched_by_fingerprints():
 
 
 def test_fingerprint_names_and_keys():
-    assert FINGERPRINT_KEYS == ("C1", "C2", "C3", "C4", "C5", "C6", "R2")
+    assert FINGERPRINT_KEYS == ("C1", "C3", "C5", "R2")
 
 
 # ══════════════════════════════════════════════════════════════════════
