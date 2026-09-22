@@ -37,12 +37,11 @@ THREE-STATE SEMANTICS (fail closed — missing data is NEVER TRUE)::
     FALSE        every operand provable AND at least one comparison fails
     UNAVAILABLE  any operand missing / non-finite / unprovable
 
-A conjunction (C3..C6) is UNAVAILABLE whenever ANY leg is UNAVAILABLE: a
+A conjunction (C3/C5) is UNAVAILABLE whenever ANY leg is UNAVAILABLE: a
 partially-provable pattern is never a pass.
 
 ``fingerprint_count`` counts ONLY TRUE fingerprints; UNAVAILABLE and FALSE
-contribute nothing.  ``fingerprints_fired`` lists the exact fired keys in
-C1..C6, R2 order (e.g. ``["C2", "C3", "C5", "R2"]``).  Per the directive,
+contribute nothing.  ``fingerprints_fired`` lists the exact fired keys in C1, C3, C5, R2 order.  Per the directive,
 fingerprint_count is RECORDED FOR ANALYSIS — it is not a threshold, gates
 nothing, and creates no alert.
 
@@ -65,8 +64,7 @@ available at the exact trigger timestamp:
     and reads no game state (enforced by test).
 
 HISTORICAL OBSERVATIONS (read-only analysis 2026-09-21, reported as
-context — NOT established production accuracy; C1 N=17 and C4 N=7 are
-small samples)::
+context — NOT established production accuracy; C1 N=17 is a small sample)::
 
     C1  N= 17   UNDER%=88.24%      C5  N=103   UNDER%=76.70%
     C3  N=147   UNDER%=72.79%      R2  N= 87   UNDER%=78.16%
@@ -111,8 +109,8 @@ C1_NAME = "HISTORICAL_UNDER_FINGERPRINT_C1"
 C3_NAME = "HISTORICAL_UNDER_FINGERPRINT_C3"
 R2_NAME = "HISTORICAL_UNDER_FINGERPRINT_R2"
 
-#: The approved fingerprint keys, in canonical order.  Exactly seven.
-#: R1 is deliberately absent (see module docstring).
+#: The approved fingerprint keys, in canonical order.  Exactly four.
+#: C2/C4/C6 are deliberately absent; R1 is also absent (see module docstring).
 FINGERPRINT_KEYS = ("C1", "C3", "C5", "R2")
 
 #: Operator-facing labels — the same wording the read-only analysis used.
