@@ -136,6 +136,11 @@ def _extract_game(gid: str, gbody: dict) -> dict:
         "period_label": _period_label(info.get("current_game_state"),
                                       addl.get("quarter")),
         "clock": info.get("current_game_time"),
+        # Authoritative game-START evidence (directive 2026-09-22 §2): the
+        # feed carries the event's start_ts (epoch seconds) on game
+        # objects — additive keys, existing payload shape unchanged.
+        "start_ts": _f(gbody.get("start_ts")),
+        "match_length": _f(gbody.get("match_length")),
         "markets": markets,
     }
 
@@ -161,42 +166,90 @@ def normalize_observations(payloads: list[dict], captured_at: Optional[str] = No
 
     ``line_value`` comes from the market's own ``base`` (the bookmaker
     line); Over/Under prices from the matching events.
+
+    Quarter-specific collection (directive 2026-09-22, DATA COLLECTION
+    ONLY): game-total markets keep their EXACT historical shape; every
+    OTHER market that actually offers an O/U ladder is ALSO emitted (one
+    row per ladder line, grouped by the events' own ``base``), because the
+    source's period taxonomy must be discovered from the data, not assumed
+    — markets whose events carry no Over/Under ladder are ignored, never
+    guessed into being totals.
     """
     ts = captured_at or _utcnow()
     obs: list[dict] = []
     for p in payloads:
         for m in p["markets"]:
             name = _TOTAL_TYPES.get(m["type"])
-            if not name:
-                continue
             over = under = None
             for ev in m["events"]:
                 if ev["type_1"] == "Over":
                     over = ev["price"]
                 elif ev["type_1"] == "Under":
                     under = ev["price"]
-            obs.append({
-                "source_game_id": p["game_id"],
-                "captured_at": ts,
-                "market_type": m["type"],
-                "market_name": m["name"] or name,
-                "line_value": m["base"],
-                "over_price": over,
-                "under_price": under,
-                "home_score": p["home_score"],
-                "away_score": p["away_score"],
-                "period_label": p["period_label"],
-                "clock": p["clock"],
-                "raw": {
-                    "home": p["home_name"],
-                    "away": p["away_name"],
-                    "markets_count": len(p["markets"]),
-                    "market_id": m["market_id"],
-                    "events": [
-                        {"type_1": e["type_1"], "price": e["price"],
-                         "base": e["base"], "name": e["name"]}
-                        for e in m["events"]
-                    ],
-                },
-            })
+            if name:  # game-total family — EXACT historical shape
+                obs.append({
+                    "source_game_id": p["game_id"],
+                    "captured_at": ts,
+                    "market_type": m["type"],
+                    "market_name": m["name"] or name,
+                    "line_value": m["base"],
+                    "over_price": over,
+                    "under_price": under,
+                    "home_score": p["home_score"],
+                    "away_score": p["away_score"],
+                    "period_label": p["period_label"],
+                    "clock": p["clock"],
+                    "raw": {
+                        "home": p["home_name"],
+                        "away": p["away_name"],
+                        "markets_count": len(p["markets"]),
+                        "market_id": m["market_id"],
+                        "events": [
+                            {"type_1": e["type_1"], "price": e["price"],
+                             "base": e["base"], "name": e["name"]}
+                            for e in m["events"]
+                        ],
+                    },
+                })
+                continue
+            # Everything else: emit ONLY genuine O/U ladders.  Events
+            # grouped by their OWN base (a market may carry several
+            # lines); a market without Over/Under events produces
+            # nothing — a non-total market is never repainted as one.
+            by_base: dict[Optional[float], dict] = {}
+            for ev in m["events"]:
+                if ev["type_1"] not in ("Over", "Under"):
+                    by_base.clear()
+                    break
+                by_base.setdefault(ev.get("base"), {})[
+                    ev["type_1"]] = ev["price"]
+            if not by_base:
+                continue
+            for base, sides in by_base.items():
+                obs.append({
+                    "source_game_id": p["game_id"],
+                    "captured_at": ts,
+                    "market_type": m["type"],
+                    "market_name": m["name"] or m.get(
+                        "name_template") or "",
+                    "line_value": base if base is not None else m.get(
+                        "base"),
+                    "over_price": sides.get("Over"),
+                    "under_price": sides.get("Under"),
+                    "home_score": p["home_score"],
+                    "away_score": p["away_score"],
+                    "period_label": p["period_label"],
+                    "clock": p["clock"],
+                    "raw": {
+                        "home": p["home_name"],
+                        "away": p["away_name"],
+                        "markets_count": len(p["markets"]),
+                        "market_id": m["market_id"],
+                        "events": [
+                            {"type_1": e["type_1"], "price": e["price"],
+                             "base": e["base"], "name": e["name"]}
+                            for e in m["events"]
+                        ],
+                    },
+                })
     return obs

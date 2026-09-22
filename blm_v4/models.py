@@ -91,6 +91,19 @@ class MarketObservation(BaseModel):
     home_total_line: Optional[float] = None
     away_total_line: Optional[float] = None
 
+    # ── quarter-specific scores (directive 2026-09-22, DATA COLLECTION
+    # ONLY).  Per-quarter values EXACTLY as the source presented them at
+    # this instant — never backfilled, never reconstructed from a later
+    # state.  NULL means the source did not expose the value NOW.
+    q1_home_score: Optional[int] = None
+    q1_away_score: Optional[int] = None
+    q2_home_score: Optional[int] = None
+    q2_away_score: Optional[int] = None
+    q3_home_score: Optional[int] = None
+    q3_away_score: Optional[int] = None
+    q4_home_score: Optional[int] = None
+    q4_away_score: Optional[int] = None
+
     # raw reproducibility payloads
     markets_json: str = "{}"
     raw_json: str = "{}"

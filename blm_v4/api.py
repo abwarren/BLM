@@ -2103,6 +2103,107 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
     }
 
 
+@router.get("/collection/quarters")
+def v4_quarter_collection() -> dict:
+    """Quarter-specific collection observability (directive 2026-09-22
+    §9, DATA COLLECTION ONLY).
+
+    Read-only aggregate over the quarter tables: coverage % per quarter,
+    quarter-line discovery, raw-frame retention, parse failures and
+    validation anomalies.  Missing data is REPORTED, never hidden; this
+    endpoint feeds no decision surface.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        conn = _connect()
+    except Exception:
+        return {"status": "db_unavailable", "server_time": now.isoformat()}
+    try:
+        def one(sql: str) -> dict:
+            r = conn.execute(sql).fetchone()
+            return dict(r) if r else {}
+
+        qso = one("""
+            SELECT COUNT(*) AS n,
+                   COUNT(DISTINCT source_game_id) AS games,
+                   SUM(q1_home_score IS NOT NULL) AS q1,
+                   SUM(q2_home_score IS NOT NULL) AS q2,
+                   SUM(q3_home_score IS NOT NULL) AS q3,
+                   SUM(q4_home_score IS NOT NULL) AS q4,
+                   MIN(captured_at) AS first_at,
+                   MAX(captured_at) AS last_at
+            FROM quarter_score_observations""")
+        qmo = one("""
+            SELECT COUNT(*) AS n,
+                   COUNT(DISTINCT source_game_id) AS games,
+                   SUM(market_period IN ('Q1','Q2','Q3','Q4')) AS q_lines,
+                   COUNT(DISTINCT market_type) AS market_types,
+                   MAX(captured_at) AS last_at
+            FROM quarter_market_observations""")
+        by_period = [dict(r) for r in conn.execute("""
+            SELECT market_period, COUNT(*) AS n,
+                   COUNT(DISTINCT market_name) AS names,
+                   SUM(line_value IS NOT NULL) AS with_line
+            FROM quarter_market_observations
+            GROUP BY market_period ORDER BY n DESC""")]
+        sample_markets = [dict(r) for r in conn.execute("""
+            SELECT market_type, market_name, market_period, line_value,
+                   over_price, under_price, MAX(captured_at) AS last_at
+            FROM quarter_market_observations
+            GROUP BY market_type, market_name
+            ORDER BY last_at DESC LIMIT 20""")]
+        wf = one("""
+            SELECT COUNT(*) AS n,
+                   SUM(parse_status='parse_failed') AS parse_failures,
+                   MAX(captured_at) AS last_at
+            FROM ws_raw_frames""")
+        an = one("SELECT COUNT(*) AS n FROM quarter_validation_anomalies")
+        recent_anoms = [dict(r) for r in conn.execute("""
+            SELECT detected_at, source_game_id, check_name, detail
+            FROM quarter_validation_anomalies
+            ORDER BY detected_at DESC LIMIT 10""")]
+    finally:
+        conn.close()
+
+    n_scores = qso.get("n") or 0
+
+    def pct(x):
+        return round((x or 0) / n_scores * 100, 2) if n_scores else 0.0
+
+    return {
+        "status": "ok",
+        "server_time": now.isoformat(),
+        "quarter_scores": {
+            "observations": n_scores,
+            "games": qso.get("games") or 0,
+            "first_at": qso.get("first_at"),
+            "last_at": qso.get("last_at"),
+            "q1_coverage_pct": pct(qso.get("q1")),
+            "q2_coverage_pct": pct(qso.get("q2")),
+            "q3_coverage_pct": pct(qso.get("q3")),
+            "q4_coverage_pct": pct(qso.get("q4")),
+        },
+        "quarter_lines": {
+            "observations": qmo.get("n") or 0,
+            "games": qmo.get("games") or 0,
+            "quarter_line_observations": qmo.get("q_lines") or 0,
+            "distinct_market_types": qmo.get("market_types") or 0,
+            "last_at": qmo.get("last_at"),
+            "by_market_period": by_period,
+            "sample_markets": sample_markets,
+        },
+        "raw_frames": {
+            "retained": wf.get("n") or 0,
+            "parse_failures": wf.get("parse_failures") or 0,
+            "last_at": wf.get("last_at"),
+        },
+        "validation_anomalies": {
+            "total": an.get("n") or 0,
+            "recent": recent_anoms,
+        },
+    }
+
+
 @router.get("/alert-outcomes")
 def v4_alert_outcomes(
         ids: str = Query("", description="comma-separated game ids")) -> dict:

@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS snapshots (
     spread_away_odds  REAL,
     home_total_line   REAL,
     away_total_line   REAL,
+    -- Quarter-specific scores (directive 2026-09-22, DATA COLLECTION
+    -- ONLY): exactly what the source presented at this instant — never
+    -- backfilled, never reconstructed.  NULL = source did not expose it.
+    q1_home_score     INTEGER,
+    q1_away_score     INTEGER,
+    q2_home_score     INTEGER,
+    q2_away_score     INTEGER,
+    q3_home_score     INTEGER,
+    q3_away_score     INTEGER,
+    q4_home_score     INTEGER,
+    q4_away_score     INTEGER,
     source_url        TEXT,
     markets_json      TEXT NOT NULL DEFAULT '{}',
     raw_json          TEXT NOT NULL DEFAULT '{}',
@@ -167,6 +178,292 @@ CREATE INDEX IF NOT EXISTS idx_market_obs_game_time
 CREATE INDEX IF NOT EXISTS idx_market_obs_type
     ON market_observations(source_game_id, market_type, captured_at);
 
+-- ── QUARTER-SPECIFIC COLLECTION (directive 2026-09-22, DATA COLLECTION
+-- ONLY) ────────────────────────────────────────────────────────────────
+-- Purpose: reliably track QUARTER-SPECIFIC scores and QUARTER-SPECIFIC
+-- lines whenever the source provides them, preserving the RAW upstream
+-- observation so analysis can reconstruct exactly what was known at each
+-- timestamp.  These tables never feed alerts, fingerprints, betting or
+-- thresholds — collection and research only.
+
+-- Raw eu-swarm WS frames, retained verbatim (§5 DO NOT DESTROY RAW DATA):
+-- if parsing fails or the source changes format, the frame survives here
+-- and the failure is recorded — never silently dropped.  Throttled (see
+-- collector) to bound growth; parse failures are ALWAYS recorded.
+CREATE TABLE IF NOT EXISTS ws_raw_frames (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at   TEXT NOT NULL,
+    ws_url        TEXT,
+    byte_size     INTEGER,
+    parse_status  TEXT NOT NULL,          -- parsed | parse_failed
+    game_count    INTEGER,                -- games carrying a market tree
+    raw_json      TEXT NOT NULL,
+    error         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ws_raw_frames_ts
+    ON ws_raw_frames(captured_at);
+
+-- One row per quarter-specific (or other non-game-total) O/U market
+-- observation pushed by the feed.  line_value from the market's own base
+-- (event base as fallback); raw_json preserves the market tree entry.
+CREATE TABLE IF NOT EXISTS quarter_market_observations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id         INTEGER REFERENCES games(id),
+    source_game_id  TEXT NOT NULL,
+    classification  TEXT NOT NULL DEFAULT '',
+    captured_at     TEXT NOT NULL,
+    market_id       TEXT NOT NULL,
+    market_type     TEXT NOT NULL,
+    market_name     TEXT,
+    market_period   TEXT,                 -- Q1..Q4 | full_game | quarter_unknown
+    period_number   INTEGER,              -- 1..4 when determinable
+    line_value      REAL,
+    over_price      REAL,
+    under_price     REAL,
+    home_score      INTEGER,
+    away_score      INTEGER,
+    period_label    TEXT,
+    clock           TEXT,
+    raw_json        TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_game_id, market_id, line_value, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_qmo_game_ts
+    ON quarter_market_observations(source_game_id, captured_at);
+CREATE INDEX IF NOT EXISTS idx_qmo_type
+    ON quarter_market_observations(source_game_id, market_type, captured_at);
+
+-- One row per verified game-state capture carrying quarter scores (from
+-- the event-view scoreboard's per-quarter breakdown, or the WS state).
+-- All-NULL rows are kept: they are the denominator for coverage metrics.
+CREATE TABLE IF NOT EXISTS quarter_score_observations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id         INTEGER REFERENCES games(id),
+    source_game_id  TEXT NOT NULL,
+    classification  TEXT NOT NULL DEFAULT '',
+    captured_at     TEXT NOT NULL,
+    period_label    TEXT,
+    quarter         INTEGER,
+    clock           TEXT,
+    q1_home_score   INTEGER,
+    q1_away_score   INTEGER,
+    q2_home_score   INTEGER,
+    q2_away_score   INTEGER,
+    q3_home_score   INTEGER,
+    q3_away_score   INTEGER,
+    q4_home_score   INTEGER,
+    q4_away_score   INTEGER,
+    home_score      INTEGER,
+    away_score      INTEGER,
+    source_path     TEXT NOT NULL DEFAULT '',  -- event_view | ws
+    raw_json        TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_qso_game_ts
+    ON quarter_score_observations(source_game_id, captured_at);
+
+-- Chronological-consistency anomalies (§4): FLAGGED, never silently
+-- corrected.  No code path rewrites a historical observation because of
+-- an anomaly — the observation stands and the anomaly is recorded.
+CREATE TABLE IF NOT EXISTS quarter_validation_anomalies (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at     TEXT NOT NULL,
+    source_game_id  TEXT NOT NULL,
+    captured_at     TEXT NOT NULL,
+    check_name      TEXT NOT NULL,
+    detail          TEXT NOT NULL,
+    anomaly_json    TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_qva_game
+    ON quarter_validation_anomalies(source_game_id, detected_at);
+
+-- ── BETUAL-ONLY DATASET (directive 2026-09-22, DATA COLLECTION ONLY)
+-- ─────────────────────────────────────────────────────────────────────
+-- A prospective, Betual-only longitudinal dataset for studying how the
+-- market line responds to SCORE and TIME (TIME → SCORE → LINE →
+-- LINE MOVEMENT).  The internal game timer is authoritative (Betual has
+-- no timeouts); the bookmaker's displayed clock is stored as a
+-- comparison field ONLY (clock_difference).  These tables never feed
+-- alerts, fingerprints, betting or thresholds.
+
+-- One row per Betual score observation with internal-timer fields and
+-- cumulative→quarter derivation performed ONLY from point-in-time-valid
+-- inputs (§5); a missing input stores NULL, never a manufactured value.
+CREATE TABLE IF NOT EXISTS betual_time_observations (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_game_id           TEXT NOT NULL,
+    classification           TEXT NOT NULL DEFAULT 'BETUAL_NBA',
+    captured_at              TEXT NOT NULL,
+    source_start_time        REAL,      -- epoch s (WS start_ts), §2
+    internal_game_time       TEXT,      -- MM:SS elapsed, internal model
+    internal_elapsed_seconds REAL,      -- monotonic-model elapsed, §3
+    quarter                  INTEGER,   -- internal model quarter 1..4
+    quarter_remaining_seconds REAL,
+    q1_home_score            INTEGER,
+    q1_away_score            INTEGER,
+    q2_home_score            INTEGER,
+    q2_away_score            INTEGER,
+    q3_home_score            INTEGER,
+    q3_away_score            INTEGER,
+    q4_home_score            INTEGER,
+    q4_away_score            INTEGER,
+    home_score               INTEGER,
+    away_score               INTEGER,
+    total_score              INTEGER,
+    betual_displayed_clock   TEXT,      -- observation/debug ONLY (§2)
+    clock_difference         REAL,      -- internal minus displayed remaining
+    source_quarter           INTEGER,   -- the source's own view
+    period_label             TEXT,
+    raw_json                 TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_game_id, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_bto_game_ts
+    ON betual_time_observations(source_game_id, captured_at);
+
+-- One row per Betual O/U line observation (full game + Q1..Q4) with
+-- line-movement fields vs the game's previous line observation (§6/§7).
+-- A line that changed and returned is RETAINED (§10): dedup collapses
+-- only same game+market+line+timestamp.
+CREATE TABLE IF NOT EXISTS betual_line_observations (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_game_id            TEXT NOT NULL,
+    classification            TEXT NOT NULL DEFAULT 'BETUAL_NBA',
+    captured_at               TEXT NOT NULL,
+    market_id                 TEXT NOT NULL,
+    market_name               TEXT,
+    period                    TEXT,      -- full_game | Q1..Q4 | other
+    line                      REAL,
+    line_previous             REAL,
+    line_change               REAL,
+    seconds_since_previous_line REAL,
+    line_velocity             REAL,      -- line_change / elapsed s
+    internal_game_time        TEXT,
+    internal_elapsed_seconds  REAL,
+    quarter                   INTEGER,   -- internal model quarter
+    quarter_remaining_seconds REAL,
+    home_score                INTEGER,
+    away_score                INTEGER,
+    total_score               INTEGER,
+    score_at_observation      INTEGER,   -- total at the PREVIOUS obs
+    betual_displayed_clock    TEXT,
+    over_price                REAL,
+    under_price               REAL,
+    raw_json                  TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_game_id, market_id, line, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_blo_game_ts
+    ON betual_line_observations(source_game_id, captured_at);
+CREATE INDEX IF NOT EXISTS idx_blo_market
+    ON betual_line_observations(source_game_id, market_id, captured_at);
+
+-- High-quality snapshot at each observed quarter transition (§11) —
+-- Q1→Q2, Q2→Q3, Q3→Q4; Q3→Q4 is the BLM-research-critical one.
+CREATE TABLE IF NOT EXISTS betual_transitions (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_game_id            TEXT NOT NULL,
+    classification            TEXT NOT NULL DEFAULT 'BETUAL_NBA',
+    captured_at               TEXT NOT NULL,
+    transition                TEXT NOT NULL,  -- 'Q3->Q4' etc.
+    prev_quarter              INTEGER,
+    new_quarter               INTEGER,
+    internal_game_time        TEXT,
+    internal_elapsed_seconds  REAL,
+    quarter_remaining_seconds REAL,
+    betual_displayed_clock    TEXT,
+    clock_difference          REAL,
+    prev_quarter_home         INTEGER,   -- final score of the ended quarter
+    prev_quarter_away         INTEGER,
+    home_score                INTEGER,   -- new cumulative
+    away_score                INTEGER,
+    total_score               INTEGER,
+    full_game_line            REAL,
+    quarter_line              REAL,
+    line_previous             REAL,
+    line_change               REAL,
+    raw_json                  TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_game_id, transition)
+);
+CREATE INDEX IF NOT EXISTS idx_bt_game
+    ON betual_transitions(source_game_id, captured_at);
+
+-- §12 game-end capture.  Final status comes from SOURCE/finalization
+-- evidence ONLY — the internal timer expiring is never recorded as
+-- final; end_evidence distinguishes observed_final vs disappeared rows
+-- (the NO-FINAL diagnosis data).  §19: collection only, never betting.
+CREATE TABLE IF NOT EXISTS betual_game_ends (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_game_id           TEXT NOT NULL,
+    classification           TEXT NOT NULL DEFAULT 'BETUAL_NBA',
+    captured_at              TEXT NOT NULL,
+    internal_game_time       TEXT,
+    internal_elapsed_seconds REAL,
+    quarter                  INTEGER,
+    final_home_score         INTEGER,
+    final_away_score         INTEGER,
+    final_total              INTEGER,
+    q1_home_score            INTEGER,
+    q1_away_score            INTEGER,
+    q2_home_score            INTEGER,
+    q2_away_score            INTEGER,
+    q3_home_score            INTEGER,
+    q3_away_score            INTEGER,
+    q4_home_score            INTEGER,
+    q4_away_score            INTEGER,
+    full_game_line           REAL,
+    betual_displayed_clock   TEXT,
+    settlement_state         TEXT,      -- source finalization evidence
+    end_evidence             TEXT NOT NULL DEFAULT 'observed_final',
+    source_quarter           INTEGER,
+    raw_json                 TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_game_id, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_bge_game
+    ON betual_game_ends(source_game_id, captured_at);
+
+-- §14 clock diagnostics: internal timer vs Betual displayed clock —
+-- FLAGGED, never used to steer the internal timer.
+CREATE TABLE IF NOT EXISTS betual_clock_diagnostics (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at     TEXT NOT NULL,
+    source_game_id  TEXT NOT NULL,
+    captured_at     TEXT NOT NULL,
+    kind            TEXT NOT NULL,   -- backward_clock_movement |
+                                     -- impossible_elapsed_time |
+                                     -- quarter_transition_anomaly |
+                                     -- large_clock_discrepancy |
+                                     -- duplicate_timestamp |
+                                     -- phase_quarter_mismatch
+    detail          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bcd_game
+    ON betual_clock_diagnostics(source_game_id, detected_at);
+
+-- §9 parse failures: raw retained, parsed value NULL, error recorded.
+CREATE TABLE IF NOT EXISTS betual_parse_failures (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at     TEXT NOT NULL,
+    source_game_id  TEXT NOT NULL DEFAULT '',
+    raw_json        TEXT NOT NULL DEFAULT '',
+    error           TEXT
+);
+
+-- §13 restart anchors: one row per Betual game carrying the persisted
+-- wall-clock anchor (from the WS feed's start_ts) + the timer model, so
+-- a restart reconstructs the internal clock from authoritative start
+-- evidence and NEVER resets the game timer to zero.
+CREATE TABLE IF NOT EXISTS betual_game_timers (
+    source_game_id      TEXT PRIMARY KEY,
+    game_start_wall     REAL,
+    observed_at_wall    REAL,
+    quarter_seconds     REAL,
+    break_seconds       REAL,
+    timer_model         TEXT NOT NULL DEFAULT 'default',
+    last_home           INTEGER,
+    last_away           INTEGER,
+    last_line           REAL,
+    last_line_at        REAL,
+    last_capture_at     TEXT,
+    updated_at          TEXT NOT NULL
+);
+
 """
 
 
@@ -208,6 +505,18 @@ class PokerBetStore:
             conn = self._connect()
             try:
                 conn.executescript(_SCHEMA)
+                # Quarter-score columns on snapshots (directive 2026-09-22)
+                # — backward-compatible ALTERs for DBs created before the
+                # directive; fresh DBs get them from _SCHEMA directly.
+                cols = {r["name"] for r in conn.execute(
+                    "PRAGMA table_info(snapshots)")}
+                for c in ("q1_home_score", "q1_away_score",
+                          "q2_home_score", "q2_away_score",
+                          "q3_home_score", "q3_away_score",
+                          "q4_home_score", "q4_away_score"):
+                    if c not in cols:
+                        conn.execute(
+                            f"ALTER TABLE snapshots ADD COLUMN {c} INTEGER")
                 conn.commit()
             finally:
                 conn.close()
@@ -365,10 +674,15 @@ class PokerBetStore:
                         game_status, w1_odds, w2_odds, spread_indicator,
                         total_line, total_over_odds, total_under_odds,
                         spread, spread_home_odds, spread_away_odds,
-                        home_total_line, away_total_line, source_url,
-                        markets_json, raw_json)
+                        home_total_line, away_total_line,
+                        q1_home_score, q1_away_score,
+                        q2_home_score, q2_away_score,
+                        q3_home_score, q3_away_score,
+                        q4_home_score, q4_away_score,
+                        source_url, markets_json, raw_json)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?)
                 """, (
                     game_id, obs.source, obs.source_game_id, obs.classification,
                     obs.captured_at, obs.home_team, obs.away_team,
@@ -377,8 +691,12 @@ class PokerBetStore:
                     obs.w1_odds, obs.w2_odds, obs.spread_indicator,
                     obs.total_line, obs.total_over_odds, obs.total_under_odds,
                     obs.spread, obs.spread_home_odds, obs.spread_away_odds,
-                    obs.home_total_line, obs.away_total_line, obs.source_url,
-                    obs.markets_json, obs.raw_json,
+                    obs.home_total_line, obs.away_total_line,
+                    obs.q1_home_score, obs.q1_away_score,
+                    obs.q2_home_score, obs.q2_away_score,
+                    obs.q3_home_score, obs.q3_away_score,
+                    obs.q4_home_score, obs.q4_away_score,
+                    obs.source_url, obs.markets_json, obs.raw_json,
                 ))
                 conn.commit()
                 return int(cur.lastrowid)
@@ -491,6 +809,546 @@ class PokerBetStore:
                     json.dumps(obs.get("raw", {}), default=str),
                 ))
                 conn.commit()
+            finally:
+                conn.close()
+
+    # ── Quarter-specific collection (directive 2026-09-22) ──────
+
+    def insert_ws_raw_frame(
+        self, captured_at: str, ws_url: Optional[str], byte_size: int,
+        parse_status: str, game_count: Optional[int], raw_json: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """Retain one raw WS frame verbatim (§5: never destroy raw data).
+        parse_status='parse_failed' rows carry the parser error."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO ws_raw_frames (
+                        captured_at, ws_url, byte_size, parse_status,
+                        game_count, raw_json, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (captured_at, ws_url, byte_size, parse_status,
+                      game_count, raw_json, error))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def insert_quarter_market_observation(self, obs: dict) -> None:
+        """One non-game-total O/U market observation (e.g. a quarter
+        total).  Raw market tree entry preserved; a NULL line is stored
+        as NULL — never fabricated.  Same game+market+line+timestamp is
+        a duplicate by definition and is ignored."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO quarter_market_observations (
+                        game_id, source_game_id, classification, captured_at,
+                        market_id, market_type, market_name, market_period,
+                        period_number, line_value, over_price, under_price,
+                        home_score, away_score, period_label, clock, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_game_id, market_id, line_value,
+                                captured_at) DO NOTHING
+                """, (
+                    obs.get("game_id"), obs["source_game_id"],
+                    obs.get("classification", ""), obs["captured_at"],
+                    obs["market_id"], obs["market_type"],
+                    obs.get("market_name"), obs.get("market_period"),
+                    obs.get("period_number"), obs.get("line_value"),
+                    obs.get("over_price"), obs.get("under_price"),
+                    obs.get("home_score"), obs.get("away_score"),
+                    obs.get("period_label"), obs.get("clock"),
+                    json.dumps(obs.get("raw", {}), default=str),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def insert_quarter_score_observation(self, obs: dict) -> None:
+        """One quarter-score observation (verified captures only).
+        All-quarter-NULL rows are the no-coverage denominator and are
+        still recorded — coverage metrics must not hide them."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO quarter_score_observations (
+                        game_id, source_game_id, classification, captured_at,
+                        period_label, quarter, clock,
+                        q1_home_score, q1_away_score,
+                        q2_home_score, q2_away_score,
+                        q3_home_score, q3_away_score,
+                        q4_home_score, q4_away_score,
+                        home_score, away_score, source_path, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?)
+                """, (
+                    obs.get("game_id"), obs["source_game_id"],
+                    obs.get("classification", ""), obs["captured_at"],
+                    obs.get("period_label"), obs.get("quarter"),
+                    obs.get("clock"),
+                    obs.get("q1_home_score"), obs.get("q1_away_score"),
+                    obs.get("q2_home_score"), obs.get("q2_away_score"),
+                    obs.get("q3_home_score"), obs.get("q3_away_score"),
+                    obs.get("q4_home_score"), obs.get("q4_away_score"),
+                    obs.get("home_score"), obs.get("away_score"),
+                    obs.get("source_path", ""),
+                    json.dumps(obs.get("raw", {}), default=str),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def last_quarter_score_observation(
+        self, source_game_id: str,
+    ) -> Optional[dict]:
+        """The game's most recent quarter-score observation — the ``prev``
+        for chronological validation (a restart simply passes None)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                r = conn.execute("""
+                    SELECT * FROM quarter_score_observations
+                    WHERE source_game_id=?
+                    ORDER BY captured_at DESC, id DESC LIMIT 1
+                """, (source_game_id,)).fetchone()
+                return dict(r) if r else None
+            finally:
+                conn.close()
+
+    def record_quarter_anomaly(
+        self, source_game_id: str, captured_at: str, check_name: str,
+        detail: str, anomaly: Optional[dict] = None,
+    ) -> None:
+        """Flag a chronological-consistency anomaly (§4: FLAG, never
+        silently correct — the original observation stands)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO quarter_validation_anomalies (
+                        detected_at, source_game_id, captured_at, check_name,
+                        detail, anomaly_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (_utcnow(), source_game_id, captured_at, check_name,
+                      detail, json.dumps(anomaly or {}, default=str)))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def quarter_collection_metrics(self) -> dict:
+        """Collection observability (§9) — one read-only aggregate.
+        Coverage = observations where the source actually exposed the
+        field; missing data is never hidden."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                def one(sql):
+                    r = conn.execute(sql).fetchone()
+                    return dict(r) if r else {}
+
+                qso = one("""
+                    SELECT COUNT(*) AS n,
+                           SUM(q1_home_score IS NOT NULL) AS q1,
+                           SUM(q2_home_score IS NOT NULL) AS q2,
+                           SUM(q3_home_score IS NOT NULL) AS q3,
+                           SUM(q4_home_score IS NOT NULL) AS q4
+                    FROM quarter_score_observations""")
+                qmo = one("""
+                    SELECT COUNT(*) AS n,
+                           SUM(market_period IN ('Q1','Q2','Q3','Q4'))
+                               AS q_lines
+                    FROM quarter_market_observations""")
+                wf = one("""
+                    SELECT COUNT(*) AS n,
+                           SUM(parse_status='parse_failed') AS parse_failures
+                    FROM ws_raw_frames""")
+                an = one(
+                    "SELECT COUNT(*) AS n FROM quarter_validation_anomalies")
+                n = qso.get("n") or 0
+
+                def pct(x):
+                    return round((x or 0) / n * 100, 2) if n else 0.0
+
+                return {
+                    "quarter_score_observations": n,
+                    "q1_coverage_pct": pct(qso.get("q1")),
+                    "q2_coverage_pct": pct(qso.get("q2")),
+                    "q3_coverage_pct": pct(qso.get("q3")),
+                    "q4_coverage_pct": pct(qso.get("q4")),
+                    "quarter_market_observations": qmo.get("n") or 0,
+                    "quarter_line_observations": qmo.get("q_lines") or 0,
+                    "ws_raw_frames": wf.get("n") or 0,
+                    "ws_parse_failures": wf.get("parse_failures") or 0,
+                    "quarter_validation_anomalies": an.get("n") or 0,
+                }
+            finally:
+                conn.close()
+
+    # ── Betual-only dataset (directive 2026-09-22) ─────────────
+
+    def insert_betual_time_observation(self, obs: dict) -> None:
+        """One Betual score observation.  Same game+timestamp is a
+        duplicate by definition and is ignored (§10: only exact logical
+        duplicates are collapsed — genuine later observations land)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO betual_time_observations (
+                        source_game_id, classification, captured_at,
+                        source_start_time, internal_game_time,
+                        internal_elapsed_seconds, quarter,
+                        quarter_remaining_seconds,
+                        q1_home_score, q1_away_score,
+                        q2_home_score, q2_away_score,
+                        q3_home_score, q3_away_score,
+                        q4_home_score, q4_away_score,
+                        home_score, away_score, total_score,
+                        betual_displayed_clock, clock_difference,
+                        source_quarter, period_label, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_game_id, captured_at) DO NOTHING
+                """, (
+                    obs["source_game_id"],
+                    obs.get("classification", "BETUAL_NBA"),
+                    obs["captured_at"], obs.get("source_start_time"),
+                    obs.get("internal_game_time"),
+                    obs.get("internal_elapsed_seconds"),
+                    obs.get("quarter"),
+                    obs.get("quarter_remaining_seconds"),
+                    obs.get("q1_home_score"), obs.get("q1_away_score"),
+                    obs.get("q2_home_score"), obs.get("q2_away_score"),
+                    obs.get("q3_home_score"), obs.get("q3_away_score"),
+                    obs.get("q4_home_score"), obs.get("q4_away_score"),
+                    obs.get("home_score"), obs.get("away_score"),
+                    obs.get("total_score"),
+                    obs.get("betual_displayed_clock"),
+                    obs.get("clock_difference"),
+                    obs.get("source_quarter"), obs.get("period_label"),
+                    json.dumps(obs.get("raw", {}), default=str),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def insert_betual_line_observation(self, obs: dict) -> None:
+        """One Betual line observation with movement fields.  Dedup
+        collapses only same game+market+line+timestamp; a line that
+        changed and returned at distinct timestamps is RETAINED (§10)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO betual_line_observations (
+                        source_game_id, classification, captured_at,
+                        market_id, market_name, period, line,
+                        line_previous, line_change,
+                        seconds_since_previous_line, line_velocity,
+                        internal_game_time, internal_elapsed_seconds,
+                        quarter, quarter_remaining_seconds,
+                        home_score, away_score, total_score,
+                        score_at_observation, betual_displayed_clock,
+                        over_price, under_price, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_game_id, market_id, line,
+                                captured_at) DO NOTHING
+                """, (
+                    obs["source_game_id"],
+                    obs.get("classification", "BETUAL_NBA"),
+                    obs["captured_at"], obs["market_id"],
+                    obs.get("market_name"), obs.get("period"),
+                    obs.get("line"), obs.get("line_previous"),
+                    obs.get("line_change"),
+                    obs.get("seconds_since_previous_line"),
+                    obs.get("line_velocity"),
+                    obs.get("internal_game_time"),
+                    obs.get("internal_elapsed_seconds"),
+                    obs.get("quarter"),
+                    obs.get("quarter_remaining_seconds"),
+                    obs.get("home_score"), obs.get("away_score"),
+                    obs.get("total_score"),
+                    obs.get("score_at_observation"),
+                    obs.get("betual_displayed_clock"),
+                    obs.get("over_price"), obs.get("under_price"),
+                    json.dumps(obs.get("raw", {}), default=str),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def insert_betual_transition(self, row: dict) -> None:
+        """One quarter-transition snapshot (§11); same game+transition is
+        a duplicate (re-observed boundary) and is ignored."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO betual_transitions (
+                        source_game_id, classification, captured_at,
+                        transition, prev_quarter, new_quarter,
+                        internal_game_time, internal_elapsed_seconds,
+                        quarter_remaining_seconds, betual_displayed_clock,
+                        clock_difference, prev_quarter_home,
+                        prev_quarter_away, home_score, away_score,
+                        total_score, full_game_line, quarter_line,
+                        line_previous, line_change, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?)  -- 21 cols / 21 params
+                    ON CONFLICT(source_game_id, transition) DO NOTHING
+                """, (
+                    row["source_game_id"],
+                    row.get("classification", "BETUAL_NBA"),
+                    row["captured_at"], row["transition"],
+                    row.get("prev_quarter"), row.get("new_quarter"),
+                    row.get("internal_game_time"),
+                    row.get("internal_elapsed_seconds"),
+                    row.get("quarter_remaining_seconds"),
+                    row.get("betual_displayed_clock"),
+                    row.get("clock_difference"),
+                    row.get("prev_quarter_home"),
+                    row.get("prev_quarter_away"),
+                    row.get("home_score"), row.get("away_score"),
+                    row.get("total_score"),
+                    row.get("full_game_line"),
+                    row.get("quarter_line"),
+                    row.get("line_previous"),
+                    row.get("line_change"),
+                    json.dumps(row.get("raw", {}), default=str),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def insert_betual_game_end(self, row: dict) -> None:
+        """One §12 game-end capture (final status from source evidence
+        only — never from internal-timer expiry)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO betual_game_ends (
+                        source_game_id, classification, captured_at,
+                        internal_game_time, internal_elapsed_seconds,
+                        quarter, final_home_score, final_away_score,
+                        final_total, q1_home_score, q1_away_score,
+                        q2_home_score, q2_away_score, q3_home_score,
+                        q3_away_score, q4_home_score, q4_away_score,
+                        full_game_line, betual_displayed_clock,
+                        settlement_state, end_evidence, source_quarter,
+                        raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_game_id, captured_at) DO NOTHING
+                """, (
+                    row["source_game_id"],
+                    row.get("classification", "BETUAL_NBA"),
+                    row["captured_at"], row.get("internal_game_time"),
+                    row.get("internal_elapsed_seconds"),
+                    row.get("quarter"),
+                    row.get("final_home_score"),
+                    row.get("final_away_score"),
+                    row.get("final_total"),
+                    row.get("q1_home_score"), row.get("q1_away_score"),
+                    row.get("q2_home_score"), row.get("q2_away_score"),
+                    row.get("q3_home_score"), row.get("q3_away_score"),
+                    row.get("q4_home_score"), row.get("q4_away_score"),
+                    row.get("full_game_line"),
+                    row.get("betual_displayed_clock"),
+                    row.get("settlement_state"),
+                    row.get("end_evidence", "observed_final"),
+                    row.get("source_quarter"),
+                    json.dumps(row.get("raw", {}), default=str),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def record_betual_clock_diagnostic(
+        self, source_game_id: str, captured_at: str, kind: str,
+        detail: str,
+    ) -> None:
+        """Flag one §14 clock diagnostic (FLAG ONLY — the internal timer
+        is never steered by diagnostics)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO betual_clock_diagnostics (
+                        detected_at, source_game_id, captured_at, kind,
+                        detail)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (_utcnow(), source_game_id, captured_at, kind,
+                      detail))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def record_betual_parse_failure(
+        self, source_game_id: str, raw_json: str, error: str,
+    ) -> None:
+        """§9: raw retained, parsed value NULL, error recorded."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO betual_parse_failures (
+                        detected_at, source_game_id, raw_json, error)
+                    VALUES (?, ?, ?, ?)
+                """, (_utcnow(), source_game_id or "", raw_json or "",
+                      error))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def upsert_betual_timer(self, source_game_id: str,
+                            game_start_wall: Optional[float],
+                            observed_at_wall: Optional[float],
+                            quarter_seconds: Optional[float],
+                            break_seconds: Optional[float],
+                            timer_model: str,
+                            last_home: Optional[int],
+                            last_away: Optional[int],
+                            last_line: Optional[float],
+                            last_line_at: Optional[float],
+                            last_capture_at: str) -> None:
+        """Persist the §13 restart anchor + caches for one Betual game."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    INSERT INTO betual_game_timers (
+                        source_game_id, game_start_wall, observed_at_wall,
+                        quarter_seconds, break_seconds, timer_model,
+                        last_home, last_away, last_line, last_line_at,
+                        last_capture_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_game_id) DO UPDATE SET
+                        game_start_wall = COALESCE(excluded.game_start_wall,
+                                                   game_start_wall),
+                        observed_at_wall = COALESCE(
+                            excluded.observed_at_wall, observed_at_wall),
+                        quarter_seconds = COALESCE(
+                            excluded.quarter_seconds, quarter_seconds),
+                        break_seconds = COALESCE(excluded.break_seconds,
+                                                 break_seconds),
+                        timer_model = excluded.timer_model,
+                        last_home = COALESCE(excluded.last_home, last_home),
+                        last_away = COALESCE(excluded.last_away, last_away),
+                        last_line = COALESCE(excluded.last_line, last_line),
+                        last_line_at = COALESCE(excluded.last_line_at,
+                                                last_line_at),
+                        last_capture_at = excluded.last_capture_at,
+                        updated_at = excluded.updated_at
+                """, (source_game_id, game_start_wall, observed_at_wall,
+                      quarter_seconds, break_seconds, timer_model,
+                      last_home, last_away, last_line, last_line_at,
+                      last_capture_at, _utcnow()))
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_betual_timer(self, source_game_id: str) -> Optional[dict]:
+        """The persisted §13 anchor row for one game, if any."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                r = conn.execute(
+                    "SELECT * FROM betual_game_timers WHERE source_game_id=?",
+                    (source_game_id,)).fetchone()
+                return dict(r) if r else None
+            finally:
+                conn.close()
+
+    def list_betual_timers(self) -> list[dict]:
+        """All persisted §13 anchor rows (restart recovery source)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                return [dict(r) for r in conn.execute(
+                    "SELECT * FROM betual_game_timers")]
+            finally:
+                conn.close()
+
+    def betual_collection_metrics(self) -> dict:
+        """§18 collection statistics for the Betual-only dataset.
+        Coverage is per GAME (a game has Qk data when any of its
+        observations exposed that quarter); missing data is never hidden.
+        """
+        with self._lock:
+            conn = self._connect()
+            try:
+                def one(sql):
+                    r = conn.execute(sql).fetchone()
+                    return dict(r) if r else {}
+
+                games = one(""
+                    "SELECT COUNT(*) AS n FROM games "
+                    "WHERE classification='BETUAL_NBA'""")
+                bto = one(""
+                    "SELECT COUNT(DISTINCT source_game_id) AS n, "
+                    "       COUNT(*) AS obs, "
+                    "       SUM(q1_home_score IS NOT NULL) AS q1, "
+                    "       SUM(q2_home_score IS NOT NULL) AS q2, "
+                    "       SUM(q3_home_score IS NOT NULL) AS q3, "
+                    "       SUM(q4_home_score IS NOT NULL) AS q4, "
+                    "       SUM(clock_difference IS NOT NULL) AS diffs, "
+                    "       SUM(ABS(COALESCE(clock_difference,0)) >= 90) "
+                    "           AS large_diffs, "
+                    "       SUM(source_start_time IS NOT NULL) AS anchored "
+                    "FROM betual_time_observations""")
+                blo = one(""
+                    "SELECT COUNT(DISTINCT source_game_id) AS n, "
+                    "       COUNT(*) AS obs, "
+                    "       SUM(line IS NOT NULL) AS with_line, "
+                    "       SUM(period IN ('Q1','Q2','Q3','Q4')) AS q_lines, "
+                    "       SUM(period='full_game') AS fg_lines, "
+                    "       SUM(line_change IS NOT NULL) AS moves "
+                    "FROM betual_line_observations""")
+                tr = one(""
+                    "SELECT COUNT(*) AS n, "
+                    "       SUM(transition='Q3->Q4') AS q34 "
+                    "FROM betual_transitions""")
+                ge = one(""
+                    "SELECT COUNT(*) AS n, "
+                    "       SUM(end_evidence='observed_final') AS ok_final, "
+                    "       SUM(end_evidence='disappeared') AS disappeared "
+                    "FROM betual_game_ends""")
+                pf = one(
+                    "SELECT COUNT(*) AS n FROM betual_parse_failures")
+                cd = one(
+                    "SELECT COUNT(*) AS n FROM betual_clock_diagnostics")
+                g = games.get("n") or 0
+                return {
+                    "betual_games": g,
+                    "games_with_score_data": bto.get("n") or 0,
+                    "games_with_q1": bto.get("q1") or 0,
+                    "games_with_q2": bto.get("q2") or 0,
+                    "games_with_q3": bto.get("q3") or 0,
+                    "games_with_q4": bto.get("q4") or 0,
+                    "score_observations": bto.get("obs") or 0,
+                    "games_anchored_to_start": bto.get("anchored") or 0,
+                    "games_with_line_data": blo.get("n") or 0,
+                    "games_with_full_game_lines": blo.get("fg_lines") or 0,
+                    "games_with_quarter_lines": blo.get("q_lines") or 0,
+                    "line_observations": blo.get("obs") or 0,
+                    "line_observations_with_line": blo.get("with_line") or 0,
+                    "line_movements": blo.get("moves") or 0,
+                    "transitions": tr.get("n") or 0,
+                    "q3_q4_transitions": tr.get("q34") or 0,
+                    "game_ends": ge.get("n") or 0,
+                    "finalization_success": ge.get("ok_final") or 0,
+                    "no_final_disappeared": ge.get("disappeared") or 0,
+                    "parse_failures": pf.get("n") or 0,
+                    "clock_diagnostics": cd.get("n") or 0,
+                    "clock_diagnostics_large_diff": bto.get(
+                        "large_diffs") or 0,
+                }
             finally:
                 conn.close()
 

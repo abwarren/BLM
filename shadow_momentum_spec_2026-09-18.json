@@ -1,0 +1,21 @@
+{
+  "created_utc": "2026-09-18T23:13:01Z",
+  "shadow_start_utc": "2026-09-18T23:13:01Z",
+  "production_trigger": "progress>=75% & actual<league_avg & required>league_avg*1.04 (strict) & line freshness<=300s & OK settlement",
+  "league_reference": "point-in-time mean realised pace, result_at STRICTLY before trigger",
+  "momentum_feature": "m = recent_pace_3m - actual_pts_per_min at trigger observation",
+  "gates": {
+    "gateA_m_lt_0": {
+      "m_lt": 0.0
+    },
+    "gateB_m_lt_-0.5": {
+      "m_lt": -0.5
+    }
+  },
+  "unseen_rule": "game enters shadow set only if FIRST >=75% observation is after shadow_start_utc",
+  "decision_timing": "recorded before settlement; settled only vs final_result_status='OK' with captured_at < result_at",
+  "primary_success_rule": "cumulative Wilson95 lower bound > 54.054% at n>=60 and point estimate >= 65%",
+  "warning_rule": "any rolling-50 window below 54.054%",
+  "threshold_change_policy": "forbidden on shadow data; new thresholds require a new spec + new start time",
+  "odds_assumption": 1.85
+}

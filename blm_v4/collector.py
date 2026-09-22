@@ -92,6 +92,11 @@ from blm_v4.classifications import (
     parse_event_url,
     slugify_team,
 )
+from blm_v4.betual_dataset import (
+    BetualDataset,
+    BetualDatasetError,
+    safe_record,
+)
 from blm_v4.clean_metrics import CleanMetricsStore
 from blm_v4.deviation import DeviationEngine
 from blm_v4.pace_projector import PaceProjector
@@ -111,6 +116,7 @@ from blm_v4.models import (
 from blm_v4.reconcile import reconcile_event
 from blm_v4.storage import PokerBetStore
 from blm_v4.ws_market import normalize_observations, parse_market_frame
+from blm_v4.quarter_validation import validate_quarter_scores
 
 logger = logging.getLogger("blm_v4.collector")
 
@@ -211,6 +217,53 @@ TICK_STATS_MAX = 17280
 # this window — the feed pushes every price change, so movements still land,
 # but a game that stays flat is not spammed into the DB every second.
 WS_MARKET_DEDUP_S = 30.0
+
+# ── Quarter-specific collection (directive 2026-09-22, DATA COLLECTION
+# ONLY) ─────────────────────────────────────────────────────────────
+# Raw-frame retention throttle: market frames for the SAME game arrive on
+# nearly every WS message; storing each verbatim would dominate disk.  One
+# frame per game per this window is retained (plus EVERY parse failure,
+# which is never throttled).  0 disables the throttle entirely.
+try:
+    WS_RAW_FRAME_KEEP_S = abs(float(
+        os.environ.get("BLM_WS_RAW_FRAME_KEEP_S", "300") or 0))
+except (TypeError, ValueError):
+    WS_RAW_FRAME_KEEP_S = 300.0
+
+# Total-market types whose base/line is the GAME total (basketball).
+# Everything else with an O/U base is treated as period-specific until
+# proven otherwise — the source's exact period taxonomy is deliberately
+# NOT assumed (§1: identify what the source actually exposes).
+GAME_TOTAL_MARKET_TYPES = {"MatchTotal"}
+
+# betting-agnostic period inference from a market NAME (English source
+# wording; unknown names map to quarter_unknown — never guessed).
+_QNUM_RE = re.compile(r"\b(?:1st|2nd|3rd|4th)\b")
+_QNAME_MAP = {"1st": 1, "2nd": 2, "3rd": 3, "4th": 4}
+_QNAMES = {"first", "second", "third", "fourth"}
+_QNAME_NUM = {"first": 1, "second": 2, "third": 3, "fourth": 4}
+
+
+def infer_market_period(name: Optional[str]):
+    """(market_period, period_number) inferred from a market NAME.
+
+    Q1..Q4 only when the name unambiguously says so; otherwise
+    ('quarter_unknown', None) — NULL is preferable to an invented period
+    (§5).  Everything else (odd/even, race-to-N, handicap etc.) gets
+    ('other', None).
+    """
+    n = (name or "").strip()
+    low = n.lower()
+    if "quarter" in low or "period" in low:
+        m = _QNUM_RE.search(n)
+        if m:
+            q = _QNAME_MAP[m.group(0)]
+            return (f"Q{q}", q)
+        for word, num in _QNAME_NUM.items():
+            if word in low:
+                return (f"Q{num}", num)
+        return ("quarter_unknown", None)
+    return ("other", None)
 
 # ── LIVE market freshness target (2026-09-10) ────────────────────────
 # Requirement: every ACTIVE live game's SCRAPED market data is refreshed
@@ -591,6 +644,24 @@ class PokerBetCollector:
         self._event_view_failures = 0         # consecutive unverified event views
         self._ws_market_last: dict[tuple[str, Optional[float]], str] = {}
         self._ws_snap_last: dict[str, str] = {}  # gid -> last bridge snapshot ts
+        # quarter-collection state (directive 2026-09-22)
+        self._ws_raw_last: dict[str, str] = {}  # gid -> last raw-frame ts
+        self._q_parse_failures = 0
+        self._q_anomalies = 0
+        self._q_market_obs = 0
+        self._q_score_obs = 0
+        # Betual-only dataset (directive 2026-09-22, DATA COLLECTION
+        # ONLY): internal-timer dataset recorder.  Hooks into the SAME
+        # polling paths (no second polling loop, §16); failure-isolated;
+        # feeds no decision path (§19).
+        self.betual = BetualDataset(self.store)
+        # game start evidence from the swarm feed (base id -> start_ts
+        # epoch seconds + when first observed) — §2's authoritative start
+        # source; None until the feed exposes it.
+        self._betual_start_ts: dict[str, tuple[float, float]] = {}
+        # last observed source quarter per game — the transition detector's
+        # previous-quarter cache (§11)
+        self._betual_last_quarter: dict[str, Optional[int]] = {}
         # LIVE market subscriptions (see LIVE_MARKET_FRESH_TARGET_S):
         # gid -> last subscribe ts.  ONE authenticated swarm socket holds
         # a market subscription per active game, so the feed pushes every
@@ -686,6 +757,14 @@ class PokerBetCollector:
         event-view DOM (no clicks, no hydration) — it is the fallback the
         market pipeline needs when the event-view route is broken.  Frames
         are parsed and persisted as market_observations rows.
+
+        Quarter-specific collection (directive 2026-09-22, DATA COLLECTION
+        ONLY): every raw frame is retained (throttled per game; parse
+        failures ALWAYS), and every O/U market the feed pushes is
+        normalized — game totals to market_observations exactly as before,
+        everything else (quarter totals etc.) to quarter_market_observations
+        with the raw market entry preserved.  Nothing here feeds alerts,
+        fingerprints, betting or thresholds.
         """
         def on_ws(ws):
             if "swarm" not in ws.url:
@@ -697,18 +776,89 @@ class PokerBetCollector:
                         return
                     payloads = parse_market_frame(text)
                     if not payloads:
+                        # §5: the raw frame survives even when parsing
+                        # finds nothing — a format change must never be
+                        # silently dropped.
+                        self._retain_raw_frame(ws.url, text, "parsed", 0)
                         return
+                    # §1 gate snapshot: which of the frame's games are
+                    # tracked BETUAL games (the dataset is Betual-only).
+                    payload_game_index: dict[str, PokerBetGame] = {}
+                    for p in payloads:
+                        base_gid = self._base_id(str(p.get("game_id") or ""))
+                        g = (self._find_tracked(str(p.get("game_id")))
+                             or self._find_tracked(base_gid)
+                             or self._find_tracked(
+                                 self._instances.get(base_gid, "")))
+                        if g is not None:
+                            payload_game_index[str(p["game_id"])] = g
                     captured = utcnow_iso()
+                    for p in payloads:
+                        # §5: retain the verbatim frame (throttled per
+                        # game) so a future format change can be
+                        # forensically re-parsed from history.
+                        self._retain_raw_frame(
+                            ws.url, text, "parsed", len(payloads),
+                            gid=p["game_id"])
+                        # §2 start evidence: the game object's start_ts is
+                        # the authoritative game start — adopted once per
+                        # game, persisted for restart recovery.
+                        frame_game = payload_game_index.get(p["game_id"])
+                        if frame_game is not None:
+                            self._betual_maybe_start_ts(frame_game,
+                                                        p.get("start_ts"))
                     for obs in normalize_observations(payloads, captured):
-                        if obs["market_type"] != "MatchTotal":
-                            continue
-                        self._ingest_ws_observation(obs)
+                        if obs["market_type"] in GAME_TOTAL_MARKET_TYPES:
+                            if obs["market_type"] != "MatchTotal":
+                                continue
+                            self._ingest_ws_observation(obs)
+                            # §6 full-game line: also feed the Betual
+                            # dataset (line-movement fields included).
+                            frame_game = payload_game_index.get(
+                                obs["source_game_id"])
+                            if frame_game is not None:
+                                try:
+                                    self._betual_record_line(
+                                        frame_game, obs, "full_game")
+                                except BetualDatasetError:
+                                    pass    # dataset is BETUAL-only (§1)
+                                except Exception:
+                                    logger.error(
+                                        "betual full-game line failed:\n%s",
+                                        traceback.format_exc())
+                        else:
+                            self._ingest_quarter_market_observation(obs)
                 except Exception:
                     # a malformed frame must never kill the collector
+                    self._q_parse_failures += 1
+                    try:
+                        self._retain_raw_frame(
+                            ws.url, text, "parse_failed", None,
+                            error=traceback.format_exc())
+                    except Exception:
+                        pass
                     logger.debug("ws market frame error: %s",
                                  traceback.format_exc())
             ws.on("framereceived", on_frame)
         page.on("websocket", on_ws)
+
+    def _retain_raw_frame(
+        self, ws_url: str, text: str, parse_status: str,
+        game_count: Optional[int], error: Optional[str] = None,
+        *, gid: Optional[str] = None,
+    ) -> None:
+        """Persist one raw WS frame (throttled per game; failures never).
+        """
+        if parse_status != "parse_failed" and WS_RAW_FRAME_KEEP_S > 0:
+            key = gid or ws_url
+            last = self._ws_raw_last.get(key)
+            if last and _ts_age_s(last) < WS_RAW_FRAME_KEEP_S:
+                return
+            self._ws_raw_last[key] = utcnow_iso()
+        self.store.insert_ws_raw_frame(
+            captured_at=utcnow_iso(), ws_url=ws_url, byte_size=len(text),
+            parse_status=parse_status, game_count=game_count,
+            raw_json=text, error=error)
 
     def _ingest_ws_observation(self, obs: dict) -> None:
         """Persist one eu-swarm MatchTotal observation + its snapshot bridge.
@@ -770,6 +920,330 @@ class PokerBetCollector:
         except Exception:
             logger.error("ws snapshot bridge failed:\n%s",
                          traceback.format_exc())
+
+    # ── LIVE market subscriptions (30s freshness) ────────────────
+
+    def _ingest_quarter_market_observation(self, obs: dict) -> None:
+        """Persist one NON-game-total O/U market observation (e.g. a
+        quarter total) pushed by the feed.
+
+        Directive 2026-09-22 §1/§2: the source's period taxonomy is NOT
+        assumed — the market NAME is inspected and unambiguous quarter
+        wording maps to Q1..Q4; anything else is stored with
+        market_period='other' or 'quarter_unknown' exactly as observed.
+        The raw market entry (events, ids, prices) is preserved verbatim.
+        This NEVER feeds alerts, fingerprints, betting or thresholds.
+        """
+        gid = obs["source_game_id"]
+        raw = obs.get("raw") or {}
+        market_id = str(raw.get("market_id") or "")
+        if not market_id:
+            return
+        game = self._find_tracked(gid)
+        if game is None:
+            cur = self._instances.get(gid)      # base -> current instance
+            if cur:
+                game = self._find_tracked(cur)
+        if game is None:
+            return
+        period, qnum = infer_market_period(obs.get("market_name"))
+        # Betual-only dataset (§1/§6/§7): quarter-total lines feed the
+        # prospective dataset with line-movement fields; failure-isolated
+        # and decision-free (§19).
+        try:
+            self._betual_record_line(game, obs, period or "other")
+        except BetualDatasetError:
+            pass                      # non-Betual: dataset is BETUAL-only
+        except Exception:
+            logger.error("betual line record failed:\n%s",
+                         traceback.format_exc())
+        try:
+            self.store.insert_quarter_market_observation({
+                "game_id": self._game_db_id(game),
+                "source_game_id": game.source_game_id,
+                "classification": game.classification,
+                "captured_at": obs["captured_at"],
+                "market_id": market_id,
+                "market_type": obs["market_type"],
+                "market_name": obs.get("market_name"),
+                "market_period": period,
+                "period_number": qnum,
+                "line_value": obs.get("line_value"),
+                "over_price": obs.get("over_price"),
+                "under_price": obs.get("under_price"),
+                "home_score": obs.get("home_score"),
+                "away_score": obs.get("away_score"),
+                "period_label": obs.get("period_label"),
+                "clock": obs.get("clock"),
+                "raw": raw,
+            })
+            self._q_market_obs += 1
+        except Exception:
+            logger.error("quarter market observation persist failed:\n%s",
+                         traceback.format_exc())
+
+    def _record_quarter_scores(self, game: PokerBetGame,
+                               parsed: dict) -> None:
+        """Record one quarter-score observation from a VERIFIED event-view
+        parse and run chronological validation (§4).
+
+        The event-view scoreboard's per-quarter breakdown is the only
+        quarter-score source in production (WS frames carry no quarter
+        scores — audited 2026-09-22).  Values are stored EXACTLY as the
+        source presented them; anomalies are flagged, never corrected.
+        All-NULL rows are still recorded: they are the coverage
+        denominator and must never be hidden (§9).
+        """
+        qs = parsed.get("quarter_scores") or []
+        qso = {
+            "game_id": self._game_db_id(game),
+            "source_game_id": game.source_game_id,
+            "classification": game.classification,
+            "captured_at": utcnow_iso(),
+            "period_label": parsed.get("period_label"),
+            "quarter": parsed.get("quarter"),
+            "clock": parsed.get("clock"),
+            "home_score": parsed.get("home_score"),
+            "away_score": parsed.get("away_score"),
+            "source_path": "event_view",
+            "raw": {"quarter_scores": [list(p) for p in qs]},
+        }
+        for i, (h, a) in enumerate(qs[:4], start=1):
+            qso[f"q{i}_home_score"] = h
+            qso[f"q{i}_away_score"] = a
+        try:
+            prev = self.store.last_quarter_score_observation(
+                game.source_game_id)
+            self.store.insert_quarter_score_observation(qso)
+            self._q_score_obs += 1
+            for an in validate_quarter_scores(qso, prev):
+                self._q_anomalies += 1
+                self.store.record_quarter_anomaly(
+                    source_game_id=game.source_game_id,
+                    captured_at=qso["captured_at"],
+                    check_name=an["check"],
+                    detail=an["detail"],
+                    anomaly=an,
+                )
+                logger.warning(
+                    "quarter anomaly %s for %s: %s",
+                    an["check"], game.source_game_id, an["detail"])
+        except Exception:
+            logger.error("quarter score observation persist failed:\n%s",
+                         traceback.format_exc())
+
+    # ── Betual-only dataset (directive 2026-09-22, DATA COLLECTION
+    # ── ONLY).  All methods failure-isolated; nothing here feeds
+    # ── alerts, fingerprints, betting or thresholds (§19).
+
+    def _betual_persist_timer(self, game: PokerBetGame) -> None:
+        """Persist the §13 anchor + latest caches for one game (called
+        after each successful dataset write; failure-isolated)."""
+        rec = self.betual.game(game.source_game_id, game.classification)
+        if rec is None:
+            return
+        try:
+            home, away = (rec.prev_score if rec.prev_score else (None, None))
+            self.store.upsert_betual_timer(
+                source_game_id=game.source_game_id,
+                game_start_wall=rec.anchors.game_start_wall,
+                observed_at_wall=rec.anchors.observed_at_wall,
+                quarter_seconds=rec.anchors.quarter_seconds,
+                break_seconds=rec.anchors.break_seconds,
+                timer_model=rec.anchors.model,
+                last_home=home, last_away=away,
+                last_line=rec.prev_line, last_line_at=rec.prev_line_at,
+                last_capture_at=rec.last_capture_at)
+        except Exception:
+            logger.error("betual timer persist failed:\n%s",
+                         traceback.format_exc())
+
+    def _betual_record_line(self, game: PokerBetGame, obs: dict,
+                            period: str) -> None:
+        """Route one non-game-total O/U observation into the Betual
+        dataset (raises BetualDatasetError for non-Betual games)."""
+        rec = self.betual.game(game.source_game_id, game.classification)
+        if rec is None:
+            raise BetualDatasetError("non-Betual game refused")
+        raw = obs.get("raw") or {}
+        safe_record(self.store, self.betual.record_line_observation,
+                    rec,
+                    source_game_id=game.source_game_id,
+                    classification=game.classification,
+                    captured_at=obs["captured_at"],
+                    market_id=str(raw.get("market_id") or ""),
+                    market_name=obs.get("market_name"),
+                    period=period,
+                    line=obs.get("line_value"),
+                    home=obs.get("home_score"), away=obs.get("away_score"),
+                    quarter=obs.get("quarter"),
+                    displayed_clock=obs.get("clock"),
+                    over_price=obs.get("over_price"),
+                    under_price=obs.get("under_price"),
+                    raw=raw)
+        self._betual_persist_timer(game)
+
+    def _betual_maybe_start_ts(self, game: PokerBetGame,
+                               start_ts: Optional[float]) -> None:
+        """Adopt the swarm feed's start_ts as the authoritative game
+        start (§2) — once, first-evidence-wins, persisted for restart
+        recovery (§13)."""
+        if not start_ts:
+            return
+        prev = self._betual_start_ts.get(game.source_game_id)
+        now_wall = time.time()
+        if prev is None:
+            self._betual_start_ts[game.source_game_id] = (
+                float(start_ts), now_wall)
+            prev = (float(start_ts), now_wall)
+        rec = self.betual.game(game.source_game_id, game.classification)
+        if rec is None:
+            return
+        start_wall, seen_wall = prev
+        elapsed_at_join = max(0.0, seen_wall - start_wall)
+        rec.adopt_start_evidence(start_wall, seen_wall,
+                                 elapsed_at_adoption=elapsed_at_join)
+        self._betual_persist_timer(game)
+
+    def _betual_record_score(self, game: PokerBetGame, parsed: dict,
+                             captured_at: str) -> None:
+        """Record one Betual score observation from a VERIFIED event-view
+        parse (internal-timer fields; §5 point-in-time derivation)."""
+        rec = self.betual.game(game.source_game_id, game.classification)
+        if rec is None:
+            return
+        qs = parsed.get("quarter_scores") or []
+        # cumulative pairs at each quarter end, exactly as observed
+        cum: list[tuple[Any, Any]] = []
+        h = a = 0
+        for qh, qa in qs[:4]:
+            if qh is None or qa is None:
+                break
+            h += int(qh)
+            a += int(qa)
+            cum.append((h, a))
+        safe_record(self.store, self.betual.record_score_observation,
+                    rec,
+                    source_game_id=game.source_game_id,
+                    classification=game.classification,
+                    captured_at=captured_at,
+                    home=parsed.get("home_score"),
+                    away=parsed.get("away_score"),
+                    quarter=parsed.get("quarter"),
+                    displayed_clock=parsed.get("clock"),
+                    period_label=parsed.get("period_label"),
+                    q_scores=cum,
+                    raw={"quarter_scores": [list(p) for p in qs]})
+        prev_q = self._betual_last_quarter.get(game.source_game_id)
+        new_q = parsed.get("quarter")
+        self._betual_maybe_transition(
+            game, rec, captured_at, prev_q, new_q,
+            parsed.get("home_score"), parsed.get("away_score"),
+            parsed, cum)
+        self._betual_last_quarter[game.source_game_id] = (
+            new_q if new_q in (1, 2, 3, 4) else prev_q)
+        self._betual_persist_timer(game)
+
+    def _betual_maybe_transition(
+        self, game: PokerBetGame, rec, captured_at: str,
+        prev_q: Optional[int], new_q: Optional[int],
+        home: Optional[int], away: Optional[int],
+        parsed: dict, cum: list,
+    ) -> None:
+        """§11: capture the high-quality transition snapshot when the
+        verified event view shows the quarter advanced one step."""
+        if prev_q not in (1, 2, 3) or new_q != prev_q + 1:
+            return
+        total = parsed.get("total", {}) or {}
+        full_line = total.get("first_line")
+        safe_record(self.store, self.betual.maybe_transition,
+                    rec,
+                    source_game_id=game.source_game_id,
+                    classification=game.classification,
+                    captured_at=captured_at,
+                    prev_quarter=prev_q, new_quarter=new_q,
+                    home=home, away=away,
+                    full_game_line=full_line,
+                    quarter_line=None,       # quarter lines: WS path only
+                    line_previous=rec.prev_line,
+                    displayed_clock=parsed.get("clock"),
+                    q_scores=cum,
+                    raw={"period_label": parsed.get("period_label")})
+
+    def _betual_end_game(self, game: PokerBetGame,
+                         parsed: Optional[dict] = None) -> None:
+        """§12: record the game-end row.  Evidence distinguishes a
+        source-proven final (verified event view) from a disappearance
+        (NO-FINAL diagnosis data) — internal-timer expiry is never final."""
+        rec = self.betual.game(game.source_game_id, game.classification)
+        if rec is None:
+            return
+        if parsed is not None:
+            qs = parsed.get("quarter_scores") or []
+            cum: list[tuple[Any, Any]] = []
+            h = a = 0
+            for qh, qa in qs[:4]:
+                if qh is None or qa is None:
+                    break
+                h += int(qh)
+                a += int(qa)
+                cum.append((h, a))
+            evidence, settle = "observed_final", parsed.get("period_label")
+            home, away = parsed.get("home_score"), parsed.get("away_score")
+            clock = parsed.get("clock")
+            quarter = parsed.get("quarter")
+        else:
+            cum, evidence, settle = [], "disappeared", None
+            home = away = clock = quarter = None
+            # §12: a disappeared game's last known scores — read-only
+            last = self.store.get_snapshots(game.source_game_id, limit=1)
+            if last:
+                home, away = last[0].get("home_score"), last[0].get(
+                    "away_score")
+        safe_record(self.store, self.betual.record_game_end,
+                    rec,
+                    source_game_id=game.source_game_id,
+                    classification=game.classification,
+                    captured_at=utcnow_iso(),
+                    home=home, away=away, quarter=quarter,
+                    displayed_clock=clock,
+                    full_game_line=None,
+                    settlement_state=settle,
+                    end_evidence=evidence,
+                    q_scores=cum,
+                    raw={"source_url": game.source_url})
+
+    def _betual_restore_state(self) -> None:
+        """§13 restart recovery: rebuild Betual timer state from the
+        persisted anchors so the internal clock is NOT reset to zero."""
+        try:
+            rows = self.store.list_betual_timers()
+        except Exception:
+            logger.error("betual restore list failed:\n%s",
+                         traceback.format_exc())
+            return
+        for r in rows:
+            try:
+                gid = r["source_game_id"]
+                game = self._find_tracked(gid)
+                cls = game.classification if game else "BETUAL_NBA"
+                rec = self.betual.restore(
+                    gid, cls,
+                    game_start_wall=r.get("game_start_wall"),
+                    observed_at_wall=r.get("observed_at_wall"),
+                    quarter_seconds=r.get("quarter_seconds"),
+                    timer_model=r.get("timer_model"),
+                    last_home=r.get("last_home"),
+                    last_away=r.get("last_away"),
+                    last_line=r.get("last_line"),
+                    last_line_at=r.get("last_line_at"))
+                if rec is not None and r.get("game_start_wall"):
+                    self._betual_start_ts[gid] = (
+                        r["game_start_wall"],
+                        r.get("observed_at_wall") or time.time())
+            except Exception:
+                logger.error("betual restore row failed:\n%s",
+                             traceback.format_exc())
 
     # ── LIVE market subscriptions (30s freshness) ────────────────
 
@@ -1042,6 +1516,20 @@ class PokerBetCollector:
                     1 for v in self._attempt_streak.values()
                     if v >= MARKET_ATTEMPT_STREAK_BACKOFF),
             },
+            # Quarter-specific collection (directive 2026-09-22 §9):
+            # in-process counters — failures and anomalies are REPORTED,
+            # never hidden.  Persistent coverage % lives in
+            # store.quarter_collection_metrics().
+            "quarter_collection": {
+                "score_observations": self._q_score_obs,
+                "market_observations": self._q_market_obs,
+                "ws_parse_failures": self._q_parse_failures,
+                "anomalies": self._q_anomalies,
+            },
+            # Betual-only dataset (§18): per-game coverage, line-movement
+            # volume, transitions, finalization success, NO-FINAL count,
+            # parse failures and clock diagnostics — read-only aggregates.
+            "betual_dataset": self.store.betual_collection_metrics(),
             # crash/restart recovery: persist tracked games so a restart
             # does NOT trigger a full re-resolution storm (each new-game
             # resolve is a ~6s event-view nav that blocks the fast tick).
@@ -1148,6 +1636,10 @@ class PokerBetCollector:
         # restart recovery: restore tracked games so a crash/restart does
         # not force a full re-resolution storm in the fast path
         self._restore_tracked()
+        # §13 Betual restart recovery: rebuild the internal-timer state
+        # from the persisted wall anchors — the game clock is NEVER reset
+        # to zero by a restart.
+        self._betual_restore_state()
         # one-time backfill: pre-existing clean observations (already in
         # blm_metrics_clean.db from before this layer existed) enter the
         # deviation benchmark immediately; per-observation refreshes keep
@@ -2241,6 +2733,18 @@ class PokerBetCollector:
                 markets_json=parsed["markets_json"],
                 raw_json=parsed["raw_json"],
             )
+            # Quarter-score collection (directive 2026-09-22, DATA
+            # COLLECTION ONLY) — record exactly what the verified event
+            # view presented, validated and flagged, never corrected.
+            self._record_quarter_scores(game, parsed)
+            # Betual-only dataset (§1): internal-timer score observation
+            # from the SAME verified parse — failure-isolated, and
+            # nothing here feeds any decision path (§19).
+            try:
+                self._betual_record_score(game, parsed, obs.captured_at)
+            except Exception:
+                logger.error("betual score record failed:\n%s",
+                             traceback.format_exc())
             row_id = self.store.insert_snapshot(self._game_db_id(game), obs)
             if row_id:
                 self.stats["snapshots"] += 1
@@ -2294,6 +2798,16 @@ class PokerBetCollector:
             lr.get("period_label"), lr.get("clock"),
         )
         self.stats["games_ended_final"] += 1
+        # §12 Betual game-end capture (evidence='observed_final' via the
+        # event-view path; a disappearance records evidence='disappeared').
+        try:
+            self._betual_end_game(game)
+        except Exception:
+            logger.error("betual game end failed:\n%s", traceback.format_exc())
+        try:
+            self.betual.discard(game.source_game_id)
+        except Exception:
+            pass
 
     @staticmethod
     def _first_team_total(parsed: dict, index: int) -> Optional[float]:
@@ -2976,6 +3490,19 @@ class PokerBetCollector:
                     self._final_capture_gids.discard(gid)
                     self._final_capture_until.pop(gid, None)
                     self._final_capture_armed.discard(gid)
+                    # §12: a game that left the panel WITHOUT a proven
+                    # final — the NO-FINAL diagnosis data (evidence=
+                    # 'disappeared', never recorded as final).
+                    ended_game = game
+                    try:
+                        self._betual_end_game(ended_game)
+                    except Exception:
+                        logger.error("betual disappeared-end failed:\n%s",
+                                     traceback.format_exc())
+                    try:
+                        self.betual.discard(game.source_game_id)
+                    except Exception:
+                        pass
             for game in to_end:
                 self.store.upsert_game(game)
                 logger.info("game ended (disappeared): %s", game.source_game_id)

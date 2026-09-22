@@ -1538,3 +1538,42 @@ Implemented the auto-betting execution architecture per directive:
   touched-surface suites green; the 4 known pre-existing archive-drift
   failures remain (stash-verified on clean HEAD, incl.
   test_forensic_relative_pace_freeze.py::test_same_game_exclusion...).
+
+## 2026-09-22 — Quarter-specific data collection (directive, DATA COLLECTION ONLY)
+- Audit: WS eu-swarm pushes the FULL market tree (up to 42 markets/game) but
+  production kept only MatchTotal and discarded every other market and the
+  raw frame; event-view quarter_scores parsed but stored nowhere (0% coverage).
+- Change: new quarter_market_observations / quarter_score_observations /
+  quarter_validation_anomalies / ws_raw_frames tables; snapshots gains
+  q1_home_score..q4_away_score (backward-compatible ALTERs); WS hook retains
+  raw frames (throttled; parse failures always) and emits every O/U market;
+  event-view path records quarter scores + chronological validation
+  (flag-only, never corrects); /api/v4/collection/quarters observability.
+- NOT touched: alert thresholds, UNDER/OVER triggers, fingerprints, betting,
+  dashboard decisions.  New tables feed no decision surface.
+- Historical backfill: NONE possible (raw frames were never retained); the
+  source's period taxonomy will be discovered from newly retained data.
+
+## 2026-09-22 — BETUAL-ONLY quarterly dataset with internal game timer (directive, DATA COLLECTION ONLY)
+- Purpose: a clean prospective BETUAL-only dataset to study TIME -> SCORE ->
+  LINE -> LINE MOVEMENT (reaction lag, Q3->Q4 behaviour, quarter lines).
+- Internal timer (new blm_v4/betual_timer.py): monotonic clock anchored at the
+  swarm feed's start_ts (§2 authoritative start — first evidence wins, persisted);
+  quarter model calibrated from OBSERVED transitions (median; default 4x600s
+  reported honestly as model='default' until then); bookmaker displayed clock is
+  an observation field only (clock_difference); NTP-safe restart recovery via
+  betual_game_timers wall anchors — timer never resets to zero (§13).
+- New tables (additive): betual_time_observations, betual_line_observations
+  (line_previous/change/velocity, score_at_observation; change-and-return
+  retained), betual_transitions (Q3->Q4 first-class), betual_game_ends
+  (end_evidence=observed_final|disappeared — NO-FINAL diagnosis data),
+  betual_clock_diagnostics (flags only), betual_parse_failures,
+  betual_game_timers.  All keyed to classification='BETUAL_NBA' (§1 gate).
+- Collector: hooks ONLY (WS frame handler, event-view capture, end paths,
+  start() restore, state payload betual_dataset metrics) — no new polling loops,
+  no parallel collector; MatchTotal market_observations shape byte-identical.
+- NOT touched: alerts, UNDER/OVER logic, fingerprints, betting, thresholds,
+  settle behaviour.  Tests: tests/test_betual_dataset.py (32) +
+  tests/test_betual_collector_integration.py (12); full suite 1355 passed, the
+  4 freeze-test failures stash-verified pre-existing.
+- Report: analysis_betual_quarterly_dataset_2026-09-22.md (sections A-P).
