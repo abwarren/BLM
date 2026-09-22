@@ -112,6 +112,14 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if _finite(proj.get("required_pts_per_min")) is None \
             or _finite(proj.get("progress_pct")) is None:
         return _no("market_missing", ik)
+    # ── limits must be CONFIGURED before any stake math (§9): an
+    #    unconfigured limit cannot be enforced, so betting is blocked —
+    #    exactly what the dashboard's "NOT CONFIGURED — betting blocked"
+    #    status line promises.  Set BETTING_MAX_STAKE_PER_BET,
+    #    BETTING_MAX_BETS_PER_DAY and BETTING_MAX_DAILY_EXPOSURE to arm.
+    if (cfg.max_stake_per_bet is None or cfg.max_bets_per_day is None
+            or cfg.max_daily_exposure is None):
+        return _no("limits_not_configured", ik)
     # ── 6. stake amount valid (unit-based staking) ────────────────────
     unit_price = _finite(unit_price)
     if unit_price is None or unit_price <= 0:

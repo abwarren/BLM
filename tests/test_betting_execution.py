@@ -635,3 +635,36 @@ def test_r1_absent_from_betting_layer():
         src = inspect.getsource(mod)
         assert "R1" not in src.replace("R1 remains excluded", "").replace(
             "R1 does not exist", ""), mod.__name__
+
+
+# ══════════════════════════════════════════════════════════════════════
+# unconfigured limits — fail closed (§9: unverifiable limits → NO BET)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_unconfigured_limits_block_betting(tmp_path):
+    """Production default (no BETTING_* env vars): every limit is None →
+    betting MUST be blocked even with the switch ON and a perfect alert."""
+    cfg = make_cfg(tmp_path, max_stake_per_bet=None, max_bets_per_day=None,
+                   max_daily_exposure=None)
+    store = make_store(tmp_path)
+    for stats in ({"verifiable": True, "bets": 0, "amount": 0.0},
+                  store.today_stats()):
+        res = evaluate(qualifying_game(), cfg=cfg, store=store,
+                       enabled=True, unit_price=10.0, stats=stats)
+        assert res["decision"] == "NO_BET"
+        assert res["reason"] == "limits_not_configured"
+
+
+def test_partially_configured_limits_block_betting(tmp_path):
+    """Any single missing limit blocks betting — partial configuration
+    is not safe configuration."""
+    store = make_store(tmp_path)
+    for kwargs in ({"max_stake_per_bet": None},
+                   {"max_bets_per_day": None},
+                   {"max_daily_exposure": None}):
+        cfg = make_cfg(tmp_path, **kwargs)
+        res = evaluate(qualifying_game(), cfg=cfg, store=store,
+                       enabled=True, unit_price=10.0,
+                       stats={"verifiable": True, "bets": 0, "amount": 0.0})
+        assert res["decision"] == "NO_BET"
+        assert res["reason"] == "limits_not_configured"
