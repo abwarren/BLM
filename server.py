@@ -51,6 +51,15 @@ SETTLE_INTERVAL_S = float(
 #: exists upstream, so reconcile it to ended.
 GAME_SOURCE_EXPIRY_S = float(
     os.environ.get("BLM_GAME_SOURCE_EXPIRY_S", "180"))
+#: RESULT RECONCILIATION worker cadence (directive 2026-09-23) — a game
+#: that leaves the live market without a verified final is stamped
+#: NEEDS_RECONCILIATION and its result is recovered from the PokerBet
+#: results page (never treated as 'no result').  0 disables the worker.
+RESULT_RECONCILE_INTERVAL_S = float(
+    os.environ.get("BLM_RESULT_RECONCILE_INTERVAL_S", "300"))
+#: games attempted per reconciliation pass (bounded Playwright work).
+RESULT_RECONCILE_BATCH = int(
+    os.environ.get("BLM_RESULT_RECONCILE_BATCH", "25"))
 
 
 def main() -> None:
@@ -295,6 +304,26 @@ def main() -> None:
         app.state._settle_worker = settle_worker
         logger.info("settle_worker_started", interval_s=SETTLE_INTERVAL_S)
 
+        # ── RESULT RECONCILIATION WORKER (directive 2026-09-23) ──────
+        # A disappearing live market is NOT evidence that a game has no
+        # result: ended games without a verified final are stamped
+        # NEEDS_RECONCILIATION and their result is recovered from the
+        # PokerBet results page (verified against the canonical game
+        # record before it is ever written).  Bounded, idempotent, and
+        # forbidden from overwriting an OK verdict; conflicts are
+        # flagged, never silently overwritten.  0 disables the worker.
+        if RESULT_RECONCILE_INTERVAL_S > 0:
+            from blm_v4.result_reconciler import ResultReconcilerWorker
+            result_reconciler = ResultReconcilerWorker(
+                root / "blm_pokerbet.db",
+                interval_s=RESULT_RECONCILE_INTERVAL_S,
+                batch_limit=RESULT_RECONCILE_BATCH)
+            result_reconciler.start()
+            app.state._result_reconciler = result_reconciler
+            logger.info("result_reconciler_started",
+                        interval_s=RESULT_RECONCILE_INTERVAL_S,
+                        batch=RESULT_RECONCILE_BATCH)
+
         # ── AUTO-BETTING WORKER (directive 2026-09-21) ─────────────
         # DRY_RUN by default; the persisted kill switch defaults OFF.
         # The worker evaluates the SAME /api/v4/live payload the dashboard
@@ -336,6 +365,13 @@ def main() -> None:
         settle_worker = getattr(app.state, "_settle_worker", None)
         if settle_worker is not None:
             settle_worker.stop(timeout=2)
+        result_reconciler = getattr(app.state, "_result_reconciler", None)
+        if result_reconciler is not None:
+            result_reconciler.stop(timeout=2)
+            try:
+                result_reconciler.reconciler._fetcher.close()
+            except Exception:
+                pass
         betting_worker = getattr(app.state, "_betting_worker", None)
         if betting_worker is not None:
             betting_worker.stop(timeout=2)

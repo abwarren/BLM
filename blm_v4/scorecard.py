@@ -1297,6 +1297,16 @@ class Scorecard:
             conn = self._connect()
             try:
                 conn.executescript(SCORECARD_SCHEMA)
+                # result reconciliation (directive 2026-09-23): the
+                # provenance column the reconciler writes — ensured here
+                # so this sweep's guarded reads cannot outrun the
+                # migration (idempotent; no-op once present).
+                _cols = {r["name"] for r in conn.execute(
+                    "PRAGMA table_info(game_results)")}
+                if "result_source" not in _cols:
+                    conn.execute(
+                        "ALTER TABLE game_results "
+                        "ADD COLUMN result_source TEXT")
                 # migrate pre-fragment DBs (ADD COLUMN is cheap + idempotent)
                 cols = {r["name"] for r in conn.execute(
                     "PRAGMA table_info(prediction_scores)")}
@@ -1613,7 +1623,7 @@ class Scorecard:
         never scored.
         """
         stats = {"checked": 0, "ok": 0, "unknown": 0, "invalid": 0,
-                 "skipped_settled": 0}
+                 "skipped_settled": 0, "skipped_protected": 0}
         with self._lock:
             conn = self._connect()
             try:
@@ -1689,6 +1699,41 @@ class Scorecard:
                     # still stays UNKNOWN (never a guessed final) — and
                     # result_at points at the graded row, the verdict's
                     # exact input.
+                    # EXTERNALLY VERIFIED results (result reconciliation,
+                    # directive 2026-09-23): a row verified from the
+                    # PokerBet results page (result_source='RESULTS_PAGE')
+                    # is a VERIFIED final.  The snapshot-derived verdict
+                    # rules cannot re-derive it — the snapshots are the
+                    # very reason the game needed reconciliation — so a
+                    # re-derivation must never clobber it with UNKNOWN.
+                    # Unprotecting case: the stored final SCORES disagree
+                    # with the current history's endpoint (a captured
+                    # state the page-verification never saw) → protection
+                    # is lifted and the normal verdict rules run.
+                    _ext = conn.execute(
+                        "SELECT result_source, final_home, final_away "
+                        "FROM game_results WHERE source_game_id=?",
+                        (g["source_game_id"],)).fetchone()
+                    _prot = bool(
+                        _ext and _ext["result_source"] == "RESULTS_PAGE"
+                        and _ext["final_home"] is not None
+                        and _ext["final_away"] is not None)
+                    if _prot:
+                        _endpoint = None
+                        for r in reversed(rows):
+                            if (r.get("home_score") is not None
+                                    and r.get("away_score") is not None):
+                                _endpoint = (r["home_score"],
+                                             r["away_score"])
+                                break
+                        if (_endpoint is not None
+                                and (_endpoint[0] != _ext["final_home"]
+                                     or _endpoint[1] != _ext["final_away"])):
+                            _prot = False
+                    if _prot:
+                        stats["skipped_protected"] = (
+                            stats.get("skipped_protected", 0) + 1)
+                        continue
                     last = rows[-1] if rows else None
                     if not last:
                         continue

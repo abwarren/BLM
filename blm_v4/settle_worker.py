@@ -85,6 +85,15 @@ def settle_once(db_path: Path | str, *,
         # SAME game_results table the sweep would (idempotent CREATE IF
         # NOT EXISTS); on a production DB it is a no-op.
         conn.executescript(SCORECARD_SCHEMA)
+        # result reconciliation (directive 2026-09-23): the provenance
+        # column the reconciler writes — ensured here too so this
+        # worker's guarded candidate query cannot outrun the migration
+        # (idempotent; no-op once present).
+        _cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(game_results)")}
+        if "result_source" not in _cols:
+            conn.execute(
+                "ALTER TABLE game_results ADD COLUMN result_source TEXT")
         conn.commit()
         # Candidates, bounded and oldest-first so a backlog drains
         # predictably:
@@ -96,6 +105,12 @@ def settle_once(db_path: Path | str, *,
         #       so the row is corrected in place through the same upsert.
         # INVALID is final and never rescored — the sweep's idempotence
         # rule; a settled OK row with no newer observation is untouched.
+        # (b2) an EXTERNALLY VERIFIED row (result_source='RESULTS_PAGE',
+        #      result reconciliation directive 2026-09-23) whose stored
+        #      final scores still agree with the history's endpoint — a
+        #      snapshot-derived re-settlement must never clobber a
+        #      verified page result with UNKNOWN (protection guard,
+        #      same semantics as the scorecard's).
         rows = conn.execute(
             """SELECT g.id, g.source_game_id, g.classification
                FROM games g
@@ -104,11 +119,23 @@ def settle_once(db_path: Path | str, *,
                WHERE g.status = 'ended'
                  AND (r.source_game_id IS NULL
                       OR r.final_result_status = 'UNKNOWN'
+                      OR r.final_result_status = 'NEEDS_RECONCILIATION'
                       OR (r.final_result_status != 'INVALID'
                           AND EXISTS (
                               SELECT 1 FROM snapshots s
                               WHERE s.game_id = g.id
                                 AND s.captured_at > r.result_at)))
+                 AND NOT (
+                     r.result_source = 'RESULTS_PAGE'
+                     AND r.final_home IS NOT NULL
+                     AND r.final_away IS NOT NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM snapshots s3
+                         WHERE s3.game_id = g.id
+                           AND s3.home_score IS NOT NULL
+                           AND s3.away_score IS NOT NULL
+                           AND (s3.home_score != r.final_home
+                                OR s3.away_score != r.final_away)))
                ORDER BY g.last_seen_at ASC
                LIMIT ?""",
             (batch_limit,)).fetchall()
@@ -175,6 +202,27 @@ def _settle_game(conn: sqlite3.Connection,
         (g["id"],)).fetchall()]
     if not rows:
         return None                      # never captured — nothing to verify
+    # EXTERNALLY VERIFIED protection (result reconciliation directive
+    # 2026-09-23): a result_source='RESULTS_PAGE' row whose stored scores
+    # still agree with the history's newest scored endpoint is never
+    # re-settled from snapshots — the re-derivation could only demote a
+    # verified page result to UNKNOWN.  A DISAGREEING endpoint lifts the
+    # protection: the captured state outranks a page the verification
+    # never saw, and the normal settlement rule below decides.
+    _ext = conn.execute(
+        "SELECT result_source, final_home, final_away FROM game_results "
+        "WHERE source_game_id = ?", (g["source_game_id"],)).fetchone()
+    if (_ext and _ext["result_source"] == "RESULTS_PAGE"
+            and _ext["final_home"] is not None
+            and _ext["final_away"] is not None):
+        _endpoint = None
+        for r in reversed(rows):
+            if r.get("home_score") is not None and r.get("away_score") is not None:
+                _endpoint = (r["home_score"], r["away_score"])
+                break
+        if _endpoint is not None and (_endpoint[0] == _ext["final_home"]
+                                      and _endpoint[1] == _ext["final_away"]):
+            return None                      # protected — untouched
     qual, reason = _snapshot_history_quality(rows)
     if qual == "INVALID":
         conn.execute(
