@@ -60,6 +60,15 @@ RESULT_RECONCILE_INTERVAL_S = float(
 #: games attempted per reconciliation pass (bounded Playwright work).
 RESULT_RECONCILE_BATCH = int(
     os.environ.get("BLM_RESULT_RECONCILE_BATCH", "25"))
+#: Use the swarm feed that BACKS the PokerBet results page as the
+#: authoritative result source (directive 2026-09-24).  The page renders a
+#: list of games and carries no game id at all, so a DOM read can only guess
+#: which game a score belongs to; the feed answers get_result_games{game_id}
+#: exactly and returns a structured four-quarter score line.  Wired here, at
+#: the composition root, so library defaults never open a network socket.
+#: Set to 0 to fall back to the results-page DOM path.
+RESULT_RECONCILE_SWARM = os.environ.get(
+    "BLM_RESULT_RECONCILE_SWARM", "1") not in ("0", "false", "no", "")
 
 
 def main() -> None:
@@ -314,15 +323,26 @@ def main() -> None:
         # flagged, never silently overwritten.  0 disables the worker.
         if RESULT_RECONCILE_INTERVAL_S > 0:
             from blm_v4.result_reconciler import ResultReconcilerWorker
+            swarm = None
+            if RESULT_RECONCILE_SWARM:
+                try:
+                    from blm_v4.swarm_results import SwarmResultsClient
+                    swarm = SwarmResultsClient(log=logger)
+                    logger.info("result_reconciler_source",
+                                source="swarm_feed")
+                except Exception:
+                    logger.exception("swarm_client_unavailable")
             result_reconciler = ResultReconcilerWorker(
                 root / "blm_pokerbet.db",
                 interval_s=RESULT_RECONCILE_INTERVAL_S,
-                batch_limit=RESULT_RECONCILE_BATCH)
+                batch_limit=RESULT_RECONCILE_BATCH,
+                swarm=swarm)
             result_reconciler.start()
             app.state._result_reconciler = result_reconciler
             logger.info("result_reconciler_started",
                         interval_s=RESULT_RECONCILE_INTERVAL_S,
-                        batch=RESULT_RECONCILE_BATCH)
+                        batch=RESULT_RECONCILE_BATCH,
+                        swarm=bool(swarm))
 
         # ── AUTO-BETTING WORKER (directive 2026-09-21) ─────────────
         # DRY_RUN by default; the persisted kill switch defaults OFF.

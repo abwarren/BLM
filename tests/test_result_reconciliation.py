@@ -164,6 +164,10 @@ def _game(gid: str, status: str = "ended",
           home: str = "Dallas Mavericks Virtual",
           away: str = "Memphis Grizzlies Virtual") -> PokerBetGame:
     now = datetime.now(timezone.utc)
+    # first_seen aligns with the fixture pages' displayed start time
+    # (2026-09-22 21:30) — the reconciler's start-time cross-check
+    # (§5/§14.6) compares these two, and a live-tracked game is first
+    # seen within minutes of its real tip-off.
     return PokerBetGame(
         source="PokerBet", source_game_id=gid,
         competition_id="18296756", competition_slug="betual-nba",
@@ -171,8 +175,12 @@ def _game(gid: str, status: str = "ended",
         game_family="betual", classification="BETUAL_NBA",
         sport="basketball", home_team=home, away_team=away,
         game_slug=f"{gid}-game", source_url=f"https://x/{gid}",
-        status=status, first_seen_at=_iso(now - timedelta(hours=2)),
-        last_seen_at=_iso(now - timedelta(minutes=30)))
+        status=status, first_seen_at="2026-09-22T21:30:00.000000Z",
+        # last seen ~40 min after tip-off: a finished 40-minute game cannot
+        # be observed days after it started (the 2026-09-24 fixture-start
+        # window anchors on last_seen — a game must have been RUNNING when
+        # we last saw it).
+        last_seen_at="2026-09-22T22:10:00.000000Z")
 
 
 @pytest.fixture
@@ -196,6 +204,16 @@ def env(tmp_path):
     def add_game(gid, status="ended", home="Dallas Mavericks Virtual",
                  away="Memphis Grizzlies Virtual"):
         st.upsert_game(_game(gid, status, home, away))
+        # storage.upsert_game stamps last_seen_at = now unconditionally
+        # (production semantics), so the fixture's realistic last
+        # observation is applied explicitly: the reconciler's fixture-start
+        # window (2026-09-24) anchors on it, and the page's displayed start
+        # (2026-09-22 21:30) must sit inside the fixture's running window.
+        c = sqlite3.connect(str(db))
+        c.execute("UPDATE games SET last_seen_at=? WHERE source_game_id=?",
+                  ("2026-09-22T22:10:00.000000Z", gid))
+        c.commit()
+        c.close()
 
     rec["add_game"] = add_game
 
@@ -685,6 +703,51 @@ def test_worker_disabled_when_interval_zero(env):
     import inspect
     src = inspect.getsource(rr.ResultReconcilerWorker.start)
     assert "Thread(" in src           # shipped shape unchanged
+
+
+def test_bootstrap_repair_strips_provenance_that_has_no_final(env):
+    """A row that claims RESULTS_PAGE but holds no final is a lie — the
+    stale-provenance state that made page-verified games unrecoverable.
+    The bootstrap repair cleans it and can never touch a verdict."""
+    env["add_game"]("91000001")                     # the lie
+    env["add_game"]("91000002")
+    # the reconciler's bootstrap adds the result_source column (the same
+    # idempotent migration production runs), so build it before inserting
+    rr = ResultReconciler(env["db"], batch_limit=1)
+    conn = sqlite3.connect(str(env["db"]))
+    try:
+        conn.execute(
+            """INSERT INTO game_results (source_game_id, classification,
+                   result_at, final_result_status, result_source)
+               VALUES ('91000001', 'BETUAL_NBA', '2026-09-24T20:00:00.000000Z',
+                       'NEEDS_RECONCILIATION', 'RESULTS_PAGE')""")   # a lie
+        conn.execute(
+            """INSERT INTO game_results (source_game_id, classification,
+                   final_home, final_away, final_total, result_at,
+                   final_result_status, result_source)
+               VALUES ('91000002', 'BETUAL_NBA', 88, 90, 178,
+                       '2026-09-24T20:00:00.000000Z', 'OK',
+                       'RESULTS_PAGE')""")          # a real verdict
+        conn.commit()
+    finally:
+        conn.close()
+
+    # the BOOTSTRAP repair is production's path: constructing the reconciler
+    # (which server start does) cleans the table it inherits
+    rr = ResultReconciler(env["db"], batch_limit=1)
+    conn = rr._connect()
+    try:
+        rows = {r["source_game_id"]: dict(r) for r in conn.execute(
+            "SELECT * FROM game_results")}
+        second = rr.repair_stale_provenance(conn)          # already clean
+    finally:
+        conn.close()
+
+    assert rows["91000001"]["result_source"] is None       # lie removed
+    assert rows["91000001"]["final_home"] is None          # nothing invented
+    assert rows["91000002"]["result_source"] == "RESULTS_PAGE"   # verdict kept
+    assert rows["91000002"]["final_home"] == 88
+    assert second == 0                                     # idempotent
 
 
 def test_fetch_failure_is_retryable_never_terminal(env):

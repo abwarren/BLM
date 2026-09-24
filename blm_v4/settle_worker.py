@@ -56,6 +56,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
+from blm_v4.result_policy import (
+    flag_conflict,
+    history_disagrees,
+    history_endpoint_total,
+    is_results_page_verdict,
+)
 from blm_v4.scorecard import SCORECARD_SCHEMA, Scorecard, _snapshot_history_quality
 
 logger = logging.getLogger("blm_v4.settle_worker")
@@ -105,12 +111,15 @@ def settle_once(db_path: Path | str, *,
         #       so the row is corrected in place through the same upsert.
         # INVALID is final and never rescored — the sweep's idempotence
         # rule; a settled OK row with no newer observation is untouched.
-        # (b2) an EXTERNALLY VERIFIED row (result_source='RESULTS_PAGE',
-        #      result reconciliation directive 2026-09-23) whose stored
-        #      final scores still agree with the history's endpoint — a
-        #      snapshot-derived re-settlement must never clobber a
-        #      verified page result with UNKNOWN (protection guard,
-        #      same semantics as the scorecard's).
+        # (b2) an EXTERNALLY VERIFIED row (result_source='RESULTS_PAGE')
+        #      is AUTHORITATIVE and is never a settlement candidate at all
+        #      (directive 2026-09-24): "the results page is authoritative".
+        #      The pre-fix predicate only excluded such a row while every
+        #      captured score happened to agree with it — i.e. it invited
+        #      the re-derivation exactly when the game vanished early, and
+        #      the re-derivation then NULLed the verified final.  A
+        #      disagreement is now flagged (see _settle_game), never
+        #      settled over.
         rows = conn.execute(
             """SELECT g.id, g.source_game_id, g.classification
                FROM games g
@@ -125,17 +134,8 @@ def settle_once(db_path: Path | str, *,
                               SELECT 1 FROM snapshots s
                               WHERE s.game_id = g.id
                                 AND s.captured_at > r.result_at)))
-                 AND NOT (
-                     r.result_source = 'RESULTS_PAGE'
-                     AND r.final_home IS NOT NULL
-                     AND r.final_away IS NOT NULL
-                     AND NOT EXISTS (
-                         SELECT 1 FROM snapshots s3
-                         WHERE s3.game_id = g.id
-                           AND s3.home_score IS NOT NULL
-                           AND s3.away_score IS NOT NULL
-                           AND (s3.home_score != r.final_home
-                                OR s3.away_score != r.final_away)))
+                 AND NOT (COALESCE(r.result_source, '') = 'RESULTS_PAGE'
+                          AND COALESCE(r.final_result_status, '') = 'OK')
                ORDER BY g.last_seen_at ASC
                LIMIT ?""",
             (batch_limit,)).fetchall()
@@ -202,27 +202,34 @@ def _settle_game(conn: sqlite3.Connection,
         (g["id"],)).fetchall()]
     if not rows:
         return None                      # never captured — nothing to verify
-    # EXTERNALLY VERIFIED protection (result reconciliation directive
-    # 2026-09-23): a result_source='RESULTS_PAGE' row whose stored scores
-    # still agree with the history's newest scored endpoint is never
-    # re-settled from snapshots — the re-derivation could only demote a
-    # verified page result to UNKNOWN.  A DISAGREEING endpoint lifts the
-    # protection: the captured state outranks a page the verification
-    # never saw, and the normal settlement rule below decides.
+    # RESULTS-PAGE AUTHORITY (directives 2026-09-23 §6, 2026-09-24).
+    # "THE RESULTS PAGE IS AUTHORITATIVE": a verified page final is
+    # IMMUTABLE — the snapshot-derived rules below cannot re-derive it,
+    # because the snapshots are the very reason the game needed
+    # reconciliation in the first place.  A captured endpoint that
+    # DISAGREES is FLAGGED in result_conflicts, never written over: a flag
+    # is a job for a human, a NULL is lost evidence.
+    # The pre-2026-09-24 "a disagreeing endpoint lifts the protection"
+    # clause is REMOVED.  Measured live before the fix: it destroyed 2,592
+    # of 2,907 page-verified finals by writing final_*=NULL + UNKNOWN while
+    # leaving result_source='RESULTS_PAGE' behind, and — because the
+    # reconciliation state still said VERIFIED — none of those games was
+    # ever re-attempted.  The live market disappearing is NOT evidence that
+    # a game has no result.
     _ext = conn.execute(
-        "SELECT result_source, final_home, final_away FROM game_results "
-        "WHERE source_game_id = ?", (g["source_game_id"],)).fetchone()
-    if (_ext and _ext["result_source"] == "RESULTS_PAGE"
-            and _ext["final_home"] is not None
-            and _ext["final_away"] is not None):
-        _endpoint = None
-        for r in reversed(rows):
-            if r.get("home_score") is not None and r.get("away_score") is not None:
-                _endpoint = (r["home_score"], r["away_score"])
-                break
-        if _endpoint is not None and (_endpoint[0] == _ext["final_home"]
-                                      and _endpoint[1] == _ext["final_away"]):
-            return None                      # protected — untouched
+        "SELECT result_source, final_result_status, final_home, "
+        "final_away, final_total "
+        "FROM game_results WHERE source_game_id = ?",
+        (g["source_game_id"],)).fetchone()
+    if is_results_page_verdict(_ext):
+        if history_disagrees(rows, _ext["final_home"], _ext["final_away"]):
+            flag_conflict(
+                conn, g, history_endpoint_total(rows), _ext["final_total"],
+                "captured history disagrees with the stored RESULTS_PAGE "
+                "verdict — verdict KEPT (the results page is authoritative)",
+                flagged_at=_utcnow())
+            conn.commit()
+        return None                          # protected — untouched
     qual, reason = _snapshot_history_quality(rows)
     if qual == "INVALID":
         conn.execute(
@@ -237,7 +244,8 @@ def _settle_game(conn: sqlite3.Connection,
             VALUES (?, ?, NULL, NULL, NULL, ?, 'INVALID')
             ON CONFLICT(source_game_id) DO UPDATE SET
                 final_result_status = excluded.final_result_status,
-                result_at = excluded.result_at""",
+                result_at = excluded.result_at,
+                result_source = NULL""",
             (g["source_game_id"], g["classification"],
              rows[-1]["captured_at"]))
         return ("invalid", "INVALID", None)
@@ -268,7 +276,11 @@ def _settle_game(conn: sqlite3.Connection,
                             final_away = excluded.final_away,
                             final_total = excluded.final_total,
                             result_at = excluded.result_at,
-                            final_result_status = excluded.final_result_status""",
+                            final_result_status = excluded.final_result_status,
+                            result_source = CASE
+                                WHEN excluded.final_result_status = 'OK'
+                                THEN game_results.result_source
+                                ELSE NULL END""",
                         (g["source_game_id"], g["classification"], c_fh,
                          c_fa, (c_fh + c_fa) if (c_fh is not None
                                                  and c_fa is not None) else None,
@@ -286,7 +298,11 @@ def _settle_game(conn: sqlite3.Connection,
             final_away = excluded.final_away,
             final_total = excluded.final_total,
             result_at = excluded.result_at,
-            final_result_status = excluded.final_result_status""",
+            final_result_status = excluded.final_result_status,
+            result_source = CASE
+                WHEN excluded.final_result_status = 'OK'
+                THEN game_results.result_source
+                ELSE NULL END""",
         (g["source_game_id"], g["classification"], fh, fa,
          (fh + fa) if (fh is not None and fa is not None) else None,
          last["captured_at"], status))

@@ -551,7 +551,12 @@ class PokerBetStore:
                     game.competition_slug, game.competition, game.region,
                     game.game_family, game.classification, game.sport,
                     game.home_team, game.away_team, game.game_slug,
-                    game.source_url, game.status, now, now,
+                    game.source_url, game.status,
+                    # first_seen: the RECORD's own discovery time when the
+                    # caller provides one (the reconciler's start-time
+                    # cross-check reads it); 'now' only as the fallback.
+                    # Existing rows never touch it (see ON CONFLICT).
+                    game.first_seen_at or now, now,
                 ))
                 conn.commit()
                 row = conn.execute(

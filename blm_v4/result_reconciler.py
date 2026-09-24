@@ -66,6 +66,14 @@ from blm_v4.results_fetcher import (
     PlaywrightResultsFetcher,
     ResultsFetcher,
     parse_results_page,
+    parse_row,
+)
+from blm_v4.projection import duration_for
+from blm_v4.result_policy import (
+    CONFLICTS_SCHEMA,
+    flag_conflict,
+    history_endpoint_total,
+    validate_page_result,
 )
 from blm_v4.scorecard import SCORECARD_SCHEMA
 
@@ -125,20 +133,21 @@ CREATE TABLE IF NOT EXISTS result_reconciliation_state (
     final_away       INTEGER,
     final_total      INTEGER,
     source           TEXT,                    -- RESULTS_PAGE | LIVE_DOM | ...
-    updated_at       TEXT NOT NULL
+    updated_at        TEXT NOT NULL
 );
 
 -- Flagged disagreements between sources — NEVER silently overwritten.
-CREATE TABLE IF NOT EXISTS result_conflicts (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_game_id    TEXT NOT NULL,
-    classification    TEXT,
-    live_dom_total    INTEGER,                -- stored OK verdict's total
-    results_total     INTEGER,                -- results-page rendered total
-    detail            TEXT NOT NULL DEFAULT '',
-    flagged_at        TEXT NOT NULL,
-    UNIQUE(source_game_id)
-);
+-- The DDL lives in result_policy.CONFLICTS_SCHEMA: ONE definition, because
+-- the results reconciler, the settle worker and the scorecard all flag the
+-- same disagreements (directive 2026-09-24).
+""" + CONFLICTS_SCHEMA + """
+
+-- The attempt audit's idempotence key: one row per (game, attempt).
+-- Retried attempts take NEW attempt numbers (the counter is incremented
+-- in _record), so ON CONFLICT here only guards a concurrent double-
+-- write of the SAME attempt — never a legitimate retry.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_result_reconciliation_game_attempt
+    ON result_reconciliation(source_game_id, attempt);
 """
 
 # ── Identity helpers (shared policy with reconcile.py) ────────────────
@@ -200,8 +209,178 @@ def _page_sums_valid(parsed: dict) -> Optional[bool]:
     return th == parsed.get("home_score") and ta == parsed.get("away_score")
 
 
+#: §14.6 — how far the page's fixture start time may drift from the
+#: record's own first-seen time before they are DIFFERENT FIXTURES
+#: (Betual virtuals replay the same two teams back-to-back; team-name
+#: identity alone can never prove which game a result belongs to).
+_START_TIME_SKEW_S = 2 * 3600
+
+#: 2026-09-24 — the fixture-start window, anchored on the game's LAST
+#: observation.  Two rules, both derived from live evidence:
+#:
+#:   UPPER: our fixture cannot have STARTED after we stopped watching it.
+#:   A result may never come from a later fixture.  (Live proof: game
+#:   31013207 was last seen 18:44:34 and its page rendered a fixture
+#:   starting 19:14:45 — the next instance of the same two teams.)
+#:
+#:   LOWER: our fixture must still have been RUNNING when we last saw it,
+#:   i.e. page_start + regulation >= last_seen.  This is what separates
+#:   NEIGHBOURING instances on a replay league — the previous replay of the
+#:   same two teams (~40 min cycle) finished before we last observed our
+#:   game, so it cannot be ours.  A ±2 h skew around first_seen cannot do
+#:   this: it accepts a neighbour 40 minutes earlier (measured: a 17:00 row
+#:   passed a 18:05 first_seen under the old rule).
+#:
+#: The grace absorbs clock skew between the page and the collector's stamps
+#: and the source's own pre-roll/overrun.
+_FIXTURE_GRACE_S = 300
+#: fallback regulation length when the classification is unknown
+_DEFAULT_FULL_MIN = 60.0
+
+
+def _parse_any_ts(s: Optional[str]) -> Optional[datetime]:
+    """Tolerant timestamp parse ('2026-09-22 21:30', ISO with/without
+    tz); None when unparseable — the check then does not apply."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(
+            str(s).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _fixture_start_consistent(page_start: Optional[str],
+                              record_first_seen: Optional[str],
+                              record_last_seen: Optional[str] = None,
+                              classification: Optional[str] = None
+                              ) -> Optional[bool]:
+    """Is the page's fixture start OUR fixture's start?  None when the page
+    carries no time at all (check inapplicable).
+
+    The window is anchored on the game's LAST observation, using the
+    classification's regulation length (projection.duration_for):
+
+        last_seen - regulation - grace  <=  page_start  <=  last_seen + grace
+
+    Below that window the render is an EARLIER replay that had already
+    finished before we last saw our game; above it, a LATER replay — both
+    are other fixtures of the same two teams, which is precisely the trap
+    on a virtual league (same teams every ~40 minutes).
+    """
+    p = _parse_any_ts(page_start)
+    if p is None:
+        return None
+    l = _parse_any_ts(record_last_seen)
+    if l is not None:
+        if p.tzinfo is None or l.tzinfo is None:
+            p_cmp, l_cmp = p.replace(tzinfo=None), l.replace(tzinfo=None)
+        else:
+            p_cmp, l_cmp = p, l
+        try:
+            full_min = float(duration_for(classification)[1])
+        except Exception:
+            full_min = _DEFAULT_FULL_MIN
+        delta = (p_cmp - l_cmp).total_seconds()
+        if delta > _FIXTURE_GRACE_S:
+            return False                # started after we stopped watching
+        if -delta > full_min * 60.0 + _FIXTURE_GRACE_S:
+            return False                # had already finished before then
+        return True
+    # no last observation to anchor on — fall back to the historical
+    # generous comparison against first_seen (can only rule out a clearly
+    # different fixture)
+    r = _parse_any_ts(record_first_seen)
+    if r is None:
+        return None
+    if p.tzinfo is None or r.tzinfo is None:
+        p, r = p.replace(tzinfo=None), r.replace(tzinfo=None)
+    return abs((p - r).total_seconds()) <= _START_TIME_SKEW_S
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def select_matching_row(rows: list[dict], game: dict) -> dict[str, Any]:
+    """Pick the page ROW that is this game, from the page's row list.
+
+    THE identity decision of the whole results-page path (2026-09-24).  The
+    page renders a list of games and echoes no game id, and the requested
+    game is frequently NOT on the page at all — live measurement: the page
+    for a basketball virtual id renders 260 unrelated football rows.  So:
+
+      * a row must match BOTH team names (either orientation), AND
+      * when the row carries a fixture date/time it must be consistent with
+        this record's window; on a replay league the same two teams recur
+        every ~40 minutes, so a name match with an inconsistent start is
+        ANOTHER INSTANCE and is rejected,
+      * several name-matching rows with no usable time is ambiguous → fail
+        closed (report the ambiguity rather than guess).
+
+    Returns ``{"parsed", "matched", "reason", "row", "candidate_rows",
+    "total_rows"}``.  ``parsed`` is None whenever no row may be believed —
+    which is an observation of ABSENCE, never a result.
+    """
+    total = len(rows or [])
+    home, away = game.get("home_team"), game.get("away_team")
+    candidates: list[tuple[dict, Optional[bool]]] = []
+    for row in rows or []:
+        teams = [t for t in (row.get("teams") or []) if t.get("name")]
+        if len(teams) < 2:
+            continue
+        n0, n1 = teams[0]["name"], teams[1]["name"]
+        oriented = None
+        if _team_match(n0, home) and _team_match(n1, away):
+            oriented = "as-rendered"
+        elif _team_match(n0, away) and _team_match(n1, home):
+            oriented = "re-oriented"
+        if oriented is None:
+            continue
+        parsed = parse_row(row)
+        cons = _fixture_start_consistent(parsed.get("start_time"),
+                                         game.get("first_seen_at"),
+                                         game.get("last_seen_at"),
+                                         game.get("classification"))
+        if oriented == "re-oriented":
+            h, a = parsed.get("home_score"), parsed.get("away_score")
+            parsed = dict(parsed, home_score=a, away_score=h,
+                          home_team=home, away_team=away,
+                          quarter_scores=[
+                              (b, a2) for (a2, b)
+                              in (parsed.get("quarter_scores") or [])])
+            parsed["orientation"] = "re-oriented"
+        else:
+            parsed["orientation"] = "as-rendered"
+        candidates.append((parsed, cons))
+
+    if not candidates:
+        return {"parsed": None, "matched": False, "row": None,
+                "candidate_rows": 0, "total_rows": total,
+                "reason": (f"the game is not among the {total} result "
+                           f"row(s) the page rendered — the results page "
+                           f"does not exhibit this fixture")}
+    consistent = [c for c in candidates if c[1] is True]
+    if consistent:
+        parsed, cons = consistent[0]
+        return {"parsed": parsed, "matched": True, "row": None,
+                "candidate_rows": len(candidates), "total_rows": total,
+                "start_time_consistent": cons,
+                "reason": "a page row matches the fixture"}
+    untimed = [c for c in candidates if c[1] is None]
+    if len(candidates) == 1 and len(untimed) == 1:
+        parsed, cons = untimed[0]
+        return {"parsed": parsed, "matched": True, "row": None,
+                "candidate_rows": 1, "total_rows": total,
+                "start_time_consistent": None,
+                "reason": ("the only name-matching row carries no fixture "
+                           "time — accepted as unverifiable-by-time")}
+    return {"parsed": None, "matched": False, "row": None,
+            "candidate_rows": len(candidates), "total_rows": total,
+            "start_time_consistent": False,
+            "reason": (f"the page shows {len(candidates)} rows with these "
+                       f"teams but none matches this fixture's time — "
+                       f"another instance of the same fixture")}
 
 
 class ResultReconciler:
@@ -209,11 +388,16 @@ class ResultReconciler:
 
     def __init__(self, db_path: Path | str,
                  fetcher: Optional[ResultsFetcher] = None, *,
+                 swarm: Optional[Any] = None,
                  max_attempts: int = 3,
                  batch_limit: int = 25,
                  log: Optional[logging.Logger] = None):
         self._db_path = Path(db_path)
         self._fetcher = fetcher
+        # The authoritative result source (blm_v4.swarm_results): the feed
+        # that BACKS the results page.  Preferred over any DOM path because
+        # it matches game_id exactly and returns a structured score line.
+        self._swarm = swarm
         self._max_attempts = max(1, int(max_attempts))
         self._batch_limit = max(1, int(batch_limit))
         self._log = log or logger
@@ -242,9 +426,36 @@ class ResultReconciler:
                     conn.execute(
                         "ALTER TABLE game_results ADD COLUMN result_source TEXT")
                 conn.executescript(SCHEMA)
+                self.repair_stale_provenance(conn)
                 conn.commit()
             finally:
                 conn.close()
+
+    # ── provenance hygiene (directive 2026-09-24) ──────────────────
+    def repair_stale_provenance(self, conn: sqlite3.Connection) -> int:
+        """Strip RESULTS_PAGE provenance from rows that hold NO final.
+
+        Why this exists: the bug that made 2,592 page-verified games
+        unrecoverable was a row keeping ``result_source='RESULTS_PAGE'``
+        after its finals had been nulled out.  Such a row is a LIE — it
+        claims a source it no longer carries — and it also makes the row
+        look like a verified verdict to every reader.
+
+        This is a REPAIR, not a policy: it only ever REMOVES a claim from
+        rows with no final.  It can never touch a row that holds a verdict
+        (``final_home``/``final_away`` both present), so it cannot destroy
+        a result.  Idempotent, bounded, run from the bootstrap so every
+        writer's startup inherits a consistent table.
+        """
+        cur = conn.execute(
+            """UPDATE game_results
+                  SET result_source = NULL
+                WHERE result_source = 'RESULTS_PAGE'
+                  AND (final_home IS NULL OR final_away IS NULL)""")
+        n = cur.rowcount or 0
+        if n:
+            self._log.warning("result_provenance_repaired rows=%d", n)
+        return n
 
     # ── candidates (directive §1) ─────────────────────────────────
     def candidate_games(self, conn: sqlite3.Connection) -> list[dict]:
@@ -254,18 +465,26 @@ class ResultReconciler:
         VERIFIED OK, whose snapshot history cannot prove a final by the
         scorecard's own rules, and whose latest attempt is retryable:
           * never attempted, or
-          * last attempt FAILED_ATTEMPT with attempts < max, or
+          * last attempt FAILED_ATTEMPT/REJECTED with attempts < max, or
           * last attempt CONFLICT (re-checked; flagged again, never
-            silently overwritten),
-        VERIFIED and TEMPLATE_FAILED games are never re-attempted
-        (idempotence, directive §9).  A game holding a verified OK row
-        is never a candidate (its result is final).
+            silently overwritten), or
+          * last attempt VERIFIED while the OK row it produced is NO
+            LONGER persisted (directive 2026-09-24: a verification is
+            terminal only while its persisted verdict stands.  Measured
+            live: the pre-fix writers destroyed 2,592 of 2,907 verified
+            finals and the games were re-attempted NEVER, because the
+            state table still said VERIFIED — the 'no final' the directive
+            forbids, produced by the reconciliation layer itself).
+        VERIFIED-with-OK and TEMPLATE_FAILED games are never re-attempted
+        (the first is final, the second is exhausted).  A game holding a
+        verified OK row is never a candidate (its result is final).
         """
         rows = conn.execute(
             """
             SELECT g.source_game_id,
                    COALESCE(g.classification, '') AS classification,
                    g.home_team, g.away_team, g.status,
+                   g.first_seen_at,
                    g.last_seen_at,
                    (SELECT MAX(captured_at) FROM snapshots s
                     WHERE s.source_game_id = g.source_game_id) AS last_snap_at
@@ -277,8 +496,8 @@ class ResultReconciler:
                   WHERE r.source_game_id = g.source_game_id
                     AND r.final_result_status = 'OK')
               AND (st.source_game_id IS NULL
-                   OR st.outcome = 'FAILED_ATTEMPT'
-                   OR st.outcome = 'CONFLICT')
+                   OR st.outcome IN ('FAILED_ATTEMPT', 'CONFLICT',
+                                     'REJECTED', 'VERIFIED'))
               AND (st.attempt IS NULL OR st.attempt < ?)
               AND NOT EXISTS (
                   SELECT 1 FROM snapshots s2
@@ -308,20 +527,67 @@ class ResultReconciler:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    # ── verification (directive §6) ───────────────────────────────
-    def verify_parsed(self, parsed: dict, game: dict) -> dict:
+    # ── the captured-history bound (directive 2026-09-24) ──────────
+    def _attach_history_bounds(self, conn: sqlite3.Connection,
+                               candidates: list[dict]) -> None:
+        """Attach ``_history`` to every candidate: the instance chain's
+        observed per-side maxima, as a ONE-ROW stand-in history.
+
+        The bound is the only history fact score validation needs (a final
+        can never be below a score already observed for the same fixture),
+        so the whole batch costs ONE grouped scan instead of a scan per
+        game.  The row shape matches ``result_policy.history_pairs``, so
+        the policy module stays the single definition of the rule.  The
+        chain (base + ``base#iN`` siblings) is keyed exactly like
+        ``settle_worker._chain_snapshots``: one fixture, one identity.
+        """
+        ids = [c["source_game_id"] for c in candidates
+               if c.get("source_game_id")]
+        if not ids:
+            return
+        base = ("CASE WHEN instr(source_game_id, '#') > 0 THEN "
+                "substr(source_game_id, 1, instr(source_game_id, '#') - 1) "
+                "ELSE source_game_id END")
+        ph = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"""SELECT {base} AS base, MAX(home_score) mh, MAX(away_score) ma
+                FROM snapshots
+                WHERE home_score IS NOT NULL AND away_score IS NOT NULL
+                  AND {base} IN ({ph})
+                GROUP BY base""", ids).fetchall()
+        bounds = {r["base"]: (r["mh"], r["ma"]) for r in rows}
+        for c in candidates:
+            b = bounds.get(c["source_game_id"])
+            c["_history"] = ([{"home_score": b[0], "away_score": b[1]}]
+                             if b else None)
+
+    # ── verification (directive §6 + 2026-09-24 result-integrity) ─────
+    def verify_parsed(self, parsed: dict, game: dict,
+                      history_rows: Optional[list] = None) -> dict:
         """Pure verification of one parsed page against one game record.
 
-        checks keys: has_scoreboard, page_sums_valid, home_team_match,
-        away_team_match, teams_match, score_consistent.  result is
+        checks keys: has_scoreboard, page_sums_valid, render_complete,
+        quarter_count, history_consistent, observed_max_home/away,
+        home_team_match, away_team_match, teams_match,
+        start_time_consistent, identity_ok, score_consistent.  result is
         VERIFIED | TEMPLATE_FAILED | REJECTED.  No DB, no I/O — the
         reconciliation decision is unit-testable end to end.
+
+        ``history_rows`` — the game's captured snapshot history (or None
+        when it has none).  A render is only a FINAL when the SCORE is
+        believable, not merely when the teams match (measured live
+        2026-09-24: 739 of 2,907 page-verified results were arithmetically
+        impossible — a foreign instance's scoreboard attached on name
+        similarity alone).  All score rules live in result_policy.
         """
         checks: dict[str, Any] = {
             "has_scoreboard": parsed.get("home_score") is not None
             and parsed.get("away_score") is not None,
-            "page_sums_valid": _page_sums_valid(parsed),
         }
+        # ── the score itself: complete render, arithmetic, history ────
+        policy_verdict = validate_page_result(parsed, history_rows)
+        checks.update(policy_verdict["checks"])
+        checks["score_consistent"] = checks.get("page_sums_valid") is not False
         checks["home_team_match"] = _team_match(
             parsed.get("home_team"), game.get("home_team"))
         checks["away_team_match"] = _team_match(
@@ -338,13 +604,27 @@ class ResultReconciler:
             (checks["home_team_match"] and checks["away_team_match"])
             or (checks["home_render_matches_record_away"]
                 and checks["away_render_matches_record_home"]))
+        # START-TIME CROSS-CHECK (§5/§14.6): game_id is the primary
+        # identity, but the results page does not echo it — when the
+        # page exposes its fixture's start time and the record knows
+        # when THIS game was first seen, a large disagreement proves a
+        # DIFFERENT fixture with the same two teams.  Team identity
+        # alone then verifies NOTHING (fail closed); a missing time on
+        # either side leaves the check inapplicable (None) and the
+        # historical team-based identity stands.
+        checks["start_time_consistent"] = _fixture_start_consistent(
+            parsed.get("start_time"), game.get("first_seen_at"),
+            game.get("last_seen_at"), game.get("classification"))
+        checks["identity_ok"] = (
+            checks["teams_match"]
+            and checks["start_time_consistent"] is not False)
         # Orientation: the page's rendered-first team is the compact
         # line's first number.  When the render order is swapped vs the
         # record, the verified final is re-oriented to the RECORD's
         # home/away so the stored row stays comparable with every
         # snapshot-derived verdict.
         orientation = "as-rendered"
-        if checks["teams_match"] and not (
+        if checks["identity_ok"] and not (
                 checks["home_team_match"] and checks["away_team_match"]):
             orientation = "re-oriented"
             h, a = parsed.get("home_score"), parsed.get("away_score")
@@ -352,19 +632,25 @@ class ResultReconciler:
             qs = [(b, a2) for (a2, b) in (parsed.get("quarter_scores") or [])]
             parsed["quarter_scores"] = qs
         checks["orientation"] = orientation
-        checks["score_consistent"] = (
-            checks["page_sums_valid"] is not False)
         failures = []
         if not checks["has_scoreboard"]:
             failures.append("no scoreboard rendered")
-        elif not checks["teams_match"]:
-            failures.append(
-                f"teams mismatch: rendered="
-                f"{parsed.get('home_team')!r}/{parsed.get('away_team')!r} "
-                f"recorded={game.get('home_team')!r}/"
-                f"{game.get('away_team')!r}")
-        elif not checks["score_consistent"]:
-            failures.append("quarter scores do not sum to the final score")
+        else:
+            if not checks["identity_ok"]:
+                if not checks["teams_match"]:
+                    failures.append(
+                        f"teams mismatch: rendered="
+                        f"{parsed.get('home_team')!r}/"
+                        f"{parsed.get('away_team')!r} "
+                        f"recorded={game.get('home_team')!r}/"
+                        f"{game.get('away_team')!r}")
+                else:
+                    failures.append(
+                        "start-time mismatch: the page shows a different "
+                        "fixture of the same teams — not this game's result")
+            # the SCORE rules (complete render / quarters sum / final
+            # never below an observed score) — one shared definition
+            failures.extend(policy_verdict["failures"])
 
         if not checks["has_scoreboard"]:
             result = "TEMPLATE_FAILED" if parsed.get("failed_template") \
@@ -389,9 +675,11 @@ class ResultReconciler:
             conn = self._connect()
             try:
                 candidates = self.candidate_games(conn)
+                self._attach_history_bounds(conn, candidates)
             finally:
                 conn.close()
             stats["scanned"] = len(candidates)
+            self._attach_swarm_results(candidates, stats)
             for game in candidates:
                 try:
                     outcome = self._reconcile_one(fetcher, game)
@@ -417,18 +705,192 @@ class ResultReconciler:
                     pass
         return stats
 
-    # -- per-game pipeline ---------------------------------------------
+    # ── the authoritative source (swarm feed behind the results page) ──
+    def _attach_swarm_results(self, candidates: list[dict], stats: dict) -> None:
+        """Look up EVERY candidate's result in the swarm feed, in one call.
+
+        The feed that renders the PokerBet results page answers
+        ``get_result_games{game_id}`` for many ids over a single session, so
+        a whole pass costs one round trip instead of one page load per game.
+        A missing entry stays None — an observation of ABSENCE (the feed has
+        no result for that id), never a failure.
+        """
+        if self._swarm is None or not candidates:
+            return
+        ids = [c["source_game_id"] for c in candidates]
+        try:
+            found = self._swarm.fetch_results(ids) or {}
+        except Exception:
+            stats["swarm_errors"] = stats.get("swarm_errors", 0) + 1
+            self._log.exception("swarm_results_fetch_failed n=%d", len(ids))
+            return
+        hits = 0
+        for c in candidates:
+            res = found.get(c["source_game_id"])
+            c["_swarm_result"] = res
+            if res is not None:
+                hits += 1
+        stats["swarm_lookups"] = len(ids)
+        stats["swarm_results"] = hits
+
+    def _apply_swarm_result(self, game: dict, res: dict) -> str:
+        """Persist (or refuse) one authoritative swarm result.
+
+        The feed is the source the results page renders, so its verdict is
+        authoritative — but authority does not excuse identity: the reply
+        carries the game id, the team names AND the fixture start, and a
+        virtual league reuses one id for a fixture slot replayed all day.
+        A reply whose id differs, whose teams differ, or whose fixture start
+        cannot be this game's fixture is ANOTHER INSTANCE and is refused.
+        """
+        gid = game["source_game_id"]
+        now = _utcnow()
+        checks: dict[str, Any] = {
+            "source": "swarm_feed",
+            "game_id_match": str(res.get("game_id") or "") == str(gid),
+            "feed_home_team": res.get("home_team"),
+            "feed_away_team": res.get("away_team"),
+            "feed_scores": res.get("raw_scores"),
+        }
+        parsed = {
+            "home_team": res.get("home_team"), "away_team": res.get("away_team"),
+            "home_score": res.get("home_score"),
+            "away_score": res.get("away_score"),
+            "final_total": res.get("final_total"),
+            "quarter_scores": res.get("quarter_scores") or [],
+            "start_time": res.get("start_time"),
+            "parse_quality": res.get("parse_quality"),
+            "rendered_pairs": [
+                (res.get("home_team"), res.get("home_score")),
+                (res.get("away_team"), res.get("away_score"))],
+        }
+        rec: dict[str, Any] = {
+            "outcome": "REJECTED", "checks": checks, "fetched_at": now,
+            "rendered_home": res.get("home_team"),
+            "rendered_away": res.get("away_team"),
+            "final_home": res.get("home_score"),
+            "final_away": res.get("away_score"),
+            "final_total": res.get("final_total"),
+            "quarter_scores": (json.dumps(parsed["quarter_scores"])
+                               if parsed["quarter_scores"] else None),
+        }
+
+        if not checks["game_id_match"]:
+            checks["reason"] = (
+                "the feed answered for a different game id — refusing")
+            self._stamp_unresolved(game, rec)
+            return self._record(game, rec)
+
+        verdict = self.verify_parsed(parsed, game,
+                                     history_rows=game.get("_history"))
+        checks.update({k: v for k, v in verdict["checks"].items()
+                       if k not in checks})
+        rec["outcome"] = verdict["result"]
+        rec["match_score"] = 1 if verdict["checks"].get("teams_match") else 0
+        if verdict["result"] != "VERIFIED":
+            self._stamp_unresolved(game, rec)
+            return self._record(game, rec)
+        self._persist_result(game, parsed, rec)
+        return self._record(game, rec)
+
+    # ── per-game pipeline ---------------------------------------------
     def _reconcile_one(self, fetcher: ResultsFetcher,
                        game: dict) -> str:
         gid = game["source_game_id"]
-        text = fetcher.fetch_results_page(gid)
+
+        # ── AUTHORITATIVE: the swarm feed (2026-09-24) ────────────────
+        # The results page is a rendering of this feed; reading it directly
+        # matches the game id exactly and yields a structured four-quarter
+        # score line, so it is tried FIRST.  Only when the feed has no
+        # result for this id does the DOM path below run.
+        swarm_res = game.get("_swarm_result")
+        if swarm_res is not None:
+            return self._apply_swarm_result(game, swarm_res)
+
         now = _utcnow()
+
+        # ── ROW-BASED observation (2026-09-24) ────────────────────────
+        # The page renders a LIST of games and carries no game id, so the
+        # only trustworthy observation is a ROW that matches this fixture.
+        # Clients that can expose the DOM rows are used in preference to
+        # the text path, which cannot tell "our game" from "the first game
+        # on the page" (measured: the page for a basketball virtual id
+        # renders 260 unrelated football rows).
+        rows_fetcher = getattr(fetcher, "fetch_results_rows", None)
+        row_obs = None
+        if callable(rows_fetcher):
+            try:
+                row_obs = rows_fetcher(gid)
+            except Exception:
+                row_obs = None
+            if row_obs is None:
+                self._stamp_unresolved(game, {
+                    "outcome": "FAILED_ATTEMPT", "fetched_at": now,
+                    "checks": {"fetch_failed": True}})
+                return self._record(game, {
+                    "outcome": "FAILED_ATTEMPT", "fetched_at": now,
+                    "checks": {"fetch_failed": True}})
+            match = select_matching_row(
+                [dict(r) for r in (row_obs or [])],  # type: ignore[union-attr]
+                game)
+            checks = {
+                "row_based": True,
+                "page_rows": match.get("total_rows"),
+                "matching_rows": match.get("candidate_rows"),
+                "row_match": match.get("matched"),
+                "row_match_reason": match.get("reason"),
+                "start_time_consistent": match.get("start_time_consistent"),
+            }
+            if not match["matched"]:
+                # ABSENCE is an observation, never a result: the game is
+                # stamped unresolved with the reason the page gives.
+                rec = {"outcome": "REJECTED", "checks": checks,
+                       "fetched_at": now}
+                self._stamp_unresolved(game, rec)
+                return self._record(game, rec)
+            parsed = match["parsed"]
+            checks["orientation"] = parsed.get("orientation")
+            verdict = self.verify_parsed(parsed, game,
+                                         history_rows=game.get("_history"))
+            checks.update({k: v for k, v in verdict["checks"].items()
+                           if k not in checks})
+            checks["parse_quality"] = parsed.get("parse_quality")
+            rec = {
+                "outcome": verdict["result"],
+                "rendered_home": parsed.get("home_team"),
+                "rendered_away": parsed.get("away_team"),
+                "final_home": parsed.get("home_score"),
+                "final_away": parsed.get("away_score"),
+                "final_total": parsed.get("final_total"),
+                "quarter_scores": (
+                    json.dumps(parsed.get("quarter_scores"))
+                    if parsed.get("quarter_scores") else None),
+                "match_score": 1 if verdict["checks"].get("teams_match")
+                else 0,
+                "checks": checks,
+                "fetched_at": now,
+            }
+            if verdict["result"] != "VERIFIED":
+                self._stamp_unresolved(game, rec)
+                return self._record(game, rec)
+            self._persist_result(game, parsed, rec)
+            return self._record(game, rec)
+
+        # ── TEXT fallback (fetchers that expose only body text) ───────
+        text = fetcher.fetch_results_page(gid)
         if text is None:
+            # a failed fetch is still an audit-queue state: the game is
+            # stamped NEEDS_RECONCILIATION (never a silent absence) and
+            # stays retryable
+            self._stamp_unresolved(game, {
+                "outcome": "FAILED_ATTEMPT", "fetched_at": now,
+                "checks": {"fetch_failed": True}})
             return self._record(game, {
                 "outcome": "FAILED_ATTEMPT", "fetched_at": now,
                 "checks": {"fetch_failed": True}})
         parsed = parse_results_page(text, gid)
-        verdict = self.verify_parsed(parsed, game)
+        verdict = self.verify_parsed(parsed, game,
+                                     history_rows=game.get("_history"))
         # verify_parsed re-orients a swapped rendering inside its own
         # copy — the oriented parse is the authoritative one to persist.
         parsed = verdict.get("parsed") or parsed
@@ -460,7 +922,10 @@ class ResultReconciler:
         """A game whose reconciliation did NOT verify still gets an
         explicit game_results row (NEEDS_RECONCILIATION) when it has no
         row at all — the directive's 'no result' is a STATE, never a
-        silent absence.  Existing rows are never downgraded."""
+        silent absence.  Existing rows are never downgraded, and a row
+        that is NOT OK never keeps a stale RESULTS_PAGE provenance (the
+        column would claim a verified result the row does not hold — the
+        exact lie the pre-2026-09-24 clobber left behind)."""
         with self._lock:
             conn = self._connect()
             try:
@@ -477,6 +942,12 @@ class ResultReconciler:
                              WHERE r.source_game_id = g.source_game_id)""",
                     (rec["fetched_at"], STATUS_NEEDS_RECONCILIATION,
                      game["source_game_id"]))
+                conn.execute(
+                    """UPDATE game_results SET result_source = NULL
+                       WHERE source_game_id = ?
+                         AND final_result_status != 'OK'
+                         AND result_source IS NOT NULL""",
+                    (game["source_game_id"],))
                 conn.commit()
             finally:
                 conn.close()
@@ -569,18 +1040,10 @@ class ResultReconciler:
     def _flag_conflict(self, conn: sqlite3.Connection, game: dict,
                        live_total: Optional[int],
                        results_total: Optional[int], detail: str) -> None:
-        conn.execute(
-            """INSERT INTO result_conflicts (
-                   source_game_id, classification, live_dom_total,
-                   results_total, detail, flagged_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(source_game_id) DO UPDATE SET
-                   live_dom_total = excluded.live_dom_total,
-                   results_total = excluded.results_total,
-                   detail = excluded.detail,
-                   flagged_at = excluded.flagged_at""",
-            (game["source_game_id"], game.get("classification") or "",
-             live_total, results_total, detail, _utcnow()))
+        # ONE definition of the flag (result_policy) — the settle worker and
+        # the scorecard write the same table with the same upsert.
+        flag_conflict(conn, game, live_total, results_total, detail,
+                      flagged_at=_utcnow())
 
     def _record(self, game: dict, rec: dict) -> str:
         """Persist one attempt outcome (audit trail + idempotence key).
@@ -601,11 +1064,11 @@ class ResultReconciler:
                     "SELECT attempt FROM result_reconciliation_state "
                     "WHERE source_game_id = ?",
                     (game["source_game_id"],)).fetchone()
+                # VERIFIED: _persist_result has already reset the state
+                # counter to 0, so this numbers the audit row 1 — a fresh
+                # verification.  Every other outcome increments the
+                # previous counter (retryable attempt history).
                 attempt = (row["attempt"] if row else 0) + 1
-                if outcome == "VERIFIED":
-                    # state row already written by _persist_result with
-                    # attempt=0 — keep attempt history consistent here
-                    attempt = (row["attempt"] if row else 0) + 1
                 conn.execute(
                     """INSERT INTO result_reconciliation (
                            source_game_id, classification, attempt,
@@ -733,7 +1196,13 @@ class ResultReconciler:
             conn.close()
 
     def audit_missing(self, limit: int = 50) -> list[dict]:
-        """§4A — games missing final results, with reasons."""
+        """§4A — games missing final results, with reasons.
+
+        The reason is derived from the LATEST attempt's recorded checks, so
+        the audit names WHY a game is still open (an incomplete render vs
+        an impossible score vs an unreachable page) instead of confessing
+        'pending' — directive 2026-09-24, final audit step.
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -746,6 +1215,7 @@ class ResultReconciler:
                           st.outcome AS last_attempt_outcome,
                           st.attempt AS attempts,
                           COALESCE(st.updated_at, '') AS last_attempt_at,
+                          att.checks_json AS last_checks_json,
                           CASE
                             WHEN st.outcome = 'TEMPLATE_FAILED' THEN
                               'results page renders the failed template'
@@ -753,6 +1223,16 @@ class ResultReconciler:
                               'conflicting result flagged'
                             WHEN st.outcome = 'FAILED_ATTEMPT' THEN
                               'fetch/parse attempt failed (retryable)'
+                            WHEN json_extract(att.checks_json,
+                                              '$.render_complete') = 0 THEN
+                              'incomplete render (mid-game or foreign frame)'
+                            WHEN json_extract(att.checks_json,
+                                              '$.history_consistent') = 0 THEN
+                              'impossible final (below the captured history)'
+                            WHEN st.outcome = 'REJECTED' THEN
+                              'render rejected by verification'
+                            WHEN st.outcome = 'VERIFIED' THEN
+                              'verification no longer persisted — retry'
                             ELSE 'not yet attempted'
                           END AS reason
                    FROM games g
@@ -760,12 +1240,20 @@ class ResultReconciler:
                           ON r.source_game_id = g.source_game_id
                    LEFT JOIN result_reconciliation_state st
                           ON st.source_game_id = g.source_game_id
+                   LEFT JOIN result_reconciliation att
+                          ON att.source_game_id = g.source_game_id
+                         AND att.attempt = st.attempt
                    WHERE g.status = 'ended'
                      AND (r.source_game_id IS NULL
                           OR r.final_result_status != 'OK')
                    ORDER BY g.last_seen_at DESC
                    LIMIT ?""", (limit,)).fetchall()
-            return [dict(r) for r in rows]
+            out = []
+            for r in rows:
+                d = dict(r)
+                d.pop("last_checks_json", None)
+                out.append(d)
+            return out
         finally:
             conn.close()
 
@@ -815,16 +1303,31 @@ class ResultReconcilerWorker:
                  batch_limit: int = 25,
                  mark_batch: int = 200,
                  log: Optional[logging.Logger] = None,
-                 fetcher: Optional[ResultsFetcher] = None):
+                 fetcher: Optional[ResultsFetcher] = None,
+                 swarm: Optional[Any] = None,
+                 use_swarm: bool = False):
         self._db_path = Path(db_path)
         self._interval_s = float(interval_s)
         self._mark_batch = int(mark_batch)
         self._log = log or logger
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # The authoritative source is WIRED IN by the composition root
+        # (server.main), never opened implicitly: a library default that
+        # dials the network would make every test and probe hit the live
+        # feed.  ``use_swarm`` exists so a caller can ask for the default
+        # client explicitly.
+        if swarm is None and use_swarm:
+            try:
+                from blm_v4.swarm_results import SwarmResultsClient
+                swarm = SwarmResultsClient(log=self._log)
+            except Exception:
+                self._log.exception("swarm_client_unavailable")
+                swarm = None
+        self._swarm = swarm
         self._reconciler = ResultReconciler(
-            self._db_path, fetcher=fetcher, batch_limit=batch_limit,
-            log=self._log)
+            self._db_path, fetcher=fetcher, swarm=swarm,
+            batch_limit=batch_limit, log=self._log)
 
     @property
     def reconciler(self) -> ResultReconciler:

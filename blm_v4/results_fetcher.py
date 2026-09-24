@@ -83,6 +83,116 @@ def _lines(text: str) -> list[str]:
     return [l.strip() for l in (text or "").split("\n") if l.strip()]
 
 
+# ── Row-based DOM observation (2026-09-24) ───────────────────────────
+#
+# The results page does NOT echo the requested game id in its DOM (the only
+# occurrences are analytics trackers echoing the URL) and it renders a
+# LIST of games — ``div.results-block-bc`` per game, each with
+# ``p.results-teams-name-bc`` / ``span.results-teams-score-bc`` and a
+# ``p.results-details-bc`` compact line, plus ``time.results-footer-date-bc``
+# date/time nodes inside ``div.competition-wrapper-bc``.
+#
+# Consequence, measured live 2026-09-24: reading the page's inner text and
+# taking the first scoreboard reaches a DIFFERENT game's result whenever the
+# requested game is not on the page — which is the usual case (the page
+# renders an unrelated default list: 260 football rows for a basketball
+# virtual id).  A result may therefore only be taken from a ROW THAT MATCHES
+# the record's fixture, and a page with no matching row is an observation of
+# ABSENCE, never a result.
+
+ROW_EXTRACT_JS = r"""
+() => {
+  const txt = (el) => el ? (el.textContent || '').trim() : null;
+  const rows = [];
+  document.querySelectorAll('div.results-block-bc').forEach(block => {
+    const teams = [];
+    block.querySelectorAll('div.results-teams-bc').forEach(t => {
+      teams.push({name: txt(t.querySelector('p.results-teams-name-bc')),
+                  score: txt(t.querySelector('span.results-teams-score-bc'))});
+    });
+    const times = [];
+    block.querySelectorAll('time.results-footer-date-bc').forEach(
+      t => times.push(txt(t)));
+    const wrap = block.closest('div.competition-wrapper-bc');
+    rows.push({competition: txt(wrap ? wrap.querySelector(
+                 'span.competition-title-bc') : null),
+               teams: teams,
+               details: txt(block.querySelector('p.results-details-bc')),
+               date: times[0] || null, time: times[1] || null});
+  });
+  return rows;
+}
+"""
+
+_RE_DM = re.compile(r"^(\d{2})\.(\d{2})\.(\d{4})$")
+
+
+def _row_start_iso(row: dict) -> Optional[str]:
+    """The row's fixture start as 'YYYY-MM-DD HH:MM' (None when absent).
+
+    The page renders the footer as two ``time`` nodes — DD.MM.YYYY then
+    HH:MM — and the virtual fixtures carry a full start time.
+    """
+    d, t = (row or {}).get("date"), (row or {}).get("time")
+    if not d or not t:
+        return None
+    m = _RE_DM.match(str(d).strip())
+    if not m:
+        return None
+    return f"{m.group(3)}-{m.group(2)}-{m.group(1)} {str(t).strip()}"
+
+
+def parse_row(row: dict) -> dict[str, Any]:
+    """One DOM row -> the same dict shape ``parse_results_page`` returns.
+
+    The compact ``details`` line ("101:111 (29:23, 25:27, 26:31, 21:30)")
+    is authoritative for the score and the quarter split; the per-team
+    score spans are the fallback when it is absent.
+    """
+    res: dict[str, Any] = {
+        "home_team": None, "away_team": None, "home_score": None,
+        "away_score": None, "rendered_pairs": [], "final_total": None,
+        "quarter_scores": [], "status_label": None, "competition": None,
+        "start_time": None, "parse_quality": "failed",
+        "failed_template": False,
+    }
+    teams = [t for t in ((row or {}).get("teams") or [])
+             if t.get("name")]
+    if len(teams) >= 2:
+        res["home_team"] = teams[0]["name"]
+        res["away_team"] = teams[1]["name"]
+    details = (row or {}).get("details") or ""
+    m = _RE_COMPACT_SCORE.search(details)
+    if m:
+        res["home_score"] = int(m.group(1))
+        res["away_score"] = int(m.group(2))
+        quarters = []
+        for pair in (m.group(3) or "").split(","):
+            pm = _RE_QUARTER_PAIR.match(pair.strip())
+            if pm:
+                quarters.append((int(pm.group(1)), int(pm.group(2))))
+        res["quarter_scores"] = quarters
+        res["parse_quality"] = ("full" if len(quarters) >= 4 else "partial")
+    elif len(teams) >= 2:
+        def _i(v):
+            try:
+                return int(str(v).strip())
+            except (TypeError, ValueError):
+                return None
+        res["home_score"] = _i(teams[0].get("score"))
+        res["away_score"] = _i(teams[1].get("score"))
+        if res["home_score"] is not None and res["away_score"] is not None:
+            res["parse_quality"] = "partial"
+    if res["home_score"] is not None and res["away_score"] is not None:
+        res["final_total"] = res["home_score"] + res["away_score"]
+        res["rendered_pairs"] = [
+            (res["home_team"], res["home_score"]),
+            (res["away_team"], res["away_score"])]
+    res["competition"] = (row or {}).get("competition")
+    res["start_time"] = _row_start_iso(row)
+    return res
+
+
 def looks_like_failed_template(text: str) -> bool:
     """True when the rendered page is the filters-only FAILED template.
 
@@ -198,6 +308,16 @@ class ResultsFetcher(Protocol):
     def fetch_results_page(self, game_id: str) -> Optional[str]: ...
 
 
+class RowResultsFetcher(Protocol):
+    """Fetch the results page as STRUCTURED ROWS (or None on fetch error).
+
+    Preferred over text: the page is a list of games and carries no game
+    id, so only the row structure can prove which game a score belongs to.
+    """
+
+    def fetch_results_rows(self, game_id: str) -> Optional[list[dict]]: ...
+
+
 RESULTS_URL = "https://www.pokerbet.co.za/en/sports/results?game={gid}"
 USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -288,6 +408,59 @@ class PlaywrightResultsFetcher:
             if self._log is not None:
                 try:
                     self._log.warning("results_page_fetch_failed gid=%s", gid)
+                except Exception:
+                    pass
+            return None
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+
+    def fetch_results_rows(self, game_id: str) -> Optional[list[dict]]:
+        """The page's result ROWS for ``game_id``; None on fetch failure.
+
+        THE authoritative observation (2026-09-24): the page is a list of
+        games and echoes no game id, so identity is decided by matching a
+        row — never by reading the first scoreboard in the text.  An EMPTY
+        list is a real observation ("the page rendered no result rows"),
+        distinct from None ("the fetch itself failed").
+
+        Each row: {competition, teams:[{name,score},..], details, date,
+        time}.  A fresh context isolates every fetch (the SPA keeps the
+        previous render otherwise); the rows are extracted with one
+        evaluate() so no element handle can go stale mid-read.
+        """
+        gid = str(game_id or "").strip()
+        if not gid.isdigit():
+            return None
+        self._ensure_browser()
+        self._uses += 1
+        try:
+            context = self._browser.new_context(
+                viewport={"width": 1600, "height": 1000},
+                user_agent=USER_AGENT, locale="en-ZA",
+            )
+        except Exception:
+            self._close_browser()
+            return None
+        try:
+            page = context.new_page()
+            page.goto(RESULTS_URL.format(gid=gid),
+                      timeout=self._nav_timeout_ms,
+                      wait_until="domcontentloaded")
+            page.wait_for_timeout(int(self._load_wait_s * 1000))
+            # the list renders lazily in waves; give the rows a second
+            # chance before declaring the page empty
+            rows = page.evaluate(ROW_EXTRACT_JS) or []
+            if not rows:
+                page.wait_for_timeout(2500)
+                rows = page.evaluate(ROW_EXTRACT_JS) or []
+            return rows
+        except Exception:
+            if self._log is not None:
+                try:
+                    self._log.warning("results_page_rows_failed gid=%s", gid)
                 except Exception:
                     pass
             return None

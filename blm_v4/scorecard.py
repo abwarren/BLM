@@ -49,6 +49,12 @@ from blm_v4.api import _detect_signals, _momentum
 from blm_v4.clean_boundary import (CLEAN_DATA_EPOCH, clean_games_where,
                                    clean_games_subq)
 from blm_v4.event_parser import select_total_market
+from blm_v4.result_policy import (
+    flag_conflict,
+    history_disagrees,
+    history_endpoint_total,
+    is_results_page_verdict,
+)
 from blm_v4.projection import (MODEL_VERSION, clock_minutes, duration_for,
                                project)
 from blm_v4.terminal_eligibility import (TERMINAL_EXCLUSION_REASON,
@@ -1681,7 +1687,8 @@ class Scorecard:
                             VALUES (?, ?, NULL, NULL, NULL, ?, 'INVALID')
                             ON CONFLICT(source_game_id) DO UPDATE SET
                                 final_result_status = excluded.final_result_status,
-                                result_at = excluded.result_at""",
+                                result_at = excluded.result_at,
+                                result_source = NULL""",
                             (g["source_game_id"], g["classification"], rows[-1]["captured_at"]),
                         )
                         continue
@@ -1699,38 +1706,36 @@ class Scorecard:
                     # still stays UNKNOWN (never a guessed final) — and
                     # result_at points at the graded row, the verdict's
                     # exact input.
-                    # EXTERNALLY VERIFIED results (result reconciliation,
-                    # directive 2026-09-23): a row verified from the
-                    # PokerBet results page (result_source='RESULTS_PAGE')
-                    # is a VERIFIED final.  The snapshot-derived verdict
-                    # rules cannot re-derive it — the snapshots are the
-                    # very reason the game needed reconciliation — so a
-                    # re-derivation must never clobber it with UNKNOWN.
-                    # Unprotecting case: the stored final SCORES disagree
-                    # with the current history's endpoint (a captured
-                    # state the page-verification never saw) → protection
-                    # is lifted and the normal verdict rules run.
+                    # RESULTS-PAGE AUTHORITY (directives 2026-09-23 §6,
+                    # 2026-09-24).  "THE RESULTS PAGE IS AUTHORITATIVE": a
+                    # row verified from the PokerBet results page
+                    # (result_source='RESULTS_PAGE', status OK) is a
+                    # VERIFIED final and is IMMUTABLE here — the
+                    # snapshot-derived verdict rules cannot re-derive it,
+                    # because the snapshots are the very reason the game
+                    # needed reconciliation.  The pre-2026-09-24
+                    # "unprotecting case" (a disagreeing endpoint lifted
+                    # the protection, and the upsert below then NULLed the
+                    # verified scores) is REMOVED: measured live, it
+                    # destroyed 2,592 of 2,907 page-verified finals.  A
+                    # disagreement is FLAGGED in result_conflicts instead,
+                    # never written over.
                     _ext = conn.execute(
-                        "SELECT result_source, final_home, final_away "
+                        "SELECT result_source, final_result_status, "
+                        "final_home, final_away, final_total "
                         "FROM game_results WHERE source_game_id=?",
                         (g["source_game_id"],)).fetchone()
-                    _prot = bool(
-                        _ext and _ext["result_source"] == "RESULTS_PAGE"
-                        and _ext["final_home"] is not None
-                        and _ext["final_away"] is not None)
-                    if _prot:
-                        _endpoint = None
-                        for r in reversed(rows):
-                            if (r.get("home_score") is not None
-                                    and r.get("away_score") is not None):
-                                _endpoint = (r["home_score"],
-                                             r["away_score"])
-                                break
-                        if (_endpoint is not None
-                                and (_endpoint[0] != _ext["final_home"]
-                                     or _endpoint[1] != _ext["final_away"])):
-                            _prot = False
-                    if _prot:
+                    if is_results_page_verdict(_ext):
+                        if history_disagrees(rows, _ext["final_home"],
+                                             _ext["final_away"]):
+                            flag_conflict(
+                                conn, g, history_endpoint_total(rows),
+                                _ext["final_total"],
+                                "captured history disagrees with the stored "
+                                "RESULTS_PAGE verdict — verdict KEPT (the "
+                                "results page is authoritative)",
+                                flagged_at=_utcnow())
+                            conn.commit()
                         stats["skipped_protected"] = (
                             stats.get("skipped_protected", 0) + 1)
                         continue
@@ -1757,7 +1762,15 @@ class Scorecard:
                             final_away = excluded.final_away,
                             final_total = excluded.final_total,
                             result_at = excluded.result_at,
-                            final_result_status = excluded.final_result_status""",
+                            final_result_status = excluded.final_result_status,
+                            -- provenance never lies: a re-derivation that
+                            -- leaves the row non-OK clears the source
+                            -- column instead of claiming a verified page
+                            -- result the row no longer holds.
+                            result_source = CASE
+                                WHEN excluded.final_result_status = 'OK'
+                                THEN game_results.result_source
+                                ELSE NULL END""",
                         (
                             g["source_game_id"], g["classification"],
                             fh, fa, (fh + fa) if (fh is not None and fa is not None) else None,
