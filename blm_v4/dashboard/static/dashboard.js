@@ -58,6 +58,13 @@ const state = {
   modalZMeta: null,        // authoritative /pace-z payload block for the Z panel
   hideNonLive: true,       // default view: LIVE games only
   lastPayload: null,
+  betting: null,
+  checkpointFilter: "",
+  directionFilter: "",
+  alertStateFilter: "",
+  betStateFilter: "",
+  gameStateFilter: "",
+  search: "",
 };
 
 /* ── UI section preferences — persisted in localStorage ─────
@@ -99,6 +106,18 @@ function isActuallyLive(g) {
   const s = String(g.status || "").trim().toLowerCase();
   return LIVE_STATUSES.indexOf(s) !== -1;
 }
+/* GAME-STATE filter fact — the same classes the card chip renders
+   (LIVE / STALE / ENDED, plus the backend's quality gate INVALID).  The
+   state is derived from the payload's own flags; nothing is invented. */
+function gameMatchesGameState(g, wanted) {
+  if (!wanted) return true;
+  if (wanted === "invalid") return g.quality_status === "INVALID";
+  if (g.quality_status === "INVALID") return false;
+  if (wanted === "live") return isActuallyLive(g);
+  if (wanted === "ended") return g.status === "ended" && !isActuallyLive(g);
+  if (wanted === "stale") return !isActuallyLive(g) && g.status !== "ended";
+  return true;
+}
 
 // keep a collapsible section's ▸/▾ arrow in sync with its state
 function setSectionLabel(det) {
@@ -116,6 +135,34 @@ function bindCollapsible(det, prefKey) {
     setSectionLabel(det);
     if (prefKey) prefSet(prefKey, !det.open);
   });
+}
+
+// ── RESULTED ALERTS section — always rendered, collapsed by default ──
+// The section header stays visible at all times; only the body toggles.
+// The expand/collapse button lives in the header and persists its state
+// so the panel opens on the next visit if the user expanded it.
+const RESULTED_COLLAPSED_PREF = "pz.resultedAlertsCollapsed";
+const resultedDetails = () => document.getElementById("resultedDetails");
+const resultedToggleBtn = () => document.getElementById("resultedExpandBtn");
+
+function syncResultedSection() {
+  const det = resultedDetails();
+  const btn = resultedToggleBtn();
+  if (!det || !btn) return;
+  // collapsed by default (open=false), but respect user preference
+  const shouldBeCollapsed = prefGet(RESULTED_COLLAPSED_PREF, true);
+  det.open = !shouldBeCollapsed;
+  btn.textContent = det.open ? "▾" : "▸";
+  btn.title = det.open ? "Collapse resulted alerts panel" : "Expand resulted alerts panel";
+}
+function toggleResultedSection() {
+  const det = resultedDetails();
+  const btn = resultedToggleBtn();
+  if (!det || !btn) return;
+  det.open = !det.open;
+  prefSet(RESULTED_COLLAPSED_PREF, !det.open);
+  btn.textContent = det.open ? "▾" : "▸";
+  btn.title = det.open ? "Collapse resulted alerts panel" : "Expand resulted alerts panel";
 }
 
 const $ = (id) => document.getElementById(id);
@@ -150,6 +197,25 @@ const mktStatusWord = (age, hasLine) => {
 };
 const num = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
 const sig = (x) => x == null ? "–" : (x > 0 ? "+" : "") + x;
+
+/* ── GLOBAL SEARCH — one predicate for every live-data surface ──────
+   Fast substring match across the operator-identifying fields of a game
+   and of the executions bound to it.  Presentation-layer only: it can
+   hide a card from view, never alter any store, verdict or decision. */
+function searchableText(g) {
+  const exec = (state.betting && state.betting.recent || []).find(
+    (r) => String(r.game_id) === String(g.game_id));
+  return [
+    g.game_id, g.home_team, g.away_team, g.competition_slug, g.competition,
+    g.classification, g.status, g.provider, g.source,
+    exec && exec.execution_id, exec && exec.alert_id,
+    exec && exec.provider_ref, exec && exec.error_code,
+  ].map((v) => (v == null ? "" : String(v).toLowerCase())).join("\u0001");
+}
+function gameMatchesSearch(g, needle) {
+  if (!needle) return true;
+  return searchableText(g).includes(needle);
+}
 
 /* ── UNDER-condition layer (READ-ONLY PRESENTATION) ──
    TWO descriptive states, both against fixed archive findings:
@@ -335,8 +401,9 @@ const num1 = (x) => (x == null || !isFinite(x)) ? "–" : x.toFixed(1);
    behind an unclassified row is visible in the browser log for diagnosis.
      NO LINE  — the game HAS a final, but no market line was ever observed by
                 the checkpoint boundary, so no verdict can exist for that line
-     NO FINAL — the record has resolved (its game ended / left the window)
-                and NEITHER a final NOR a line is provable
+     RESULT PENDING — the record has resolved (its game ended / left the
+                window) and NEITHER a final NOR a line is provable: an
+                outstanding reconciliation job, never a completed result
    A record that may still settle (nothing resolved yet) is ordinary PENDING
    and is never logged — that is the normal pre-outcome state. */
 const UNPROVABLE_WARNED = new Set();
@@ -376,7 +443,7 @@ function normalizedResultStatus(status) {
    the active-alert result line, so both surfaces word a verdict the same
    way (and neither invents a synonym). */
 const ALERT_RESULT_WORDS = { under: "UNDER", over: "OVER", push: "PUSH",
-  no_final: "NO FINAL", unknown: "NO FINAL" };
+  no_final: "RESULT PENDING", unknown: "RESULT PENDING" };
 
 /* Unknown/malformed statuses are reported once per distinct value (console
    only — never a visual or data mutation) so a payload regression is visible
@@ -397,8 +464,9 @@ function warnUnknownResult(where, status) {
    render without its result colour:
      under/over/push → the verdict class + word
      anything else   → al-unknown + RESULT UNKNOWN (explicit fallback state)
-     no status at all → the explicit UNPROVABLE states (NO LINE / NO FINAL /
-       PENDING — see alertVerdictStateFor), never an anonymous blank */
+     no status at all → the explicit UNPROVABLE states (NO LINE /
+       RESULT PENDING / PENDING — see alertVerdictStateFor), never an
+       anonymous blank */
 function alertVerdictState(oc) {
   return alertVerdictStateFor(oc, null);
 }
@@ -411,8 +479,9 @@ function alertVerdictState(oc) {
      status == null + final     → NO LINE  (final provable, line never
                                   observed at the boundary — a real cause,
                                   logged once per game, never colourable)
-     status == null, resolved   → NO FINAL (the record has closed and the
-                                  backend still proves neither final nor line)
+     status == null, resolved   → RESULT PENDING (the record has closed and
+                                  the backend still proves neither final
+                                  nor line — never shown as a result)
      status == null, unresolved → PENDING  (may still settle — never logged)
    Every branch here is still the PENDING family for COLOURING: none of these
    rows ever receives a verdict colour class, so the acceptance invariant
@@ -424,8 +493,8 @@ function alertVerdictStateFor(oc, why) {
       return { cls: null, word: "NO LINE", kind: "noline" };
     }
     if (why && why.resolved) {
-      if (why && why.onUnprovable) why.onUnprovable("NO FINAL", why.rec);
-      return { cls: null, word: "NO FINAL", kind: "nofinal" };
+      if (why && why.onUnprovable) why.onUnprovable("RESULT PENDING", why.rec);
+      return { cls: null, word: "RESULT PENDING", kind: "nofinal" };
     }
     return { cls: null, word: "PENDING" };   // may still settle
   }
@@ -452,7 +521,8 @@ function alertOutcomeClass(oc) {
 /* The result line of a RESULTED alert — the two halves of the trigger,
    worded with the SAME vocabulary as the active row so the panels never
    disagree:
-     the VERDICT (UNDER / OVER / PUSH / NO FINAL), coloured from the status
+     the VERDICT (UNDER / OVER / PUSH / RESULT PENDING), coloured from the
+     status
      the IMMUTABLE TRIGGERED LINE the verdict was settled against — the
      record's own sealed value, NEVER the opening, latest or closing market
      line — and the FINAL total it was compared with.
@@ -1011,7 +1081,7 @@ function underAlertValues(g, ua, labels) {
    with unprovable data renders UNAVAILABLE honestly, never as a pass.
    Pure display: the layer never creates, suppresses or re-fires an alert
    and fingerprint_count is never a threshold here. */
-const FINGERPRINT_KEYS = ["C1", "C2", "C3", "C4", "C5", "C6", "R2"];
+const FINGERPRINT_KEYS = ["C1", "C3", "C5", "R2"];
 const FINGERPRINT_LABELS = {
   C1: "Required pace 1.10–1.20x league avg",
   C2: "Recent deceleration",
@@ -1428,7 +1498,7 @@ function historyRowHTML(rec) {
                 entirely outside a [from, to] window are hidden; '' = open)
      result   — the verdict class computed by the SAME classifier the rows
                 render with (alertVerdictStateFor): UNDER / OVER / PUSH map
-                to the settled statuses; NO LINE / NO FINAL map to the
+                to the settled statuses; NO LINE / RESULT PENDING map to the
                 explicit unprovable kinds; PENDING covers everything still
                 awaiting settlement; ALL disables the filter.
    A record LACKING the compared field (e.g. no triggered_at) fails the
@@ -2050,6 +2120,82 @@ function gatedNoteHTML(g) {
     <span class="muted">· ${esc(reason)} · historical rows retained for diagnostics</span></div>`;
 }
 
+/* ── BLM ALERT STATE ROW — explicit direction, checkpoint, line on card face ──
+   Shows the current BLM alert state for this game:
+   direction (UNDER/OVER/—), checkpoint (25/50/75/Q3_BREAK), trigger line.
+   Consumes under_alert and under_alert_q3_break verbatim from the API.
+   Direction is explicit; Trap/Under status is labelled directly. */
+function blmAlertStateRowHTML(g) {
+  const ua = g.under_alert || {};
+  const q3 = g.under_alert_q3_break || {};
+  const alertOn = !!(ua.active || q3.active);
+  // pick the active alert block (prefer standard over q3break if both active)
+  const alertBlock = ua.active ? ua : (q3.active ? q3 : null);
+  // BLM direction from exec if available, else from alert
+  const exec = (state.betting && state.betting.recent || []).find(
+    (r) => String(r.game_id) === String(g.game_id));
+  let direction = "—";
+  let dirCls = "blm-sig-direction-none";
+  if (exec && exec.selection) {
+    const sel = String(exec.selection).toUpperCase();
+    direction = sel;
+    dirCls = sel === "UNDER" ? "blm-sig-direction-under"
+      : sel === "OVER" ? "blm-sig-direction-over" : "blm-sig-direction-none";
+  } else if (alertOn) {
+    direction = "UNDER";
+    dirCls = "blm-sig-direction-under";
+  }
+  const cp = alertBlock ? (alertBlock.checkpoint != null ? alertBlock.checkpoint : "–") : "–";
+  const cpLabel = cp === "–" ? "–" : (String(cp) === "Q3_BREAK" ? "Q3 BREAK" : `@${cp}%`);
+  const trigLine = alertBlock ? (alertBlock.trigger_line != null ? num1(alertBlock.trigger_line) : "–") : "–";
+  // Trap/Under badge: label direction from active alert or execution direction
+  let trapCls = "trap-none", trapTxt = "—";
+  if (alertOn) { trapCls = "trap-under"; trapTxt = "UNDER"; }
+  else if (exec && exec.selection && String(exec.selection).toUpperCase() === "OVER") {
+    trapCls = "trap-over"; trapTxt = "OVER";
+  }
+  const sigCls = alertOn ? "blm-sig-active" : "blm-sig-inactive";
+  const sigTxt = alertOn ? "BLM ACTIVE" : "BLM —";
+  return `<div class="blm-signal-row">
+    <span class="blm-sig-label">SIGNAL</span>
+    <span class="${sigCls}">${sigTxt}</span>
+    <span class="blm-sig-label">DIR</span>
+    <span class="${dirCls}">${esc(direction)}</span>
+    <span class="blm-sig-label">CP</span>
+    <span class="blm-sig-checkpoint">${esc(cpLabel)}</span>
+    <span class="blm-sig-label">LINE</span>
+    <span class="blm-sig-line">${esc(trigLine)}</span>
+    <span class="blm-sig-trap ${trapCls}">${trapTxt}</span>
+  </div>`;
+}
+
+/* ── EXECUTION TRACE ROW — alert → bet traceability ─────────────────────
+   Shows the alert ID, checkpoint, execution ID, provider reference, and
+   status/reason for any execution bound to this game.
+   Every value is from the API — nothing fabricated. */
+function execTraceHTML(exec) {
+  if (!exec) return "";
+  const statusRaw = String(exec.execution_state || exec.status || "UNKNOWN").toUpperCase();
+  let statusCls = "et-val";
+  if (statusRaw === "ACCEPTED") statusCls = "et-accepted";
+  else if (statusRaw === "REJECTED") statusCls = "et-rejected";
+  else if (statusRaw === "BLOCKED") statusCls = "et-blocked";
+  else if (statusRaw === "PENDING" || statusRaw === "SUBMITTING" || statusRaw === "SUBMITTED") statusCls = "et-pending";
+  else if (statusRaw === "WOULD_BET") statusCls = "et-pending";
+  const reason = exec.error_message || exec.error_code;
+  return `<div class="exec-trace">
+    <span><span class="et-label">ALERT </span><span class="et-alert">${esc(exec.alert_id || "–")}</span></span>
+    <span><span class="et-label">CP </span><span class="et-val">${esc(exec.checkpoint != null ? `@${exec.checkpoint}%` : "–")}</span></span>
+    <span><span class="et-label">SEL </span><span class="et-val">${esc(exec.selection || "–")}</span></span>
+    <span><span class="et-label">LINE </span><span class="et-val">${exec.price != null ? num1(exec.price) : "–"}</span></span>
+    <span><span class="et-label">STAKE </span><span class="et-val">${exec.stake_amount != null ? money(exec.stake_amount) : "–"}</span></span>
+    <span><span class="et-label">STATUS </span><span class="${statusCls}">${esc(statusRaw)}</span></span>
+    ${exec.provider_ref ? `<span><span class="et-label">REF </span><span class="et-ref">${esc(exec.provider_ref)}</span></span>` : ""}
+    ${exec.execution_id ? `<span><span class="et-label">EXEC </span><span class="et-val">${esc(exec.execution_id)}</span></span>` : ""}
+    ${reason ? `<span><span class="et-label">REASON </span><span class="et-reason">${esc(reason)}</span></span>`
+      : (exec.rejection_reason ? `<span><span class="et-label">REASON </span><span class="et-reason">${esc(exec.rejection_reason)}</span></span>` : "")}
+  </div>`;
+}
 function cardHTML(g, ui, alertEnter) {
   const invalid = g.quality_status === "INVALID";
   const liveNow = isActuallyLive(g);
@@ -2058,8 +2204,31 @@ function cardHTML(g, ui, alertEnter) {
   const liveTxt = invalid ? "EXCLUDED" : (liveNow ? "LIVE" : g.status === "ended" ? "ENDED" : "STALE");
   const score = (v) => (v == null ? "–" : v);
   const m = g.market || {};
+  const p = g.projector || {};
+  const currentLine = p.live_total_line ?? m.total_line;
+  const currentLineLive = liveNow && (p.market_status || m.market_status) === "LIVE";
+  const exec = (state.betting && state.betting.recent || []).find(
+    (r) => String(r.game_id) === String(g.game_id));
+  const ua = g.under_alert || {};
+  const q3 = g.under_alert_q3_break || {};
+  const alertOn = !!(ua.active || q3.active);
+  const gameControls = state.betting && state.betting.game_controls || {};
+  const gameAutoBet = Object.prototype.hasOwnProperty.call(gameControls, String(g.game_id))
+    ? gameControls[String(g.game_id)] !== false : true;
+  const autoState = state.betting == null ? "UNKNOWN"
+    : !(state.betting.enabled && gameAutoBet) ? "BLOCKED"
+      : alertOn ? "ARMED" : "IDLE";
+  const executionState = exec ? String(exec.execution_state || exec.status || "UNKNOWN").toUpperCase() : autoState;
+  const direction = exec && exec.selection ? String(exec.selection).toUpperCase()
+    : (alertOn ? "UNDER" : "–");
   const detOpen = !!(ui && ui.detOpen);
   const chartsOpen = !!(ui && ui.chartsOpen);
+  // opening / current / closing line movement indicator
+  const openLine = m.opening_line;
+  const currLine = (g.projector || {}).live_total_line ?? m.total_line;
+  const closeLine = m.closing_line;
+  const lineChangeDir = (openLine != null && currLine != null)
+    ? (currLine > openLine ? "\u25b2" : currLine < openLine ? "\u25bc" : "=") : "";
   return `
     <div class="card-head">
       <span class="cat-badge ${esc(g.classification)}">${esc(g.classification)}</span>
@@ -2077,6 +2246,31 @@ function cardHTML(g, ui, alertEnter) {
     ${finalResultHTML(g)}
     ${paceStripHTML(g)}
     ${liveMarketHTML(g)}
+    <div class="market-compact">
+      <span title="Opening total line">OPEN <b>${num(openLine, 1)}</b></span>
+      <span title="Current live total line">${lineChangeDir} CURRENT <b>${num(currLine, 1)}</b></span>
+      <span title="Closing total line">CLOSE <b>${num(closeLine, 1)}</b></span>
+    </div>
+    ${blmAlertStateRowHTML(g)}
+    <div class="card-state-pill ${gameMatchesGameState(g, "live") ? "csp-live" : "csp-off"}">STATE ${esc((() => {
+      if (g.quality_status === "INVALID") return "INVALID";
+      if (gameMatchesGameState(g, "live")) return "LIVE";
+      return g.status === "ended" ? "ENDED" : "STALE";
+    })())}</div>
+    <div class="trade-state">
+      <span class="trade-alert ${alertOn ? "is-active" : ""}">BLM ${alertOn ? "ACTIVE" : "\u2014"}</span>
+      <span class="trade-direction">${esc(direction)}</span>
+      <span class="trade-execution exec-${esc(executionState.toLowerCase())}" title="Execution state">${esc(executionState)}</span>
+    </div>
+    ${execTraceHTML(exec)}
+    <div class="auto-game-state">AUTO BET ${esc(autoState)} <span class="muted">· global ${state.betting && state.betting.enabled ? "ON" : "OFF"}</span>
+      <button type="button" class="game-auto-toggle" data-game-id="${esc(g.game_id)}" data-enabled="${gameAutoBet ? "true" : "false"}" ${!liveNow ? "disabled" : ""}>GAME ${gameAutoBet ? "ON" : "OFF"}</button></div>
+    <form class="manual-bet" data-game-id="${esc(g.game_id)}" data-line="${currentLineLive ? esc(currentLine ?? "") : ""}">
+      <span>MANUAL TOTAL</span><select name="direction" aria-label="Manual wager direction"><option value="UNDER">UNDER</option><option value="OVER">OVER</option></select>
+      <label>Stake <input name="stake" type="number" min="0.01" step="0.01" value="${state.betting && state.betting.unit_price != null ? esc(state.betting.unit_price) : ""}" aria-label="Stake amount"></label>
+      <span>LINE ${currentLineLive ? num(currentLine, 1) : "–"}</span>
+      <button type="submit" ${!(state.betting && state.betting.enabled && currentLineLive && currentLine != null) ? "disabled" : ""}>BET</button>
+    </form>
     ${histBadgeHTML(g, alertEnter || null)}
     ${invalid ? gatedNoteHTML(g) : ""}
     <details class="card-charts" ${chartsOpen ? "open" : ""}>
@@ -2156,9 +2350,30 @@ function renderCards(payload) {
   // source metadata), never a display alias.  The button's data-filter
   // value is that identifier; empty = ALL (no filter).  No competition
   // slug is hard-coded here — the comparison is generic.
-  const games = (payload.games || []).filter(
+  let games = (payload.games || []).filter(
     (g) => !state.filter || g.competition_slug === state.filter,
   );
+  games = games.filter((g) => {
+    const a = g.under_alert || {}, q = g.under_alert_q3_break || {};
+    const active = !!(a.active || q.active);
+    const cp = a.checkpoint ?? q.checkpoint;
+    const execForGame = (state.betting && state.betting.recent || []).find(
+      (r) => String(r.game_id) === String(g.game_id));
+    // Direction: UNDER from active alert; OVER from execution selection if present;
+    // also from under_alert_outcome direction if the alert resolved as OVER.
+    let dir = active ? "UNDER" : "";
+    if (!dir && execForGame && execForGame.selection) {
+      const sel = String(execForGame.selection).toUpperCase();
+      if (sel === "OVER" || sel === "UNDER") dir = sel;
+    }
+    const hasExec = !!execForGame;
+    return (!state.checkpointFilter || String(cp) === state.checkpointFilter)
+      && (!state.directionFilter || dir === state.directionFilter)
+      && (!state.alertStateFilter || (state.alertStateFilter === "ACTIVE") === active)
+      && (!state.betStateFilter || (state.betStateFilter === "EXECUTED") === hasExec)
+      && gameMatchesGameState(g, state.gameStateFilter)
+      && gameMatchesSearch(g, state.search);
+  });
   const visible = state.hideNonLive
     ? games.filter(isActuallyLive)
     : games;
@@ -2176,6 +2391,7 @@ function renderCards(payload) {
       };
       el.innerHTML = cardHTML(g, ui);
       el.addEventListener("click", (ev) => {
+        if (ev.target.closest(".manual-bet")) return;
         // clicks inside the CHARTS / DETAILS sections only toggle the
         // section — they never open the detail modal
         if (ev.target.closest("details")) return;
@@ -3086,6 +3302,7 @@ async function refresh() {
     renderStatus(payload);
     renderSummary(payload);
     renderCards(payload);
+    renderExecutionTrace();
     // active-vs-history alert reconciliation runs on the SAME payload, once
     // per poll — it never rebuilds one store from the other.
     renderUnderAlerts(state.games);
@@ -3112,6 +3329,87 @@ async function refresh() {
     $("collectorPill").textContent = `api error: ${esc(err.message)}`;
     $("collectorPill").style.color = "var(--red)";
   }
+}
+
+/* ── Collector liveness poller (dedicated /api/v4/status channel) ──
+
+   HISTORY (2026-09-26): liveness was painted as a side-effect of the
+   /api/v4/live poll, so a server-side /status stall read as
+   "collector: OFFLINE" while collection was healthy — and vice versa,
+   /live answers from cache so a genuinely dead collector could still
+   look alive for minutes.  This channel polls /status DIRECTLY on its
+   own cadence with a hard 8s abort, and paints BOTH the header pill
+   and a full-width banner when the collector is not provably running.
+   The banner is intentionally impossible to miss: THE COLLECTOR MUST
+   NEVER BE DOWN (directive 2026-09-26). */
+
+const API_STATUS = "/api/v4/status";
+const STATUS_POLL_MS = 10000;
+let statusTimer = null;
+
+function ensureCollectorBanner() {
+  let b = document.getElementById("collectorBanner");
+  if (b) return b;
+  b = document.createElement("div");
+  b.id = "collectorBanner";
+  b.hidden = true;
+  b.style.cssText =
+    "position:sticky;top:0;z-index:999;background:var(--red);color:#fff;" +
+    "padding:8px 16px;font-weight:700;letter-spacing:.5px;text-align:center;" +
+    "text-transform:uppercase";
+  document.body.prepend(b);
+  return b;
+}
+
+function paintCollectorStatus(st) {
+  const cpill = $("collectorPill");
+  const banner = ensureCollectorBanner();
+  const col = st && st.collector ? st.collector : null;
+  const now = Date.now();
+  const lastTick = col && col.last_tick_at ? new Date(col.last_tick_at).getTime() : 0;
+  const tickAge = lastTick ? (now - lastTick) / 1000 : Infinity;
+  let label, ok;
+  if (st && st.status === "running" && tickAge < 90) {
+    label = "collector: RUNNING"; ok = true;
+  } else if (st && tickAge < 90) {
+    label = "collector: STALLED"; ok = false;
+  } else {
+    label = "collector: OFFLINE"; ok = false;
+  }
+  if (cpill) {
+    cpill.textContent = label;
+    cpill.style.color = ok ? "var(--green)"
+      : label === "collector: STALLED" ? "var(--orange)" : "var(--red)";
+  }
+  if (!ok) {
+    const detail = st && st.collector && st.collector.last_tick_at
+      ? `last tick ${fmtAgeExact(tickAge)} ago` : "no heartbeat";
+    banner.textContent = `COLLECTOR ${label.replace("collector: ", "")} — data collection is DOWN · ${detail}`;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+async function pollCollectorStatus() {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const resp = await fetch(API_STATUS, { signal: ctrl.signal, cache: "no-store" });
+    if (!resp.ok) throw new Error(`http ${resp.status}`);
+    paintCollectorStatus(await resp.json());
+  } catch (err) {
+    // /status unreachable or too slow — that IS the down state.
+    paintCollectorStatus(null);
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+function startStatusPolling() {
+  if (statusTimer) return;
+  pollCollectorStatus();
+  statusTimer = setInterval(pollCollectorStatus, STATUS_POLL_MS);
 }
 
 /* ── Wiring ──────────────────────────────────────────────── */
@@ -3167,12 +3465,134 @@ $("audioToggle").addEventListener("click", () => {
 });
 syncAudioButton();
 
+// ── RESULTED ALERTS expand/collapse toggle ──────────────────────
+// The section is always rendered (paintResultedPanel() fires every poll),
+// but the body is collapsible via the ▾/▸ button in the header.  Default
+// is collapsed; the user's choice persists across reloads.
+const resultedExpandBtn = () => document.getElementById("resultedExpandBtn");
+if (resultedExpandBtn()) {
+  resultedExpandBtn().addEventListener("click", (ev) => {
+    ev.stopPropagation();       // don't toggle the <details> via the button's click
+    toggleResultedSection();
+  });
+  resultedExpandBtn().addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleResultedSection();
+    }
+  });
+}
+
 // Arm the context from a user gesture.  A single attempt must not strand a
 // context the browser chose to leave suspended, so each gesture retries
 // until it is running — and only a gesture, never the poll, can do this.
 const armAudio = () => { if (!audioReady) unlockAudio(); };
 ["pointerdown", "keydown", "touchstart"].forEach((ev) =>
   window.addEventListener(ev, armAudio, { passive: true }));
+
+/* ── EXECUTION / AUDIT TRACE — ALERT → GAME → SIGNAL → EXECUTION → RESULT ──
+   One chain per game that has an execution.  Every value is served:
+   ids and the per-game decision/reconciliation state come from the
+   betting API's per-game state endpoint (server-authoritative), the
+   market/selection/stake/line/status/reason/timings from the status
+   payload's recent records.  Nothing is inferred, nothing fabricated:
+   an unserved field renders "–". */
+const API_BETTING_STATE = (id) =>
+  `${BETTING_API}/game/${encodeURIComponent(id)}/state`;
+// hydration cache — one authoritative per-game fetch per TTL per game,
+// so a busy poll cycle cannot hammer the state endpoint (P3: no needless
+// request storms); a row re-rendered inside the TTL reuses the cached
+// server state instead of re-fetching.
+const BSTATE_TTL_MS = 30000;
+const BSTATE_CACHE = new Map();   // game_id -> { at, value }
+function bstateCached(gameId) {
+  const hit = BSTATE_CACHE.get(String(gameId));
+  return (hit && Date.now() - hit.at < BSTATE_TTL_MS) ? hit.value : null;
+}
+const EXEC_STATES = ["PENDING", "WOULD_BET", "SUBMITTING", "SUBMITTED",
+  "ACCEPTED", "REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "RECONCILING",
+  "EXPIRED", "CANCELLED"];
+function execStateWord(raw) {
+  const s = String(raw == null ? "" : raw).trim().toUpperCase();
+  return EXEC_STATES.includes(s) ? s : String(raw || "UNKNOWN").toUpperCase();
+}
+function traceHTML(g, exec, bstate) {
+  const st = execStateWord((exec && (exec.execution_state || exec.status))
+    || (bstate && bstate.state) || "UNKNOWN");
+  const chain = (label, value, cls) =>
+    `<span class="tr-step ${cls || ""}" title="${label}">`
+      + `<span class="tr-k">${label}</span><span class="tr-v">${esc(value)}</span></span>`;
+  const timing = [];
+  if (exec) {
+    if (exec.requested_at_utc) timing.push(`req ${(exec.requested_at_utc || "").replace("T", " ").slice(11, 19)}`);
+    if (exec.submitted_at_utc) timing.push(`sub ${(exec.submitted_at_utc || "").replace("T", " ").slice(11, 19)}`);
+    if (exec.resolved_at_utc) timing.push(`res ${(exec.resolved_at_utc || "").replace("T", " ").slice(11, 19)}`);
+    if (exec.elapsed_ms != null) timing.push(`${esc(exec.elapsed_ms)}ms`);
+  }
+  const reason = (exec && (exec.error_message || exec.error_code
+    || exec.rejection_reason))
+    || (bstate && bstate.blocked_reason) || "";
+  return `<div class="tr-chain">
+    ${chain("ALERT", exec && exec.alert_id ? exec.alert_id : "–", "tr-alert")}
+    ${chain("GAME", `${g.game_id}${(g.home_team || g.away_team) ? ` · ${g.home_team || "–"} vs ${g.away_team || "–"}` : ""}`)}
+    ${chain("SIGNAL", exec ? `${exec.market || "TOTAL"} ${exec.selection || "–"}` : "–")}
+    ${chain("LINE", exec ? (exec.line != null || exec.price != null ? num1(exec.line != null ? exec.line : exec.price) : "–") : "–")}
+    ${chain("EXECUTION", exec && exec.execution_id ? exec.execution_id : "–", "tr-exec")}
+    ${chain("RESULT", st, `tr-st-${st.toLowerCase()}`)}
+  </div>
+  <div class="tr-meta">
+    <span class="muted">ref ${esc((exec && exec.provider_ref) || "–")}</span>
+    <span class="muted">stake ${exec ? money(exec.stake_amount) : "–"} · unit ${exec ? money(exec.unit_price) : "–"}</span>
+    ${bstate ? `<span class="muted" title="server per-game state">server: ${esc(bstate.state || "–")}${bstate.reconciliation_state && bstate.reconciliation_state !== "NOT_REQUIRED" ? ` · reconcile ${esc(bstate.reconciliation_state)}` : ""}${bstate.decision ? ` · ${esc(bstate.decision)}` : ""}</span>` : ""}
+    ${timing.length ? `<span class="muted">${timing.join(" · ")}</span>` : ""}
+    ${reason ? `<span class="tr-reason">REASON ${esc(String(reason).slice(0, 160))}</span>` : ""}
+  </div>`;
+}
+async function hydrateBettingState(gameId, el) {
+  const cached = bstateCached(gameId);
+  if (cached) {
+    el.dataset.bstate = JSON.stringify(cached);
+    const holder = el.closest(".tr-row");
+    if (holder && state.lastPayload) {
+      const g = state.games.find((gm) => String(gm.game_id) === String(gameId));
+      const exec = (state.betting && state.betting.recent || []).find(
+        (r) => String(r.game_id) === String(gameId));
+      if (g) holder.innerHTML = traceHTML(g, exec, cached);
+    }
+    return;
+  }
+  try {
+    const resp = await fetch(API_BETTING_STATE(gameId));
+    if (!resp.ok) return;                    // 404: game left the window — keep served values
+    const bstate = await resp.json();
+    BSTATE_CACHE.set(String(gameId), { at: Date.now(), value: bstate });
+    if (el.isConnected) el.dataset.bstate = JSON.stringify(bstate);
+    const holder = el.closest(".tr-row");
+    if (holder && state.lastPayload) {
+      const g = state.games.find((gm) => String(gm.game_id) === String(gameId));
+      const exec = (state.betting && state.betting.recent || []).find(
+        (r) => String(r.game_id) === String(gameId));
+      if (g) holder.innerHTML = traceHTML(g, exec, bstate);
+    }
+  } catch (_) { /* best-effort hydration; served values remain */ }
+}
+function renderExecutionTrace() {
+  const list = $("traceList");
+  if (!list) return;
+  const execs = (state.betting && state.betting.recent) || [];
+  if (!execs.length) {
+    list.innerHTML = '<div class="alerts-empty">No executions to trace</div>';
+    return;
+  }
+  list.innerHTML = execs.map((r) => {
+    const g = state.games.find((gm) => String(gm.game_id) === String(r.game_id))
+      || { game_id: r.game_id, home_team: "", away_team: "" };
+    return `<div class="tr-row" data-game-id="${esc(r.game_id)}">${traceHTML(g, r, null)}</div>`;
+  }).join("");
+  list.querySelectorAll(".tr-row[data-game-id]").forEach((el) =>
+    hydrateBettingState(el.dataset.gameId, el));
+}
 
 /* ── AUTO BETTING panel (directive 2026-09-21) ───────────────
    The kill switch and unit price are consumed by the SERVER's betting
@@ -3187,8 +3607,57 @@ function money(v) {
 }
 
 function abStatusHTML(st) {
-  $("abModePill").textContent = st.mode || "--";
-  $("abModePill").className = "pill " + (st.dry_run ? "muted" : "bad");
+  // ── Mode pill (in alerts-head) ─────────────────────────────
+  const modePill = $("abModePill");
+  if (modePill) {
+    modePill.textContent = st.mode || "--";
+    modePill.className = "pill ab-mode-pill " + (st.dry_run ? "dry" : st.enabled ? "live" : "off");
+  }
+  // ── Header status pills (global summary) ──────────────────
+  const abGlobal = $("abGlobalPill");
+  if (abGlobal) {
+    abGlobal.textContent = `AB ${st.enabled ? "ON" : "OFF"}`;
+    abGlobal.style.color = st.enabled ? "var(--green)" : "var(--red)";
+    abGlobal.title = `Auto Betting ${st.enabled ? "enabled" : "disabled"} · ${st.mode || "--"}`;
+  }
+  const abModeHeader = $("abModePillHeader");
+  if (abModeHeader) {
+    abModeHeader.textContent = st.mode || "--";
+    abModeHeader.style.color = st.dry_run ? "var(--amber)" : st.enabled ? "var(--green)" : "var(--muted)";
+  }
+  // ── Kill-switch state pill ─────────────────────────────────
+  const ksPill = $("abKillSwitchPill");
+  if (ksPill) {
+    ksPill.textContent = `KILL SWITCH: ${st.enabled ? "OFF (armed)" : "ON (blocked)"}`;
+    ksPill.style.color = st.enabled ? "var(--amber)" : "var(--green)";
+    ksPill.title = "Kill switch controls whether the betting worker will place bets. ON = blocked.";
+  }
+  // ── Global state bar ───────────────────────────────────────
+  const ksVal = $("abKillSwitchVal");
+  if (ksVal) {
+    ksVal.textContent = st.enabled ? "OFF (armed)" : "ON (blocked)";
+    ksVal.className = "ab-state-val " + (st.enabled ? "ab-val-on" : "ab-val-off");
+  }
+  const modeVal = $("abModeVal");
+  if (modeVal) {
+    modeVal.textContent = st.mode || "--";
+    modeVal.className = "ab-state-val " + (st.dry_run ? "ab-val-dry" : "ab-val-live");
+  }
+  const statusVal = $("abStatusVal");
+  if (statusVal) {
+    statusVal.textContent = st.enabled ? "ARMED" : "IDLE";
+    statusVal.className = "ab-state-val " + (st.enabled ? "ab-val-on" : "ab-val-off");
+  }
+  const credVal = $("abCredVal");
+  if (credVal) {
+    const cred = st.credentials || {};
+    const credParts = [];
+    if (cred.username != null) credParts.push(cred.username ? "USER ✓" : "USER ✗");
+    if (cred.password != null) credParts.push(cred.password ? "PASS ✓" : "PASS ✗");
+    credVal.textContent = credParts.length ? credParts.join(" · ") : "—";
+    credVal.className = "ab-state-val muted";
+  }
+  // ── Switch + unit price ────────────────────────────────────
   const sw = $("abSwitch");
   sw.disabled = false;
   sw.checked = st.enabled === true;
@@ -3203,27 +3672,54 @@ function abStatusHTML(st) {
   if (st.max_daily_exposure != null) lim.push(`max exposure ${money(st.max_daily_exposure)}`);
   $("abLimitsNote").textContent =
     "limits: " + (lim.length ? lim.join(" · ") : "NOT CONFIGURED — betting blocked (set BETTING_* env vars)");
+  // ── Today stats ───────────────────────────────────────────
   const t = st.today || {};
   $("abTodayBets").textContent = t.bets ?? "–";
   $("abTodayUnits").textContent = t.units ?? "–";
-  $("abTodayAmount").textContent = money(t.amount);
+  // §8: DRY_RUN shows simulated exposure (no real money moved); LIVE shows
+  // real wagered amount.  The two are never mixed.
+  if (t.is_simulated) {
+    const sim = t.amount_simulated;
+    $("abTodayAmount").textContent = (sim != null && isFinite(sim))
+      ? `R0.00 (simulated: R${Number(sim).toFixed(2)})`
+      : "R0.00 (simulated: –)";
+  } else {
+    $("abTodayAmount").textContent = money(t.amount_real ?? t.amount);
+  }
   $("abTodayRemaining").textContent =
     t.remaining_exposure != null ? money(t.remaining_exposure) : "–";
+  // ── Execution list ────────────────────────────────────────
   const list = $("abExecList");
   if (!st.recent || !st.recent.length) {
     list.innerHTML = '<li class="alerts-empty">No executions yet</li>';
   } else {
-    list.innerHTML = st.recent.map((r) => `
-      <li class="ab-exec st-${esc((r.status || "UNKNOWN").toLowerCase())}">
-        <span class="ab-game">${esc(r.game_id)}</span>
-        <span class="ab-alert">${esc(r.alert_id || "")}</span>
-        <span>${esc(r.selection || "")}</span>
-        <span class="al-num">${num1(r.price)}</span>
-        <span class="al-num">${num1(r.stake_units)}</span>
-        <span class="al-num">${money(r.stake_amount)}</span>
-        <span class="ab-status">${esc(r.status || "")}</span>
+    list.innerHTML = st.recent.map((r) => {
+      const statusLower = (r.status || "UNKNOWN").toLowerCase();
+      // rejection/block reasons shown explicitly (§7 / directive §11)
+      const hasReason = r.error_message && r.status !== "ACCEPTED";
+      const reasonNote = hasReason
+        ? `<span class="muted ab-reason et-reason">${esc(r.error_message.slice(0, 80))}</span>`
+        : (r.error_code
+          ? `<span class="muted ab-reason">[${esc(r.error_code)}]</span>`
+          : (r.provider_ref
+            ? `<span class="muted ab-reason">${esc(r.provider_ref.slice(0, 40))}</span>`
+            : ""));
+      return `
+      <li class="ab-exec st-${esc(statusLower)}">
+        <span class="ab-game" title="game ID">${esc(r.game_id || "")}</span>
+        <span class="ab-alert muted" title="alert ID">${esc(r.alert_id ? `A:${r.alert_id}` : "")}</span>
+        <span class="ab-chk muted">${esc(r.checkpoint != null ? "@" + r.checkpoint + "%" : "")}</span>
+        <span title="direction/selection">${esc(r.selection || "")}</span>
+        <span class="al-num" title="price/odds">${r.price != null ? num1(r.price) : "–"}</span>
+        <span class="al-num" title="stake units">${r.stake_units != null ? num1(r.stake_units) + "u" : "–"}</span>
+        <span class="al-num" title="stake amount">${money(r.stake_amount)}</span>
+        <span class="ab-status" title="execution status">${esc(r.status || "")}</span>
+        ${r.provider_ref ? `<span class="muted" title="provider ref">${esc(r.provider_ref.slice(0, 20))}</span>` : ""}
+        ${r.execution_id ? `<span class="muted ab-id" title="exec ID" style="font-size:9px">${esc(r.execution_id.slice(0, 12))}</span>` : ""}
         <span class="muted">${esc((r.requested_at_utc || "").replace("T", " ").slice(0, 19))}</span>
-      </li>`).join("");
+        ${reasonNote}
+      </li>`;
+    }).join("");
   }
 }
 
@@ -3231,9 +3727,95 @@ async function refreshBettingStatus() {
   try {
     const resp = await fetch(`${BETTING_API}/status`);
     if (!resp.ok) return;
-    abStatusHTML(await resp.json());
+    state.betting = await resp.json();
+    abStatusHTML(state.betting);
+    if (state.lastPayload) renderCards(state.lastPayload);
   } catch (_) { /* betting panel is best-effort; never breaks the board */ }
 }
+
+async function loadBettingHistory() {
+  const q = encodeURIComponent($("abHistoryQuery").value.trim());
+  const status = encodeURIComponent($("abHistoryState").value);
+  const list = $("abHistoryList");
+  const audit = $("abAuditList");
+  try {
+    const response = await fetch(`${BETTING_API}/history?q=${q}&status=${status}&limit=100`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.json();
+    list.innerHTML = body.executions.length ? body.executions.map((r) =>
+      `<li class="ab-exec st-${esc(String(r.status || "UNKNOWN").toLowerCase())}">
+        <span class="ab-game">${esc(r.game_id)}</span><span>${esc(r.alert_id || "")}</span>
+        <span>${esc(r.execution_id || "")}</span><span>${esc(r.market || "TOTAL")} ${esc(r.selection || "")} @ ${num1(r.line)}</span>
+        <span>${esc(r.execution_state || r.status || "UNKNOWN")}</span>
+        <span>${esc(r.provider_ref || "")}</span><span>${esc(r.error_message || r.rejection_reason || "")}</span>
+        <span>${esc(r.requested_at_utc || "")} · ${r.elapsed_ms == null ? "–" : esc(r.elapsed_ms) + "ms"}</span></li>`).join("")
+      : '<li class="alerts-empty">No matching executions</li>';
+    audit.innerHTML = body.audit.length ? body.audit.map((r) =>
+      `<li>${esc(r.at_utc || "")} · ${esc(r.event || "")} · ${esc(r.execution_id || "")} · ${esc(r.reason || "")}</li>`).join("")
+      : '<li class="alerts-empty">No audit records for these executions</li>';
+  } catch (err) {
+    list.innerHTML = `<li class="alerts-empty">History unavailable: ${esc(err.message)}</li>`;
+  }
+}
+
+$("abHistorySearch").addEventListener("click", loadBettingHistory);
+$("abHistoryQuery").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") loadBettingHistory();
+});
+$("abHistoryState").addEventListener("change", loadBettingHistory);
+
+$("grid").addEventListener("submit", async (ev) => {
+  const form = ev.target.closest("form.manual-bet");
+  if (!form) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const button = form.querySelector("button[type=submit]");
+  const dir = form.querySelector('[name="direction"]').value;
+  const stake = Number(form.querySelector('[name="stake"]').value);
+  const line = Number(form.dataset.line);
+  button.disabled = true;
+  button.textContent = "SENDING";
+  try {
+    const response = await fetch(BETTING_API + "/manual", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ game_id: form.dataset.gameId, market: "TOTAL",
+        direction: dir, line, stake,
+        idempotency_key: `ui-${crypto.randomUUID()}` }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+    button.textContent = body.execution.execution_state || body.execution.status || "RECORDED";
+    await refreshBettingStatus();
+    await loadBettingHistory();
+  } catch (err) {
+    button.textContent = "BLOCKED";
+    button.title = err.message;
+  } finally {
+    setTimeout(() => { if (button.isConnected) button.textContent = "BET"; }, 3000);
+  }
+});
+
+$("grid").addEventListener("click", async (ev) => {
+  const button = ev.target.closest("button.game-auto-toggle");
+  if (!button) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const enabled = button.dataset.enabled !== "true";
+  button.disabled = true;
+  try {
+    const response = await fetch(`${BETTING_API}/game/${encodeURIComponent(button.dataset.gameId)}/auto-bet`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.detail || `HTTP ${response.status}`);
+    }
+    await refreshBettingStatus();
+  } catch (err) {
+    button.title = err.message;
+  } finally { button.disabled = false; }
+});
 
 $("abSwitch").addEventListener("change", async (ev) => {
   const want = ev.target.checked ? "ON" : "OFF";
@@ -3273,5 +3855,47 @@ loadAlertHistory();
 loadQ3BreakHistory();
 Object.assign(LEAGUE_LABELS, leagueLabelsFrom(document));
 refresh();
+// Resulted Alerts section: sync collapsed state (always rendered, collapsed by default)
+syncResultedSection();
 setInterval(refresh, POLL_MS);
 setInterval(refreshBettingStatus, POLL_MS);
+startStatusPolling();
+
+[ ["checkpointFilter", "checkpointFilter"], ["directionFilter", "directionFilter"],
+  ["alertStateFilter", "alertStateFilter"], ["betStateFilter", "betStateFilter"],
+  ["gameStateFilter", "gameStateFilter"] ]
+  .forEach(([id, key]) => $(id).addEventListener("change", (ev) => {
+    state[key] = ev.target.value;
+    if (state.lastPayload) renderCards(state.lastPayload);
+  }));
+
+/* GLOBAL SEARCH — debounced just enough to stay responsive while live;
+   case-insensitive substring across game + bound-execution fields. */
+let __searchTimer = null;
+$("globalSearch").addEventListener("input", (ev) => {
+  const v = ev.target.value.trim().toLowerCase();
+  if (__searchTimer) clearTimeout(__searchTimer);
+  __searchTimer = setTimeout(() => {
+    state.search = v;
+    if (state.lastPayload) renderCards(state.lastPayload);
+  }, 120);
+});
+
+/* ── EXECUTION / AUDIT TRACE — server-state hydration ──
+   Chain rows are rendered from the status payload immediately; the
+   per-game state endpoint then adds the server-authoritative decision,
+   reconciliation state and blocked reason.  BEST-EFFORT ONLY: the
+   endpoint 404s for games outside the live window and is skipped. */
+$("traceRefresh").addEventListener("click", () => renderExecutionTrace());
+const TRACE_RECONCILE_STATES = ["UNKNOWN", "RECONCILING", "EXPIRED"];
+function traceStateOf(el) {
+  try { return JSON.parse(el.dataset.bstate || "null"); } catch (_) { return null; }
+}
+setInterval(() => {
+  document.querySelectorAll(".tr-row[data-game-id]").forEach((el) => {
+    const b = traceStateOf(el);
+    if (b && TRACE_RECONCILE_STATES.includes(b.reconciliation_state)) {
+      hydrateBettingState(el.dataset.gameId, el);
+    }
+  });
+}, POLL_MS);

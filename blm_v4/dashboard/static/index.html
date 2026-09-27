@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PokerBet Live Analytics — Descriptive Terminal</title>
+  <title>BLM Command Center — PokerBet Live Analytics</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
@@ -11,9 +11,9 @@
   <!-- ═══════════ HEADER ═══════════ -->
   <header class="topbar">
     <div class="brand">
-      <span class="brand-logo">PZ</span>
-      <span class="brand-title">LIVE ANALYTICS</span>
-      <span class="brand-sub">PokerBet · descriptive pace-Z deviation · Cyber 2K26 / Betual NBA</span>
+      <span class="brand-logo">BLM</span>
+      <span class="brand-title">BLM COMMAND CENTER</span>
+      <span class="brand-sub">PokerBet · pace-Z under-alert · Cyber 2K26 / Betual NBA</span>
     </div>
     <div class="status-cluster">
       <span class="pill live-pill" id="livePill"><span class="dot" id="liveDot"></span><span id="liveLabel">LIVE</span></span>
@@ -21,6 +21,8 @@
       <span class="pill muted" id="lastUpdatePill">--</span>
       <span class="pill muted" id="stateAgePill">state --</span>
       <span class="pill muted" id="gamesMonitoredPill">0 games</span>
+      <span class="pill muted" id="abGlobalPill" title="Auto Betting global status">AB --</span>
+      <span class="pill muted" id="abModePillHeader" title="Betting mode (DRY_RUN or LIVE)">MODE --</span>
       <button class="audio-toggle" id="audioToggle" type="button"
               data-audio="off" aria-pressed="false"
               title="Alert audio off — click to enable">AUDIO OFF</button>
@@ -35,9 +37,29 @@
       <button class="filter" data-filter="cyber-basketball-2k26-matches">CYBER 2K26</button>
       <span class="filter-sep"></span>
       <button class="filter active" id="liveToggle" data-livefilter="live" title="Show ended/stale games too">SHOWING LIVE</button>
+      <input type="search" id="globalSearch" class="global-search" placeholder="SEARCH teams · league · game id · exec / alert id" spellcheck="false" aria-label="Global search across live games">
+      <label class="filter-select">CHECKPOINT <select id="checkpointFilter"><option value="">ALL</option><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option></select></label>
+      <label class="filter-select">DIRECTION <select id="directionFilter"><option value="">ALL</option><option value="UNDER">UNDER</option><option value="OVER">OVER</option></select></label>
+      <label class="filter-select">ALERT <select id="alertStateFilter"><option value="">ALL</option><option value="ACTIVE">ACTIVE</option><option value="INACTIVE">INACTIVE</option></select></label>
+      <label class="filter-select">BET <select id="betStateFilter"><option value="">ALL</option><option value="EXECUTED">HAS EXECUTION</option><option value="NONE">NO EXECUTION</option></select></label>
+      <label class="filter-select">STATE <select id="gameStateFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="stale">STALE</option><option value="ended">ENDED</option><option value="invalid">INVALID</option></select></label>
       <span class="muted filter-count" id="liveCount"></span>
     </div>
   </header>
+
+  <!-- ═══════════ VIEW TABS ═══════════ -->
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Dashboard views">
+    <button class="tab active" role="tab" id="tabLive" data-view="live"
+            aria-selected="true">LIVE</button>
+    <button class="tab" role="tab" id="tabStats" data-view="stats"
+            aria-selected="false">STATS</button>
+    <button class="tab" role="tab" id="tabExplorer" data-view="explorer"
+            aria-selected="false">DB EXPLORER</button>
+    <span class="tab-note muted" id="tabNote">live games + alerts</span>
+  </nav>
+
+  <!-- ═══════════ VIEW: LIVE ═══════════ -->
+  <div class="view" id="viewLive">
 
   <!-- ═══════════ SUMMARY STRIP ═══════════ -->
   <section class="summary" id="summary">
@@ -59,17 +81,37 @@
     <div class="empty" id="empty">Waiting for live data…</div>
   </main>
 
-  <!-- ═══════════ AUTO BETTING — kill switch + status (DRY_RUN server-side) ═══════════ -->
+  <!-- ═══════════ GLOBAL CONTROLS — kill switch + auto bet status ═══════════ -->
   <section class="alerts" id="autoBettingSection">
     <div class="alerts-head">
-      <span class="alerts-title">AUTO BETTING</span>
-      <span class="pill" id="abModePill">--</span>
+      <span class="alerts-title">GLOBAL CONTROLS</span>
+      <span class="pill ab-mode-pill" id="abModePill">--</span>
+      <span class="pill muted" id="abKillSwitchPill" title="Kill-switch state — server-controlled">KILL SWITCH: --</span>
       <label class="ab-switch-wrap muted">
         <input type="checkbox" id="abSwitch" disabled>
         <span id="abSwitchLabel">AUTO BETTING: --</span>
       </label>
     </div>
     <div class="alerts-body" id="autoBettingBody">
+      <!-- global state bar -->
+      <div class="ab-global-bar" id="abGlobalBar">
+        <div class="ab-state-item">
+          <span class="ab-state-label">KILL SWITCH</span>
+          <span class="ab-state-val" id="abKillSwitchVal">--</span>
+        </div>
+        <div class="ab-state-item">
+          <span class="ab-state-label">MODE</span>
+          <span class="ab-state-val" id="abModeVal">--</span>
+        </div>
+        <div class="ab-state-item">
+          <span class="ab-state-label">STATUS</span>
+          <span class="ab-state-val" id="abStatusVal">--</span>
+        </div>
+        <div class="ab-state-item">
+          <span class="ab-state-label">CREDENTIALS</span>
+          <span class="ab-state-val muted" id="abCredVal">--</span>
+        </div>
+      </div>
       <div class="ab-grid">
         <div class="ab-settings">
           <div class="ab-row">
@@ -87,10 +129,20 @@
           <div class="ab-row"><span>Remaining daily exposure:</span><span class="al-num" id="abTodayRemaining">–</span></div>
         </div>
       </div>
-      <div class="ab-exec-head muted">RECENT EXECUTIONS</div>
+      <div class="ab-exec-head muted">RECENT EXECUTIONS
+        <span class="muted ab-exec-legend">ALERT → CHECKPOINT → EXEC ID → STATUS</span>
+      </div>
       <ul class="ab-exec-list" id="abExecList">
         <li class="alerts-empty">No executions yet</li>
       </ul>
+      <div class="ab-history-tools">
+        <label>SEARCH <input id="abHistoryQuery" type="search" placeholder="game / alert / execution / provider / error"></label>
+        <label>STATE <select id="abHistoryState"><option value="">ALL</option><option>WOULD_BET</option><option>SUBMITTING</option><option>SUBMITTED</option><option>ACCEPTED</option><option>REJECTED</option><option>BLOCKED</option><option>UNKNOWN</option><option>RECONCILING</option><option>EXPIRED</option></select></label>
+        <button id="abHistorySearch" type="button">SEARCH LEDGER</button>
+      </div>
+      <div class="ab-history-title">EXECUTION LEDGER + AUDIT TRAIL</div>
+      <ul class="ab-exec-list" id="abHistoryList"><li class="alerts-empty">Search execution history</li></ul>
+      <ul class="ab-audit-list" id="abAuditList"></ul>
     </div>
   </section>
 
@@ -107,18 +159,160 @@
 
   <!-- ═══════════ RESULTED ALERTS — historical review of every trigger ═══════════ -->
   <section class="alerts" id="alertHistorySection">
-    <div class="alerts-head">
+    <details class="resulted-details" id="resultedDetails">
+    <summary class="alerts-head" id="resultedHead">
       <span class="alerts-title">RESULTED ALERTS</span>
       <span class="muted" id="alertHistoryCount"></span>
       <span class="muted alerts-sub">every triggered alert ·
         <span class="lg-under">UNDER</span> /
         <span class="lg-over">OVER</span> /
         <span class="lg-push">PUSH</span> against its immutable triggered line</span>
-    </div>
+      <span class="resulted-toggle" id="resultedToggle">
+        <button class="resulted-expand-btn" id="resultedExpandBtn" type="button" title="Expand resulted alerts panel">▾</button>
+      </span>
+    </summary>
     <div class="alerts-body" id="alertHistory">
       <div class="alerts-empty">No alerts triggered</div>
     </div>
+    </details>
   </section>
+
+  <!-- ═══════════ EXECUTION / AUDIT TRACE — ALERT → GAME → SIGNAL → EXECUTION → RESULT.
+       One chain per game that has an execution: every value served by the
+       betting status/history endpoints and the per-game state endpoint —
+       the browser invents no state, no id and no reason. -->
+  <section class="alerts" id="traceSection">
+    <div class="alerts-head">
+      <span class="alerts-title">EXECUTION / AUDIT TRACE</span>
+      <span class="muted alerts-sub">ALERT → GAME → SIGNAL → EXECUTION → RESULT ·
+        states as served by the betting API · UNKNOWN needs provider reconciliation</span>
+      <button id="traceRefresh" type="button">REFRESH</button>
+    </div>
+    <div class="alerts-body" id="traceList">
+      <div class="alerts-empty">No executions to trace</div>
+    </div>
+  </section>
+
+  </div><!-- /#viewLive -->
+
+  <!-- ═══════════ VIEW: EXPLORER — data/database visibility over the EXISTING
+       read-only API endpoints (games, scorecard checkpoint events, betting
+       ledger, quarter-collection observability, result integrity).
+       Read-only investigation surface; no data is modified. -->
+  <div class="view" id="viewExplorer" hidden>
+    <section class="st-card" id="explorerCard">
+      <div class="st-head">
+        <span class="st-title">DATABASE / DATA EXPLORER</span>
+        <span class="pill muted" id="exAsOf">–</span>
+      </div>
+      <div class="ex-toolbar">
+        <label>DATASET
+          <select id="exDataset">
+            <option value="games">GAMES (recent, with quality partition)</option>
+            <option value="checkpoints">CHECKPOINT EVENTS (observed vs reference)</option>
+            <option value="executions">EXECUTION LEDGER (betting)</option>
+            <option value="quarters">QUARTER COLLECTION</option>
+            <option value="integrity">RESULT INTEGRITY</option>
+          </select>
+        </label>
+        <label>SEARCH <input type="search" id="exQuery" placeholder="substring across row values" spellcheck="false"></label>
+        <label>LIMIT <input type="number" id="exLimit" min="10" max="1000" step="10" value="200"></label>
+        <button id="exReload" type="button">RELOAD</button>
+        <span class="muted" id="exMeta"></span>
+      </div>
+      <div class="st-scroll"><table class="st-table" id="exTable"></table></div>
+      <div class="st-note muted" id="exNote"></div>
+    </section>
+  </div><!-- /#viewExplorer -->
+
+  <!-- ═══════════ VIEW: STATS — the fired-alert cohort, live ═══════════
+       Everything here is served by /api/v4/stats from a background worker's
+       last completed scan (see StatsWorker) — the page NEVER triggers a scan,
+       so switching tabs and polling stay instant however slow the scan is.
+       Segmentation is by COMPETITION, never by classification: BETUAL_NBA
+       bundles five competitions. -->
+  <div class="view" id="viewStats" hidden>
+
+    <!-- ─── headline ─── -->
+    <section class="st-card" id="stHeadline">
+      <div class="st-head">
+        <span class="st-title">OF ALL GAMES WHERE THE ALERT FIRED</span>
+        <span class="pill" id="stAsOf">–</span>
+        <span class="muted" id="stModel"></span>
+      </div>
+      <div class="st-kpis" id="stKpis"></div>
+      <div class="st-note muted" id="stHeadlineNote"></div>
+    </section>
+
+    <!-- ─── league standings — the "which league is weak" table ─── -->
+    <section class="st-card">
+      <div class="st-head">
+        <span class="st-title">LEAGUE STANDINGS</span>
+        <span class="muted">weakest first · Wilson 95% interval · a lower bound
+          below 50% is NOT distinguishable from a coin flip</span>
+      </div>
+      <div class="st-scroll"><table class="st-table" id="stLeagues"></table></div>
+      <div class="st-note muted" id="stLeaguesNote"></div>
+    </section>
+
+    <!-- ─── timing window ─── -->
+    <section class="st-card">
+      <div class="st-head">
+        <span class="st-title">ALERT TIMING WINDOW</span>
+        <span class="muted">6th min of Q3 → 4th min of Q4 · measured from each
+          game's FIRST firing moment · REPORTED, not enforced</span>
+      </div>
+      <div class="st-scroll"><table class="st-table" id="stWindow"></table></div>
+      <div class="st-scroll"><table class="st-table" id="stWindowBounds"></table></div>
+      <div class="st-note muted" id="stWindowNote"></div>
+    </section>
+
+    <!-- ─── fingerprints ─── -->
+    <section class="st-card">
+      <div class="st-head">
+        <span class="st-title">FINGERPRINTS</span>
+        <span class="muted">RECORDED context — they gate nothing; the alert
+          fires on the required-pace rule alone</span>
+      </div>
+      <div class="st-scroll"><table class="st-table" id="stFingerprints"></table></div>
+      <div class="st-note muted" id="stFingerprintsNote"></div>
+    </section>
+
+    <div class="st-split">
+      <!-- ─── count ladder ─── -->
+      <section class="st-card">
+        <div class="st-head"><span class="st-title">FINGERPRINT COUNT LADDER</span></div>
+        <div class="st-scroll"><table class="st-table" id="stLadder"></table></div>
+        <div class="st-note muted" id="stCollapse"></div>
+      </section>
+
+      <!-- ─── req/bar bands ─── -->
+      <section class="st-card">
+        <div class="st-head">
+          <span class="st-title">REQUIRED-PACE BANDS</span>
+          <span class="muted">the edge is not monotone</span>
+        </div>
+        <div class="st-scroll"><table class="st-table" id="stBands"></table></div>
+      </section>
+    </div>
+
+    <!-- ─── observed fired sets ─── -->
+    <section class="st-card">
+      <div class="st-head">
+        <span class="st-title">OBSERVED FIRED-SET COMBINATIONS</span>
+        <span class="muted">the keys share legs, so full houses are rare</span>
+      </div>
+      <div class="st-scroll"><table class="st-table" id="stCombos"></table></div>
+    </section>
+
+    <!-- ─── definitions + caveats ─── -->
+    <section class="st-card">
+      <div class="st-head"><span class="st-title">DEFINITIONS</span></div>
+      <div class="st-scroll"><table class="st-table" id="stDefinitions"></table></div>
+      <div class="st-note muted" id="stNotes"></div>
+    </section>
+
+  </div><!-- /#viewStats -->
 
   <!-- ═══════════ DETAIL MODAL ═══════════ -->
   <div class="modal-backdrop" id="modalBackdrop" hidden>
@@ -137,5 +331,7 @@
   </div>
 
   <script src="/static/dashboard.js"></script>
+  <script src="/static/stats.js"></script>
+  <script src="/static/explorer.js"></script>
 </body>
 </html>

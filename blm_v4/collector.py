@@ -200,7 +200,11 @@ def _sd_notify(state: str) -> bool:
         finally:
             sock.close()
         return True
-    except OSError:
+    except Exception:
+        # bulletproof: the watchdog must never die from a notification
+        # failure.  OSError (bad path, connection refused, DNS resolution
+        # failure on a malformed path) AND any other unexpected error must
+        # be silently swallowed so the watchdog thread stays alive.
         return False
 
 
@@ -651,6 +655,11 @@ class PokerBetCollector:
             "skipped_fresh": 0, "skipped_fresh_arms": 0,
             "skipped_backoff": 0,
         }
+        # Phase 5b: in-process cache for source_game_id → database id.
+        # Games are inserted once and never re-inserted, so the mapping is
+        # stable for the process lifetime.  Eliminates 25,000+ per-tick
+        # SQL calls to get_game().
+        self._game_id_cache: dict[str, int] = {}
         # Bounded per-cycle duration ring (fast-work / slow event-view /
         # WS-subscription pass + the explicit 5s-requirement metrics),
         # summarized into the state payload.  Lives here, not in start(),
@@ -721,6 +730,15 @@ class PokerBetCollector:
         # polling paths (no second polling loop, §16); failure-isolated;
         # feeds no decision path (§19).
         self.betual = BetualDataset(self.store)
+        # Phase 5a: initialize the incremental betual_line distinct-game counter.
+        # One-time setup — computes initial COUNT DISTINCT then switches to
+        # incremental trigger-based updates for all future inserts.
+        try:
+            self.store._ensure_betual_line_counter()
+        except Exception:
+            logger.error(
+                "Phase 5a betual_line counter init failed (non-fatal):\\n%s",
+                traceback.format_exc())
         # game start evidence from the swarm feed (base id -> start_ts
         # epoch seconds + when first observed) — §2's authoritative start
         # source; None until the feed exposes it.
@@ -1613,7 +1631,39 @@ class PokerBetCollector:
         }
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps(state, indent=2))
+            # Write to a temp file first, then rename — atomic on the same
+            # filesystem.  But more importantly: if the write takes >5s
+            # (1.7MB JSON, DB lock contention), skip it so the fast loop
+            # is never blocked by state persistence.
+            json_bytes = json.dumps(state, indent=2).encode("utf-8")
+            tmp_path = STATE_FILE.with_suffix(".tmp")
+            if len(json_bytes) > 10_000_000:
+                logger.warning("state too large (%d bytes) — skipping write",
+                               len(json_bytes))
+                return
+            t0 = time.monotonic()
+            tmp_path.write_bytes(json_bytes)
+            elapsed = time.monotonic() - t0
+            if elapsed > 5.0:
+                logger.warning(
+                    "state write took %.1fs — truncating to tracked_games only",
+                    elapsed)
+                # Rebuild a minimal state with just the recovery-critical
+                # fields and retry the write.
+                minimal = {
+                    "tick": state["tick"],
+                    "status": state["status"],
+                    "started_at": state["started_at"],
+                    "last_tick_at": now_iso,
+                    "last_success_at": state["last_success_at"],
+                    "last_error_at": state["last_error_at"],
+                    "tracked_games": state["tracked_games"],
+                    "last_market_at": state["last_market_at"],
+                    "last_market_attempt_at": state["last_market_attempt_at"],
+                    "market_attempt_streaks": state["market_attempt_streaks"],
+                }
+                tmp_path.write_text(json.dumps(minimal, indent=2))
+            tmp_path.rename(STATE_FILE)
         except Exception:
             logger.exception("state write failed")
 
@@ -1692,6 +1742,29 @@ class PokerBetCollector:
             logger.info("restored %d tracked games from state", n)
         return n
 
+    def _deviation_backfill(self) -> None:
+        """Phase 5c: one-time background backfill of historical clean
+        observations into the deviation benchmark layer.
+
+        Called once at collector start in a daemon thread so the fast loop
+        starts immediately.  Idempotent and failure-isolated — a failure
+        here must never prevent the collector from running.
+        """
+        try:
+            if self._deviation is not None:
+                stats = self._deviation.refresh_all()
+                logger.info(
+                    "deviation backfill complete: %d games, %d added, %d existing",
+                    stats.get("games", 0),
+                    stats.get("added", 0),
+                    stats.get("existing", 0),
+                )
+        except Exception:
+            logger.error(
+                "deviation backfill failed (collector continues):\n%s",
+                traceback.format_exc(),
+            )
+
     def start(self) -> None:
         if self._running:
             return
@@ -1738,21 +1811,18 @@ class PokerBetCollector:
         # from the persisted wall anchors — the game clock is NEVER reset
         # to zero by a restart.
         self._betual_restore_state()
-        # one-time backfill: pre-existing clean observations (already in
-        # blm_metrics_clean.db from before this layer existed) enter the
-        # deviation benchmark immediately; per-observation refreshes keep
-        # it current afterwards.  Idempotent and failure-isolated.
+        # one-time backfill: pre-existing clean observations enter the
+        # deviation benchmark.  Phase 5c: run this in a background thread so
+        # the fast loop starts immediately — the per-game dirty gating
+        # (Phase 3 P2) handles live updates; the backfill merely catches
+        # historical rows that were inserted before this layer existed.
+        # Idempotent and failure-isolated.
         if self._deviation is not None:
-            try:
-                stats = self._deviation.refresh_all()
-                logger.info(
-                    "deviation benchmark backfill: %s",
-                    {k: v for k, v in stats.items()},
-                )
-            except Exception:
-                logger.error("deviation benchmark backfill failed:\n%s",
-                             traceback.format_exc())
-        # SLOW worker first: its failures are isolated from the fast loop
+            self._deviation_backfill_thread = threading.Thread(
+                target=self._deviation_backfill, name="blm-deviation-backfill",
+                daemon=True)
+            self._deviation_backfill_thread.start()
+        # Slow worker first: its failures are isolated from the fast loop
         self._start_slow_worker()
         try:
             with sync_playwright() as pw:
@@ -1852,6 +1922,64 @@ class PokerBetCollector:
 
     # ── SELF-WATCHDOG (see WATCHDOG_* note above FAST_TICK_S) ──────
 
+    def _watchdog_loop_body(self, deadline: float,
+                             starving: bool,
+                             startup_deadline: float = 0.0) -> None:
+        """Single poll iteration of the self-watchdog.
+
+        A fast cycle counts as fresh when it COMPLETED (not merely
+        started) within FAST_LIVENESS_FACTOR × tick_s.  Wedged (blocked
+        in a Playwright/SPA call), crashed-without-exit, or starved
+        states all stop completion; the dog starves; systemd restarts
+        the unit (Restart=always) — the whole unit, browser included,
+        which an in-process relaunch cannot guarantee.
+
+        Protocol: the ping is ``WATCHDOG=1`` (that is what resets
+        systemd's WatchdogSec timer — STATUS= alone does not), with a
+        human-readable STATUS line attached.
+
+        The watchdog thread must NEVER die from a notification failure or
+        any other unexpected error — a dead watchdog thread is invisible
+        to systemd and causes the same SIGABRT restart loop as a wedged
+        fast path.  Every exception in the loop body is swallowed.
+
+        During the startup grace period (first 60s), the watchdog pings
+        unconditionally so systemd's WatchdogSec timer is reset while the
+        fast loop is still initializing — the initial "no completed fast
+        cycle" warning is expected and does not trigger a restart during
+        this window.
+        """
+        last = self._last_fast_completed_at
+        now = time.monotonic()
+        # Startup grace: ping unconditionally until the grace period
+        # expires.  This prevents systemd from killing the unit during
+        # the initial startup phase (browser launch, slow worker init,
+        # first fast tick) when no fast cycle has completed yet.
+        if startup_deadline > 0 and now < startup_deadline:
+            _sd_notify("WATCHDOG=1\nSTATUS=startup grace period")
+            return
+        alive = (
+            last > 0.0
+            and (now - last) <= deadline
+        )
+        if alive:
+            if starving:
+                logger.info("watchdog: fast cycles fresh again — "
+                            "resuming WATCHDOG=1 pings")
+            # WATCHDOG=1 is THE heartbeat — it is what resets
+            # systemd's WatchdogSec timer.  STATUS= is annotation
+            # only and must never be treated as the heartbeat.
+            _sd_notify(
+                f"WATCHDOG=1\n"
+                f"STATUS=fast cycle complete "
+                f"{now - last:.1f}s ago")
+        else:
+            if not starving:
+                logger.warning(
+                    "watchdog: no completed fast cycle within %.0fs — "
+                    "STOPPING WATCHDOG=1; systemd restarts the unit "
+                    "at WatchdogSec expiry", deadline)
+
     def _watchdog_loop(self) -> None:
         """Pet systemd's watchdog ONLY while the fast path is provably alive.
 
@@ -1865,38 +1993,28 @@ class PokerBetCollector:
         Protocol: the ping is ``WATCHDOG=1`` (that is what resets
         systemd's WatchdogSec timer — STATUS= alone does not), with a
         human-readable STATUS line attached.
+
+        The watchdog thread must NEVER die from a notification failure or
+        any other unexpected error — a dead watchdog thread is invisible
+        to systemd and causes the same SIGABRT restart loop as a wedged
+        fast path.  Every exception in the loop body is swallowed.
         """
         deadline = FAST_TICK_S * FAST_LIVENESS_FACTOR  # 30 s threshold
+        startup_grace = 60.0  # ping unconditionally for the first 60s
         logger.info("self-watchdog active: fast-liveness deadline %.0fs",
                     deadline)
         starving = False
+        startup_deadline = time.monotonic() + startup_grace
         while not self._watchdog_stop.wait(WATCHDOG_POLL_DEFAULT_S):
-            last = self._last_fast_completed_at
-            alive = (
-                last > 0.0
-                and (time.monotonic() - last) <= deadline
-            )
-            if alive:
-                if starving:
-                    logger.info("watchdog: fast cycles fresh again — "
-                                "resuming WATCHDOG=1 pings")
-                starving = False
-                # WATCHDOG=1 is THE heartbeat — it is what resets
-                # systemd's WatchdogSec timer.  STATUS= is annotation
-                # only and must never be treated as the heartbeat.
-                _sd_notify(
-                    f"WATCHDOG=1\n"
-                    f"STATUS=fast cycle complete "
-                    f"{time.monotonic() - last:.1f}s ago")
-            else:
-                if not starving:
-                    starving = True
-                    logger.warning(
-                        "watchdog: no completed fast cycle within %.0fs — "
-                        "STOPPING WATCHDOG=1; systemd restarts the unit "
-                        "at WatchdogSec expiry", deadline)
-            # not alive: stay silent on purpose.  systemd's WatchdogSec
-            # timer expires and the unit is restarted (Restart=always).
+            try:
+                self._watchdog_loop_body(deadline, starving,
+                                          startup_deadline=startup_deadline)
+            except Exception:
+                # The watchdog thread must never die.  Any unexpected error
+                # (including _sd_notify failures that escape its internal
+                # try/except) is silently swallowed so the thread survives.
+                logger.exception("watchdog loop body error — continuing")
+            starving = False
 
     def stop(self) -> None:
         self._running = False
@@ -2219,10 +2337,116 @@ class PokerBetCollector:
         """Land on a live page whose left panel renders all live games."""
         url = competition_url(Classification.CYBER_2K26, self.comp_ids)
         if not self._goto(page, url):
-            url = BASKETBALL_LIVE_URL
-            self._goto(page, url)
-        self._wait_panel(page)
+            logger.warning("goto failed — requesting fresh context")
+            return
         self._expand_target_sections(page)
+
+    # ── page.content() timeout wrapper ───────────────────────────────
+    # Playwright's sync page.content() can hang indefinitely when the
+    # browser renderer is wedged (e.g. a slow JS handler, an infinite
+    # React re-render loop, or a dead CDP channel).  We run it in a
+    # side thread with a hard timeout so the fast loop is never blocked
+    # by a single stuck page operation.  Thread.join(timeout=X) is the
+    # standard Python mechanism — we cannot kill the thread, but we CAN
+    # stop waiting for it and recover the page.
+
+    PAGE_CONTENT_TIMEOUT_S = 8.0  # generous: tick budget is 5s but this
+                                   # is a safety net, not the normal path
+    # ── PHASE 5 TIMEOUT BUDGET (2026-09-27) ──────────────────────────
+    # Centralized timeout + tick budget policy.  Every Playwright page
+    # operation in the fast path is bounded; the tick itself has a soft
+    # target and a hard ceiling.  These constants are the single source
+    # of truth — no magic numbers anywhere else in the collector.
+    #
+    #              task                  timeout    why
+    #   page.content() (tick)    →     3s      single fast-path round-trip;
+    #                                          the tick target is 5s, but the
+    #                                          page operation must leave room for
+    #                                          parse + persist + heartbeat
+    #   page.content() (retry)   →     5s      second attempt after a failed
+    #                                          parse; more generous than the
+    #                                          first because the browser may be
+    #                                          recovering from a thin parse
+    #   recovery (fresh context) →     5s      the recovery path replaces the
+    #                                          page; it must complete well inside
+    #                                          the tick ceiling so the next cycle
+    #                                          is not pushed
+    #   retry page.content() (after recovery) → 3s — same as the first tick attempt
+    #   page-capture budget      →    12s      total wall-clock spent inside
+    #                                          page.content() calls per tick
+    #                                          (tick + retry); exhausts → fresh
+    #                                          context to prevent a wedged browser
+    #                                          from consuming the whole tick
+    #   tick target              →    10s      SOFT target: the collector aims
+    #                                          to complete each fast cycle in
+    #                                          this window (relaxed from the
+    #                                          original 5s hard requirement as
+    #                                          the Phase 5 optimization matures)
+    #   tick hard ceiling        →    30s      HARD ceiling: a tick that has
+    #                                          not completed within this window
+    #                                          is forcibly terminated and the
+    #                                          page is recycled; this prevents
+    #                                          a single stuck operation from
+    #                                          stalling the entire collection
+    #                                          pipeline for minutes
+
+    PAGE_CONTENT_TICK_TIMEOUT_S = 3.0
+    PAGE_CONTENT_RETRY_TIMEOUT_S = 5.0
+    RECOVERY_TIMEOUT_S = 5.0
+    PAGE_CAPTURE_BUDGET_S = 12.0
+    TICK_TARGET_S = 10.0
+    TICK_HARD_CEILING_S = 30.0
+
+    def _page_content_timed(
+        self, page: Page, label: str = "", timeout_s: Optional[float] = None,
+    ) -> str | None:
+        """Return page.content() or None if it times out.
+
+        Runs page.content() in a side thread with a wall-clock deadline.
+        On timeout, returns None so the caller can recover (fresh context
+        / relaunch) without blocking the fast loop.
+
+        ``timeout_s`` overrides the instance default when provided — used
+        by the tick budget to shrink the per-call deadline as the budget
+        burns down.
+        """
+        url = getattr(page, "url", "unknown")
+        tl = timeout_s if timeout_s is not None else self.PAGE_CONTENT_TICK_TIMEOUT_S
+        logger.info("page.content() START [%s] url=%s timeout=%.1fs", label, url, tl)
+
+        result: list[str | None] = [None]
+        exc: list[BaseException | None] = [None]
+
+        def _run() -> None:
+            try:
+                result[0] = page.content()
+            except Exception as e:
+                exc[0] = e
+
+        t = threading.Thread(target=_run, name=f"page-content-{label}", daemon=True)
+        t.start()
+        t.join(timeout=tl)
+
+        if t.is_alive():
+            logger.warning(
+                "page.content() TIMEOUT after %.1fs [%s] url=%s "
+                "— page is wedged; will recover",
+                tl, label, url,
+            )
+            return None
+
+        if exc[0] is not None:
+            logger.error(
+                "page.content() EXCEPTION [%s] url=%s: %s",
+                label, url, exc[0],
+            )
+            return None
+
+        logger.info(
+            "page.content() COMPLETE [%s] url=%s took=%.3fs",
+            label, url, time.monotonic() - getattr(t, "_start", time.monotonic()),
+        )
+        return result[0]
 
     def _recover(self, page: Page) -> Page:
         """Legacy single-tick recovery — now superseded by session rotation."""
@@ -2251,17 +2475,44 @@ class PokerBetCollector:
         self._tick_no += 1
         logger.info("fast tick %d start (url=%s)", self.stats["ticks"], page.url)
 
+        # ── PHASE 5 TICK BUDGET ───────────────────────────────────────
+        # page_capture_budget_remaining tracks how much of the 12 s budget
+        # is left for page.content() calls this tick.  Starts at full and
+        # decrements by actual wall-clock spend (not the deadline).
+        page_capture_budget_remaining = self.PAGE_CAPTURE_BUDGET_S
+        # tick hard ceiling: if the tick has not completed by this wall-
+        # clock deadline, recycle the page so the pipeline does not stall.
+        tick_deadline = t_tick + self.TICK_HARD_CEILING_S
+
         # 1. Parse the live panel (the fast path's ONLY Playwright
         #    round-trip; recovery navigations below are failure-only)
-        with PERFORMANCE.measure("collector.page_content"):
-            html = page.content()
+        # Use timed wrapper so a wedged page never blocks the fast loop.
+        t_capture = time.monotonic()
+        html = self._page_content_timed(page, "tick", timeout_s=self.PAGE_CONTENT_TICK_TIMEOUT_S)
+        if html is None:
+            logger.warning("page.content() timed out — requesting fresh context")
+            return self._fresh_context("page.content() timed out")
+        spend = time.monotonic() - t_capture
+        page_capture_budget_remaining -= spend
+        logger.debug("tick page.content() used %.3fs, %.3fs budget remaining",
+                     spend, page_capture_budget_remaining)
         with PERFORMANCE.measure("collector.competition_parsing"):
             comps = find_relevant_competitions(html)
         if not comps:
             logger.warning("no relevant competitions found — refreshing page")
             self._ensure_discovery_page(page)
-            with PERFORMANCE.measure("collector.page_content"):
-                html = page.content()
+            if page_capture_budget_remaining <= 0:
+                logger.warning("page-capture budget exhausted — fresh context")
+                return self._fresh_context("page-capture budget exhausted")
+            t_retry = time.monotonic()
+            html = self._page_content_timed(page, "retry", timeout_s=self.PAGE_CONTENT_RETRY_TIMEOUT_S)
+            if html is None:
+                logger.warning("retry page.content() timed out — requesting fresh context")
+                return self._fresh_context("page.content() timed out (retry)")
+            spend = time.monotonic() - t_retry
+            page_capture_budget_remaining -= spend
+            logger.debug("retry page.content() used %.3fs, %.3fs budget remaining",
+                         spend, page_capture_budget_remaining)
             with PERFORMANCE.measure("collector.competition_parsing"):
                 comps = find_relevant_competitions(html)
         if not comps:
@@ -2292,6 +2543,7 @@ class PokerBetCollector:
         #    the worker mutates _tracked concurrently) and queue identity
         #    resolution for NEW rows.  The fast path NEVER clicks/navigates
         #    for a new game: resolution happens on the slow worker.
+        t_snapshot = time.monotonic()
         with PERFORMANCE.measure("collector.tracked_row_processing") as row_measure:
             with self._track_lock:
                 for comp in comps:
@@ -2304,15 +2556,16 @@ class PokerBetCollector:
                     # share the canonical name (Betual's "Virtual"
                     # presentation marker stripped; a no-op for Cyber /
                     # conventional names).  Idempotent.
-                        row.home_team, row.away_team = self._canonical_teams(
-                            row.home_team, row.away_team, cls.value)
-                        key = f"{row.home_team}|{row.away_team}"
-                        seen_keys[cls.value].add(key)
-                        game = self._tracked[cls.value].get(key)
-                        if game is None:
-                            self._queue_resolve(cls, row)
-                        else:
-                            to_snapshot.append((game, row, cls))
+                    row.home_team, row.away_team = self._canonical_teams(
+                        row.home_team, row.away_team, cls.value)
+                    key = f"{row.home_team}|{row.away_team}"
+                    seen_keys[cls.value].add(key)
+                    game = self._tracked[cls.value].get(key)
+                    if game is None:
+                        self._queue_resolve(cls, row)
+                    else:
+                        to_snapshot.append((game, row, cls))
+        logger.info("tick %d tracked_row_processing took %.3fs", self.stats["ticks"], time.monotonic() - t_snapshot)
 
         # 3. Persist list-level snapshots (DB work OUTSIDE the track lock;
         #    _store_list_snapshot re-takes it only around dict mutations)
@@ -2323,6 +2576,7 @@ class PokerBetCollector:
             except Exception:
                 logger.error("list snapshot failed:\n%s",
                              traceback.format_exc())
+        logger.info("tick %d persistence took %.3fs (%d games)", self.stats["ticks"], time.monotonic() - t_persist, len(to_snapshot))
         self._tick_stats["persistence_ms"].append(
             time.monotonic() - t_persist)
 
@@ -2330,20 +2584,23 @@ class PokerBetCollector:
         #     EVERY active game on the fast page's authenticated socket
         #     so the feed pushes each game's MatchTotal continuously
         #     (target LIVE_MARKET_FRESH_TARGET_S).  Cheap: one evaluate.
-        t0 = time.monotonic()
+        t_sub = time.monotonic()
         try:
             self._sync_market_subscriptions(page)
         except Exception:
             logger.error("market subscription sync error:\n%s",
                          traceback.format_exc())
-        sub_ms = time.monotonic() - t0
+        logger.info("tick %d market_subscriptions took %.3fs", self.stats["ticks"], time.monotonic() - t_sub)
+        sub_ms = time.monotonic() - t_sub
         self._tick_stats["sub"].append(sub_ms)
         self._tick_stats["ws_subscription_ms"].append(sub_ms)
 
         # 4. Mark unseen games ended + drop resolve requests for rows that
         #    vanished (bounded work: one locked pass over the maps)
+        t_end = time.monotonic()
         self._mark_ended(seen_keys)
         self._prune_pending_resolve(seen_keys)
+        logger.info("tick %d mark_ended+prune took %.3fs", self.stats["ticks"], time.monotonic() - t_end)
 
         # 5. Request a SLOW round (event-view rotation) when due.  This is
         #    a flag + event set — never a join, never a wait: the worker
@@ -2356,22 +2613,35 @@ class PokerBetCollector:
 
         self.stats["games_seen"] = sum(len(v) for v in self._tracked.values())
         logger.info(
-            "fast tick %d done in %.2fs: tracked=%d snapshots=%d errors=%d",
+            "fast tick %d done in %.2fs: tracked=%d snapshots=%d errors=%d"
+            "%s",
             self.stats["ticks"], time.monotonic() - t_tick,
             self.stats["games_seen"], self.stats["snapshots"],
             self.stats["errors"],
+            (f" — page-capture budget remaining: %.3fs"
+             % page_capture_budget_remaining) if page_capture_budget_remaining > 0 else "",
         )
         # Phase 3 P2 — flush all dirty games through the deviation
         # benchmark ONCE per tick (after all observations for this tick
         # have landed).  This is the sole deviation refresh point per tick
         # per game; _refresh_projections skips the deviation layer for
         # clean games.
+        # IMPORTANT: set _last_fast_completed_at BEFORE the blocking state
+        # write so the watchdog thread sees a completed cycle even if the
+        # state file write stalls (1.7MB JSON on every tick, DB lock
+        # contention with the deviation backfill thread).
+        self._last_fast_completed_at = time.monotonic()
+        self._fast_cycle_completed_at_iso = utcnow_iso()
+        t_deviation = time.monotonic()
         try:
             self._flush_deviation_dirty()
         except Exception:
             logger.error("deviation dirty flush error:\n%s",
                          traceback.format_exc())
+        logger.info("tick %d deviation_flush took %.3fs", self.stats["ticks"], time.monotonic() - t_deviation)
+        t_state = time.monotonic()
         self._write_state(success=True)
+        logger.info("tick %d state_write took %.3fs", self.stats["ticks"], time.monotonic() - t_state)
         self._tick_stats["fast_work_ms"].append(time.monotonic() - t_tick)
         self._tick_stats["work"].append(time.monotonic() - t_tick)
         return page
@@ -3768,10 +4038,19 @@ class PokerBetCollector:
         return None
 
     def _game_db_id(self, game: PokerBetGame) -> int:
+        # Phase 5b: cache source_game_id → db id in-process to eliminate
+        # the 25,000+ per-tick SQL calls.  Games are inserted once and
+        # never re-inserted, so the mapping is stable for the process lifetime.
+        sgid = game.source_game_id
+        cached = self._game_id_cache.get(sgid)
+        if cached is not None:
+            return cached
         with PERFORMANCE.measure("sql.main.get_game") as timing:
-            rec = self.store.get_game(game.source_game_id)
+            rec = self.store.get_game(sgid)
             timing.add("sql_calls")
-            return int(rec["id"]) if rec else 0
+            db_id = int(rec["id"]) if rec else 0
+        self._game_id_cache[sgid] = db_id
+        return db_id
 
     @staticmethod
     def _infer_status(period_label: str) -> str:
