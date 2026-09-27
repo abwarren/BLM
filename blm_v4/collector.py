@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sqlite3
 import time
 import traceback
@@ -99,6 +100,7 @@ from blm_v4.betual_dataset import (
 )
 from blm_v4.clean_metrics import CleanMetricsStore
 from blm_v4.deviation import DeviationEngine
+from blm_v4.performance import PERFORMANCE
 from blm_v4.pace_projector import PaceProjector
 from blm_v4.discovery import (
     RowGame,
@@ -157,6 +159,56 @@ ENDED_GRACE_S = 60.0
 # never drift apart.
 FAST_TICK_S = 5.0
 TICK_DEFAULT = FAST_TICK_S
+
+# ── SELF-WATCHDOG (2026-09-26: the collector must never be down) ──────
+# A watchdog that runs INSIDE the process it guards cannot fire while that
+# process is wedged, so liveness is signalled to systemd (sd_notify,
+# WatchdogSec) from the FAST path, and a completely dead process is
+# covered by Restart=always in the unit.  The failure this guards:
+# a Playwright/SPA call blocks far longer than any in-process timeout
+# (measured 6.8-minute gap between fast ticks during browser rotation,
+# 2026-09-26 00:57→01:03) — the process is "alive" but no observation
+# lands for minutes, and nothing inside the process can report it.
+#
+# gating (main collector only, NOT tests / run_once diagnostics):
+#   * WATCHDOG_USEC set (systemd's watchdog interval, in microseconds)
+#   * NOTIFY_SOCKET set (systemd supplies the socket for the unit)
+#   * --tick >= self-watchdog cadence (diagnostic fast loops excluded)
+#   * --once runs via run_once() and never calls start(), so it can
+#     never arm the thread
+SD_NOTIFY_AVAILABLE = True  # raw socket implementation — no dependency
+
+
+def _sd_notify(state: str) -> bool:
+    """Minimal systemd sd_notify (UNIX datagram, sd_notify(3) protocol).
+
+    Dependency-free on purpose: the vendor `sdnotify` package is not
+    installed here and the whole protocol is one datagram to the socket
+    systemd supplies in NOTIFY_SOCKET.  Abstract-namespace sockets
+    (leading '@') are supported per the spec.
+    """
+    sock_path = os.environ.get("NOTIFY_SOCKET")
+    if not sock_path:
+        return False
+    if sock_path.startswith("@"):
+        sock_path = "\0" + sock_path[1:]
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            sock.connect(sock_path)
+            sock.sendall(state.encode("utf-8"))
+        finally:
+            sock.close()
+        return True
+    except OSError:
+        return False
+
+
+WATCHDOG_POLL_DEFAULT_S = 5.0  # check cadence; notify on every pass
+# A fast cycle is "fresh" when it completed within this multiple of the
+# 5s tick.  6× = 30s: two full missed cycles plus margin, far below the
+# minutes-long wedges observed, and below typical WatchdogSec values.
+FAST_LIVENESS_FACTOR = 6.0
 # Slow-path worker: ONE daemon thread owning its OWN sync_playwright
 # scope + browser + page (sync Playwright objects are thread-affine —
 # they must never cross threads).  The fast path only PASSES it work
@@ -611,6 +663,20 @@ class PokerBetCollector:
                         "slow_event_view_ms", "ws_subscription_ms",
                         "persistence_ms")}
         self._instances: dict[str, str] = {}  # base game_id -> current instance id
+        # ── Phase 3 P2 — deviation dirty gating ──────────────────────
+        # A game is "dirty" when an accepted clean observation (or a
+        # finalization) has changed the deviation inputs since the last
+        # time deviation.refresh_game ran for that game.  The gate:
+        #   1. Mark dirty in _record_clean_impl / _finalize_clean.
+        #   2. Skip deviation refresh inside _refresh_projections when NOT dirty.
+        #   3. Flush all dirty games ONCE per tick at the end of _tick_body.
+        #   4. Clear dirty flag only after a successful flush.
+        # This collapses N per-snapshot deviation refreshes per game per
+        # tick into at most one refresh per game per tick (or per
+        # finalization), matching the Phase 3 P2 acceptance criteria
+        # (deviation.refresh_game call count must fall materially from the
+        # 22,421-call / 175,783 ms Phase 2 baseline).
+        self._deviation_dirty: set[str] = set()
         self._running = False
         self._browser: Optional[Browser] = None
         self._pw: Any = None                  # active sync_playwright scope
@@ -1444,10 +1510,16 @@ class PokerBetCollector:
             raise
 
     def _write_state(self, *, success: bool) -> None:
+        with PERFORMANCE.measure("collector.write_state"):
+            return self._write_state_impl(success=success)
+
+    def _write_state_impl(self, *, success: bool) -> None:
         """Heartbeat file the dashboard API reads for collector status."""
         now_iso = utcnow_iso()
         if success:
             self._last_success_iso = now_iso
+        with PERFORMANCE.measure("collector.state_metrics"):
+            betual_metrics = self.store.betual_collection_metrics()
         state = {
             "tick": self.stats["ticks"],
             "status": "running" if success else "stalled",
@@ -1501,6 +1573,7 @@ class PokerBetCollector:
                     and len(self._pending_resolve) > 0),
             },
             "tick_timing": _tick_timing_summary(self._tick_stats),
+            "performance": PERFORMANCE.snapshot(),
             # LIVE freshness: collection cadence vs observation age are
             # reported separately (see _freshness_summary).
             "market_freshness": self._freshness_summary(),
@@ -1529,7 +1602,7 @@ class PokerBetCollector:
             # Betual-only dataset (§18): per-game coverage, line-movement
             # volume, transitions, finalization success, NO-FINAL count,
             # parse failures and clock diagnostics — read-only aggregates.
-            "betual_dataset": self.store.betual_collection_metrics(),
+            "betual_dataset": betual_metrics,
             # crash/restart recovery: persist tracked games so a restart
             # does NOT trigger a full re-resolution storm (each new-game
             # resolve is a ~6s event-view nav that blocks the fast tick).
@@ -1623,6 +1696,31 @@ class PokerBetCollector:
         if self._running:
             return
         self._running = True
+        self._watchdog_stop = threading.Event()
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._last_fast_completed_at = 0.0  # monotonic; 0 = never
+        self._watchdog_enabled = (
+            SD_NOTIFY_AVAILABLE
+            and bool(os.environ.get("WATCHDOG_USEC"))
+            and bool(os.environ.get("NOTIFY_SOCKET"))
+            and self.tick_s >= WATCHDOG_POLL_DEFAULT_S
+        )
+        if self._watchdog_enabled:
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop, name="blm-watchdog", daemon=True)
+            self._watchdog_thread.start()
+        elif os.environ.get("WATCHDOG_USEC"):
+            logger.warning(
+                "WATCHDOG_USEC set but self-watchdog disabled "
+                "(NOTIFY_SOCKET=%s tick=%s)",
+                bool(os.environ.get("NOTIFY_SOCKET")), self.tick_s)
+        # NOTE (Type=notify semantics, 2026-09-26 review): READY=1 is
+        # deliberately NOT sent here.  It is sent once initialization has
+        # SUCCEEDED — slow worker, browser session, tracked-state restore
+        # — immediately before the fast loop (see below).  A process that
+        # hangs during startup never sends READY and is killed at
+        # TimeoutStartSec; watchdog pings are the separate WATCHDOG=1
+        # channel in _watchdog_loop and never substitute for READY.
         # ── FAST deadline scheduler (2026-09-10: hard 5s live cadence) ──
         # The fast loop aims each cycle at the NEXT FAST_TICK_S boundary
         # from the PREVIOUS target: latency is absorbed INSIDE the
@@ -1660,6 +1758,11 @@ class PokerBetCollector:
             with sync_playwright() as pw:
                 self._pw = pw
                 page = self._new_session()
+                # READY=1: initialization SUCCEEDED (slow worker up,
+                # browser session up, tracked state restored).  From this
+                # point liveness is reported exclusively via WATCHDOG=1
+                # pings from _watchdog_loop, gated on fresh fast cycles.
+                _sd_notify("READY=1")
                 while self._running:
                     tick_start = time.monotonic()
                     self._last_fast_started_at = tick_start
@@ -1747,8 +1850,59 @@ class PokerBetCollector:
                     pass
             self._running = False
 
+    # ── SELF-WATCHDOG (see WATCHDOG_* note above FAST_TICK_S) ──────
+
+    def _watchdog_loop(self) -> None:
+        """Pet systemd's watchdog ONLY while the fast path is provably alive.
+
+        A fast cycle counts as fresh when it COMPLETED (not merely
+        started) within FAST_LIVENESS_FACTOR × tick_s.  Wedged (blocked
+        in a Playwright/SPA call), crashed-without-exit, or starved
+        states all stop completion; the dog starves; systemd restarts
+        the unit (Restart=always) — the whole unit, browser included,
+        which an in-process relaunch cannot guarantee.
+
+        Protocol: the ping is ``WATCHDOG=1`` (that is what resets
+        systemd's WatchdogSec timer — STATUS= alone does not), with a
+        human-readable STATUS line attached.
+        """
+        deadline = FAST_TICK_S * FAST_LIVENESS_FACTOR  # 30 s threshold
+        logger.info("self-watchdog active: fast-liveness deadline %.0fs",
+                    deadline)
+        starving = False
+        while not self._watchdog_stop.wait(WATCHDOG_POLL_DEFAULT_S):
+            last = self._last_fast_completed_at
+            alive = (
+                last > 0.0
+                and (time.monotonic() - last) <= deadline
+            )
+            if alive:
+                if starving:
+                    logger.info("watchdog: fast cycles fresh again — "
+                                "resuming WATCHDOG=1 pings")
+                starving = False
+                # WATCHDOG=1 is THE heartbeat — it is what resets
+                # systemd's WatchdogSec timer.  STATUS= is annotation
+                # only and must never be treated as the heartbeat.
+                _sd_notify(
+                    f"WATCHDOG=1\n"
+                    f"STATUS=fast cycle complete "
+                    f"{time.monotonic() - last:.1f}s ago")
+            else:
+                if not starving:
+                    starving = True
+                    logger.warning(
+                        "watchdog: no completed fast cycle within %.0fs — "
+                        "STOPPING WATCHDOG=1; systemd restarts the unit "
+                        "at WatchdogSec expiry", deadline)
+            # not alive: stay silent on purpose.  systemd's WatchdogSec
+            # timer expires and the unit is restarted (Restart=always).
+
     def stop(self) -> None:
         self._running = False
+        stop_evt = getattr(self, "_watchdog_stop", None)
+        if stop_evt is not None:
+            stop_evt.set()
         self._slow_stop.set()
         self._slow_wake.set()
 
@@ -2077,6 +2231,12 @@ class PokerBetCollector:
     # ── Main tick (FAST PATH — hard 5s live-cycle requirement) ───
 
     def _tick(self, page: Page) -> Page:
+        """Measure a complete fast cycle, including early returns."""
+        with PERFORMANCE.tick_scope():
+            with PERFORMANCE.measure("collector.tick_duration"):
+                return self._tick_body(page)
+
+    def _tick_body(self, page: Page) -> Page:
         """One FAST collection cycle.
 
         Fast-path contents ONLY: the single lobby ``page.content()``
@@ -2093,13 +2253,17 @@ class PokerBetCollector:
 
         # 1. Parse the live panel (the fast path's ONLY Playwright
         #    round-trip; recovery navigations below are failure-only)
-        html = page.content()
-        comps = find_relevant_competitions(html)
+        with PERFORMANCE.measure("collector.page_content"):
+            html = page.content()
+        with PERFORMANCE.measure("collector.competition_parsing"):
+            comps = find_relevant_competitions(html)
         if not comps:
             logger.warning("no relevant competitions found — refreshing page")
             self._ensure_discovery_page(page)
-            html = page.content()
-            comps = find_relevant_competitions(html)
+            with PERFORMANCE.measure("collector.page_content"):
+                html = page.content()
+            with PERFORMANCE.measure("collector.competition_parsing"):
+                comps = find_relevant_competitions(html)
         if not comps:
             self._empty_ticks += 1
             self._write_state(success=False)
@@ -2128,25 +2292,27 @@ class PokerBetCollector:
         #    the worker mutates _tracked concurrently) and queue identity
         #    resolution for NEW rows.  The fast path NEVER clicks/navigates
         #    for a new game: resolution happens on the slow worker.
-        with self._track_lock:
-            for comp in comps:
-                cls = comp.classification
-                for row in comp.games:
+        with PERFORMANCE.measure("collector.tracked_row_processing") as row_measure:
+            with self._track_lock:
+                for comp in comps:
+                    cls = comp.classification
+                    for row in comp.games:
+                        row_measure.add("rows_seen")
                     # Canonical identity boundary: Betual rows are
                     # normalized ONCE at discovery so the panel key, the
                     # tracked key, the DB record and the API payload all
                     # share the canonical name (Betual's "Virtual"
                     # presentation marker stripped; a no-op for Cyber /
                     # conventional names).  Idempotent.
-                    row.home_team, row.away_team = self._canonical_teams(
-                        row.home_team, row.away_team, cls.value)
-                    key = f"{row.home_team}|{row.away_team}"
-                    seen_keys[cls.value].add(key)
-                    game = self._tracked[cls.value].get(key)
-                    if game is None:
-                        self._queue_resolve(cls, row)
-                    else:
-                        to_snapshot.append((game, row, cls))
+                        row.home_team, row.away_team = self._canonical_teams(
+                            row.home_team, row.away_team, cls.value)
+                        key = f"{row.home_team}|{row.away_team}"
+                        seen_keys[cls.value].add(key)
+                        game = self._tracked[cls.value].get(key)
+                        if game is None:
+                            self._queue_resolve(cls, row)
+                        else:
+                            to_snapshot.append((game, row, cls))
 
         # 3. Persist list-level snapshots (DB work OUTSIDE the track lock;
         #    _store_list_snapshot re-takes it only around dict mutations)
@@ -2195,6 +2361,16 @@ class PokerBetCollector:
             self.stats["games_seen"], self.stats["snapshots"],
             self.stats["errors"],
         )
+        # Phase 3 P2 — flush all dirty games through the deviation
+        # benchmark ONCE per tick (after all observations for this tick
+        # have landed).  This is the sole deviation refresh point per tick
+        # per game; _refresh_projections skips the deviation layer for
+        # clean games.
+        try:
+            self._flush_deviation_dirty()
+        except Exception:
+            logger.error("deviation dirty flush error:\n%s",
+                         traceback.format_exc())
         self._write_state(success=True)
         self._tick_stats["fast_work_ms"].append(time.monotonic() - t_tick)
         self._tick_stats["work"].append(time.monotonic() - t_tick)
@@ -2546,6 +2722,10 @@ class PokerBetCollector:
         return new_game
 
     def _store_list_snapshot(self, game: PokerBetGame, row: RowGame, comp) -> None:
+        with PERFORMANCE.measure("collector.store_list_snapshot"):
+            return self._store_list_snapshot_impl(game, row, comp)
+
+    def _store_list_snapshot_impl(self, game: PokerBetGame, row: RowGame, comp) -> None:
         """Persist the list-level observation for a known game.
 
         Detects virtual-replay score resets: when the panel row shows a
@@ -2555,7 +2735,8 @@ class PokerBetCollector:
         """
         if game.status == "ended":
             return
-        sig = self._detect_instance_reset(game, row)
+        with PERFORMANCE.measure("collector.instance_reset_check"):
+            sig = self._detect_instance_reset(game, row)
         if sig:
             game = self._split_instance(game, row, comp, signal=sig, path="list")
         obs = MarketObservation(
@@ -2582,7 +2763,11 @@ class PokerBetCollector:
             source_url=game.source_url,
             raw_json=json.dumps(row.__dict__, default=str),
         )
-        row_id = self.store.insert_snapshot(self._game_db_id(game), obs)
+        with PERFORMANCE.measure("collector.game_db_lookup"):
+            game_id = self._game_db_id(game)
+        with PERFORMANCE.measure("collector.insert_snapshot") as insert_measure:
+            row_id = self.store.insert_snapshot(game_id, obs)
+            insert_measure.add("sql_calls", 2)  # duplicate SELECT + INSERT attempt
         if row_id:
             self.stats["snapshots"] += 1
             self._record_clean(game, obs)
@@ -2592,6 +2777,11 @@ class PokerBetCollector:
             ] = 0
 
     def _record_clean(self, game: PokerBetGame, obs: MarketObservation) -> None:
+        with PERFORMANCE.measure("collector.record_clean") as timing:
+            timing.add("accepted_snapshots")
+            return self._record_clean_impl(game, obs)
+
+    def _record_clean_impl(self, game: PokerBetGame, obs: MarketObservation) -> None:
         """Feed one VALIDATED observation into the clean metrics DB.
 
         Called only after ``insert_snapshot`` accepted the row (so exact
@@ -2599,11 +2789,22 @@ class PokerBetCollector:
         instance the collector wrote to — the replay protections already
         routed post-final frames to a fresh #iN instance, never back to
         the finished base.  Failure-isolated: any clean-metrics error is
-        logged and swallowed so collection is unaffected."""
+        logged and swallowed so collection is unaffected.
+
+        Phase 3 P2 — deviation dirty gating: marks the game dirty so the
+        deviation benchmark is refreshed exactly ONCE per tick (in the
+        end-of-tick flush) rather than once per accepted snapshot.  The
+        pace projection refresh still runs immediately so the subsequent-
+        observation linkage stays current within the tick.
+        """
         if self.clean_metrics is None:
             return
         try:
             self.clean_metrics.record_snapshot_obs(game, obs, self.store)
+            # Mark dirty BEFORE _refresh_projections so the pace projector
+            # still runs immediately (for subsequent-observation linkage),
+            # but the deviation refresh is deferred to the end-of-tick flush.
+            self._deviation_dirty.add(game.source_game_id)
             self._refresh_projections(game.source_game_id)
         except Exception:
             logger.error("clean metrics record failed:\n%s",
@@ -2614,7 +2815,17 @@ class PokerBetCollector:
         from its VALID clean observations (idempotent, failure-isolated).
         Called as observations arrive so the subsequent-observation
         linkage stays current; also called on finalize so
-        final_settled_total updates when the game completes."""
+        final_settled_total updates when the game completes.
+
+        Phase 3 P2 — deviation dirty gating: this method runs ONLY the
+        pace projection (always needed for subsequent-observation linkage).
+        The deviation benchmark refresh is deliberately NOT called here —
+        it is deferred to ``_flush_deviation_dirty`` (called once per tick
+        in ``_tick_body``) or called directly from ``_finalize_clean``
+        when the game is ending.  This ensures deviation.refresh_game is
+        called at most once per game per tick, regardless of how many
+        observations arrive in that tick.
+        """
         if self.clean_metrics is None:
             return
         try:
@@ -2622,14 +2833,35 @@ class PokerBetCollector:
         except Exception:
             logger.error("pace projector refresh failed:\n%s",
                          traceback.format_exc())
-        # Deviation benchmark: residuals + provisional z-scores for any new
-        # eligible trajectory rows (idempotent, never rewrites history).
-        if self._deviation is not None:
+
+    def _flush_deviation_dirty(self) -> None:
+        """Phase 3 P2 — flush dirty games through the deviation benchmark.
+
+        Called ONCE per tick (at the end of ``_tick_body``) after all
+        observations for the tick have been accepted.  This collapses
+        N per-snapshot deviation refreshes per game into at most ONE
+        refresh per game per tick, eliminating the dominant work
+        amplification seen in the Phase 2 baseline (51.2 refreshes per
+        accepted snapshot → 1 per dirty game per tick).
+
+        Games are removed from ``_deviation_dirty`` only after a
+        SUCCESSFUL refresh so a transient failure retries on the next
+        tick rather than silently losing the residual.  Failure-isolated:
+        a crash during flush is logged and does not affect collection.
+        """
+        if self._deviation is None or not self._deviation_dirty:
+            return
+        # Snapshot the set so new marks that arrive concurrently (from
+        # the WS frame handler on the main thread) are not cleared
+        # until they have their own flush.
+        to_flush = set(self._deviation_dirty)
+        for gid in to_flush:
             try:
-                self._deviation.refresh_game(source_game_id)
+                self._deviation.refresh_game(gid)
+                self._deviation_dirty.discard(gid)
             except Exception:
-                logger.error("deviation refresh failed:\n%s",
-                             traceback.format_exc())
+                logger.error("deviation flush failed for %s:\n%s",
+                             gid, traceback.format_exc())
 
     def _finalize_clean(
         self, game: PokerBetGame, obs: Optional[MarketObservation] = None,
@@ -2638,7 +2870,13 @@ class PokerBetCollector:
 
         ``obs`` carries the verified final scores when the event view
         observed the terminal state; otherwise the game ended unseen and
-        the clean record is finalized as UNKNOWN (NULL finals)."""
+        the clean record is finalized as UNKNOWN (NULL finals).
+
+        Phase 3 P2: calls deviation.refresh_game IMMEDIATELY (not deferred)
+        because the game is ending — it will be dropped from tracking after
+        this call so the end-of-tick flush would never see it.  The pace
+        projection is updated unconditionally via _refresh_projections.
+        """
         if self.clean_metrics is None:
             return
         try:
@@ -2649,6 +2887,17 @@ class PokerBetCollector:
                 classification=game.classification,
             )
             self._refresh_projections(game.source_game_id)
+            # Deviation refresh: run immediately on finalization (game is
+            # ending and will be untracked; the end-of-tick flush won't see
+            # it).  Remove from dirty set so the flush skips it (it was
+            # already processed here).
+            if self._deviation is not None:
+                try:
+                    self._deviation.refresh_game(game.source_game_id)
+                    self._deviation_dirty.discard(game.source_game_id)
+                except Exception:
+                    logger.error("deviation finalize refresh failed:\n%s",
+                                 traceback.format_exc())
         except Exception:
             logger.error("clean metrics finalize failed:\n%s",
                          traceback.format_exc())
@@ -3519,8 +3768,10 @@ class PokerBetCollector:
         return None
 
     def _game_db_id(self, game: PokerBetGame) -> int:
-        rec = self.store.get_game(game.source_game_id)
-        return int(rec["id"]) if rec else 0
+        with PERFORMANCE.measure("sql.main.get_game") as timing:
+            rec = self.store.get_game(game.source_game_id)
+            timing.add("sql_calls")
+            return int(rec["id"]) if rec else 0
 
     @staticmethod
     def _infer_status(period_label: str) -> str:
