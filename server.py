@@ -60,6 +60,34 @@ RESULT_RECONCILE_INTERVAL_S = float(
 #: games attempted per reconciliation pass (bounded Playwright work).
 RESULT_RECONCILE_BATCH = int(
     os.environ.get("BLM_RESULT_RECONCILE_BATCH", "25"))
+#: LIVE ALERT STATS recompute cadence (operator stats tab).  The stats
+#: payload is a full-history scan (~10 s cold, dominated by the ~1.76M-row
+#: snapshots group-by behind fingerprint_c5.q3_pace_reference), so it runs
+#: on its OWN daemon thread and the /api/v4/stats route only ever reads the
+#: last completed payload — a poll can never block on the scan.  0 disables
+#: the worker (the route then reports 'unconfigured').  Read-only: it opens
+#: both databases mode=ro and touches no gate, threshold or model input.
+#:
+#: The cadence is CHEAP: each tick first runs a ~6 ms change-detector
+#: (settled count + last settled timestamp) and skips the scan entirely
+#: unless a new game has settled.  The cohort can only move when one does,
+#: so on a quiet box this costs ~6 ms/minute instead of ~10 s/minute.
+STATS_INTERVAL_S = float(os.environ.get("BLM_STATS_INTERVAL_S", "60"))
+#: Backstop age for the stats payload: rescan regardless at least this
+#: often, so a change-detector miss can never leave the tab on a frozen
+#: payload.  Applies even when no game has settled.
+STATS_MAX_AGE_S = float(os.environ.get("BLM_STATS_MAX_AGE_S", "900"))
+#: PACE REFERENCE worker cadence (empty-live-data fix, diagnostic
+#: 2026-09-25).  Precomputes the competition pace + Q3 pace references on
+#: its own thread so /api/v4/live never runs the minutes-long whole-table
+#: GROUP BY on the request path.  A cheap MAX(rowid) change-detector
+#: skips the scan unless a game/snapshot landed; a backstop age re-scans
+#: regardless.  Read-only; no model input is touched.  0 disables the
+#: worker (the API then computes inline — the pre-fix behavior).
+PACE_REF_INTERVAL_S = float(os.environ.get("BLM_PACE_REF_INTERVAL_S", "60"))
+#: Backstop age for the pace-reference payload (same rationale as
+#: STATS_MAX_AGE_S).
+PACE_REF_MAX_AGE_S = float(os.environ.get("BLM_PACE_REF_MAX_AGE_S", "900"))
 #: Use the swarm feed that BACKS the PokerBet results page as the
 #: authoritative result source (directive 2026-09-24).  The page renders a
 #: list of games and carries no game id at all, so a DOM read can only guess
@@ -135,7 +163,53 @@ def main() -> None:
 
     # ── BLM V4 PokerBet pipeline API (classification-aware) ──
     from blm_v4.api import router as v4_router
+    from blm_v4.api import configure_stats, configure_pace_reference_worker
     app.include_router(v4_router)
+
+    # ── PACE REFERENCE worker (empty-live-data fix, diagnostic
+    # 2026-09-25) ─────────────────────────────────────────────
+    # v4_live consumed the competition pace + Q3 pace references INLINE
+    # per request; the Q3 reference is a whole-table GROUP BY over the
+    # ~2M-row snapshots table (minutes on the production DB), so every
+    # cache-miss poll hung the sync worker pool and the dashboard froze
+    # on its placeholders.  Mirroring StatsWorker, this daemon thread
+    # precomputes BOTH references off the request path and publishes
+    # them to blm_v4.api; v4_live reads the last completed payload and
+    # never computes one.  Read-only over blm_pokerbet.db; no gate,
+    # threshold, alert or model input is touched — only WHERE the same
+    # numbers are computed moves.  0 disables it (the API wrappers then
+    # fall back to inline computation — the pre-fix behavior).
+    pace_ref_worker = None
+    if PACE_REF_INTERVAL_S > 0:
+        from blm_v4.api import _publish_pace_references
+        from blm_v4.live_analytics.pace_reference_worker import (
+            PaceReferenceWorker)
+        pace_ref_worker = PaceReferenceWorker(
+            root / "blm_pokerbet.db",
+            interval_s=PACE_REF_INTERVAL_S,
+            max_age_s=PACE_REF_MAX_AGE_S,
+            log=logger,
+            consumer=_publish_pace_references)
+        configure_pace_reference_worker(pace_ref_worker)
+        app.state._pace_ref_worker = pace_ref_worker
+
+    # ── LIVE ALERT STATS worker (operator stats tab) ─────────
+    # Recomputes the stats payload on its own daemon thread so the
+    # /api/v4/stats route never scans on the request path.  READ-ONLY over
+    # both databases; no gate, threshold, trigger or model input is touched
+    # (fingerprints stay RECORDED context, the alert window is REPORTED not
+    # enforced).  0 disables it.
+    stats_worker = None
+    if STATS_INTERVAL_S > 0:
+        from blm_v4.live_analytics.fingerprint_stats import StatsWorker
+        stats_worker = StatsWorker(
+            root / "blm_pokerbet.db",
+            root / "blm_metrics_clean.db",
+            interval_s=STATS_INTERVAL_S,
+            max_age_s=STATS_MAX_AGE_S,
+            log=logger)
+        configure_stats(stats_worker)
+        app.state._stats_worker = stats_worker
 
     # ── AUTO-BETTING execution layer (directive 2026-09-21) ──
     # DRY_RUN by default; the kill switch persists OFF; credentials
@@ -171,6 +245,23 @@ def main() -> None:
             return FileResponse(str(_dashboard_static / "index.html"))
     else:
         logger.warning("operator dashboard static dir missing: %s", _dashboard_static)
+
+    # ── AUTHENTICATION (BLM login + session layer) ───────────
+    # ADDITIVE: adds an ASGI guard + the /login page + /api/auth/*.
+    # The guard is the single gate for every non-public route (pages, API
+    # and the /ws handshake), so protection cannot be bypassed by calling a
+    # URL directly.  Sessions live in their own SQLite database
+    # (blm_auth.db); no table in any analytics/betting database is touched.
+    from blm_v4.auth import install as install_auth
+    _auth_state = install_auth(app, root, logger=logger)
+
+    @app.get("/healthz", include_in_schema=False)
+    async def healthz():
+        """Public liveness probe (no data, no internals)."""
+        return {"status": "ok",
+                "service": "blm",
+                "auth": bool(_auth_state.get("enabled")),
+                "users": _auth_state.get("users", 0)}
 
     # ── Wire deps into global state for API endpoints ────────
     from blm_v2.api.dependencies import wire_dependencies
@@ -313,6 +404,15 @@ def main() -> None:
         app.state._settle_worker = settle_worker
         logger.info("settle_worker_started", interval_s=SETTLE_INTERVAL_S)
 
+        # ── PACE REFERENCE worker (empty-live-data fix) ───────────────
+        # Started early: its FIRST scan is the expensive one (the Q3
+        # whole-table GROUP BY), and until it lands /live serves empty
+        # references (warmup).  Read-only; publishing is a dict swap.
+        if pace_ref_worker is not None:
+            pace_ref_worker.start()
+            logger.info("pace_ref_worker_started",
+                        interval_s=PACE_REF_INTERVAL_S)
+
         # ── RESULT RECONCILIATION WORKER (directive 2026-09-23) ──────
         # A disappearing live market is NOT evidence that a game has no
         # result: ended games without a verified final are stamped
@@ -350,16 +450,32 @@ def main() -> None:
         # consumes and can only ADD execution-ledger rows — the alert
         # logic is untouched.  Credentials are read from the environment
         # at runtime only; nothing is logged or stored.
+        _betting_payload_cache = {"at": 0.0, "games": []}
+        _betting_payload_lock = threading.Lock()
+
         def _live_games_for_betting() -> list:
             """The current /api/v4/live games list, computed in-process
             (the same authority the dashboard renders).  Failure-isolated:
             an error yields [] and the worker simply finds no candidates —
-            never a stale evaluation."""
+            never a stale evaluation. The bounded four-second shared cache
+            prevents the UI state endpoint from multiplying full live scans."""
+            now = time.monotonic()
+            with _betting_payload_lock:
+                if now - _betting_payload_cache["at"] < 4.0:
+                    return _betting_payload_cache["games"]
             from blm_v4.api import v4_live as _v4_live
             try:
-                return (_v4_live(classification=None).get("games") or [])
+                games = (_v4_live(classification=None).get("games") or [])
             except Exception:
-                return []
+                games = []
+            with _betting_payload_lock:
+                _betting_payload_cache.update(at=time.monotonic(), games=games)
+            return games
+
+        # Expose the same authoritative in-process game view to the
+        # read-only eligibility endpoint and the manual Total validator.
+        configure_betting(betting_store, betting_cfg,
+                          live_payload_fn=_live_games_for_betting)
 
         betting_worker = BettingWorker(
             betting_cfg, betting_store, _live_games_for_betting,
@@ -369,6 +485,16 @@ def main() -> None:
         logger.info("betting_worker_started",
                     dry_run=betting_cfg.dry_run,
                     enabled=betting_store.is_enabled())
+
+        # ── LIVE ALERT STATS worker ───────────────────────────────────
+        # Started LAST of the workers: it is read-only and its first scan is
+        # a ~10 s full-history read, so it must never delay the pipeline
+        # (collector, scheduler, settlement, reconciliation, betting) coming
+        # up.  It computes on its own thread and /api/v4/stats serves the
+        # last completed payload, reporting 'warming' until the first lands.
+        if stats_worker is not None:
+            stats_worker.start()
+            logger.info("stats_worker_started", interval_s=STATS_INTERVAL_S)
         logger.info("pipeline_started")
 
     @app.on_event("shutdown")
@@ -395,6 +521,12 @@ def main() -> None:
         betting_worker = getattr(app.state, "_betting_worker", None)
         if betting_worker is not None:
             betting_worker.stop(timeout=2)
+        stats_worker_obj = getattr(app.state, "_stats_worker", None)
+        if stats_worker_obj is not None:
+            stats_worker_obj.stop(timeout=2)
+        pace_ref_worker = getattr(app.state, "_pace_ref_worker", None)
+        if pace_ref_worker is not None:
+            pace_ref_worker.stop(timeout=2)
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
             sct.cancel()

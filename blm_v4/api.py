@@ -29,6 +29,7 @@ reachable only through the explicit audit sections.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -53,7 +54,52 @@ from blm_v4.live_analytics.under_alert import (
     under_alert_eligibility,
     under_alert_state,
 )
+
+#: C2 forensic observability (2026-09-23): one logger for the per-candidate
+#: C2 accept/reject diagnostics (DEBUG level — see the c2_evaluation call).
+_log = logging.getLogger("blm_v4.api")
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
+
+# ── PRECOMPUTED LEAGUE REFERENCES (empty-live-data diagnostic 2026-09-25) ──
+# v4_live consumed competition_pace_reference + q3_pace_reference INLINE per
+# request.  On the production database the Q3 reference's whole-table
+# GROUP BY over ~2M snapshot rows takes minutes, so every cache-miss poll
+# hung the sync worker pool and the dashboard froze on its initial
+# placeholders.  Mirroring the StatsWorker pattern, a background
+# PaceReferenceWorker (server.py, the composition root) precomputes BOTH
+# references off the request path and publishes them here; v4_live reads
+# the last completed payload and never computes one.  The wrappers below
+# remain the single seam tests stub (monkeypatch v4api._pace_reference /
+# v4api._q3_pace_reference); when NO worker is wired — a bare router in
+# tests, or BLM_PACE_REF_WORKER=0 — they fall back to the inline scan so
+# nothing that stubs them can break.
+_PACE_REF_WORKER = None
+_PACE_REF_LATEST = {"pace": None, "q3": None}
+_PACE_REF_LOCK = threading.Lock()
+
+
+def _publish_pace_references(pace: dict, q3: dict) -> None:
+    """PaceReferenceWorker's consumer: store the last completed pair."""
+    with _PACE_REF_LOCK:
+        _PACE_REF_LATEST["pace"] = pace
+        _PACE_REF_LATEST["q3"] = q3
+
+
+def configure_pace_reference_worker(worker) -> None:
+    """Wire the process's PaceReferenceWorker in (composition root)."""
+    global _PACE_REF_WORKER
+    _PACE_REF_WORKER = worker
+
+
+def pace_reference_status() -> dict:
+    """Diagnostics for the reference worker (status route / tests)."""
+    with _PACE_REF_LOCK:
+        latest = dict(_PACE_REF_LATEST)
+    snap = _PACE_REF_WORKER.snapshot() if _PACE_REF_WORKER else None
+    return {"worker_configured": _PACE_REF_WORKER is not None,
+            "worker": snap,
+            "pace_available": latest["pace"] is not None,
+            "q3_available": latest["q3"] is not None}
 from blm_v4.live_analytics.under_fingerprints import evaluate_fingerprints
 from blm_v4.live_analytics.under_outcome import (outcome_status,
                                                  score_at_observation,
@@ -1164,9 +1210,21 @@ def _pace_projector_for(source_game_id: str) -> Optional[dict]:
 
 def _pace_reference(conn: sqlite3.Connection) -> dict:
     """League-specific pace reference for the WHOLE payload, keyed by
-    canonical competition slug — failure-isolated ({} on any gap).  One
-    grouped scan, cached in-process by the engine below, so the per-poll
-    cost does not scale with the number of games or competitions."""
+    canonical competition slug — failure-isolated ({} on any gap).
+
+    Served from the background PaceReferenceWorker's last completed scan
+    when one is wired (the production path — the scan never runs on the
+    request path).  Falls back to the inline grouped scan ONLY when no
+    worker is configured (bare router in tests, BLM_PACE_REF_WORKER=0),
+    preserving the legacy per-poll cost contract those callers rely on."""
+    if _PACE_REF_WORKER is not None:
+        with _PACE_REF_LOCK:
+            payload = _PACE_REF_LATEST.get("pace")
+        if payload is not None:
+            return payload
+        return {}          # worker warming up: fail closed, {} disables
+                           # nothing structurally — the alert layer renders
+                           # UNAVAILABLE until the first scan lands
     try:
         from blm_v4.live_analytics.competition_pace import (
             competition_pace_reference,
@@ -1181,16 +1239,30 @@ _HCTX_LOCK = threading.Lock()
 _HCTX_TTL_S = 120.0
 
 
-def _q3_pace_reference(conn: sqlite3.Connection) -> dict:
+def _q3_pace_reference(conn: Optional[sqlite3.Connection] = None) -> dict:
     """Per-competition average Q3 pace for the WHOLE payload, keyed by
-    canonical competition slug — failure-isolated ({} on any gap).  One
-    grouped scan, cached in-process by the engine below, so the per-poll
-    cost does not scale with the number of games or competitions.  The
-    fingerprint_c5 module holds its own cache; this wrapper exists so
-    tests can stub the reference the way ``_pace_reference`` is stubbed.
-    """
+    canonical competition slug — failure-isolated ({} on any gap).
+
+    Served from the background PaceReferenceWorker's last completed scan
+    when one is wired (the production path).  Falls back to the inline
+    grouped scan ONLY when no worker is configured (bare router in tests,
+    BLM_PACE_REF_WORKER=0).  ``conn`` is optional: the wrapper delegates
+    to the fingerprint_c5 engine (which holds its own per-database cache)
+    and opens its own read-only connection when none is passed."""
+    if _PACE_REF_WORKER is not None:
+        with _PACE_REF_LOCK:
+            payload = _PACE_REF_LATEST.get("q3")
+        if payload is not None:
+            return payload
+        return {}          # worker warming up: fail closed (see above)
     try:
-        return q3_pace_reference(conn)
+        if conn is not None:
+            return q3_pace_reference(conn)
+        own = _connect()
+        try:
+            return q3_pace_reference(own)
+        finally:
+            own.close()
     except Exception:
         return {}
 
@@ -1572,19 +1644,54 @@ def _canonical_display(game: dict) -> None:
 
 
 def _db_stats(conn: sqlite3.Connection, now: datetime) -> dict:
+    # EMPTY-DATA FIX (diagnostic 2026-09-25): /api/v4/status ran exact
+    # COUNT(*)/GROUP BY aggregates over the ~2M-row snapshots table on
+    # EVERY poll — on the production database those scans alone took
+    # minutes and (with the reference scans) starved the sync worker
+    # pool, so /status hung exactly like /live.  Snapshot counts are
+    # presentation metadata, not model input, so they are served as
+    # MAX(rowid) estimates (O(1) on SQLite — rowid is the b-tree key).
+    # The games table is small (24k rows) and its exact aggregates stay.
     per_class: dict[str, dict] = {}
     for r in conn.execute(
         "SELECT classification, COUNT(*) AS c FROM games GROUP BY classification"
     ):
         per_class[r["classification"]] = {"games": r["c"], "snapshots": 0}
-    for r in conn.execute(
-        "SELECT classification, COUNT(*) AS c FROM snapshots GROUP BY classification"
-    ):
-        per_class.setdefault(r["classification"], {"games": 0, "snapshots": 0})
-        per_class[r["classification"]]["snapshots"] = r["c"]
-    last = conn.execute(
-        "SELECT MAX(captured_at) AS m FROM snapshots"
-    ).fetchone()["m"]
+    snap_total = conn.execute(
+        "SELECT COALESCE(MAX(rowid), 0) AS c FROM snapshots"
+    ).fetchone()["c"]
+    # Last-snapshot freshness — per-classification INDEX SEEK (measured
+    # 0.2 ms per class on the production DB).
+    # HISTORY (two defects this line replaced):
+    #   * pre-2026-09-25: unbounded MAX(captured_at) scanned the whole
+    #     ~2M-row snapshots table on every poll (>60 s).
+    #   * 2026-09-25 "fix": ORDER BY captured_at DESC LIMIT 1 with no
+    #     WHERE — captured_at is the SECOND column of the only usable
+    #     index (classification, captured_at), so this scanned the same
+    #     2M index entries and /status hung 87 s per poll while /live
+    #     (cached) answered instantly.  That hang is what made the
+    #     dashboard report COLLECTOR OFFLINE during a fully healthy
+    #     collection run (2026-09-26 01:0xZ incident).
+    # An equality on the LEADING index column (classification) turns the
+    # same ORDER BY into an O(log n) backward index seek.  Classification
+    # values come from the tiny games GROUP BY above, so no class is ever
+    # missed; the overall last_snapshot_at is the max over classes.
+    last = None
+    for cls in per_class:
+        row = conn.execute(
+            "SELECT captured_at FROM snapshots "
+            "WHERE classification = ? "
+            "ORDER BY captured_at DESC LIMIT 1",
+            (cls,),
+        ).fetchone()
+        if row and row[0] and (last is None or row[0] > last):
+            last = row[0]
+    # Per-class SNAPSHOT breakdown intentionally NOT scanned here: it is
+    # presentation metadata (no model or alert input reads it), and an
+    # exact per-class GROUP BY is another whole-table scan on the request
+    # path.  Volume monitoring uses total_snapshots below; exact per-class
+    # counts remain available from the stats worker's per_classification
+    # payload (fingerprint_stats.compute_stats), which scans off-path.
     live = conn.execute("""
         SELECT COUNT(*) AS c FROM games g
         WHERE g.status = 'live'
@@ -1594,7 +1701,7 @@ def _db_stats(conn: sqlite3.Connection, now: datetime) -> dict:
     """, (now.replace(microsecond=0).isoformat(),)).fetchone()["c"]
     return {
         "total_games": conn.execute("SELECT COUNT(*) AS c FROM games").fetchone()["c"],
-        "total_snapshots": conn.execute("SELECT COUNT(*) AS c FROM snapshots").fetchone()["c"],
+        "total_snapshots": snap_total,   # MAX(rowid) estimate — see note above
         "reconciliations": conn.execute(
             "SELECT COUNT(*) AS c FROM reconciliation").fetchone()["c"],
         "reconciled_ok": conn.execute(
@@ -1613,6 +1720,17 @@ def _db_stats(conn: sqlite3.Connection, now: datetime) -> dict:
 
 router = APIRouter(prefix="/api/v4", tags=["blm-v4"])
 
+# Fresh-state cache: one shared entry for the /status game_state_freshness
+# block (see _freshest_game_state).  The bucketed key re-derives the value
+# at most once per _FRESH_STATE_CACHE_S across ALL polls.
+_FRESH_STATE_LOCK = threading.Lock()
+_FRESH_STATE_CACHE: dict = {"key": None, "value": None}
+_FRESH_STATE_CACHE_S = 20
+#: Any accepted game state older than this is hours stale by definition —
+#: the state-age indicator renders minutes.  Scanning only this window
+#: keeps the freshest-state lookup off the months-deep history.
+_STATE_LOOKBACK_S = 24 * 3600
+
 # Historical-context routes (league/state-relative UNDER context) —
 # registered on the SAME router so the live surface stays unified.
 try:
@@ -1622,6 +1740,12 @@ except Exception:  # pragma: no cover - context layer is optional at boot
     pass
 
 
+# Pathological-DB guard for the freshness probes below: the LIMIT can
+# only bind when the newest million rows are ALL incomplete, which
+# append-only capture never produces (rows are ~99% complete).
+_FRESH_STATE_SCAN_CAP = 1_000_000
+
+
 def _freshest_game_state(conn: sqlite3.Connection,
                          now: datetime) -> dict:
     """Freshest COMPLETE game state across the live collection (score AND
@@ -1629,18 +1753,39 @@ def _freshest_game_state(conn: sqlite3.Connection,
     WS market_observations feed.  This is the number the dashboard's
     STATE-AGE indicator renders — distinct from response generation time
     and from collector heartbeat (audit 2026-09-16 §8)."""
+    # FRESHNESS-SEEK FIX (2026-09-26 incident): BOTH probes below are
+    # rowid-desc first-match walks — 0.1 ms measured on the production DB.
+    # History: the original unbounded MAX(captured_at) over the
+    # completeness predicates read months of rows per poll (minutes); the
+    # 2026-09-25 fix restricted to a 24 h window and cached the result,
+    # but a windowed MAX is STILL a full scan — no index leads with
+    # captured_at for either predicate (idx_snapshots_class_captured
+    # leads with classification; idx_market_obs_type leads with
+    # source_game_id), so the WS probe alone measured >240 s standalone
+    # and /status kept hanging on every cache-missing poll.
+    # Capture is append-only (rows written newest-last), so the newest
+    # COMPLETE observation is found by walking the rowid b-tree BACKWARD
+    # and taking the first row that satisfies the completeness
+    # predicates.  The 24 h window is intentionally dropped: a walk that
+    # returns an old timestamp is the honest truth (collector down → big
+    # state age → dashboard shows stale) where a windowed None would hide
+    # the outage.  None ⇒ no complete state at all.
     try:
         dom = conn.execute(
-            "SELECT MAX(captured_at) AS m FROM snapshots "
+            "SELECT captured_at FROM snapshots "
             "WHERE home_score IS NOT NULL AND away_score IS NOT NULL "
-            "AND quarter IS NOT NULL AND captured_at >= ?",
-            (CLEAN_DATA_EPOCH,)).fetchone()["m"]
+            "AND quarter IS NOT NULL "
+            "ORDER BY rowid DESC LIMIT ?",
+            (_FRESH_STATE_SCAN_CAP,)).fetchone()
+        dom = dom[0] if dom else None
         ws = conn.execute(
-            "SELECT MAX(captured_at) AS m FROM market_observations "
+            "SELECT captured_at FROM market_observations "
             "WHERE market_type='MatchTotal' AND period_label IS NOT NULL "
             "AND clock IS NOT NULL AND home_score IS NOT NULL "
-            "AND away_score IS NOT NULL AND captured_at >= ?",
-            (CLEAN_DATA_EPOCH,)).fetchone()["m"]
+            "AND away_score IS NOT NULL "
+            "ORDER BY rowid DESC LIMIT ?",
+            (_FRESH_STATE_SCAN_CAP,)).fetchone()
+        ws = ws[0] if ws else None
         candidates = [("dom", dom)] + ([("ws", ws)] if ws else [])
         best_source, best_ts = max(
             ((s, t) for s, t in candidates if t),
@@ -1884,11 +2029,19 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 out.append(_analyze_game(g, rows, now, conn,
                                          quality=qm.get(g["source_game_id"])))
         # League-specific pace reference (mean settled final total /
-        # regulation minutes per canonical competition).  Served so the
-        # browser compares REQUIRED pace against the game's OWN league
-        # without carrying a competition table of its own.  Failure
-        # isolated: an unreadable population yields {} and the alert
-        # layer then produces nothing rather than borrowing a number.
+        # regulation minutes per canonical competition) and the per-
+        # competition average Q3 pace.  Served so the browser compares
+        # REQUIRED pace against the game's OWN league without carrying a
+        # competition table of its own.  EMPTY-DATA FIX (diagnostic
+        # 2026-09-25): both are read from the background
+        # PaceReferenceWorker's last completed scan — NEVER computed on
+        # this request path (the Q3 scan is a minutes-long whole-table
+        # GROUP BY on the production DB and hung every poll behind it).
+        # Until the first scan lands the references are {} (warmup): the
+        # alert layer's documented fail-closed behavior — no reference,
+        # no alert — self-heals within one scan.  Failure isolation is
+        # unchanged: an unreadable population yields {} and the alert
+        # layer produces nothing rather than borrowing a number.
         pace_reference = _pace_reference(conn)
         q3_reference = _q3_pace_reference(conn)
     finally:
@@ -1992,6 +2145,23 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 (q3_reference.get(g.get("competition_slug")) or {})
                 .get("avg_q3_pace"),
                 proj.get("recent_pace_3m"), proj.get("actual_pts_per_min"))
+            # ── C2 forensic observability (2026-09-23): every candidate's
+            # accept/reject reason is IN THE PAYLOAD (c2_reason /
+            # c2_operand_source beside recent3_minus_act) and loggable —
+            # at DEBUG because this endpoint is polled every few seconds
+            # for every game (an INFO line here would flood the journal
+            # the way the V1 collector's per-tick logging once did).
+            # Enable with LOGGER.setLevel(DEBUG) on "blm_v4.api".
+            _fp = g["under_alert_fingerprint"]
+            _log.debug(
+                "c2_evaluation game=%s c2=%s offset=%s operand=%s "
+                "recent3=%s actual=%s :: %s",
+                g.get("game_id"), _fp.get("fingerprint_c2"),
+                _fp.get("recent3_minus_act"), _fp.get("c2_operand_source"),
+                _fp.get("recent3_pace"),
+                (proj.get("actual_pts_per_min") if _fp.get("recent3_pace")
+                 is not None else None),
+                _fp.get("c2_reason"))
             # ── Q3 BREAK checkpoint (directive 2026-09-18) — ADDITIVE, a
             # sibling of the production alert above, never a replacement.
             # The Q3/Q4 break sits at exactly 75.0% progress (3 of 4
@@ -2879,3 +3049,100 @@ def v4_game_market_lines(game_id: str) -> dict:
     return {"game_id": game_id, "section": "market_line_history",
             "data_epoch": CLEAN_DATA_EPOCH, "total": len(out),
             "observations": out}
+
+
+# ── LIVE ALERT STATS (operator stats tab) ──────────────────────────────
+# The fired-alert cohort, its fingerprints, the LEAGUE STANDINGS and the
+# alert-timing window.  COMPUTATION-ONLY ROUTE: it never scans on the
+# request path.  ``compute_stats`` is a full-history read (~10 s cold,
+# dominated by the ~1.76 M-row snapshots group-by behind
+# fingerprint_c5.q3_pace_reference), so a StatsWorker recomputes it on its
+# own thread and this route only ever reads the last completed payload.
+# A poll therefore returns in microseconds however slow the scan is, and
+# the numbers move as new games settle — which is the point of the tab.
+#
+# READ-ONLY: no gate, threshold, trigger or model input is touched or
+# exposed for change.  Fingerprints remain RECORDED context; the window is
+# REPORTED, not enforced.
+_STATS_WORKER = None
+
+
+def configure_stats(worker) -> None:
+    """Wire the process's StatsWorker in (called from the composition root)."""
+    global _STATS_WORKER
+    _STATS_WORKER = worker
+
+
+@router.get("/stats")
+def v4_stats() -> dict:
+    """The live alert-stats payload: cohort, fingerprints, ladder, league
+    standings, timing window.  Served from the StatsWorker's last completed
+    scan — this route performs NO database work of its own.
+
+    ``status`` is ``ok`` with a payload, ``warming`` on the first scan, or
+    ``unconfigured`` when no worker was wired (e.g. a bare router import in
+    tests) — in which case an on-demand synchronous compute is offered via
+    ``?compute=1`` for CLI/debug use, bounded by the module's own TTL cache.
+    """
+    if _STATS_WORKER is None:
+        return {
+            "status": "unconfigured",
+            "message": ("no StatsWorker wired — the composition root starts "
+                        "one at boot; add ?compute=1 for a one-off blocking "
+                        "compute (may take ~10s)"),
+        }
+    return _STATS_WORKER.latest()
+
+
+@router.get("/stats/compute")
+def v4_stats_compute() -> dict:
+    """One-off SYNCHRONOUS compute (CLI/debug).  Bounded by the module's TTL
+    cache, so repeated calls within the TTL are free.  Not used by the tab —
+    the tab reads /stats, which never blocks."""
+    from blm_v4.live_analytics.fingerprint_stats import get_stats
+    try:
+        stats = get_stats(_db_path(),
+                          _db_path().parent / "blm_metrics_clean.db")
+    except Exception as e:                     # never 500 the dashboard
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+    return {"status": "ok", **stats}
+
+
+# ── RESULT INTEGRITY (directive 2026-09-23 §11) ────────────────────────
+# The zero-'NO FINAL' policy, made visible: one read-only report of
+# every ended game's result state.  Missing finals are NEVER silent —
+# each unresolved game is enumerated with its reason and last audit.
+@router.get("/results/integrity")
+def v4_result_integrity(
+        limit: int = Query(100, le=500)) -> dict:
+    try:
+        from blm_v4.result_reconciler import ResultReconciler
+        reconciler = ResultReconciler(_db_path())
+        report = reconciler.audit_report()
+        pending = reconciler.audit_missing(limit=limit)
+        conflicts_list = reconciler.audit_conflicts(limit=limit)
+    except Exception as e:                     # never 500 the dashboard
+        return {"section": "result_integrity", "error": str(e),
+                "total_ended_games": None, "verified_results": None,
+                "missing_results": None, "pending": []}
+    return {"section": "result_integrity",
+            "data_epoch": CLEAN_DATA_EPOCH,
+            "total_ended_games": report.get("expected_to_have_results"),
+            "verified_results": report.get("verified_results"),
+            "pending_results": report.get("missing_results"),
+            "reconciliation_required": (
+                report.get("status_breakdown", {}).get("UNKNOWN", 0)
+                + report.get("status_breakdown", {}).get("INVALID", 0)),
+            "conflicts": report.get("conflicts"),
+            "conflict_games": conflicts_list,
+            "missing_results": report.get("missing_results"),
+            "stale_audits": None,
+            "last_audit_timestamp": report.get("generated_at"),
+            "result_coverage_pct": report.get("result_coverage_pct"),
+            "status_breakdown": report.get("status_breakdown"),
+            "recovered_from_results_page": report.get(
+                "recovered_from_results_page"),
+            "pending": pending,
+            "target": "missing final results = 0; unresolved ended games = 0",
+            "policy": "a missing result is an outstanding reconciliation "
+                      "job, never a completed 'NO FINAL' outcome"}
