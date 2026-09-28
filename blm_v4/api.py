@@ -29,7 +29,6 @@ reachable only through the explicit audit sections.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import sqlite3
 import threading
@@ -55,9 +54,6 @@ from blm_v4.live_analytics.under_alert import (
     under_alert_state,
 )
 
-#: C2 forensic observability (2026-09-23): one logger for the per-candidate
-#: C2 accept/reject diagnostics (DEBUG level — see the c2_evaluation call).
-_log = logging.getLogger("blm_v4.api")
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
 
 # ── PRECOMPUTED LEAGUE REFERENCES (empty-live-data diagnostic 2026-09-25) ──
@@ -2127,14 +2123,14 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 entry.get("games"), eligible=eligibility["eligible"],
                 **trigger)
             # ── HISTORICAL UNDER FINGERPRINT LAYER (authorization
-            # 2026-09-21) — the approved set C1..C6 + R2 evaluated as
+            # 2026-09-21) — the approved set C1, C3, C5 + R2 evaluated as
             # CONTEXT on every UNDER evaluation, NEVER a second alert
             # source and never a loosening of the condition above (the
             # active verdict was already decided verbatim by
             # under_alert_state).  Evaluated at the SAME checkpoint with
             # the SAME inputs the alert consumed (projector required
-            # pace, competition_pace league average, trailing recent3
-            # window, the game's Q3 pace vs its competition's settled Q3
+            # pace, competition_pace league average, and the game's Q3 pace
+            # vs its competition's settled Q3
             # archive) — all available at the trigger instant.  Each
             # fingerprint is TRUE / FALSE / UNAVAILABLE; missing data is
             # reported, never silently treated as a pass.
@@ -2143,25 +2139,7 @@ def v4_live(classification: Optional[str] = Query(None)) -> dict:
                 proj.get("required_pts_per_min"), entry.get("avg_pace"),
                 _q3_game_ppm(g, rows_asc),
                 (q3_reference.get(g.get("competition_slug")) or {})
-                .get("avg_q3_pace"),
-                proj.get("recent_pace_3m"), proj.get("actual_pts_per_min"))
-            # ── C2 forensic observability (2026-09-23): every candidate's
-            # accept/reject reason is IN THE PAYLOAD (c2_reason /
-            # c2_operand_source beside recent3_minus_act) and loggable —
-            # at DEBUG because this endpoint is polled every few seconds
-            # for every game (an INFO line here would flood the journal
-            # the way the V1 collector's per-tick logging once did).
-            # Enable with LOGGER.setLevel(DEBUG) on "blm_v4.api".
-            _fp = g["under_alert_fingerprint"]
-            _log.debug(
-                "c2_evaluation game=%s c2=%s offset=%s operand=%s "
-                "recent3=%s actual=%s :: %s",
-                g.get("game_id"), _fp.get("fingerprint_c2"),
-                _fp.get("recent3_minus_act"), _fp.get("c2_operand_source"),
-                _fp.get("recent3_pace"),
-                (proj.get("actual_pts_per_min") if _fp.get("recent3_pace")
-                 is not None else None),
-                _fp.get("c2_reason"))
+                .get("avg_q3_pace"))
             # ── Q3 BREAK checkpoint (directive 2026-09-18) — ADDITIVE, a
             # sibling of the production alert above, never a replacement.
             # The Q3/Q4 break sits at exactly 75.0% progress (3 of 4
