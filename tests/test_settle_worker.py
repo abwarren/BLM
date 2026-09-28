@@ -10,7 +10,7 @@ populated/corrected when a game reaches final — without waiting for the
      after the initial observation
   4. a valid UNDER/OVER/PUSH reaches the frontend with the correct colour
   5. NO LINE remains NO LINE and is never coloured
-  6. NO FINAL remains NO FINAL and is never coloured
+  6. RESULT PENDING remains RESULT PENDING and is never coloured
   7. PENDING remains PENDING and is never coloured
   8. the worker is IDEMPOTENT — no duplicates, no corruption
   9. the 4-hour full-history sweep (scorecard run + its server loop)
@@ -405,7 +405,7 @@ def test_no_line_remains_no_line_and_never_coloured(tmp_path):
 @node
 def test_no_final_remains_no_final_and_never_coloured(tmp_path):
     """Requirement 6: record resolved, backend proves neither final nor
-    line -> NO FINAL, no verdict colour."""
+    line -> RESULT PENDING, no verdict colour."""
     r = _run(_dash_js(), tmp_path, """
       seed([rec({ outcome: { status: null, trigger_total: null,
         final_total: null } })]);
@@ -413,7 +413,7 @@ def test_no_final_remains_no_final_and_never_coloured(tmp_path):
       OUT.cls = m.alertOutcomeClass(m.UNDER_ALERTS.history[0].outcome);
       OUT.row = rowClassOf(OUT.html);
     """)
-    assert "NO FINAL" in r["html"], r
+    assert "RESULT PENDING" in r["html"], r
     assert colourClasses(r["row"]) == [], r
     assert r["cls"] is None
     assert "al-under" not in r["html"] and "al-over" not in r["html"]

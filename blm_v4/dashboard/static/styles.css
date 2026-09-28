@@ -972,8 +972,46 @@ td.ex-st-submitted { color: #3b82f6; }
    right-aligned because almost every column is numeric */
 .st-table td.txt { text-align: left; white-space: normal; color: var(--text); }
 
+/* ── ACTIVE ALERT CARD STATE (directive 2026-09-28) ─────────────
+   Yellow border = an ACTIVE BLM alert on this canonical game — never a
+   placed bet.  Only ACTIVE_ALERT gets it; RESULTED removes it. */
+.card.card-alert-active {
+  border: 2px solid #ffd400;
+  box-shadow: 0 0 8px rgba(255, 212, 0, 0.35);
+}
+.card.card-alert-resulted { border-color: var(--border2); }
+.card-alert-slot:empty { display: none; }
+.card-alert-banner {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 8px; margin: 2px 0;
+  border: 1px solid #ffd400; border-radius: 4px;
+  background: rgba(255, 212, 0, 0.08);
+}
+.card-alert-badge {
+  font-weight: 700; color: #ffd400; white-space: nowrap;
+}
+.card-alert-info { font-size: 12px; color: var(--text); }
+.card-place-bet {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  background: #ffd400; color: #1a1a00;
+  border: 1px solid #ffd400; border-radius: 3px;
+  padding: 3px 10px; cursor: pointer;
+  transition: filter 0.15s;
+}
+.card-place-bet:hover { filter: brightness(1.1); }
+.card-place-bet:disabled { opacity: 0.55; cursor: wait; }
+
 /* ── RESULTED ALERTS section ──────────────────────────────────── */
+/* Collapsing is presentation-only: the section always renders and the
+   data keeps updating while hidden.  When EXPANDED the body is
+   independently scrollable so a 50+-row history never pushes the rest
+   of the dashboard down (directive 2026-09-28). */
 .resulted-details { }
+.resulted-details .alerts-body {
+  max-height: 60vh;
+  overflow-y: auto;
+}
 .resulted-details summary.alerts-head {
   cursor: default;
   display: flex; align-items: center; gap: 12px;
@@ -989,3 +1027,104 @@ td.ex-st-submitted { color: #3b82f6; }
 .resulted-expand-btn:hover { background: var(--border2); border-color: var(--cyan); }
 .resulted-expand-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .resulted-toggle { display: inline-flex; align-items: center; }
+
+/* ═══════════════════════════════════════════════════════════════
+   FRONTEND REDESIGN — LIVE ALERTS / RESULTS / CARD HIERARCHY
+   (directive 2026-09-28).  Presentation only: no data, no contract.
+   The existing .al-row / .al-under / .al-over rules above ARE the
+   settled-result colour contract and are deliberately UNTOUCHED —
+   every rule here is either a NEW class or scoped under the live
+   alerts panel's own ul.al-list wrapper.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── LIVE ALERTS — one compact, clickable row per active alert ─── */
+/* each alert row is a STACKED card (headline → ident → game state → fact
+   rail → result → disclosure).  The legacy `.al-row` rule above sets
+   display:flex for the key/value summary rows; scoped here to the alert
+   panel bodies so an alert row is never laid out as side-by-side columns. */
+.alerts-body .al-row { display: block; }
+.alerts ul.al-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.alerts ul.al-list li.al-row { cursor: pointer; transition: border-color .15s, transform .15s; }
+.alerts ul.al-list li.al-row:hover { border-color: var(--cyan); transform: translateY(-1px); }
+.alerts ul.al-list li.al-row:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.alerts ul.al-list li.al-row .alc-more { cursor: auto; }
+
+/* the game's CURRENT state — score / period / clock, from the payload */
+.alc-meta {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin: 2px 0 3px; font-family: var(--mono); font-size: 12.5px;
+  color: var(--muted);
+}
+.alc-meta .alc-score { color: #eaf2ff; font-weight: 800; letter-spacing: .04em; }
+.alc-meta .alc-clock { color: var(--cyan); }
+
+/* the compact fact rail: the alert's own sealed numbers on one line */
+.alc-facts {
+  display: flex; flex-wrap: wrap; gap: 4px 16px;
+  margin: 3px 0; font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+}
+.alc-fact .al-num, .alc-fact .al-trigger-line, .alc-fact .al-neg { font-weight: 800; margin-left: 3px; }
+.alc-fact .al-num { color: var(--text); }
+.alc-fact .al-neg { color: var(--red); }
+.alc-facts .al-trigger-line { color: var(--amber); }
+
+/* DETAILS ▸ — the row's own disclosure; the deeper alert detail stays here */
+.alc-more { margin-top: 5px; border-top: 1px dashed var(--border); padding-top: 4px; }
+.alc-more > summary {
+  cursor: pointer; font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  color: var(--dim); user-select: none;
+}
+.alc-more > summary:hover, .alc-more[open] > summary { color: var(--cyan); }
+.alc-more .al-line { margin-top: 4px; }
+
+/* ── RESULTS — verdict first: colour + glyph + word, then the line ─ */
+.alc-result-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+.alc-verdict {
+  font-family: var(--mono); font-size: 12px; font-weight: 800;
+  letter-spacing: .08em; color: var(--muted);
+}
+.al-row.al-under .alc-verdict { color: #22c55e; }
+.al-row.al-over .alc-verdict { color: #ef4444; }
+.al-row.al-push .alc-verdict { color: var(--muted, #94a3b8); }
+.al-row.al-unknown .alc-verdict { color: #f59e0b; }
+.alc-result-head .al-teams { font-size: 12px; color: var(--muted); }
+
+/* ── ALERT → GAME REVEAL — the clicked card is emphasised, briefly ─ */
+.card.card-focus { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+/* ── CARD HIERARCHY — the betting controls read as the operable row.
+      Visual emphasis on ALREADY-RENDERED elements only; the manual
+      wager form and the BLM signal row keep their exact structure. */
+.card .manual-bet {
+  border-top: 1px solid var(--border2);
+  background: rgba(34, 211, 238, .04);
+  padding: 8px 10px;
+}
+.card .manual-bet button { padding: 6px 12px; }
+.card .blm-signal-row { border-left: 2px solid var(--border2); padding-left: 6px; }
+
+/* ── RESPONSIVE — alert rows and betting controls stay usable on
+      tablet and phone; nothing overflows horizontally. */
+/* the header filter rail wraps instead of forcing page-wide horizontal
+   scroll — its content is wider than any viewport (pre-existing defect,
+   fixed here so the responsive layout is actually sound) */
+.filters { flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .alerts { margin: 14px 10px 0; }
+  .alerts-head { flex-wrap: wrap; }
+  .alerts-body { padding: 10px; }
+  .alc-facts { gap: 3px 12px; }
+  .manual-bet { flex-wrap: wrap; }
+  .grid { padding: 4px 10px 40px; }
+}
+@media (max-width: 520px) {
+  .alerts-sub { display: none; }
+  .alc-meta { gap: 8px; font-size: 12px; }
+  .manual-bet input { width: 68px; }
+}

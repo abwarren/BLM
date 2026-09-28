@@ -23,6 +23,9 @@
       <span class="pill muted" id="gamesMonitoredPill">0 games</span>
       <span class="pill muted" id="abGlobalPill" title="Auto Betting global status">AB --</span>
       <span class="pill muted" id="abModePillHeader" title="Betting mode (DRY_RUN or LIVE)">MODE --</span>
+      <span class="pill muted" id="blmUserPill" title="Signed in">--</span>
+      <button class="audio-toggle" id="signOutBtn" type="button"
+              title="Sign out of BLM">SIGN OUT</button>
       <button class="audio-toggle" id="audioToggle" type="button"
               data-audio="off" aria-pressed="false"
               title="Alert audio off — click to enable">AUDIO OFF</button>
@@ -70,13 +73,52 @@
     <div class="sum-card"><div class="sum-label">LAST SNAPSHOT</div><div class="sum-value" id="sumAge">–</div><div class="sum-sub" id="sumAgeSub">–</div></div>
   </section>
 
-  <!-- ═══════════ LIVE VIEW — CLEAN POST-EPOCH GAMES ONLY ═══════════ -->
-  <section class="live-head">
-    <span class="live-title">LIVE GAMES</span>
-    <span class="muted" id="liveHeadSub">clean post-epoch observations only · default view</span>
+  <!-- ═══════════ 🔴 LIVE ALERTS — what is firing NOW ═══════════
+       Compact rows ONLY — the full game card stays in the grid below.
+       Clicking a row reveals that game's card (no navigation, no reload). -->
+  <section class="alerts sec-alerts" id="activeAlertsSection">
+    <div class="alerts-head">
+      <span class="alerts-title">🔴 LIVE ALERTS</span>
+      <span class="muted" id="activeAlertsCount"></span>
+      <span class="muted alerts-sub">click a row to jump to its game card</span>
+    </div>
+    <div class="alerts-body" id="activeAlerts">
+      <div class="alerts-empty">No active UNDER alerts</div>
+    </div>
   </section>
 
-  <!-- ═══════════ GAME CARDS GRID ═══════════ -->
+  <!-- ═══════════ 🟢 RESULTS — what happened to previous alerts ═══════════
+       Every triggered alert, kept and colour-coded by its settled verdict.
+       Collapsed by default; the header count keeps counting while collapsed. -->
+  <section class="alerts sec-results" id="alertHistorySection">
+    <details class="resulted-details" id="resultedDetails">
+    <summary class="alerts-head" id="resultedHead">
+      <span class="alerts-title">🟢 RESULTS</span>
+      <span class="muted" id="alertHistoryCount"></span>
+      <span class="muted alerts-sub">every triggered alert ·
+        <span class="lg-under">UNDER</span> /
+        <span class="lg-over">OVER</span> /
+        <span class="lg-push">PUSH</span> against its immutable triggered line</span>
+      <span class="resulted-toggle" id="resultedToggle">
+        <button class="resulted-expand-btn" id="resultedExpandBtn" type="button" title="Expand results panel">▼</button>
+      </span>
+    </summary>
+    <div class="alerts-body" id="alertHistory">
+      <div class="alerts-empty">No alerts triggered</div>
+    </div>
+    </details>
+  </section>
+
+
+  <!-- ═══════════ 🎯 LIVE GAMES — the operational betting surface ═══════════
+       The existing game cards ARE the betting grid; nothing here replaces
+       them.  A card with an active alert carries a 2px yellow border. -->
+  <section class="live-head">
+    <span class="live-title">LIVE GAMES</span>
+    <span class="muted" id="liveHeadSub">🟨 = this game has an active alert · clean post-epoch observations only · default view</span>
+  </section>
+
+  <!-- ═══════════ GAME CARDS GRID — the betting surface ═══════════ -->
   <main class="grid" id="grid">
     <div class="empty" id="empty">Waiting for live data…</div>
   </main>
@@ -144,37 +186,6 @@
       <ul class="ab-exec-list" id="abHistoryList"><li class="alerts-empty">Search execution history</li></ul>
       <ul class="ab-audit-list" id="abAuditList"></ul>
     </div>
-  </section>
-
-  <!-- ═══════════ ACTIVE UNDER ALERTS — what needs attention NOW ═══════════ -->
-  <section class="alerts" id="activeAlertsSection">
-    <div class="alerts-head">
-      <span class="alerts-title">ACTIVE UNDER ALERTS</span>
-      <span class="muted" id="activeAlertsCount"></span>
-    </div>
-    <div class="alerts-body" id="activeAlerts">
-      <div class="alerts-empty">No active UNDER alerts</div>
-    </div>
-  </section>
-
-  <!-- ═══════════ RESULTED ALERTS — historical review of every trigger ═══════════ -->
-  <section class="alerts" id="alertHistorySection">
-    <details class="resulted-details" id="resultedDetails">
-    <summary class="alerts-head" id="resultedHead">
-      <span class="alerts-title">RESULTED ALERTS</span>
-      <span class="muted" id="alertHistoryCount"></span>
-      <span class="muted alerts-sub">every triggered alert ·
-        <span class="lg-under">UNDER</span> /
-        <span class="lg-over">OVER</span> /
-        <span class="lg-push">PUSH</span> against its immutable triggered line</span>
-      <span class="resulted-toggle" id="resultedToggle">
-        <button class="resulted-expand-btn" id="resultedExpandBtn" type="button" title="Expand resulted alerts panel">▾</button>
-      </span>
-    </summary>
-    <div class="alerts-body" id="alertHistory">
-      <div class="alerts-empty">No alerts triggered</div>
-    </div>
-    </details>
   </section>
 
   <!-- ═══════════ EXECUTION / AUDIT TRACE — ALERT → GAME → SIGNAL → EXECUTION → RESULT.
@@ -335,3 +346,4 @@
   <script src="/static/explorer.js"></script>
 </body>
 </html>
+
