@@ -281,7 +281,7 @@ def test_zero_uncoloured_resulted_rows_across_every_status(tmp_path):
 @node
 def test_genuinely_pending_rows_render_pending_styling_only(tmp_path):
     """A record with no settled outcome renders the explicit no-verdict word
-    — PENDING while it may still settle (unresolved), NO FINAL once the
+    — PENDING while it may still settle (unresolved), RESULT PENDING once the
     record has resolved and the backend proves neither final nor line —
     with no verdict colour class and no fake verdict word."""
     r = _run(_js(), tmp_path, """
@@ -298,13 +298,13 @@ def test_genuinely_pending_rows_render_pending_styling_only(tmp_path):
         assert colourClasses(rowClassOf(html)) == [], html
         assert "al-under" not in html and "al-over" not in html, html
     # the fixture records are RESOLVED (this is the resulted panel), so the
-    # no-verdict record shows the explicit NO FINAL state, styled as pending
+    # no-verdict record shows the explicit RESULT PENDING state, styled as pending
     # — while a literal "pending" STATUS is the pending family and words
     # PENDING.  Neither ever carries a coloured verdict.
     for word in (r["noneWord"], r["pendingWord"]):
         assert "al-pending" in word, word
         assert "al-outcome" not in word, word    # never a coloured verdict
-    assert "NO FINAL" in r["noneWord"] and "al-nofinal" in r["noneWord"], r
+    assert "RESULT PENDING" in r["noneWord"] and "al-nofinal" in r["noneWord"], r
     assert "PENDING" in r["pendingWord"], r
 
 
@@ -365,7 +365,13 @@ def test_add_remove_reorder_never_changes_any_rows_colour(tmp_path):
     assert r["afterAdd"] == base + [None, "al-unknown"], r
     assert r["afterRemove"] == ["al-over", "al-push", None, "al-unknown"], r
     assert r["afterReorder"] == ["al-unknown", None, "al-push", "al-over"], r
-    # the rendered rows (reversed) carry exactly those classes — none lost
+    # the rendered rows carry exactly those classes, newest-first.  For
+    # records sharing a trigger instant the panel's order is the REVERSE of
+    # the append-ordered store (the settlement colour contract: the newest
+    # record renders on top), so the classes come back in reverse store
+    # order — none lost, none transplanted.  (This is the pre-2026-09-28
+    # contract the settle-worker colour test also locks in; the accordion
+    # directive only changed CROSS-FAMILY ordering by trigger timestamp.)
     assert r["rowClasses"] == [["al-over"], ["al-push"], [],
                                ["al-unknown"]], r
     # persisted records keep their classes too (survives a reload)

@@ -30,6 +30,55 @@
    ═══════════════════════════════════════════════════════════════ */
 "use strict";
 
+/* ═══ AUTH TRANSPORT (BLM login layer) ══════════════════════════════
+   Every request carries the session cookie (same-origin) plus the
+   per-session CSRF header, and an expired session sends the operator to
+   /login instead of leaving a half-rendered terminal on screen.
+   Nothing is stored in localStorage — the session cookie is HTTP-only
+   and the CSRF token lives in memory for the life of this page only. */
+const BLM_AUTH = (() => {
+  const LOGIN_URL = "/login";
+  let csrf = "";
+  const originalFetch = window.fetch.bind(window);
+  const isLoginUrl = (u) => typeof u === "string" && u.indexOf("/login") === 0;
+  window.fetch = function (input, init) {
+    init = Object.assign({}, init);
+    if (!("credentials" in init)) init.credentials = "same-origin";
+    const method = String(
+      init.method || (input && input.method) || "GET").toUpperCase();
+    if (csrf && method !== "GET" && method !== "HEAD") {
+      const headers = new Headers(init.headers || {});
+      if (!headers.has("X-CSRF-Token")) headers.set("X-CSRF-Token", csrf);
+      init.headers = headers;
+    }
+    return originalFetch(input, init).then((res) => {
+      if (res.status === 401 && !isLoginUrl(input)) {
+        window.location.replace(LOGIN_URL);
+      }
+      return res;
+    });
+  };
+  return {
+    setCsrf: (v) => { if (v) csrf = v; },
+    load: () => originalFetch("/api/auth/me", {
+      credentials: "same-origin",
+      headers: { "Accept": "application/json" },
+      cache: "no-store"
+    }).then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && d.csrf_token) csrf = d.csrf_token; return d; })
+      .catch(() => null),
+    logout: () => {
+      const done = () => window.location.replace(LOGIN_URL);
+      return originalFetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "X-CSRF-Token": csrf, "Accept": "application/json" },
+        cache: "no-store"
+      }).then(done).catch(done);
+    }
+  };
+})();
+
 const POLL_MS = 5000;
 const API_LIVE = "/api/v4/live";
 // READ-ONLY: the settled outcome block for games OUTSIDE the /live window.
@@ -139,31 +188,65 @@ function bindCollapsible(det, prefKey) {
 
 // ── RESULTED ALERTS section — always rendered, collapsed by default ──
 // The section header stays visible at all times; only the body toggles.
-// The expand/collapse button lives in the header and persists its state
-// so the panel opens on the next visit if the user expanded it.
+// The expand/collapse button lives in the header; the state persists per
+// session via localStorage so the panel opens on the next visit if the
+// user expanded it.  Collapsing is PRESENTATION-ONLY: the stores, the
+// poll, settlement and the out-of-window hydration all keep running and
+// the header count keeps counting — a collapsed panel never hides data.
+// Arrow convention (directive mock): ▼ while COLLAPSED — click expands;
+// ▲ while EXPANDED — click collapses.  Collapsing is PRESENTATION-ONLY:
+// the stores, the poll, settlement and the out-of-window hydration all
+// keep running and the header count keeps counting — a collapsed panel
+// never hides data.
 const RESULTED_COLLAPSED_PREF = "pz.resultedAlertsCollapsed";
-const resultedDetails = () => document.getElementById("resultedDetails");
-const resultedToggleBtn = () => document.getElementById("resultedExpandBtn");
 
-function syncResultedSection() {
-  const det = resultedDetails();
-  const btn = resultedToggleBtn();
-  if (!det || !btn) return;
-  // collapsed by default (open=false), but respect user preference
-  const shouldBeCollapsed = prefGet(RESULTED_COLLAPSED_PREF, true);
-  det.open = !shouldBeCollapsed;
-  btn.textContent = det.open ? "▾" : "▸";
-  btn.title = det.open ? "Collapse resulted alerts panel" : "Expand resulted alerts panel";
+/* __ACCORDION_BEGIN__ */
+/* REUSABLE ACCORDION (directive: the same pattern serves future
+   historical/result panels).  One call gives a <details class="resulted-details">
+   the full behaviour: session-persisted collapsed/expanded state, the
+   ▼/▲ header arrow kept in sync from BOTH interactions (the header button
+   and a native click on the summary row), and — via .resulted-details
+   .alerts-body in styles.css — an independently scrollable expanded body
+   so a 50+-row history never pushes the rest of the dashboard down. */
+function initAccordionSection({ detailsId, buttonId, prefKey,
+                                panelLabel = "resulted alerts",
+                                defaultCollapsed = true }) {
+  const det = $(detailsId);
+  const btn = buttonId ? $(buttonId) : null;
+  if (!det) return null;
+  const apply = (open) => {
+    if (det.open !== open) det.open = open;
+    if (btn) {
+      // directive mock: ▼ while collapsed, ▲ while expanded
+      btn.textContent = open ? "▲" : "▼";
+      btn.title = open ? `Collapse ${panelLabel} panel`
+                       : `Expand ${panelLabel} panel`;
+    }
+  };
+  apply(!prefGet(prefKey, defaultCollapsed));
+  if (btn) {
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();       // the click must not ALSO hit the <summary>
+      ev.stopPropagation();
+      apply(!det.open);
+      prefSet(prefKey, !det.open);
+    });
+    btn.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        apply(!det.open);
+        prefSet(prefKey, !det.open);
+      }
+    });
+  }
+  det.addEventListener("toggle", () => {
+    apply(det.open);             // covers native <summary> clicks too
+    prefSet(prefKey, !det.open);
+  });
+  return det;
 }
-function toggleResultedSection() {
-  const det = resultedDetails();
-  const btn = resultedToggleBtn();
-  if (!det || !btn) return;
-  det.open = !det.open;
-  prefSet(RESULTED_COLLAPSED_PREF, !det.open);
-  btn.textContent = det.open ? "▾" : "▸";
-  btn.title = det.open ? "Collapse resulted alerts panel" : "Expand resulted alerts panel";
-}
+/* __ACCORDION_END__ */
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -988,16 +1071,25 @@ function applyQ3BreakOutcomes(games) {
 function q3ActiveRowHTML(a) {
   const ocClass = alertOutcomeClass(a.outcome);
   return `
-    <li class="al-row${ocClass ? " " + ocClass : ""}" data-alert-id="${esc(a.id)}">
+    <li class="al-row${ocClass ? " " + ocClass : ""}"
+        data-game-id="${esc(a.game_id)}" role="button" tabindex="0"
+        title="Reveal this game's card">
       <div class="al-headline">🔥 UNDER ALERT — Q3 BREAK</div>
       <div class="al-ident">${a.home_team || a.away_team
         ? `${esc(a.home_team)} vs ${esc(a.away_team)}` : alertIdent(a)}</div>
-      <div class="al-line">League: <span class="al-num">${esc(a.league)}</span> | Market: <span class="al-num">${UNDER_ALERT_MARKET}</span></div>
-      <div class="al-line">Triggered Line: <span class="al-trigger-line">${num1(a.triggered_line)}</span> <span class="muted">· live market line at the Q3/Q4 break (immutable)</span></div>
-      <div class="al-line">Triggered: <span class="al-num">${fmtTime(a.triggered_at)}</span> | State: <span class="al-num">ACTIVE</span></div>
-      <div class="al-line">Score at Trigger: <span class="al-num">${num1(a.score_at_trigger)}</span> | Required: <span class="al-num">${num2(a.required_pts_per_min)}</span> | League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></div>
-      <div class="al-line">Gap: <span class="al-neg">${num2(a.pace_gap)}</span> <span class="muted">(required ${num1(a.required_vs_league_avg_pct)}% above league avg)</span></div>
+      ${alertGameMetaHTML(a)}
+      <div class="alc-facts">
+        <span class="alc-fact">Triggered Line: <span class="al-trigger-line">${num1(a.triggered_line)}</span></span>
+        <span class="alc-fact">Triggered: <span class="al-num">${fmtTime(a.triggered_at)}</span></span>
+        <span class="alc-fact">Score at Trigger: <span class="al-num">${num1(a.score_at_trigger)}</span></span>
+        <span class="alc-fact">Required: <span class="al-num">${num2(a.required_pts_per_min)}</span></span>
+        <span class="alc-fact">Gap: <span class="al-neg">${num2(a.pace_gap)}</span></span>
+      </div>
       <div class="al-line">Result: ${alertResultHTML(a)}</div>
+      <details class="alc-more"><summary>DETAILS ▸</summary>
+        <div class="al-line">League: <span class="al-num">${esc(a.league)}</span> | Market: <span class="al-num">${UNDER_ALERT_MARKET}</span> | State: <span class="al-num">ACTIVE</span></div>
+        <div class="al-line">League Avg: <span class="al-num">${num2(a.league_average_pace)}</span> <span class="muted">· required ${num1(a.required_vs_league_avg_pct)}% above league avg</span></div>
+      </details>
     </li>`;
 }
 
@@ -1398,6 +1490,50 @@ function closeUnderAlert(id, act, game, now) {
 
 const alertIdent = (r) => `${esc(r.league)} | Game ${esc(r.game_id)}`;
 
+/* ── LIVE ALERTS — compact rows ─────────────────────────────────────────
+   The panel answers "what is firing NOW" and sits directly above the game
+   grid, so a row carries ONLY what the operator needs to triage it: the
+   alert's own sealed values, plus the CURRENT score / period / clock of the
+   game it belongs to.  Those three are read from the SAME live payload the
+   cards render from, matched by CANONICAL game_id (never team names), and a
+   field the payload does not carry is omitted — never invented.
+
+   Everything else the alert knows (league, market, current line, trigger
+   time, actual pace, strength band, fingerprints) stays available under the
+   row's own DETAILS ▸ disclosure: the panel is compact by default and deep
+   when opened, and no analytical information is deleted.
+
+   Clicking a row reveals that game's card in the grid (scroll + emphasis).
+   It never navigates, never reloads, and never touches a data stream. */
+let ALERT_GAME_INDEX = Object.create(null);
+function indexGamesById(games) {
+  const map = Object.create(null);
+  for (const g of games || []) {
+    if (g && g.game_id != null) map[String(g.game_id)] = g;
+  }
+  return map;
+}
+function alertGameOf(rec) {
+  return (rec && rec.game_id != null)
+    ? ALERT_GAME_INDEX[String(rec.game_id)] || null : null;
+}
+/* score / period / clock for an alert row — from the game, else "" */
+function alertGameMetaHTML(rec) {
+  const g = alertGameOf(rec);
+  if (!g) return "";
+  const score = (g.home_score != null && g.away_score != null)
+    ? `<span class="alc-score"><b>${g.home_score}</b> — <b>${g.away_score}</b></span>`
+    : "";
+  const period = g.period_label || (g.quarter ? "Q" + g.quarter : "");
+  const qc = [period, g.clock].filter(Boolean).join(" ");
+  const clock = qc ? `<span class="alc-clock">${esc(qc)}</span>` : "";
+  if (!score && !clock) return "";
+  return `<div class="alc-meta">${score}${clock}</div>`;
+}
+
+/* one compact alert row — the SHARED anatomy for both checkpoint kinds, so
+   the panel always reads as a single list. */
+
 function activeAlertsHTML() {
   const rows = Array.from(UNDER_ALERTS.active.values())
     .sort((a, b) => b.checkpoint - a.checkpoint);
@@ -1409,32 +1545,38 @@ function activeAlertsHTML() {
   if (!rows.length && !q3rows.length) {
     return `<div class="alerts-empty">No active UNDER alerts</div>`;
   }
-  // The ACTIVE view answers "what needs attention now", so it shows BOTH
-  // halves of the alert: the LIVE MARKET LINE THE ALERT FIRED AGAINST
-  // (sealed at trigger, never the opening / closing / current line) and
-  // THE RESULT of that alert — neutral while unresolved, then the
-  // backend's settled verdict (UNDER green, PUSH neutral, the failed
-  // UNDER red) against that same line.  The verdict word and its colour
-  // come from alertResultHTML, outside this region; the row is coloured
-  // only by a SETTLED result, so a pending alert keeps the default look.
-  return `<ul>` + rows.map((a) => {
+  // The verdict word and its colour come from alertResultHTML (the ONE
+  // result renderer, shared with the history line), so a row is coloured
+  // ONLY by a SETTLED result and reads its line from the record's own
+  // sealed triggered_line — an unresolved alert keeps the default look.
+  return `<ul class="al-list">` + rows.map((a) => {
     const ocClass = alertOutcomeClass(a.outcome);
     return `
-    <li class="al-row${ocClass ? " " + ocClass : ""}" data-alert-id="${esc(a.id)}">
+    <li class="al-row${ocClass ? " " + ocClass : ""}"
+        data-game-id="${esc(a.game_id)}" role="button" tabindex="0"
+        title="Reveal this game's card">
       <div class="al-headline">🔥 UNDER ALERT — ${a.checkpoint}%</div>
       <div class="al-ident">${a.home_team || a.away_team
         ? `${esc(a.home_team)} vs ${esc(a.away_team)}` : alertIdent(a)}</div>
-      <div class="al-line">League: <span class="al-num">${esc(a.league)}</span> | Market: <span class="al-num">${UNDER_ALERT_MARKET}</span></div>
-      <div class="al-line">Triggered Line: <span class="al-trigger-line">${num1(a.triggered_line)}</span> <span class="muted">· live market line at trigger (immutable)</span></div>
-      ${a.current_line != null
-        ? `<div class="al-line">Current Line: <span class="al-num">${num1(a.current_line)}</span> <span class="muted">· live market now (may move)</span></div>`
-        : ""}
-      <div class="al-line">Triggered: <span class="al-num">${fmtTime(a.triggered_at)}</span> | State: <span class="al-num">ACTIVE</span></div>
-      <div class="al-line">Actual: <span class="al-num">${num2(a.actual_pace)}</span> | Required: <span class="al-num">${num2(a.required_pace)}</span> | League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></div>
-      <div class="al-line">Strength: <span class="al-num">${esc(marginBand(a.required_pace, a.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band</span></div>
-      <div class="al-line">Gap: <span class="al-neg">${num2(a.pace_gap)}</span> <span class="muted">(${num1(a.actual_vs_required_pct)}% vs required · ${num1(a.required_vs_league_avg_pct)}% vs avg)</span></div>
-      ${fingerprintLineHTML(a.fingerprint)}
+      ${alertGameMetaHTML(a)}
+      <div class="alc-facts">
+        <span class="alc-fact">Triggered Line: <span class="al-trigger-line">${num1(a.triggered_line)}</span></span>
+        <span class="alc-fact">Actual: <span class="al-num">${num2(a.actual_pace)}</span></span>
+        <span class="alc-fact">Required: <span class="al-num">${num2(a.required_pace)}</span></span>
+        <span class="alc-fact">League Avg: <span class="al-num">${num2(a.league_average_pace)}</span></span>
+        <span class="alc-fact">Gap: <span class="al-neg">${num2(a.pace_gap)}</span></span>
+      </div>
       <div class="al-line">Result: ${alertResultHTML(a)}</div>
+      <details class="alc-more"><summary>DETAILS ▸</summary>
+        <div class="al-line">League: <span class="al-num">${esc(a.league)}</span> | Market: <span class="al-num">${UNDER_ALERT_MARKET}</span></div>
+        <div class="al-line">Triggered: <span class="al-num">${fmtTime(a.triggered_at)}</span> | State: <span class="al-num">ACTIVE</span></div>
+        ${a.current_line != null
+          ? `<div class="al-line">Current Line: <span class="al-num">${num1(a.current_line)}</span> <span class="muted">· live market now (may move)</span></div>`
+          : ""}
+        <div class="al-line">Strength: <span class="al-num">${esc(marginBand(a.required_pace, a.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band</span></div>
+        <div class="al-line">Gap detail: <span class="muted">${num1(a.actual_vs_required_pct)}% vs required · ${num1(a.required_vs_league_avg_pct)}% vs avg</span></div>
+        ${fingerprintLineHTML(a.fingerprint)}
+      </details>
     </li>`;
   }).join("") + q3rows.map(q3ActiveRowHTML).join("") + `</ul>`;
 }
@@ -1453,6 +1595,22 @@ function marginBand(required, avg) {
   return "<1.10";
 }
 
+/* The verdict glyph — a NON-COLOUR indication of the SAME verdict the row
+   already carries, so a result state never depends on colour alone
+   (directive §23).  It is derived from the ONE classifier that colours the
+   row, so glyph and colour can never disagree; an unsettled or neutral
+   verdict claims nothing. */
+function outcomeGlyph(oc) {
+  const cls = alertOutcomeClass(oc);
+  return cls === "al-under" ? "✓" : cls === "al-over" ? "✕" : "";
+}
+
+/* A RESULTS row is COMPACT by default: the settled verdict (word + glyph,
+   coloured by the row's own class), the game, and the verdict's own
+   triggered line against its final total.  Everything the record also
+   carries — timings, actual/required/avg, strength band, post-trigger
+   movement, fingerprints — stays under the row's own DETAILS ▸ disclosure,
+   so nothing is dropped from the review surface. */
 function historyRowHTML(rec) {
   const running = !rec.resolved_at;
   const dur = running ? (Date.now() - Date.parse(rec.triggered_at)) : rec.duration_ms;
@@ -1460,27 +1618,33 @@ function historyRowHTML(rec) {
   const moved = !running && (rec.final_actual_pace !== rec.actual_pace
     || rec.final_required_pace !== rec.required_pace);
   const ocClass = alertOutcomeClass(rec.outcome);
+  const st = alertVerdictState(rec.outcome || null);
   return `
     <li class="al-row${running ? "" : " al-resolved"}${ocClass ? " " + ocClass : ""}">
+      <div class="alc-result-head">
+        <span class="alc-verdict">${esc(st.word)}${outcomeGlyph(rec.outcome)}</span>
+        ${(rec.home_team || rec.away_team)
+          ? `<span class="al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</span>` : ""}
+      </div>
       <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
-      ${(rec.home_team || rec.away_team)
-        ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
       ${rec.alert_rule !== ALERT_RULE_ID
         ? `<div class="al-audit">AUDIT · triggered under the superseded condition — not a validated alert under the current rule</div>` : ""}
       ${(rec.refire_count)
         ? `<div class="al-refire">RE-FIRED ×${rec.refire_count}${rec.last_refire_at ? ` · last ${fmtTime(rec.last_refire_at)}` : ""} · re-arms are monitoring events — the bet and its settle line stay pinned to the FIRST trigger</div>` : ""}
       ${rec.outcome_corrected
         ? `<div class="al-corrected">AUTHORITATIVE FINAL-RESULT CORRECTION · the settled final was revised by the backend's verified game result — the triggered line is unchanged</div>` : ""}
-      <div class="al-times">
-        <span>Triggered: ${fmtTime(rec.triggered_at)}</span>
-        <span>Ended: ${running ? "—" : fmtTime(rec.resolved_at)}</span>
-        <span>Duration: ${fmtDuration(dur)}${running ? ` <span class="al-running">(still active)</span>` : ""}</span>
-      </div>
-      <div class="al-line">Actual: <span class="al-num">${num2(rec.actual_pace)}</span> | Required: <span class="al-num">${num2(rec.required_pace)}</span> | Avg: <span class="al-num">${num2(rec.league_average_pace)}</span></div>
-      <div class="al-line">Strength: <span class="al-num">${esc(marginBand(rec.required_pace, rec.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band (higher = stronger condition)</span></div>
-      ${moved ? `<div class="al-line">Final: <span class="al-num">${num2(rec.final_actual_pace)}</span> | <span class="al-num">${num2(rec.final_required_pace)}</span></div>` : ""}
-      ${fingerprintLineHTML(rec.fingerprint)}
       ${alertOutcomeLine(rec)}
+      <details class="alc-more"><summary>DETAILS ▸</summary>
+        <div class="al-times">
+          <span>Triggered: ${fmtTime(rec.triggered_at)}</span>
+          <span>Ended: ${running ? "—" : fmtTime(rec.resolved_at)}</span>
+          <span>Duration: ${fmtDuration(dur)}${running ? ` <span class="al-running">(still active)</span>` : ""}</span>
+        </div>
+        <div class="al-line">Actual: <span class="al-num">${num2(rec.actual_pace)}</span> | Required: <span class="al-num">${num2(rec.required_pace)}</span> | Avg: <span class="al-num">${num2(rec.league_average_pace)}</span></div>
+        <div class="al-line">Strength: <span class="al-num">${esc(marginBand(rec.required_pace, rec.league_average_pace) || "–")}</span> <span class="muted">· required vs league-avg band (higher = stronger condition)</span></div>
+        ${moved ? `<div class="al-line">Final: <span class="al-num">${num2(rec.final_actual_pace)}</span> | <span class="al-num">${num2(rec.final_required_pace)}</span></div>` : ""}
+        ${fingerprintLineHTML(rec.fingerprint)}
+      </details>
     </li>`;
 }
 
@@ -1620,19 +1784,48 @@ function resultedFilterBarHTML() {
 
 function historyAlertsHTML() {
   const f = resultFilters;
-  const q3rows = filterResultedRows(
-    Q3B_ALERTS.history.slice().reverse(), f);
   if (!UNDER_ALERTS.history.length && !Q3B_ALERTS.history.length) {
     return `<div class="alerts-empty">No alerts triggered</div>`;
   }
-  const rows = filterResultedRows(UNDER_ALERTS.history.slice().reverse(), f);
+  // NEWEST FIRST across BOTH alert families (directive): one merged list,
+  // each record kept with its own row renderer.  A record lacking a
+  // usable trigger timestamp (defensive; none is created without one)
+  // sorts after every timestamped row.
+  //
+  // TIES fall back to newest-INSERTED first (``seq``, the record's own
+  // position in its append-ordered store).  This is load-bearing, not
+  // cosmetic: the settlement colour contract renders the newest record at
+  // the top, so two records sharing a trigger instant — or the
+  // timestamp-less case — must still come out newest-first.  A plain
+  // stable 0-return would leave them in oldest-first store order and
+  // invert the panel (the settle-worker colour regression, 2026-09-28).
+  const merged = [
+    ...UNDER_ALERTS.history.map((rec, i) => ({ rec, rowHTML: historyRowHTML,
+                                               seq: i })),
+    ...Q3B_ALERTS.history.map((rec, i) => ({
+      rec, rowHTML: q3HistoryRowHTML, seq: UNDER_ALERTS.history.length + i })),
+  ];
+  for (const item of merged) {
+    const t = Date.parse(item.rec && item.rec.triggered_at);
+    item.ts = isFinite(t) ? t : NaN;
+  }
+  merged.sort((a, b) => {
+    if (isFinite(a.ts) && isFinite(b.ts) && a.ts !== b.ts) return b.ts - a.ts;
+    if (isFinite(a.ts) !== isFinite(b.ts)) return isFinite(a.ts) ? -1 : 1;
+    return b.seq - a.seq;   // equal / absent timestamps: newest-inserted first
+  });
+  const rows = filterResultedRows(
+    merged.map((item) => item.rec), f);
+  const visible = new Set(rows.map((r) => r.id == null ? r : r.id));
+  const shown = merged.filter((item) => visible.has(
+    item.rec.id == null ? item.rec : item.rec.id));
   const bar = resultedFilterBarHTML();
-  if (!rows.length && !q3rows.length) {
+  if (!shown.length) {
     return bar
       + `<div class="alerts-empty">No alerts match the active filters</div>`;
   }
-  return bar + `<ul>` + rows.map(historyRowHTML).join("")
-    + q3rows.map(q3HistoryRowHTML).join("") + `</ul>`;
+  return bar + `<ul>`
+    + shown.map((item) => item.rowHTML(item.rec)).join("") + `</ul>`;
 }
 
 function paintAlerts(elId, html) {
@@ -1792,6 +1985,9 @@ function renderUnderAlerts(games, labels) {
   // Q3 BREAK checkpoint (directive 2026-09-18) — reconciled from the SAME
   // payload in the SAME poll, painted into the SAME panels.
   reconcileQ3BreakAlerts(games, labels || LEAGUE_LABELS);
+  // the alert rows read score / period / clock from the SAME payload the
+  // cards were just rendered from — indexed by canonical game_id
+  ALERT_GAME_INDEX = indexGamesById(games);
   paintAlerts("activeAlerts", activeAlertsHTML());
   paintResultedPanel();
   const ac = $("activeAlertsCount");
@@ -2196,6 +2392,52 @@ function execTraceHTML(exec) {
       : (exec.rejection_reason ? `<span><span class="et-label">REASON </span><span class="et-reason">${esc(exec.rejection_reason)}</span></span>` : "")}
   </div>`;
 }
+/* __CARD_ALERT_BEGIN__ */
+/* ── ACTIVE ALERT CARD STATE (directive 2026-09-28) ───────────────────
+   YELLOW BORDER = an ACTIVE BLM alert on THIS game (matched by canonical
+   game_id from the backend's alert block — never team names).  It must
+   never mean that a bet was placed.  Explicit card states:
+     NORMAL        no alert
+     ACTIVE_ALERT  yellow border + 🟡 badge + alert info + [ PLACE BET ]
+     RESULTED      settled verdict lives in RESULTED ALERTS (no border)
+   The [ PLACE BET ] action submits ONLY values the backend serves for
+   this game (game_id / market / side / sealed triggered line) plus the
+   user's stake, through the SAME validated manual-wager endpoint as
+   the manual form — the backend revalidates market availability, the
+   current line, stake, unit config and the kill switch, and rejects a
+   stale line with 409.  It never constructs identity from stale
+   frontend state and it never arms the automated wager worker. */
+function cardAlertState(g) {
+  const ua = (g && g.under_alert) || {};
+  const q3 = (g && g.under_alert_q3_break) || {};
+  if (ua.active || q3.active) return "ACTIVE_ALERT";
+  // RESULTED: the alert's game has ended / its outcome block carries a
+  // settled verdict — the yellow border is REMOVED and the verdict lives
+  // in the RESULTED ALERTS panel (underlying data is never deleted).
+  const oc = (g && g.under_alert_outcome) || {};
+  if ((g && g.status === "ended") || oc.status != null) return "RESULTED";
+  return "NORMAL";
+}
+
+function cardAlertBadgeHTML(g) {
+  if (cardAlertState(g) !== "ACTIVE_ALERT") return "";
+  const ua = (g && g.under_alert) || {};
+  const q3 = (g && g.under_alert_q3_break) || {};
+  const alertBlock = ua.active ? ua : q3;
+  const side = "UNDER";                  // both BLM alert families are UNDER
+  const cp = alertBlock.checkpoint;
+  const cpLabel = (String(cp) === "Q3_BREAK") ? "Q3"
+    : (cp != null ? `Q${cp}` : "–");
+  const line = alertBlock.trigger_line != null ? num1(alertBlock.trigger_line) : "–";
+  return `
+    <div class="card-alert-banner">
+      <span class="card-alert-badge">🟡 ${side} ALERT</span>
+      <span class="card-alert-info">${esc(cpLabel)} · Triggered Line: ${esc(line)}${alertBlock.triggered_at ? ` · ${fmtTime(alertBlock.triggered_at)}` : ""}</span>
+      <button type="button" class="card-place-bet" data-game-id="${esc(g.game_id)}" data-side="${side}" data-line="${alertBlock.trigger_line != null ? esc(alertBlock.trigger_line) : ""}">PLACE BET</button>
+    </div>`;
+}
+/* __CARD_ALERT_END__ */
+
 function cardHTML(g, ui, alertEnter) {
   const invalid = g.quality_status === "INVALID";
   const liveNow = isActuallyLive(g);
@@ -2235,6 +2477,7 @@ function cardHTML(g, ui, alertEnter) {
       <span class="comp-name">${esc(g.competition_slug || g.competition || "")}</span>
       <span class="${liveCls}">${liveTxt}</span>
     </div>
+    <div class="card-alert-slot">${cardAlertBadgeHTML(g)}</div>
     <div class="scoreboard">
       <div class="team"><div class="team-name">${esc(g.home_team)}</div>
         <div class="team-score home">${score(g.home_score)}</div></div>
@@ -2246,12 +2489,18 @@ function cardHTML(g, ui, alertEnter) {
     ${finalResultHTML(g)}
     ${paceStripHTML(g)}
     ${liveMarketHTML(g)}
+    ${blmAlertStateRowHTML(g)}
+    <form class="manual-bet" data-game-id="${esc(g.game_id)}" data-line="${currentLineLive ? esc(currentLine ?? "") : ""}">
+      <span>MANUAL TOTAL</span><select name="direction" aria-label="Manual wager direction"><option value="UNDER">UNDER</option><option value="OVER">OVER</option></select>
+      <label>Stake <input name="stake" type="number" min="0.01" step="0.01" value="${state.betting && state.betting.unit_price != null ? esc(state.betting.unit_price) : ""}" aria-label="Stake amount"></label>
+      <span>LINE ${currentLineLive ? num(currentLine, 1) : "–"}</span>
+      <button type="submit" ${!(state.betting && state.betting.enabled && currentLineLive && currentLine != null) ? "disabled" : ""}>BET</button>
+    </form>
     <div class="market-compact">
       <span title="Opening total line">OPEN <b>${num(openLine, 1)}</b></span>
       <span title="Current live total line">${lineChangeDir} CURRENT <b>${num(currLine, 1)}</b></span>
       <span title="Closing total line">CLOSE <b>${num(closeLine, 1)}</b></span>
     </div>
-    ${blmAlertStateRowHTML(g)}
     <div class="card-state-pill ${gameMatchesGameState(g, "live") ? "csp-live" : "csp-off"}">STATE ${esc((() => {
       if (g.quality_status === "INVALID") return "INVALID";
       if (gameMatchesGameState(g, "live")) return "LIVE";
@@ -2265,12 +2514,6 @@ function cardHTML(g, ui, alertEnter) {
     ${execTraceHTML(exec)}
     <div class="auto-game-state">AUTO BET ${esc(autoState)} <span class="muted">· global ${state.betting && state.betting.enabled ? "ON" : "OFF"}</span>
       <button type="button" class="game-auto-toggle" data-game-id="${esc(g.game_id)}" data-enabled="${gameAutoBet ? "true" : "false"}" ${!liveNow ? "disabled" : ""}>GAME ${gameAutoBet ? "ON" : "OFF"}</button></div>
-    <form class="manual-bet" data-game-id="${esc(g.game_id)}" data-line="${currentLineLive ? esc(currentLine ?? "") : ""}">
-      <span>MANUAL TOTAL</span><select name="direction" aria-label="Manual wager direction"><option value="UNDER">UNDER</option><option value="OVER">OVER</option></select>
-      <label>Stake <input name="stake" type="number" min="0.01" step="0.01" value="${state.betting && state.betting.unit_price != null ? esc(state.betting.unit_price) : ""}" aria-label="Stake amount"></label>
-      <span>LINE ${currentLineLive ? num(currentLine, 1) : "–"}</span>
-      <button type="submit" ${!(state.betting && state.betting.enabled && currentLineLive && currentLine != null) ? "disabled" : ""}>BET</button>
-    </form>
     ${histBadgeHTML(g, alertEnter || null)}
     ${invalid ? gatedNoteHTML(g) : ""}
     <details class="card-charts" ${chartsOpen ? "open" : ""}>
@@ -2392,6 +2635,7 @@ function renderCards(payload) {
       el.innerHTML = cardHTML(g, ui);
       el.addEventListener("click", (ev) => {
         if (ev.target.closest(".manual-bet")) return;
+        if (ev.target.closest(".card-place-bet")) return;   // bet action, not modal
         // clicks inside the CHARTS / DETAILS sections only toggle the
         // section — they never open the detail modal
         if (ev.target.closest("details")) return;
@@ -2412,6 +2656,21 @@ function renderCards(payload) {
       card.el.classList.add("flash");
     }
     card.lastScore = nowScore;
+    // ── ACTIVE ALERT card state (directive 2026-09-28): the yellow
+    // border marks an ACTIVE BLM alert on THIS canonical game_id —
+    // matched from the backend's own alert block, never team names, and
+    // NEVER a placed bet.  Only ACTIVE_ALERT gets the border; a settled
+    // game (border removed) hands its verdict to RESULTED ALERTS.
+    const alertState = cardAlertState(g);
+    card.el.classList.toggle("card-alert-active", alertState === "ACTIVE_ALERT");
+    card.el.classList.toggle("card-alert-resulted", alertState === "RESULTED");
+    // repaint the alert banner (badge/info/bet) without rebuilding the
+    // card; the wager action itself is never armed automatically
+    const bannerHost = card.el.querySelector(".card-alert-slot");
+    if (bannerHost) {
+      const bannerHTML = cardAlertBadgeHTML(g);
+      if (bannerHost.innerHTML !== bannerHTML) bannerHost.innerHTML = bannerHTML;
+    }
     // the card ELEMENT carries the settled result's accent class — applied
     // for an ended+settled game, removed otherwise (never a stale colour)
     const frCls = finalResultCardClass(g);
@@ -3425,9 +3684,12 @@ function syncLiveToggle(total, visible) {
   if (cnt) cnt.textContent = on ? `showing ${visible} live · hidden ${total - visible}` : "";
   const sub = $("liveHeadSub");
   if (sub) sub.textContent = on
-    ? "clean post-epoch observations only · live games shown"
-    : "clean post-epoch observations only · ended/stale included (SHOW ALL)";
+    ? "🟨 = active alert · clean post-epoch observations only · live games shown"
+    : "🟨 = active alert · clean post-epoch observations only · ended/stale included (SHOW ALL)";
 }
+
+// LIVE ALERTS row → reveal the matching game card (scroll + emphasis)
+bindAlertReveal();
 
 $("filters").addEventListener("click", (ev) => {
   const btn = ev.target.closest(".filter");
@@ -3466,23 +3728,11 @@ $("audioToggle").addEventListener("click", () => {
 syncAudioButton();
 
 // ── RESULTED ALERTS expand/collapse toggle ──────────────────────
-// The section is always rendered (paintResultedPanel() fires every poll),
-// but the body is collapsible via the ▾/▸ button in the header.  Default
-// is collapsed; the user's choice persists across reloads.
-const resultedExpandBtn = () => document.getElementById("resultedExpandBtn");
-if (resultedExpandBtn()) {
-  resultedExpandBtn().addEventListener("click", (ev) => {
-    ev.stopPropagation();       // don't toggle the <details> via the button's click
-    toggleResultedSection();
-  });
-  resultedExpandBtn().addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" || ev.key === " ") {
-      ev.preventDefault();
-      ev.stopPropagation();
-      toggleResultedSection();
-    }
-  });
-}
+// Wired ONCE via the reusable accordion init at the bottom of this file
+// (detailsId "resultedDetails", pref RESULTED_COLLAPSED_PREF): collapsed
+// by default, persisted per session, ▼/▲ arrow synced from button AND
+// native summary clicks, expanded body independently scrollable
+// (styles.css).
 
 // Arm the context from a user gesture.  A single attempt must not strand a
 // context the browser chose to leave suspended, so each gesture retries
@@ -3616,7 +3866,7 @@ function abStatusHTML(st) {
   // ── Header status pills (global summary) ──────────────────
   const abGlobal = $("abGlobalPill");
   if (abGlobal) {
-    abGlobal.textContent = `AB ${st.enabled ? "ON" : "OFF"}`;
+    abGlobal.textContent = st.enabled ? "AUTO BET 🟢 ARMED" : "AUTO BET 🔴 OFF";
     abGlobal.style.color = st.enabled ? "var(--green)" : "var(--red)";
     abGlobal.title = `Auto Betting ${st.enabled ? "enabled" : "disabled"} · ${st.mode || "--"}`;
   }
@@ -3795,6 +4045,96 @@ $("grid").addEventListener("submit", async (ev) => {
   }
 });
 
+/* ── CARD [ PLACE BET ] — explicit execution action on an active-alert
+   card (directive 2026-09-28).  Submits ONLY the identity the backend
+   serves for this exact card (data-* attributes rendered from the game's
+   own alert block — canonical game_id, TOTAL market, UNDER side, sealed
+   triggered line) plus the user's stake, through the SAME validated
+   /betting/manual endpoint as the manual form.  The backend revalidates
+   availability, the current line (a stale line is rejected 409), stake,
+   unit config and the kill switch.  Purely manual: it never arms or
+   triggers the auto-betting worker, and the yellow border never implies
+   a bet was placed. */
+/* ── ALERT → GAME REVEAL ────────────────────────────────────────────────
+   Clicking (or pressing Enter/Space on) a LIVE ALERTS row reveals that
+   game's card in the grid: scroll it into view and emphasise it briefly.
+   Purely presentational — no navigation, no reload, no re-render, and the
+   game's live data stream is untouched.  Identity is the row's canonical
+   game_id; a card that is not currently rendered (filtered out) is left
+   alone rather than scrolled to something the operator cannot see. */
+const CARD_FOCUS_CLASS = "card-focus";
+const CARD_FOCUS_MS = 1600;
+function revealGameCard(gameId) {
+  const card = state.cards.get(String(gameId));
+  if (!card || !card.el || !card.el.isConnected) return false;
+  card.el.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.el.classList.remove(CARD_FOCUS_CLASS);
+  void card.el.offsetWidth;            // restart the emphasis transition
+  card.el.classList.add(CARD_FOCUS_CLASS);
+  clearTimeout(card.focusTimer);
+  card.focusTimer = setTimeout(
+    () => card.el.classList.remove(CARD_FOCUS_CLASS), CARD_FOCUS_MS);
+  return true;
+}
+function bindAlertReveal() {
+  const host = $("activeAlerts");
+  if (!host) return;
+  const activate = (ev) => {
+    const row = ev.target.closest(".al-row[data-game-id]");
+    if (!row) return;
+    // the row's own controls (the DETAILS disclosure, any button) keep their
+    // own behaviour — only the row body reveals the card
+    if (ev.target.closest("button, a, input, select, summary, details")) return;
+    if (ev.type === "keydown" && ev.key !== "Enter" && ev.key !== " ") return;
+    ev.preventDefault();
+    revealGameCard(row.dataset.gameId);
+  };
+  host.addEventListener("click", activate);
+  host.addEventListener("keydown", activate);
+}
+
+$("grid").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest(".card-place-bet");
+  if (!btn || btn.disabled) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const stakeInput = $("alertStake");
+  const stake = Number(stakeInput && stakeInput.value
+    || (state.betting && state.betting.unit_price) || 0);
+  if (!(stake > 0)) {
+    btn.title = "stake unavailable — set the unit stake first";
+    return;
+  }
+  const payload = {
+    game_id: btn.dataset.gameId,
+    market: "TOTAL",
+    direction: btn.dataset.side || "UNDER",
+    line: Number(btn.dataset.line),
+    stake,
+    idempotency_key: `card-${crypto.randomUUID()}`,
+  };
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = "SENDING";
+  try {
+    const resp = await fetch(`${BETTING_API}/manual`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+    btn.textContent = body.execution.execution_state
+      || body.execution.status || "RECORDED";
+    await refreshBettingStatus();
+    await loadBettingHistory();
+  } catch (err) {
+    btn.textContent = "REJECTED";
+    btn.title = err.message;   // e.g. "requested line is not the current observed Total"
+  } finally {
+    setTimeout(() => { if (btn.isConnected) { btn.textContent = prev; btn.disabled = false; } }, 3000);
+  }
+});
+
 $("grid").addEventListener("click", async (ev) => {
   const button = ev.target.closest("button.game-auto-toggle");
   if (!button) return;
@@ -3855,8 +4195,15 @@ loadAlertHistory();
 loadQ3BreakHistory();
 Object.assign(LEAGUE_LABELS, leagueLabelsFrom(document));
 refresh();
-// Resulted Alerts section: sync collapsed state (always rendered, collapsed by default)
-syncResultedSection();
+// Resulted Alerts section: one reusable-accordion init — collapsed by
+// default, persisted per session, arrow synced from button AND summary
+// clicks, expanded body independently scrollable (styles.css).
+initAccordionSection({
+  detailsId: "resultedDetails",
+  buttonId: "resultedExpandBtn",
+  prefKey: RESULTED_COLLAPSED_PREF,
+  defaultCollapsed: true,
+});
 setInterval(refresh, POLL_MS);
 setInterval(refreshBettingStatus, POLL_MS);
 startStatusPolling();
@@ -3899,3 +4246,26 @@ setInterval(() => {
     }
   });
 }, POLL_MS);
+
+/* ═══ AUTH BOOTSTRAP + SIGN-OUT (BLM login layer) ═══════════════════
+   Reads the current identity (and the CSRF token) from /api/auth/me and
+   wires the SIGN OUT control.  The role shown here is COSMETIC — every
+   authorisation decision is made server-side. */
+(function blmAuthBootstrap() {
+  BLM_AUTH.load().then((me) => {
+    const who = document.getElementById("blmUserPill");
+    if (who && me && me.username) {
+      who.textContent = `${String(me.username).toUpperCase()} · ` +
+                        `${String(me.role || "").toUpperCase()}`;
+      who.title = `Signed in as ${me.username} (${me.role})`;
+    }
+  });
+  const out = document.getElementById("signOutBtn");
+  if (out) {
+    out.addEventListener("click", () => {
+      out.disabled = true;
+      out.textContent = "SIGNING OUT…";
+      BLM_AUTH.logout();
+    });
+  }
+})();
