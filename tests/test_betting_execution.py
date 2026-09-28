@@ -82,7 +82,7 @@ def qualifying_game(game_id="30990001", checkpoint=75, age_s=5.0):
         },
         "under_alert_fingerprint": {
             "fingerprint_count": 2,
-            "fingerprints_fired": ["C2", "C6"],
+            "fingerprints_fired": ["C3", "C5"],
         },
     }
 
@@ -139,7 +139,7 @@ def test_on_plus_valid_alert_yields_would_bet(tmp_path):
     assert cand["stake_units"] == 1.0
     assert cand["selection"] == "UNDER"
     assert cand["fingerprint_count"] == 2
-    assert cand["fingerprints_present"] == ["C2", "C6"]
+    assert cand["fingerprints_present"] == ["C3", "C5"]
     out = execute(cand, cfg=cfg, store=store, provider=DryRunProvider())
     assert out["status"] == "ACCEPTED"
     rec = store.get_execution(cand["execution_id"])
@@ -608,7 +608,7 @@ def test_audit_log_records_why_and_fingerprints(tmp_path):
         "production UNDER alert active (under_alert.active)"
     assert details["alert_id"]
     assert details["checkpoint"] == "75"
-    assert details["fingerprints_present"] == ["C2", "C6"]
+    assert details["fingerprints_present"] == ["C3", "C5"]
     assert details["fingerprint_count"] == 2
     assert details["stake_calculation"] == {
         "unit_price": 10.0, "stake_units": 1.0, "stake_amount": 10.0}
@@ -621,7 +621,7 @@ def test_fingerprints_cannot_create_bets(tmp_path):
     g["under_alert"] = {"active": False, "checkpoint": None}
     g["under_alert_fingerprint"] = {
         "fingerprint_count": 7,
-        "fingerprints_fired": ["C1", "C2", "C3", "C4", "C5", "C6", "R2"]}
+        "fingerprints_fired": ["C1", "C3", "C5", "R2"]}
     res = evaluate(g, cfg=cfg, store=store, enabled=True,
                    unit_price=10.0, stats=store.today_stats())
     assert res["decision"] == "NO_BET"
