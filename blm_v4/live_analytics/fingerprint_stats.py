@@ -600,25 +600,24 @@ def compute_stats(prod_path: Path, clean_path: Path) -> dict:
             blk["count"] = cnt
             ladder.append(blk)
 
-        # The seven keys SHARE legs (C4=C1&C2, C3/C5/C6 pair a required-pace
-        # leg with the Q3 leg), so a full house is NOT seven independent
-        # confirmations.  ASSERT the identity rather than describing it.
+        # The keys SHARE legs (C3/C5 pair a required-pace leg with the Q3 leg,
+        # C1 and R2 are the base conditions), so a full house is NOT four
+        # independent confirmations.  ASSERT the identity rather than describing it.
         all_seven = {r["gid"] for r in cohort
                      if r["fp"]["fingerprint_count"] == len(FINGERPRINT_KEYS)}
         c1 = {r["gid"] for r in cohort if r["fp"]["fingerprint_c1_triggered"]}
-        c2 = {r["gid"] for r in cohort if r["fp"]["fingerprint_c2_triggered"]}
         r2 = {r["gid"] for r in cohort if r["fp"]["fingerprint_r2_triggered"]}
-        inter = c1 & c2 & r2
+        inter = c1 & r2
         collapse = {
             "seven_n": len(all_seven),
             "intersection_n": len(inter),
             "identical": bool(all_seven) and all_seven == inter,
-            "definition": "count == 7   ==   C1 AND C2 AND R2",
+            "definition": "count == len(FINGERPRINT_KEYS)   ==   C1 AND R2",
             "explanation": (
                 "C1 fixes req_ratio in [1.10,1.20) and R2 fixes q3_ratio<0.90, "
-                "so req>1.04 & q3<1.00 (C3), req>1.10 & q3<1.00 (C5) and "
-                "C2 & q3<1.00 (C6) all follow arithmetically. A full house is "
-                "ONE conjunction of three conditions, not seven votes."),
+                "so req>1.04 & q3<1.00 (C3) and req>1.10 & q3<1.00 (C5) "
+                "all follow arithmetically. A full house is "
+                "ONE conjunction of two conditions, not four votes."),
         }
 
         # ── 9. req/bar bands — the edge is NOT monotone ─────────────────
