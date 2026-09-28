@@ -39,9 +39,11 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from blm_v4.performance import PERFORMANCE
 
 from blm_v4.event_parser import select_total_market
 from blm_v4.projection import duration_for, project, row_elapsed_minutes
@@ -359,6 +361,13 @@ class CleanMetricsStore:
             Path(__file__).resolve().parent.parent / DEFAULT_CLEAN_DB
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # Per-game in-memory cache of VALID observations (ascending by id).
+        # Eliminates the sql.clean.valid_observations round-trip on every
+        # pace.refresh_game call.  Populated lazily on first access and
+        # updated in-place when a new VALID row is committed.  Invalidated
+        # (dropped) on finalize so a post-game refresh re-reads from disk.
+        # Protected by self._lock (same lock as all DB operations).
+        self._obs_cache: dict[str, list[dict]] = {}
         self.initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -545,6 +554,8 @@ class CleanMetricsStore:
                 status = REPLAY
                 reason = "game-clock regression vs prior clean observation"
 
+        sql_started = time.perf_counter()
+        sql_calls = 0
         with self._lock:
             conn = self._connect()
             try:
@@ -561,6 +572,7 @@ class CleanMetricsStore:
                      home_team or "", away_team or "", game_status,
                      captured_at, captured_at),
                 )
+                sql_calls += 1
                 # raw snapshot state (reproducibility)
                 cur = conn.execute(
                     """INSERT INTO clean_snapshots (
@@ -572,6 +584,7 @@ class CleanMetricsStore:
                      _i(home_score), _i(away_score), total_points,
                      game_status, source),
                 )
+                sql_calls += 1
                 snapshot_id = int(cur.lastrowid)
                 # market line identities — every distinct line at a capture,
                 # never averaged
@@ -584,6 +597,7 @@ class CleanMetricsStore:
                         (source_game_id, market_captured_at, line,
                          over_price, under_price, market_source),
                     )
+                    sql_calls += 1
                 for m in ws_batch:
                     mv = _f(m.get("line_value"))
                     if mv is None:
@@ -596,6 +610,7 @@ class CleanMetricsStore:
                         (source_game_id, m.get("captured_at") or captured_at, mv,
                          _f(m.get("over_price")), _f(m.get("under_price")), "ws"),
                     )
+                    sql_calls += 1
                 # calculated metrics row
                 conn.execute(
                     """INSERT INTO clean_observations (
@@ -629,9 +644,65 @@ class CleanMetricsStore:
                      excl_reason,
                      predictive_validation_label(terminal)),
                 )
+                sql_calls += 1
+                new_obs_id = conn.execute(
+                    "SELECT last_insert_rowid() AS id"
+                ).fetchone()["id"]
                 conn.commit()
+                # Update the in-memory observation cache while still
+                # holding self._lock and after the commit is durable.
+                # Only VALID rows enter the cache (same filter as the DB
+                # query in _load_obs_from_db).
+                if status == VALID:
+                    cache_row = {
+                        "id": new_obs_id,
+                        "source_game_id": source_game_id,
+                        "snapshot_id": snapshot_id,
+                        "captured_at": captured_at,
+                        "classification": classification,
+                        "home_score": _i(home_score),
+                        "away_score": _i(away_score),
+                        "total_points": total_points,
+                        "total_game_minutes": tm["total_game_minutes"],
+                        "elapsed_game_minutes": elapsed,
+                        "remaining_game_minutes": remaining,
+                        "progress_pct": tm["progress_pct"],
+                        "actual_pts_per_min": pm["actual_pts_per_min"],
+                        "required_pts_per_min": pm["required_pts_per_min"],
+                        "required_remaining_points": pm["required_remaining_points"],
+                        "pace_difference": pm["pace_difference"],
+                        "required_pace_target": pm["required_pace_target"],
+                        "live_total_line": line,
+                        "over_price": over_price,
+                        "under_price": under_price,
+                        "market_captured_at": market_captured_at,
+                        "market_source": market_source,
+                        "projected_final_total": fair_total,
+                        "fair_total": fair_total,
+                        "market_fair_difference": mf_diff,
+                        "z_score": None,
+                        "status": status,
+                        "reason": reason,
+                        "terminal": int(terminal),
+                        "predictive_eligible": int(pred_eligible),
+                        "exclusion_reason": excl_reason,
+                        "predictive_validation": predictive_validation_label(terminal),
+                        # joined fields from clean_snapshots
+                        "period_label": period_label,
+                        "clock": clock,
+                    }
+                    if source_game_id in self._obs_cache:
+                        self._obs_cache[source_game_id].append(cache_row)
+                    else:
+                        # First observation for this game — seed the cache.
+                        self._obs_cache[source_game_id] = [cache_row]
             finally:
                 conn.close()
+                PERFORMANCE.record(
+                    "sql.clean.record_snapshot",
+                    (time.perf_counter() - sql_started) * 1000.0,
+                    counters={"sql_calls": sql_calls},
+                )
 
         return {
             "source_game_id": source_game_id,
@@ -660,7 +731,8 @@ class CleanMetricsStore:
 
     def record_snapshot_obs(self, game: Any, obs: Any, main_store: Any) -> dict:
         """Convenience wrapper: record a MarketObservation + PokerBetGame."""
-        return self.record_snapshot(
+        with PERFORMANCE.measure("clean.record_snapshot_obs"):
+          return self.record_snapshot(
             source_game_id=game.source_game_id,
             classification=game.classification,
             captured_at=obs.captured_at,
@@ -677,7 +749,7 @@ class CleanMetricsStore:
             main_store=main_store,
             home_team=game.home_team,
             away_team=game.away_team,
-        )
+          )
 
     def finalize(
         self, source_game_id: str, *,
@@ -694,6 +766,10 @@ class CleanMetricsStore:
         is created on demand if no observation was ever written.
         """
         with self._lock:
+            # Invalidate the observation cache so any subsequent
+            # refresh_game call re-reads from disk (picks up the final
+            # total which is stored on clean_games, not observations).
+            self._obs_cache.pop(source_game_id, None)
             conn = self._connect()
             try:
                 if final_home is not None and final_away is not None:
@@ -734,6 +810,11 @@ class CleanMetricsStore:
     # ── reads (tests/audit) ─────────────────────────────────────────
 
     def _last_valid(self, source_game_id: str) -> Optional[dict]:
+        with PERFORMANCE.measure("sql.clean.last_valid") as timing:
+            timing.add("sql_calls")
+            return self._last_valid_measured(source_game_id)
+
+    def _last_valid_measured(self, source_game_id: str) -> Optional[dict]:
         with self._lock:
             conn = self._connect()
             try:
@@ -886,41 +967,65 @@ class CleanMetricsStore:
 
     # ── Pace projector support (deterministic trajectory layer) ────
 
-    def valid_observations(self, source_game_id: str) -> list[dict]:
-        """All VALID clean observations for a game, ascending, with the
-        raw snapshot period/clock joined (projector provenance).
-
-        Replayed/stale/INVALID observations are never part of the clean
-        statistical population, so they cannot feed the trajectory layer.
-        """
-        with self._lock:
+    def _load_obs_from_db(self, source_game_id: str) -> list[dict]:
+        """Full SQL fetch of VALID observations for one game (ascending).
+        Called only on a cache miss — never on every refresh_game call."""
+        with PERFORMANCE.measure("sql.clean.valid_observations") as timing:
             conn = self._connect()
             try:
-                return [dict(r) for r in conn.execute(
+                rows = [dict(r) for r in conn.execute(
                     """SELECT o.*, s.period_label, s.clock
                        FROM clean_observations o
                        LEFT JOIN clean_snapshots s ON s.id = o.snapshot_id
                        WHERE o.source_game_id = ? AND o.status = ?
                        ORDER BY o.id ASC""",
                     (source_game_id, VALID)).fetchall()]
+                timing.add("observations_loaded", len(rows))
+                timing.add("sql_calls")
+                return rows
             finally:
                 conn.close()
+
+    def valid_observations(self, source_game_id: str) -> list[dict]:
+        """All VALID clean observations for a game, ascending, with the
+        raw snapshot period/clock joined (projector provenance).
+
+        Served from the in-memory per-game cache when populated; falls
+        back to a full SQL query on a cold start or after finalization.
+        Replayed/stale/INVALID observations are never part of the clean
+        statistical population, so they cannot feed the trajectory layer.
+        """
+        with self._lock:
+            if source_game_id not in self._obs_cache:
+                self._obs_cache[source_game_id] = self._load_obs_from_db(
+                    source_game_id)
+            return list(self._obs_cache[source_game_id])
 
     def game_final_total(self, source_game_id: str) -> Optional[int]:
         """Recorded final total for the game/instance (clean_games), or
         None while the game is still live."""
-        with self._lock:
+        with PERFORMANCE.measure("sql.clean.game_final_total") as timing:
+          with self._lock:
             conn = self._connect()
             try:
                 r = conn.execute(
                     "SELECT final_total FROM clean_games WHERE source_game_id = ?",
                     (source_game_id,),
                 ).fetchone()
+                timing.add("sql_calls")
                 return r["final_total"] if r else None
             finally:
                 conn.close()
 
     def replace_projections(
+        self, source_game_id: str, rows: list[dict],
+    ) -> None:
+        with PERFORMANCE.measure("clean.replace_projections") as timing:
+            timing.add("projections_rebuilt", len(rows))
+            timing.add("projection_count", len(rows))
+            return self._replace_projections_impl(source_game_id, rows)
+
+    def _replace_projections_impl(
         self, source_game_id: str, rows: list[dict],
     ) -> None:
         """Idempotently replace all trajectory rows for one game.
@@ -953,16 +1058,22 @@ class CleanMetricsStore:
         with self._lock:
             conn = self._connect()
             try:
-                conn.execute(
-                    "DELETE FROM clean_projections WHERE source_game_id = ?",
-                    (source_game_id,),
-                )
-                for r in rows:
-                    conn.execute(
-                        f"INSERT INTO clean_projections ({', '.join(cols)}) "
-                        f"VALUES ({marks})",
-                        [r.get(c) for c in cols],
+                with PERFORMANCE.measure("sql.clean.projections_delete") as sql_timing:
+                    deleted = conn.execute(
+                        "DELETE FROM clean_projections WHERE source_game_id = ?",
+                        (source_game_id,),
                     )
+                    sql_timing.add("sql_calls")
+                    sql_timing.add("projections_deleted", max(0, deleted.rowcount))
+                for r in rows:
+                    with PERFORMANCE.measure("sql.clean.projection_insert") as sql_timing:
+                        conn.execute(
+                            f"INSERT INTO clean_projections ({', '.join(cols)}) "
+                            f"VALUES ({marks})",
+                            [r.get(c) for c in cols],
+                        )
+                        sql_timing.add("sql_calls")
+                        sql_timing.add("projections_inserted")
                 conn.commit()
             finally:
                 conn.close()

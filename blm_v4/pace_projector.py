@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Optional
+from blm_v4.performance import PERFORMANCE
 
 MODEL_VERSION = "v4-pace-projector-1"
 
@@ -232,12 +233,16 @@ class PaceProjector:
     """
 
     def refresh_game(self, store: Any, source_game_id: str) -> dict[str, Any]:
-        rows = store.valid_observations(source_game_id)
-        final_total = store.game_final_total(source_game_id)
-        projections = [self._project_observation(rows, i, final_total)
-                       for i in range(len(rows))]
-        store.replace_projections(source_game_id, projections)
-        return {"source_game_id": source_game_id, "n": len(projections)}
+        with PERFORMANCE.measure("pace.refresh_game") as timing:
+            rows = store.valid_observations(source_game_id)
+            final_total = store.game_final_total(source_game_id)
+            with PERFORMANCE.measure("pace.python_computation"):
+                projections = [self._project_observation(rows, i, final_total)
+                               for i in range(len(rows))]
+            timing.add("observations_loaded", len(rows))
+            timing.add("projection_count", len(projections))
+            store.replace_projections(source_game_id, projections)
+            return {"source_game_id": source_game_id, "n": len(projections)}
 
     def latest_for_game(self, store: Any, source_game_id: str) -> Optional[dict]:
         """Most recent trajectory row — the CURRENT live trajectory."""

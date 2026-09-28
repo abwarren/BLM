@@ -69,9 +69,11 @@ import math
 import re
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from blm_v4.performance import PERFORMANCE
 
 from blm_v4.terminal_eligibility import is_terminal_checkpoint
 
@@ -227,13 +229,17 @@ class DeviationStore:
     def game_projection_rows(self, source_game_id: str) -> list[dict]:
         """Trajectory rows for one game (VALID clean observations only —
         replayed/stale/regressed frames never appear here)."""
-        with self._lock:
+        with PERFORMANCE.measure("sql.deviation.projection_rows") as timing:
+          with self._lock:
             conn = self._connect()
             try:
-                return [dict(r) for r in conn.execute(
+                rows = [dict(r) for r in conn.execute(
                     "SELECT * FROM clean_projections WHERE source_game_id=? "
                     "ORDER BY captured_at, observation_id",
                     (source_game_id,)).fetchall()]
+                timing.add("projection_rows_loaded", len(rows))
+                timing.add("sql_calls")
+                return rows
             finally:
                 conn.close()
 
@@ -250,12 +256,16 @@ class DeviationStore:
     # ── residual persistence ────────────────────────────────────────
 
     def residual_observation_ids(self, source_game_id: str) -> set[int]:
-        with self._lock:
+        with PERFORMANCE.measure("sql.deviation.residual_ids") as timing:
+          with self._lock:
             conn = self._connect()
             try:
-                return {int(r["observation_id"]) for r in conn.execute(
+                rows = {int(r["observation_id"]) for r in conn.execute(
                     "SELECT observation_id FROM deviation_residuals "
                     "WHERE source_game_id=?", (source_game_id,))}
+                timing.add("residual_ids_loaded", len(rows))
+                timing.add("sql_calls")
+                return rows
             finally:
                 conn.close()
 
@@ -265,7 +275,8 @@ class DeviationStore:
         """(n, mean, std) over residuals STRICTLY EARLIER than the given
         observation (same bucket).  Later residuals — and the observation
         itself — are excluded, so no future information can leak in."""
-        with self._lock:
+        with PERFORMANCE.measure("sql.deviation.prior_bucket_stats") as timing:
+          with self._lock:
             conn = self._connect()
             try:
                 row = conn.execute(
@@ -279,11 +290,17 @@ class DeviationStore:
                               OR (captured_at = ? AND observation_id < ?))""",
                     (benchmark_key, captured_at, captured_at, observation_id),
                 ).fetchone()
+                timing.add("sql_calls")
                 return _mean_std(int(row["n"]), float(row["s"]), float(row["ss"]))
             finally:
                 conn.close()
 
     def insert_residual(self, row: dict[str, Any]) -> int:
+        with PERFORMANCE.measure("sql.deviation.insert_residual") as timing:
+            timing.add("sql_calls")
+            return self._insert_residual_impl(row)
+
+    def _insert_residual_impl(self, row: dict[str, Any]) -> int:
         cols = (
             "observation_id", "model_version", "source_game_id",
             "classification", "period", "benchmark_key", "captured_at",
@@ -421,6 +438,28 @@ class DeviationEngine:
         self.store = DeviationStore(clean_db_path)
 
     def refresh_game(self, source_game_id: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        with PERFORMANCE._lock:
+            sql_before = sum(
+                m["total_ms"] for n, m in PERFORMANCE._metrics.items()
+                if n.startswith("sql.deviation.")
+            )
+        with PERFORMANCE.measure("deviation.refresh_game") as timing:
+            result = self._refresh_game_impl(source_game_id)
+            timing.add("projection_rows_loaded", result.get("projections", 0))
+            timing.add("eligible_rows", result.get("eligible", 0))
+            timing.add("residual_calculations", result.get("residual_calculations", 0))
+            timing.add("residuals_processed", result.get("residual_calculations", 0))
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        with PERFORMANCE._lock:
+            sql_after = sum(
+                m["total_ms"] for n, m in PERFORMANCE._metrics.items()
+                if n.startswith("sql.deviation.")
+            )
+        PERFORMANCE.record("deviation.python_time", max(0.0, elapsed_ms - (sql_after - sql_before)))
+        return result
+
+    def _refresh_game_impl(self, source_game_id: str) -> dict[str, Any]:
         projections = self.store.game_projection_rows(source_game_id)
         existing = self.store.residual_observation_ids(source_game_id)
         # TERMINAL EXCLUSION (directive): the final/terminal frame is
@@ -439,6 +478,7 @@ class DeviationEngine:
         eligible.sort(key=lambda p: (p["captured_at"], p["observation_id"]))
         added = 0
         existing_hits = 0
+        residual_calculations = 0
         ineligible = len(projections) - len(eligible)
         for p in eligible:
             obs_id = int(p["observation_id"])
@@ -450,6 +490,7 @@ class DeviationEngine:
             key = benchmark_key(cls, period)
             residual = market_trajectory_residual(
                 p.get("live_total_line"), p.get("projected_final_total"))
+            residual_calculations += 1
             if residual is None:  # defensive — eligibility already checked
                 continue
             n, mean, std = self.store.prior_bucket_stats(
@@ -493,6 +534,7 @@ class DeviationEngine:
             "terminal_excluded": n_terminal,
             "added": added,
             "existing": existing_hits,
+            "residual_calculations": residual_calculations,
         }
 
     def refresh_all(self) -> dict[str, Any]:
