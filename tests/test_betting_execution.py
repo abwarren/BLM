@@ -140,6 +140,7 @@ def test_on_plus_valid_alert_yields_would_bet(tmp_path):
     assert cand["selection"] == "UNDER"
     assert cand["fingerprint_count"] == 2
     assert cand["fingerprints_present"] == ["C3", "C5"]
+    store.set_config("auto_betting_enabled", "true")
     out = execute(cand, cfg=cfg, store=store, provider=DryRunProvider())
     assert out["status"] == "ACCEPTED"
     rec = store.get_execution(cand["execution_id"])
@@ -335,6 +336,7 @@ def test_missing_identity_means_no_bet(tmp_path):
 
 def test_provider_failure_records_failed(tmp_path):
     cfg, store = make_cfg(tmp_path, dry_run=False), make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
     res = evaluate(qualifying_game(), cfg=cfg, store=store,
                    enabled=True, unit_price=10.0,
                    stats=store.today_stats())
@@ -351,6 +353,7 @@ def test_provider_failure_records_failed(tmp_path):
 
 def test_ambiguous_response_records_unknown(tmp_path):
     cfg, store = make_cfg(tmp_path, dry_run=False), make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
     res = evaluate(qualifying_game(), cfg=cfg, store=store,
                    enabled=True, unit_price=10.0,
                    stats=store.today_stats())
@@ -575,6 +578,7 @@ def test_credentials_not_in_api_payload_or_db(tmp_path):
         res = evaluate(qualifying_game(), cfg=cfg, store=store,
                        enabled=True, unit_price=10.0,
                        stats=store.today_stats())
+        store.set_config("auto_betting_enabled", "true")
         execute(res["candidate"], cfg=cfg, store=store,
                 provider=DryRunProvider())
         conn = sqlite3.connect(store.db_path)
@@ -593,6 +597,7 @@ def test_credentials_not_in_api_payload_or_db(tmp_path):
 
 def test_audit_log_records_why_and_fingerprints(tmp_path):
     cfg, store = make_cfg(tmp_path), make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
     res = evaluate(qualifying_game(), cfg=cfg, store=store,
                    enabled=True, unit_price=10.0,
                    stats=store.today_stats())
@@ -668,3 +673,378 @@ def test_partially_configured_limits_block_betting(tmp_path):
                        stats={"verifiable": True, "bets": 0, "amount": 0.0})
         assert res["decision"] == "NO_BET"
         assert res["reason"] == "limits_not_configured"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# LIVE MODE — requires explicit configuration (§3 / §12)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_live_mode_requires_dry_run_false(tmp_path):
+    """Live money requires BETTING_DRY_RUN=false — the default is always
+    DRY_RUN regardless of any other setting."""
+    # default config → always DRY_RUN
+    cfg = make_cfg(tmp_path)
+    assert cfg.dry_run is True
+    assert cfg.live_money_enabled is False
+    assert type(provider_from_config(cfg)).__name__ == "DryRunProvider"
+
+
+def test_live_mode_dry_run_false_still_stub(tmp_path):
+    """Even with dry_run=False, the PokerBet provider is still a stub
+    and raises ProviderUnavailable — no accidental live bets."""
+    cfg = make_cfg(tmp_path, dry_run=False)
+    assert cfg.dry_run is False
+    assert cfg.live_money_enabled is True
+    p = provider_from_config(cfg)
+    assert type(p).__name__ == "PokerBetProvider"
+    with pytest.raises(ProviderUnavailable):
+        p.submit(execution_id="x", game_id="g", alert_id="a",
+                 selection="UNDER", price=193.5, stake_amount=10.0)
+
+
+def test_live_mode_evaluate_returns_execute_not_would_bet(tmp_path):
+    """With dry_run=False the executor returns EXECUTE (not WOULD_BET)
+    so the worker routes it to the real provider path."""
+    cfg = make_cfg(tmp_path, dry_run=False)
+    store = make_store(tmp_path)
+    res = evaluate(qualifying_game(), cfg=cfg, store=store,
+                   enabled=True, unit_price=10.0,
+                   stats=store.today_stats())
+    assert res["decision"] == "EXECUTE"
+
+
+def test_live_mode_provider_failure_recorded_not_success(tmp_path):
+    """A provider failure in LIVE mode records FAILED — never ACCEPTED."""
+    cfg = make_cfg(tmp_path, dry_run=False)
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    res = evaluate(qualifying_game(), cfg=cfg, store=store,
+                   enabled=True, unit_price=10.0,
+                   stats=store.today_stats())
+    assert res["decision"] == "EXECUTE"
+
+    class AlwaysUnavailable:
+        name = "stub"
+        def submit(self, **kw):
+            raise ProviderUnavailable("not implemented")
+
+    out = execute(res["candidate"], cfg=cfg, store=store,
+                  provider=AlwaysUnavailable())
+    assert out["status"] == "FAILED"
+    rec = store.get_execution(res["candidate"]["execution_id"])
+    assert rec["status"] == "FAILED"
+    assert rec["error_code"] == "PROVIDER_UNAVAILABLE"
+    # a FAILED bet must NOT count as a successful execution — bets=0
+    stats = store.today_stats()
+    # FAILED is not in the counted statuses — only ACCEPTED/SUBMITTED/UNKNOWN
+    assert stats["bets"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# BET COUNT LIMITS (§4)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_bet_count_below_max_allowed(tmp_path):
+    cfg = make_cfg(tmp_path)  # max_bets_per_day=5
+    store = make_store(tmp_path)
+    # 4 bets so far — one more is permitted
+    res = evaluate(qualifying_game(), cfg=cfg, store=store,
+                   enabled=True, unit_price=10.0,
+                   stats={"verifiable": True, "bets": 4, "amount": 40.0})
+    assert res["decision"] == "WOULD_BET"
+
+
+def test_bet_count_exactly_at_max_blocked(tmp_path):
+    cfg = make_cfg(tmp_path)  # max_bets_per_day=5
+    store = make_store(tmp_path)
+    res = evaluate(qualifying_game(), cfg=cfg, store=store,
+                   enabled=True, unit_price=10.0,
+                   stats={"verifiable": True, "bets": 5, "amount": 50.0})
+    assert res["decision"] == "NO_BET"
+    assert res["reason"] == "daily_bet_limit_reached"
+
+
+def test_bet_count_additional_execution_blocked_after_max(tmp_path):
+    """The worker prevents a second execution after the daily bet cap is hit
+    — the stats are refreshed after each execution so the next candidate
+    sees the updated count."""
+    cfg = make_cfg(tmp_path, max_bets_per_day=2)
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    store.set_unit_price(10.0)
+    games = [qualifying_game("G1", 75), qualifying_game("G2", 75),
+             qualifying_game("G3", 75)]
+    w = BettingWorker(cfg, store, lambda: games)
+    summary = w.poll_once()
+    # only 2 should be accepted (max_bets_per_day=2)
+    assert summary["would_bet"] == 2
+    assert summary["no_bet"] >= 1
+    stats = store.today_stats()
+    assert stats["bets"] == 2
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DRY_RUN — simulated amount vs real wagered (§8)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_api_dry_run_amount_is_simulated_not_real(tmp_path):
+    """§8: In DRY_RUN the API must distinguish simulated exposure from real
+    wagered amount.  amount_real=0, amount_simulated=actual stake total,
+    is_simulated=True."""
+    from blm_v4.betting import api as betting_api
+    cfg = make_cfg(tmp_path)
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    store.set_unit_price(10.0)
+    w = BettingWorker(cfg, store, lambda: [qualifying_game()])
+    w.poll_once()  # produces one ACCEPTED dry-run execution
+
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+    st = c.get("/api/v4/betting/status").json()
+    t = st["today"]
+    assert t["is_simulated"] is True
+    assert t["amount_real"] == 0.0
+    assert t["amount_simulated"] == 10.0   # one bet × R10 unit price
+    assert t["amount"] == 10.0             # limit-enforcement value unchanged
+    assert t["bets"] == 1
+    assert t["remaining_exposure"] == 190.0   # 200 - 10
+
+
+def test_api_provider_ref_in_recent_executions(tmp_path):
+    """§7: The API must return provider_ref for each execution so the
+    frontend can show the dry-run reference."""
+    from blm_v4.betting import api as betting_api
+    cfg = make_cfg(tmp_path)
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    store.set_unit_price(10.0)
+    w = BettingWorker(cfg, store, lambda: [qualifying_game()])
+    w.poll_once()
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+    st = c.get("/api/v4/betting/status").json()
+    assert st["recent"]
+    r = st["recent"][0]
+    assert r["provider_ref"] is not None
+    assert r["provider_ref"].startswith("dryrun-")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DASHBOARD STATISTICS (§8) — server-derived, correct counts
+# ══════════════════════════════════════════════════════════════════════
+
+def test_dashboard_stats_reflect_persisted_executions(tmp_path):
+    """Today's Bets / Units / Amount / Remaining are server-derived and
+    update correctly after executions."""
+    from blm_v4.betting import api as betting_api
+    cfg = make_cfg(tmp_path)  # max_daily_exposure=200, stake_units=1
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    store.set_unit_price(20.0)
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+
+    # initial state — no bets
+    st = c.get("/api/v4/betting/status").json()
+    assert st["today"]["bets"] == 0
+    assert st["today"]["amount"] == 0.0
+    assert st["today"]["remaining_exposure"] == 200.0
+
+    # run the worker — one qualifying game
+    w = BettingWorker(cfg, store, lambda: [qualifying_game()])
+    w.poll_once()
+
+    st = c.get("/api/v4/betting/status").json()
+    assert st["today"]["bets"] == 1
+    assert st["today"]["units"] == 1.0
+    assert st["today"]["amount"] == 20.0
+    assert st["today"]["remaining_exposure"] == 180.0
+
+
+def test_dashboard_remaining_exposure_never_negative(tmp_path):
+    """Remaining exposure is max(0, limit - total) — never negative."""
+    from blm_v4.betting import api as betting_api
+    # set a low limit that can be exceeded across multiple bets
+    cfg = make_cfg(tmp_path, max_daily_exposure=25.0, max_bets_per_day=10,
+                   max_stake_per_bet=100.0)
+    store = make_store(tmp_path)
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+
+    # manually write an execution that exceeds the limit (e.g. pre-existing)
+    rec = {
+        "execution_id": "e-over", "idempotency_key": "k-over",
+        "game_id": "G1", "alert_id": "A1", "checkpoint": "75",
+        "stake_amount": 30.0, "status": "ACCEPTED",
+    }
+    store.claim(rec)
+    store.update_status("e-over", "ACCEPTED")
+
+    st = c.get("/api/v4/betting/status").json()
+    assert st["today"]["remaining_exposure"] == 0.0   # not negative
+
+
+# ══════════════════════════════════════════════════════════════════════
+# RECENT EXECUTIONS — render and show blocked reason (§7)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_recent_executions_populated_after_dry_run(tmp_path):
+    """After a dry-run the recent list is non-empty and carries the
+    expected fields: game_id, selection, stake_amount, status, provider_ref,
+    checkpoint, error_message."""
+    from blm_v4.betting import api as betting_api
+    cfg = make_cfg(tmp_path)
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    store.set_unit_price(15.0)
+    w = BettingWorker(cfg, store, lambda: [qualifying_game("G42", 75)])
+    w.poll_once()
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+    st = c.get("/api/v4/betting/status").json()
+    assert len(st["recent"]) == 1
+    r = st["recent"][0]
+    assert r["game_id"] == "G42"
+    assert r["checkpoint"] == "75"
+    assert r["selection"] == "UNDER"
+    assert r["stake_amount"] == 15.0
+    assert r["status"] == "ACCEPTED"
+    assert r["provider_ref"].startswith("dryrun-")
+    assert "DRY_RUN" in r["error_message"]
+
+
+def test_blocked_execution_shows_reason_in_api(tmp_path):
+    """A FAILED execution persists its error_code so the dashboard can
+    display the rejection reason (§7 / §11)."""
+    from blm_v4.betting import api as betting_api
+    from blm_v4.betting.executor import execute
+    from blm_v4.betting.provider import DryRunProvider, ProviderUnavailable
+    cfg = make_cfg(tmp_path, dry_run=False)
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    res = evaluate(qualifying_game(), cfg=cfg, store=store,
+                   enabled=True, unit_price=10.0,
+                   stats=store.today_stats())
+
+    class AlwaysFails:
+        name = "stub"
+        def submit(self, **kw):
+            raise ProviderUnavailable("provider stub not implemented")
+
+    execute(res["candidate"], cfg=cfg, store=store, provider=AlwaysFails())
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+    st = c.get("/api/v4/betting/status").json()
+    assert st["recent"]
+    r = st["recent"][0]
+    assert r["status"] == "FAILED"
+    assert r["error_code"] == "PROVIDER_UNAVAILABLE"
+    assert r["error_message"] is not None
+
+
+def test_no_executions_returns_empty_recent(tmp_path):
+    """Before any execution the recent list is empty — the dashboard shows
+    'No executions yet'."""
+    from blm_v4.betting import api as betting_api
+    cfg = make_cfg(tmp_path)
+    store = make_store(tmp_path)
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+    st = c.get("/api/v4/betting/status").json()
+    assert st["recent"] == []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# API SECURITY — browser cannot override server-side limits (§12)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_browser_cannot_inject_stake_above_server_limit(tmp_path):
+    """The browser sends only unit_price; the server calculates the final
+    stake using cfg.stake_units.  Even if the client sends a huge
+    unit_price it is bounded by cfg.max_unit_price (1000 by default),
+    and stake = unit_price × stake_units is enforced server-side."""
+    from blm_v4.betting import api as betting_api
+    cfg = make_cfg(tmp_path)   # max_stake_per_bet=100, max_unit_price=1000
+    store = make_store(tmp_path)
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+    # attempt to set unit_price above max_unit_price
+    r = c.post("/api/v4/betting/settings", json={"unit_price": 99999.0})
+    assert r.status_code == 400
+
+
+def test_browser_cannot_set_limits_via_settings(tmp_path):
+    """The /settings endpoint only accepts auto_betting and unit_price.
+    Sending limit fields has no effect — they are silently ignored (the
+    server always uses its env-sourced config)."""
+    from blm_v4.betting import api as betting_api
+    cfg = make_cfg(tmp_path, max_daily_exposure=100.0)
+    store = make_store(tmp_path)
+    betting_api.configure_betting(store, cfg)
+    app = FastAPI()
+    app.include_router(betting_api.router)
+    c = TestClient(app)
+    # trying to inject a larger exposure limit via settings
+    r = c.post("/api/v4/betting/settings",
+               json={"max_daily_exposure": 999999.0,
+                     "max_bets_per_day": 9999,
+                     "max_stake_per_bet": 9999.0})
+    assert r.status_code == 200   # ignored, not rejected
+    st = c.get("/api/v4/betting/status").json()
+    # the server-side config is unchanged
+    assert st["max_daily_exposure"] == 100.0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CUMULATIVE EXPOSURE (§8 — multiple bets accumulate correctly)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_cumulative_exposure_across_multiple_bets(tmp_path):
+    """Each dry-run bet adds to the running exposure total; the remaining
+    exposure decreases by exactly stake_amount per bet."""
+    cfg = make_cfg(tmp_path, max_bets_per_day=10, max_daily_exposure=100.0,
+                   max_stake_per_bet=50.0)
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    store.set_unit_price(30.0)
+    games = [qualifying_game(f"G{i}", 75) for i in range(3)]
+    w = BettingWorker(cfg, store, lambda: games)
+    w.poll_once()
+    stats = store.today_stats()
+    # 3 bets × R30 = R90 — all fit within R100 exposure limit
+    assert stats["bets"] == 3
+    assert abs(stats["amount"] - 90.0) < 0.01
+
+
+def test_exposure_blocks_on_cumulative_overflow(tmp_path):
+    """After enough bets to fill the daily exposure, further candidates
+    are blocked — even if the bet count limit hasn't been reached."""
+    cfg = make_cfg(tmp_path, max_bets_per_day=10, max_daily_exposure=50.0,
+                   max_stake_per_bet=50.0)
+    store = make_store(tmp_path)
+    store.set_config("auto_betting_enabled", "true")
+    store.set_unit_price(30.0)  # 30+30=60 > 50 limit → second blocked
+    games = [qualifying_game("G1", 75), qualifying_game("G2", 75)]
+    w = BettingWorker(cfg, store, lambda: games)
+    summary = w.poll_once()
+    assert summary["would_bet"] == 1
+    assert summary["no_bet"] == 1
+    stats = store.today_stats()
+    assert stats["bets"] == 1

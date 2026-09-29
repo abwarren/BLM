@@ -78,7 +78,9 @@ class BettingWorker:
         for g in games:
             res = evaluate(g, cfg=self.cfg, store=self.store,
                            enabled=True, unit_price=unit_price,
-                           stats=stats)
+                           stats=stats,
+                           game_enabled=self.store.is_game_enabled(
+                               g.get("game_id")))
             if res["decision"] == "NO_BET":
                 summary["no_bet"] += 1
                 continue
@@ -90,8 +92,16 @@ class BettingWorker:
                 self.store.update_status(
                     cand["execution_id"], "ACCEPTED",
                     provider_ref=f"dryrun-{cand['execution_id']}",
-                    error_message="DRY_RUN — no real bet submitted")
+                    error_message="DRY_RUN — no real bet submitted",
+                    simulated_amount=cand["stake_amount"],
+                    execution_state="WOULD_BET")
                 summary["would_bet"] += 1
+                # refresh running stats so later candidates in this same
+                # pass respect the updated exposure/count (§4: limits
+                # enforced within a single poll pass, not just across
+                # passes — WOULD_BET records count toward the limits
+                # immediately after they are persisted)
+                stats = self.store.today_stats()
                 continue
             out = execute(cand, cfg=self.cfg, store=self.store,
                           provider=self.provider)
