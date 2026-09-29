@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import re
+import signal
 import socket
 import sqlite3
 import time
@@ -209,6 +210,19 @@ def _sd_notify(state: str) -> bool:
 
 
 WATCHDOG_POLL_DEFAULT_S = 5.0  # check cadence; notify on every pass
+
+
+def _block_deadline_signal() -> None:
+    """Block the capture-deadline SIGALRM in the calling thread.
+
+    ``signal.setitimer`` arms ONE process-wide real-time timer, and the
+    kernel may deliver the signal to ANY thread that does not block it —
+    not necessarily the thread that armed it.  The handler must only ever
+    run on the capturing thread, so every other collector thread blocks it
+    here.  See ``_page_content_timed`` for why a handler must not raise.
+    """
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
 # A fast cycle is "fresh" when it completed within this multiple of the
 # 5s tick.  6× = 30s: two full missed cycles plus margin, far below the
 # minutes-long wedges observed, and below typical WatchdogSec values.
@@ -1750,6 +1764,7 @@ class PokerBetCollector:
         starts immediately.  Idempotent and failure-isolated — a failure
         here must never prevent the collector from running.
         """
+        _block_deadline_signal()
         try:
             if self._deviation is not None:
                 stats = self._deviation.refresh_all()
@@ -1922,9 +1937,7 @@ class PokerBetCollector:
 
     # ── SELF-WATCHDOG (see WATCHDOG_* note above FAST_TICK_S) ──────
 
-    def _watchdog_loop_body(self, deadline: float,
-                             starving: bool,
-                             startup_deadline: float = 0.0) -> None:
+    def _watchdog_loop_body(self, deadline: float, starving: bool) -> None:
         """Single poll iteration of the self-watchdog.
 
         A fast cycle counts as fresh when it COMPLETED (not merely
@@ -1943,21 +1956,14 @@ class PokerBetCollector:
         to systemd and causes the same SIGABRT restart loop as a wedged
         fast path.  Every exception in the loop body is swallowed.
 
-        During the startup grace period (first 60s), the watchdog pings
-        unconditionally so systemd's WatchdogSec timer is reset while the
-        fast loop is still initializing — the initial "no completed fast
-        cycle" warning is expected and does not trigger a restart during
-        this window.
+        Pinging is strictly conditional on a COMPLETED fast cycle.  With
+        Type=notify, systemd arms WatchdogSec only after READY=1, so pings
+        sent before the first fast cycle are not what keeps the unit alive;
+        the unconditional 60s startup-grace ping that used to sit here
+        merely blindfolded the dog for its most fragile minute.
         """
         last = self._last_fast_completed_at
         now = time.monotonic()
-        # Startup grace: ping unconditionally until the grace period
-        # expires.  This prevents systemd from killing the unit during
-        # the initial startup phase (browser launch, slow worker init,
-        # first fast tick) when no fast cycle has completed yet.
-        if startup_deadline > 0 and now < startup_deadline:
-            _sd_notify("WATCHDOG=1\nSTATUS=startup grace period")
-            return
         alive = (
             last > 0.0
             and (now - last) <= deadline
@@ -1999,16 +2005,14 @@ class PokerBetCollector:
         to systemd and causes the same SIGABRT restart loop as a wedged
         fast path.  Every exception in the loop body is swallowed.
         """
+        _block_deadline_signal()
         deadline = FAST_TICK_S * FAST_LIVENESS_FACTOR  # 30 s threshold
-        startup_grace = 60.0  # ping unconditionally for the first 60s
         logger.info("self-watchdog active: fast-liveness deadline %.0fs",
                     deadline)
         starving = False
-        startup_deadline = time.monotonic() + startup_grace
         while not self._watchdog_stop.wait(WATCHDOG_POLL_DEFAULT_S):
             try:
-                self._watchdog_loop_body(deadline, starving,
-                                          startup_deadline=startup_deadline)
+                self._watchdog_loop_body(deadline, starving)
             except Exception:
                 # The watchdog thread must never die.  Any unexpected error
                 # (including _sd_notify failures that escape its internal
@@ -2061,6 +2065,7 @@ class PokerBetCollector:
         happens here, on this thread's own browser; a hung 45s-timeout
         navigation delays only the NEXT round, never the fast cadence.
         """
+        _block_deadline_signal()
         try:
             with sync_playwright() as pw:
                 self._slow_pw = pw
@@ -2400,11 +2405,35 @@ class PokerBetCollector:
     def _page_content_timed(
         self, page: Page, label: str = "", timeout_s: Optional[float] = None,
     ) -> str | None:
-        """Return page.content() or None if it times out.
+        """Return page.content() or None if it overran its budget.
 
-        Runs page.content() in a side thread with a wall-clock deadline.
-        On timeout, returns None so the caller can recover (fresh context
-        / relaunch) without blocking the fast loop.
+        Runs page.content() on the SAME thread that owns the sync_playwright
+        context (the main fast-path thread).  The thread-spawning version
+        crossed Playwright's greenlet thread-affinity boundary and produced
+        ``greenlet.error: cannot switch to a different thread`` on every
+        call (reproducer-confirmed), so the deadline is armed as SIGALRM on
+        the calling thread — no cross-thread greenlet switch is attempted.
+
+        The handler FLAGS an overrun; it must never RAISE.  Playwright
+        dispatches WebSocket frame callbacks NESTED on this same thread
+        while page.content() is in flight (each thread owns a socket), and
+        those callbacks write to SQLite.  A raising handler was landing
+        inside ``upsert_betual_timer``'s ``conn.commit()`` (159 events to
+        2026-09-29): it aborted the write mid-transaction AND consumed the
+        alarm, so the deadline silently stopped being enforced (a 3.0s
+        budget measured 5.9s) and a late raise could equally land in the
+        tick's own persistence phase.  Flagging keeps the error out of
+        every frame but the call site's own.
+
+        An overrun is REPORTED, not punished: the capture is still returned.
+        Discarding it would route every over-budget capture through
+        ``_fresh_context`` (a context recycle plus a discovery navigation) —
+        measured at roughly 3–5% of ticks, and exactly the path that hung for
+        85s before the 03:04:06Z watchdog restart.  The spend-based budget at
+        the call site and, for a page wedged outright, the self-watchdog →
+        systemd restart remain the recovery mechanisms (see the WATCHDOG_*
+        note above FAST_TICK_S; ``tick_deadline`` in ``_tick`` is currently
+        computed but never used).  A failed capture still returns None.
 
         ``timeout_s`` overrides the instance default when provided — used
         by the tick budget to shrink the per-call deadline as the budget
@@ -2412,41 +2441,41 @@ class PokerBetCollector:
         """
         url = getattr(page, "url", "unknown")
         tl = timeout_s if timeout_s is not None else self.PAGE_CONTENT_TICK_TIMEOUT_S
+        t_start = time.monotonic()
         logger.info("page.content() START [%s] url=%s timeout=%.1fs", label, url, tl)
 
-        result: list[str | None] = [None]
-        exc: list[BaseException | None] = [None]
+        self._capture_overran = False
 
-        def _run() -> None:
+        def _on_alarm(signum: int, frame: Any) -> None:
+            self._capture_overran = True
+
+        old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, tl)
             try:
-                result[0] = page.content()
+                html = page.content()
             except Exception as e:
-                exc[0] = e
+                logger.error(
+                    "page.content() EXCEPTION [%s] url=%s: %s",
+                    label, url, e,
+                )
+                return None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old_handler)
 
-        t = threading.Thread(target=_run, name=f"page-content-{label}", daemon=True)
-        t.start()
-        t.join(timeout=tl)
-
-        if t.is_alive():
+        spend = time.monotonic() - t_start
+        if self._capture_overran:
             logger.warning(
-                "page.content() TIMEOUT after %.1fs [%s] url=%s "
-                "— page is wedged; will recover",
-                tl, label, url,
+                "page.content() OVERRAN its %.1fs budget (took %.3fs) [%s] "
+                "url=%s — capture kept; wedge recovery is the watchdog's",
+                tl, spend, label, url,
             )
-            return None
-
-        if exc[0] is not None:
-            logger.error(
-                "page.content() EXCEPTION [%s] url=%s: %s",
-                label, url, exc[0],
-            )
-            return None
-
         logger.info(
             "page.content() COMPLETE [%s] url=%s took=%.3fs",
-            label, url, time.monotonic() - getattr(t, "_start", time.monotonic()),
+            label, url, spend,
         )
-        return result[0]
+        return html
 
     def _recover(self, page: Page) -> Page:
         """Legacy single-tick recovery — now superseded by session rotation."""
