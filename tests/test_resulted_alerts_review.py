@@ -297,7 +297,9 @@ def test_resulted_panel_is_labelled_for_historical_review():
     """Requirement 10: the panel says what it is for, and its legend names
     UNDER / OVER / PUSH in their own colours."""
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert "RESULTED ALERTS" in html
+    # frontend redesign directive 2026-09-28: the historical-review panel is
+    # titled "RESULTS" (formerly "RESULTED ALERTS") — same content contract
+    assert "🟢 RESULTS" in html
     assert 'id="alertHistory"' in html
     for lg in ('class="lg-under">UNDER<', 'class="lg-over">OVER<',
                'class="lg-push">PUSH<'):

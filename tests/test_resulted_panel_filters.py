@@ -1,7 +1,7 @@
 """RESULTED-PANEL FILTERS — Date / Time / League / Result (directive 2026-09-19).
 
 The RESULTED panel gains display filters: LEAGUE, DATE, TIME (from/to
-window) and RESULT (UNDER / OVER / PUSH / NO LINE / NO FINAL / PENDING).
+window) and RESULT (UNDER / OVER / PUSH / NO LINE / RESULT PENDING / PENDING).
 The contract pinned here:
 
 1. REAL DATA — filters run against the record's actual fields: the verdict
@@ -16,9 +16,9 @@ The contract pinned here:
 4. TIME WINDOW — HH:MM is minutes-after-midnight UTC, matching the panel's
    own UTC rendering; records outside [from, to] are hidden; unparseable
    bounds hide nothing by themselves.
-5. NEW STATES — NO LINE / NO FINAL / PENDING each select exactly the rows
+5. NEW STATES — NO LINE / RESULT PENDING / PENDING each select exactly the rows
    now labelled with those explicit words; settled UNDER/OVER/PUSH keep
-   their colours; NO LINE / NO FINAL rows are never coloured.
+   their colours; NO LINE / RESULT PENDING rows are never coloured.
 6. UNDECIDABLE — a record with no trigger timestamp is never hidden by the
    time/date filters (a filter hides rows, never misfiles them).
 
@@ -363,7 +363,7 @@ def test_filtering_never_mutates_stores_or_settlement(tmp_path):
 @node
 def test_filtered_repaint_keeps_verdict_colours_and_new_states(tmp_path):
     """While a filter is active, every SHOWN settled row keeps its verdict
-    colour; NO LINE / NO FINAL rows stay uncoloured with their words."""
+    colour; NO LINE / RESULT PENDING rows stay uncoloured with their words."""
     r = _run(tmp_path, """
       seed(ALL());
       m.resultFilters.league = "betual-nba";   // hides only K
@@ -380,13 +380,13 @@ def test_filtered_repaint_keeps_verdict_colours_and_new_states(tmp_path):
     assert row_colour(html, "O") == "al-over", html
     assert row_colour(html, "P") == "al-push", html
     assert row_colour(html, "NL") is None and "NO LINE" in html, html
-    assert row_colour(html, "NF") is None and "NO FINAL" in html, html
+    assert row_colour(html, "NF") is None and "RESULT PENDING" in html, html
     assert "Game K" not in html.replace("Game KBL", ""), html  # hidden
     assert r["nolineHtml"].count('<li class="al-row') == 1, r
     assert "NO LINE" in r["nolineHtml"] and "166" in r["nolineHtml"], r
     assert "al-under" not in r["nolineHtml"] and "al-over" not in r["nolineHtml"]
     assert r["nofinalHtml"].count('<li class="al-row') == 1, r
-    assert "NO FINAL" in r["nofinalHtml"], r
+    assert "RESULT PENDING" in r["nofinalHtml"], r
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -407,7 +407,7 @@ def test_filter_bar_renders_all_controls_and_states(tmp_path):
                     "rfResult", "rfClear"):
         assert f'id="{control}"' in html, control
     assert "betual-kbl" in html and "betual-nba" in html   # league options
-    for label in ("NO LINE", "NO FINAL", "PENDING", "UNDER", "OVER", "PUSH"):
+    for label in ("NO LINE", "RESULT PENDING", "PENDING", "UNDER", "OVER", "PUSH"):
         assert label in html, label
     # clear button hidden while no filter is active
     assert 'class="rf-clear"' in html, html

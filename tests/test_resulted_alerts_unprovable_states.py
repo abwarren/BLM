@@ -1,4 +1,4 @@
-"""UNPROVABLE RESULT STATES — explicit NO LINE / NO FINAL / PENDING words on
+"""UNPROVABLE RESULT STATES — explicit NO LINE / RESULT PENDING / PENDING words on
 resulted rows that can carry no verdict (directive 2026-09-19).
 
 The 2026-09-17 production validation proved the classifier colours 100% of
@@ -8,7 +8,7 @@ for those rows: none of them may render as an anonymous blank or look like a
 bypassed result, and none of them may ever receive a verdict colour class.
 
     status null + block carries a final  → NO LINE   (line never captured)
-    status null + record resolved        → NO FINAL  (backend proves neither)
+    status null + record resolved        → RESULT PENDING  (backend proves neither)
     status null + nothing resolved       → PENDING   (may still settle)
     settled statuses                     → unchanged verdict colouring
 
@@ -143,7 +143,7 @@ def test_null_status_with_a_provable_final_is_no_line(tmp_path):
 @node
 def test_null_status_resolved_without_a_final_is_no_final(tmp_path):
     """A record that has RESOLVED (game ended / left the window) and still
-    proves neither a final nor a line: the explicit NO FINAL state."""
+    proves neither a final nor a line: the explicit RESULT PENDING state."""
     r = _run(tmp_path, """
       OUT.state = m.alertVerdictStateFor(pendingBlock(),
         { resolved: true, rec: recN(1), onUnprovable: () => {} });
@@ -151,7 +151,7 @@ def test_null_status_resolved_without_a_final_is_no_final(tmp_path):
         { resolved: true, rec: recN(1), onUnprovable: () => {} });
     """)
     for st in (r["state"], r["emptyBlock"]):
-        assert st["word"] == "NO FINAL", st
+        assert st["word"] == "RESULT PENDING", st
         assert st["cls"] is None and st["kind"] == "nofinal", st
 
 
@@ -195,7 +195,7 @@ def colour_classes(row: str | None) -> list:
 @node
 def test_resulted_rows_render_their_explicit_unprovable_state(tmp_path):
     """Every status=None row states WHY it has no verdict: NO LINE (with the
-    known final shown), NO FINAL, or PENDING — never an empty result line,
+    known final shown), RESULT PENDING, or PENDING — never an empty result line,
     and NEVER a verdict colour class on the row."""
     r = _run(tmp_path, """
       OUT.rows = {};
@@ -205,7 +205,7 @@ def test_resulted_rows_render_their_explicit_unprovable_state(tmp_path):
       OUT.rows.noline = { cls: rowClassOf(m.historyAlertsHTML()),
         html: m.historyAlertsHTML(),
         line: m.alertOutcomeLine(m.UNDER_ALERTS.history[0]) };
-      // NO FINAL: resolved, backend proves neither
+      // RESULT PENDING: resolved, backend proves neither
       seed([recN(2, { resolved_at: "2026-09-19T11:00:00.000Z",
         outcome: pendingBlock() })]);
       OUT.rows.nofinal = { cls: rowClassOf(m.historyAlertsHTML()),
@@ -222,7 +222,7 @@ def test_resulted_rows_render_their_explicit_unprovable_state(tmp_path):
     # the explicit words appear on the rendered rows
     assert "NO LINE" in noline["line"] and "no line captured" in noline["line"]
     assert "Final:" in noline["line"] and "186" in noline["line"], noline
-    assert "NO FINAL" in nofinal["line"], nofinal
+    assert "RESULT PENDING" in nofinal["line"], nofinal
     assert "PENDING" in pending["line"], pending
     # none of the three is an anonymous blank
     for got in (noline, nofinal, pending):
@@ -250,7 +250,7 @@ def test_active_surface_renders_the_explicit_states_too(tmp_path):
     """)
     assert "NO LINE" in r["noline"] and "al-noline" in r["noline"], r
     assert "PENDING" in r["pending"] and "al-noline" not in r["pending"], r
-    assert "NO FINAL" in r["nofinal"] and "al-nofinal" in r["nofinal"], r
+    assert "RESULT PENDING" in r["nofinal"] and "al-nofinal" in r["nofinal"], r
     # never a verdict-coloured outcome on an unprovable row
     for key in ("noline", "pending", "nofinal"):
         assert "al-outcome" not in r[key], (key, r[key])
@@ -262,7 +262,7 @@ def test_active_surface_renders_the_explicit_states_too(tmp_path):
 
 @node
 def test_unprovable_causes_log_once_per_game_and_pending_never(tmp_path):
-    """NO LINE / NO FINAL each log once per (cause, game) with the game id;
+    """NO LINE / RESULT PENDING each log once per (cause, game) with the game id;
     ordinary PENDING rows never log; settled rows never log."""
     r = _run(tmp_path, """
       const warns = [];
@@ -279,7 +279,7 @@ def test_unprovable_causes_log_once_per_game_and_pending_never(tmp_path):
         recN(1, { resolved_at: "2026-09-19T11:00:00.000Z",
           outcome: pendingBlock({ final_total: 186 }) })]));
       m.historyAlertsHTML();          // same game again: still one line
-      // NO FINAL for a third game
+      // RESULT PENDING for a third game
       seed(m.UNDER_ALERTS.history.concat([
         recN(3, { resolved_at: "2026-09-19T11:00:00.000Z",
           outcome: pendingBlock() })]));
@@ -296,10 +296,10 @@ def test_unprovable_causes_log_once_per_game_and_pending_never(tmp_path):
       OUT.warnCount = warns.length;
       OUT.warns = warns;
     """)
-    # 2 games × NO LINE + 1 game × NO FINAL — no cause or game repeats
+    # 2 games × NO LINE + 1 game × RESULT PENDING — no cause or game repeats
     assert r["warnCount"] == 3, r["warns"]
     noline = [w for w in r["warns"] if "NO LINE" in w]
-    nofinal = [w for w in r["warns"] if "NO FINAL" in w]
+    nofinal = [w for w in r["warns"] if "RESULT PENDING" in w]
     assert len(noline) == 2 and len(nofinal) == 1, r["warns"]
     # the game id is named so the data-path defect is traceable
     assert any("G-1" in w for w in noline), r["warns"]
@@ -364,7 +364,7 @@ def test_source_single_classifier_and_explicit_state_branch():
     assert js.count("function alertVerdictStateFor") == 1
     body = js[js.index("function alertVerdictStateFor"):]
     body = body[:body.index("\n}\n")]
-    for token in ('"NO LINE"', '"NO FINAL"', '"PENDING"'):
+    for token in ('"NO LINE"', '"RESULT PENDING"', '"PENDING"'):
         assert token in body, token
     # every no-verdict branch is cls:null — a colour only from a verdict
     # (3 unprovable branches + the pending-family status branch = 4)

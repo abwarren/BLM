@@ -429,7 +429,7 @@ def _run_node(script: str):
 _STUBS = """
 const num1 = (x) => (x == null || !isFinite(x)) ? "\\u2013" : Number(x).toFixed(1);
 const ALERT_RESULT_WORDS = { under: "UNDER", over: "OVER", push: "PUSH",
-  no_final: "NO FINAL", unknown: "NO FINAL" };
+  no_final: "RESULT PENDING", unknown: "RESULT PENDING" };
 """
 
 
