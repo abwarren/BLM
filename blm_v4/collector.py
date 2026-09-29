@@ -211,6 +211,33 @@ def _sd_notify(state: str) -> bool:
 
 WATCHDOG_POLL_DEFAULT_S = 5.0  # check cadence; notify on every pass
 
+# Bounded startup grace (2026-09-29 forensic follow-up): while NO fast
+# cycle has ever completed, keep pinging for at most this long — capped
+# at runtime at half of systemd's WatchdogSec — so a slow-but-alive
+# first cycle under host load is not rewarded with a systemd kill.  The
+# 2026-09-29 restart storms each killed a process inside its first ~60s
+# (kill = last completed cycle + FAST_LIVENESS_FACTOR × FAST_TICK_S +
+# WatchdogSec ≈ 120s); the grace re-covers exactly that fragile minute
+# without weakening steady-state cycle-gated liveness.
+WATCHDOG_STARTUP_GRACE_S = 60.0
+
+
+def _startup_grace_seconds(watchdog_usec: Optional[str]) -> float:
+    """Bounded startup grace: min(WATCHDOG_STARTUP_GRACE_S, WatchdogSec/2).
+
+    ``watchdog_usec`` is the raw WATCHDOG_USEC environment value (string
+    microseconds, or None when unset).  Unknown/invalid values return
+    the un-capped default — the caller only pings MORE, never less.
+    """
+    grace = WATCHDOG_STARTUP_GRACE_S
+    try:
+        watchdog_sec_s = float(watchdog_usec) / 1e6  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return grace
+    if watchdog_sec_s > 0.0:
+        grace = min(grace, watchdog_sec_s / 2.0)
+    return grace
+
 
 def _block_deadline_signal() -> None:
     """Block the capture-deadline SIGALRM in the calling thread.
@@ -1846,7 +1873,10 @@ class PokerBetCollector:
                 # READY=1: initialization SUCCEEDED (slow worker up,
                 # browser session up, tracked state restored).  From this
                 # point liveness is reported exclusively via WATCHDOG=1
-                # pings from _watchdog_loop, gated on fresh fast cycles.
+                # pings from _watchdog_loop, gated on fresh fast cycles
+                # (with the one bounded startup-grace exception documented
+                # in _watchdog_loop — it ends at the first completed
+                # cycle).
                 _sd_notify("READY=1")
                 while self._running:
                     tick_start = time.monotonic()
@@ -1956,11 +1986,17 @@ class PokerBetCollector:
         to systemd and causes the same SIGABRT restart loop as a wedged
         fast path.  Every exception in the loop body is swallowed.
 
-        Pinging is strictly conditional on a COMPLETED fast cycle.  With
-        Type=notify, systemd arms WatchdogSec only after READY=1, so pings
-        sent before the first fast cycle are not what keeps the unit alive;
-        the unconditional 60s startup-grace ping that used to sit here
-        merely blindfolded the dog for its most fragile minute.
+        Pinging is strictly conditional on a COMPLETED fast cycle, with
+        ONE bounded exception: the startup grace window (see the
+        WATCHDOG_* note above FAST_TICK_S).  With Type=notify, systemd
+        arms WatchdogSec only after READY=1, and the first fast cycle of
+        a fresh process is its most fragile — the 2026-09-29 restart
+        storms each killed a process inside its first ~60s under host
+        load.  The grace window re-covers exactly that minute; it is
+        BOUNDED (min(WATCHDOG_STARTUP_GRACE_S, WatchdogSec / 2)) and
+        ends at the first completed cycle, so steady-state liveness
+        remains gated on completed fast cycles and a wedged fast path is
+        still killed at WatchdogSec expiry.
         """
         last = self._last_fast_completed_at
         now = time.monotonic()
@@ -1968,10 +2004,16 @@ class PokerBetCollector:
             last > 0.0
             and (now - last) <= deadline
         )
+        in_grace = (
+            last <= 0.0
+            and getattr(self, "_startup_deadline", 0.0) > 0.0
+            and now < self._startup_deadline
+        )
         if alive:
             if starving:
                 logger.info("watchdog: fast cycles fresh again — "
                             "resuming WATCHDOG=1 pings")
+            self._starving_now = False
             # WATCHDOG=1 is THE heartbeat — it is what resets
             # systemd's WatchdogSec timer.  STATUS= is annotation
             # only and must never be treated as the heartbeat.
@@ -1979,7 +2021,20 @@ class PokerBetCollector:
                 f"WATCHDOG=1\n"
                 f"STATUS=fast cycle complete "
                 f"{now - last:.1f}s ago")
+        elif in_grace:
+            self._starving_now = False
+            # Bounded startup grace: a fresh process has not completed
+            # its first fast cycle yet — usually browser warmup under
+            # load, not a wedge.  Ping so systemd's newly armed
+            # WatchdogSec is not allowed to kill the unit for being slow
+            # in the one minute every 2026-09-29 restart storm exploited.
+            # The window expires (see _watchdog_loop) and ends outright
+            # at the first completed cycle.
+            _sd_notify(
+                "WATCHDOG=1\n"
+                "STATUS=startup grace — no completed fast cycle yet")
         else:
+            self._starving_now = True
             if not starving:
                 logger.warning(
                     "watchdog: no completed fast cycle within %.0fs — "
@@ -1996,9 +2051,13 @@ class PokerBetCollector:
         the unit (Restart=always) — the whole unit, browser included,
         which an in-process relaunch cannot guarantee.
 
-        Protocol: the ping is ``WATCHDOG=1`` (that is what resets
-        systemd's WatchdogSec timer — STATUS= alone does not), with a
-        human-readable STATUS line attached.
+        ONE bounded exception: until the FIRST fast cycle completes but
+        no longer than _startup_grace_seconds (min(60s, WatchdogSec/2),
+        see the WATCHDOG_* note above FAST_TICK_S), the dog is still
+        fed — a slow first cycle under host load must not be rewarded
+        with a systemd kill.  The window ends at the first completed
+        cycle, after which liveness is gated on completed cycles
+        exclusively.
 
         The watchdog thread must NEVER die from a notification failure or
         any other unexpected error — a dead watchdog thread is invisible
@@ -2007,18 +2066,30 @@ class PokerBetCollector:
         """
         _block_deadline_signal()
         deadline = FAST_TICK_S * FAST_LIVENESS_FACTOR  # 30 s threshold
-        logger.info("self-watchdog active: fast-liveness deadline %.0fs",
-                    deadline)
+        # Bounded startup grace (2026-09-29 forensic follow-up): ping
+        # while the process has NEVER completed a fast cycle and start-up
+        # is younger than min(WATCHDOG_STARTUP_GRACE_S, WatchdogSec / 2).
+        # After that — or after the first completed cycle — liveness is
+        # gated on completed fast cycles exclusively.
+        self._startup_deadline = time.monotonic() + _startup_grace_seconds(
+            os.environ.get("WATCHDOG_USEC"))
+        self._starving_now = False
+        logger.info(
+            "self-watchdog active: fast-liveness deadline %.0fs, "
+            "startup grace until +%.0fs",
+            deadline, self._startup_deadline - time.monotonic())
         starving = False
         while not self._watchdog_stop.wait(WATCHDOG_POLL_DEFAULT_S):
             try:
                 self._watchdog_loop_body(deadline, starving)
+                # one STOPPING warning per starvation episode, not one
+                # per poll pass (the pre-fix flag was never propagated)
+                starving = self._starving_now
             except Exception:
                 # The watchdog thread must never die.  Any unexpected error
                 # (including _sd_notify failures that escape its internal
                 # try/except) is silently swallowed so the thread survives.
                 logger.exception("watchdog loop body error — continuing")
-            starving = False
 
     def stop(self) -> None:
         self._running = False

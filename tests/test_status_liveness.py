@@ -20,6 +20,7 @@ These tests pin:
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import time
@@ -333,6 +334,16 @@ def _start(c: PokerBetCollector, monkeypatch) -> None:
     t.start()
     assert entered_loop.wait(10), "start() never reached the fast loop"
     t.join(10)
+    # determinism: when the watchdog armed, wait until its thread has run
+    # its entry code (it computes _startup_deadline there) so tests that
+    # overwrite it cannot be raced by a late thread start.
+    if getattr(c, "_watchdog_enabled", False):
+        for _ in range(100):
+            if getattr(c, "_startup_deadline", 0.0):
+                break
+            time.sleep(0.02)
+        assert getattr(c, "_startup_deadline", 0.0), (
+            "watchdog thread never computed _startup_deadline")
 
 
 def test_ready1_sent_after_successful_init(monkeypatch):
@@ -381,8 +392,15 @@ def test_watchdog_disarmed_for_test_cadence(monkeypatch):
 
 
 def test_watchdog_pets_only_when_fast_cycle_fresh(monkeypatch):
-    """Silent when no fast cycle ever completed, silent when stale,
-    WATCHDOG=1 ping when fresh (READY=1 already sent by start())."""
+    """Silent when no fast cycle ever completed AND the startup grace has
+    expired, silent when stale, WATCHDOG=1 ping when fresh (READY=1
+    already sent by start()).
+
+    2026-09-29 contract update: a fresh process now pings through the
+    BOUNDED startup grace window (watchdog restart-storm forensics);
+    this test therefore pins the POST-grace state, and the grace window
+    itself is pinned by test_startup_grace_pings_only_while_bounded.
+    """
     c, log = _make_collector(monkeypatch, tick_s=5.0,
                              env={"WATCHDOG_USEC": "90000000", "NOTIFY_SOCKET": "@blm"})
     _start(c, monkeypatch)
@@ -390,9 +408,11 @@ def test_watchdog_pets_only_when_fast_cycle_fresh(monkeypatch):
     # the fresh-completion marker; reset it — this test simulates
     # "no fast cycle has EVER completed" (the true post-restart state).
     c._last_fast_completed_at = 0.0
+    # ...and the grace window already expired (post-grace wedge state).
+    c._startup_deadline = 0.0
     log.states.clear()  # drop READY=1 and any ping on the fake tick
 
-    # never completed a fast cycle → the dog must starve
+    # never completed a fast cycle, grace expired → the dog must starve
     time.sleep(colmod.WATCHDOG_POLL_DEFAULT_S + 0.3)
     assert log.states == []
 
@@ -420,3 +440,93 @@ def test_gating_block_in_start_matches_test_replica():
     for token in ("WATCHDOG_USEC", "NOTIFY_SOCKET",
                   "WATCHDOG_POLL_DEFAULT_S", "_watchdog_loop"):
         assert token in src, f"start() gating drift: missing {token}"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 4. Bounded startup grace (2026-09-29 watchdog restart-storm follow-up)
+# ────────────────────────────────────────────────────────────────────────
+
+def test_startup_grace_seconds_bounded_by_watchdogsec():
+    """min(60s, WatchdogSec / 2); unknown/invalid values keep the 60s
+    default (the caller may only ping MORE, never less)."""
+    assert colmod._startup_grace_seconds("90000000") == 45.0   # 90s dog
+    assert colmod._startup_grace_seconds("300000000") == 60.0  # 300s dog → un-capped
+    assert colmod._startup_grace_seconds(None) == 60.0
+    assert colmod._startup_grace_seconds("0") == 60.0
+    assert colmod._startup_grace_seconds("garbage") == 60.0
+
+
+def _wait_until(pred, timeout: float = 12.0) -> bool:
+    """Deterministic wait for an asynchronous watchdog-thread effect (the
+    thread polls on its own 5s cadence — fixed sleeps race it)."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_startup_grace_pings_only_while_bounded(monkeypatch):
+    """A fresh process with NO completed fast cycle pings through the
+    grace window (STATUS says so), then goes SILENT the moment the
+    bounded window expires — steady-state liveness stays cycle-gated."""
+    c, log = _make_collector(monkeypatch, tick_s=5.0,
+                             env={"WATCHDOG_USEC": "90000000", "NOTIFY_SOCKET": "@blm"})
+    _start(c, monkeypatch)
+    # simulate a process whose first fast cycle has not completed yet;
+    # the window must span at least one full poll pass
+    c._last_fast_completed_at = 0.0
+    c._startup_deadline = (
+        time.monotonic() + colmod.WATCHDOG_POLL_DEFAULT_S + 3.0)
+    log.states.clear()
+
+    assert _wait_until(lambda: log.states), (
+        "grace window must keep the dog fed on a slow start")
+    assert all(s.startswith("WATCHDOG=1") for s in log.states)
+    assert all("STATUS=startup grace" in s for s in log.states)
+
+    # the window is BOUNDED: once expired, silence (the dog starves)
+    c._startup_deadline = time.monotonic() - 1.0
+    log.states.clear()
+    assert _wait_until(lambda: c._starving_now), (
+        "an expired grace with no completed cycle must reach starvation")
+    assert log.states == []
+
+    # and the first completed cycle ends the grace story for good
+    c._last_fast_completed_at = time.monotonic()
+    assert _wait_until(
+        lambda: any("fast cycle complete" in s for s in log.states))
+    c._watchdog_stop.set()
+
+
+def test_starvation_warning_fires_once_per_episode(monkeypatch, caplog):
+    """The STOPPING warning must fire ONCE per starvation episode (not on
+    every 5s poll pass) and the resume line must actually be reachable —
+    the pre-fix starving flag was never propagated (251 duplicate
+    warnings across the two 2026-09-29 storms)."""
+    c, log = _make_collector(monkeypatch, tick_s=5.0,
+                             env={"WATCHDOG_USEC": "90000000", "NOTIFY_SOCKET": "@blm"})
+    _start(c, monkeypatch)
+    c._last_fast_completed_at = 0.0
+    c._startup_deadline = 0.0  # grace expired → starving
+    log.states.clear()
+
+    with caplog.at_level(logging.INFO, logger="blm_v4.collector"):
+        # starvation begins: the ONE STOPPING warning of this episode
+        # fires on the pass that enters starvation; further passes in
+        # the same episode must stay silent
+        assert _wait_until(lambda: c._starving_now)
+        time.sleep(2 * colmod.WATCHDOG_POLL_DEFAULT_S + 0.5)
+        stopping = caplog.text.count("STOPPING WATCHDOG")
+        assert stopping == 1, (
+            f"expected exactly 1 STOPPING warning per episode, got {stopping}")
+
+        # recovery: the resume line must fire exactly once
+        caplog.clear()
+        c._last_fast_completed_at = time.monotonic()
+        assert _wait_until(lambda: "fresh again" in caplog.text)
+        time.sleep(colmod.WATCHDOG_POLL_DEFAULT_S + 0.5)
+        assert caplog.text.count("fresh again") == 1, (
+            "recovery must log 'fresh again — resuming' exactly once")
+    c._watchdog_stop.set()
