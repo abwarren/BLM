@@ -20,7 +20,7 @@ the store's UNIQUE idempotency key, not by hope.
 from __future__ import annotations
 
 import math
-import uuid
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -30,6 +30,7 @@ from blm_v4.betting.provider import (
     ProviderAmbiguous,
     ProviderUnavailable,
 )
+from blm_v4.betting.account_guard import verify_account
 from blm_v4.betting.store import BettingStore
 
 # directive §5 — the execution-state vocabulary
@@ -70,7 +71,8 @@ def _alert_age_s(game: dict) -> Optional[float]:
 
 def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
              enabled: bool, unit_price: Optional[float],
-             stats: dict) -> dict:
+             stats: dict, claim: bool = True,
+             game_enabled: bool = True) -> dict:
     """Evaluate ONE game's payload as a potential execution candidate.
 
     Returns ``{"decision": "EXECUTE"|"NO_BET"|"WOULD_BET", "reason":
@@ -81,6 +83,8 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     # ── 1. the kill switch (persisted; OFF unless explicitly enabled) ──
     if not enabled:
         return _no("auto_betting_off", ik)
+    if not game_enabled:
+        return _no("PER_GAME_AUTO_BET_OFF", ik)
     # ── 2+3. the production alert verdict, consumed verbatim ──────────
     ua = game.get("under_alert") or {}
     if ua.get("active") is not True:
@@ -129,6 +133,8 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     units = _finite(cfg.stake_units)
     if units is None or units <= 0:
         return _no("stake_units_invalid", ik)
+    if units > 1.0:
+        return _no("ONE_UNIT_MAXIMUM", ik)
     stake_amount = round(unit_price * units, 2)
     if stake_amount <= 0 or not math.isfinite(stake_amount):
         return _no("stake_calculation_failed", ik)
@@ -149,26 +155,32 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     fingerprints_fired = fp.get("fingerprints_fired") or []
     fingerprint_count = fp.get("fingerprint_count")
     # ── 10. idempotent claim — AFTER all other gates passed ───────────
-    execution_id = f"bet-{uuid.uuid4().hex[:20]}"
+    execution_id = "bet-" + hashlib.sha256(ik.encode("utf-8")).hexdigest()[:20]
     rec = {
         "execution_id": execution_id,
         "idempotency_key": ik,
         "game_id": game_id,
         "alert_id": alert_id,
         "checkpoint": checkpoint,
-        "market": "TOTAL_POINTS_UNDER",
+        "market": "TOTAL",
         "selection": "UNDER",
         "triggered_line": trig_line,
         "price": line,
         "unit_price": unit_price,
         "stake_units": units,
         "stake_amount": stake_amount,
+        "requested_amount": stake_amount,
+        "simulated_amount": stake_amount if cfg.dry_run else None,
+        "unit_limit": unit_price,
         "status": STATUS_PENDING,
     }
-    claimed, existing = store.claim(rec)
-    if not claimed:
-        return _no("duplicate_execution", ik)
-    store.audit(
+    if claim:
+        claimed, existing = store.claim(rec)
+        if not claimed:
+            return {"decision": "NO_BET", "reason": "duplicate_execution",
+                    "idempotency_key": ik, "existing": existing,
+                    "candidate": None}
+        store.audit(
         "claimed", idempotency_key=ik, execution_id=execution_id,
         reason="all ten conditions satisfied",
         details={
@@ -191,6 +203,7 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
             "game_id": game_id,
             "alert_id": alert_id,
             "checkpoint": checkpoint,
+            "market": "TOTAL",
             "selection": "UNDER",
             "triggered_line": trig_line,
             "price": line,
@@ -210,18 +223,48 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
     dry-run reference; no network call, no credentials (§11)."""
     execution_id = candidate["execution_id"]
     ik = candidate["idempotency_key"]
+    # The kill switch is re-read at the submission boundary; a worker's
+    # earlier polling check cannot authorize a later provider call.
+    if not store.is_enabled():
+        store.update_status(execution_id, "BLOCKED",
+                            error_code="GLOBAL_KILL_SWITCH",
+                            error_message="global betting kill switch is OFF",
+                            rejection_reason="GLOBAL_KILL_SWITCH")
+        return {"status": "BLOCKED", "error_code": "GLOBAL_KILL_SWITCH"}
     if not cfg.dry_run and cfg.live_money_enabled is False:
         # unreachable by construction (live_money_enabled == not dry_run)
         # — kept as a belt-and-braces stop before any real submission
         store.update_status(execution_id, STATUS_CANCELLED,
                             error_code="DRY_RUN_REQUIRED")
         return {"status": STATUS_CANCELLED}
+    # ── ACCOUNT IDENTITY GUARD (directive GATE 8, 2026-09-28) ────────
+    # account mismatch → NO BET, verified at the submission boundary —
+    # the last point before any provider interaction.  Fail-closed: an
+    # identity-requiring provider that cannot prove BOTH sides of the
+    # identity comparison is blocked, never assumed to match.  Providers
+    # without account identity (DryRunProvider) are exempt by design —
+    # there is no real submission to mis-bind.
+    mismatch = verify_account(provider)
+    if mismatch:
+        store.update_status(execution_id, "BLOCKED",
+                            error_code="ACCOUNT_MISMATCH",
+                            error_message=mismatch[:300],
+                            rejection_reason="ACCOUNT_MISMATCH")
+        store.audit("result", idempotency_key=ik,
+                    execution_id=execution_id,
+                    reason=mismatch[:300],
+                    details={"result": "BLOCKED",
+                             "guard": "account_identity"})
+        return {"status": "BLOCKED", "error_code": "ACCOUNT_MISMATCH"}
+    store.update_status(execution_id, "SUBMITTING")
     try:
         result = provider.submit(
             execution_id=execution_id, game_id=candidate["game_id"],
             alert_id=candidate["alert_id"],
             selection=candidate["selection"], price=candidate["price"],
-            stake_amount=candidate["stake_amount"])
+            stake_amount=candidate["stake_amount"],
+            market=candidate.get("market", "TOTAL"),
+            line=candidate.get("triggered_line", candidate.get("price")))
     except ProviderUnavailable as e:
         store.update_status(execution_id, STATUS_FAILED,
                             error_code="PROVIDER_UNAVAILABLE",
@@ -240,15 +283,15 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                     reason=str(e)[:300], details={"result": "UNKNOWN"})
         return {"status": STATUS_UNKNOWN,
                 "error_code": "PROVIDER_AMBIGUOUS"}
-    except Exception as e:  # unexpected → assume nothing, record FAILED
-        store.update_status(execution_id, STATUS_FAILED,
+    except Exception as e:  # after submission boundary, outcome is ambiguous
+        store.update_status(execution_id, STATUS_UNKNOWN,
                             error_code="EXECUTION_EXCEPTION",
                             error_message=str(e)[:300])
         store.audit("result", idempotency_key=ik,
                     execution_id=execution_id,
                     reason=f"exception: {str(e)[:200]}",
-                    details={"result": "FAILED"})
-        return {"status": STATUS_FAILED, "error_code": "EXECUTION_EXCEPTION"}
+                    details={"result": "UNKNOWN"})
+        return {"status": STATUS_UNKNOWN, "error_code": "EXECUTION_EXCEPTION"}
 
     status = result.get("status")
     if status not in (STATUS_SUBMITTED, STATUS_ACCEPTED, STATUS_REJECTED,
@@ -261,7 +304,16 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
     store.update_status(execution_id, status,
                         provider_ref=result.get("provider_ref"),
                         error_code=result.get("error_code"),
-                        error_message=result.get("error_message"))
+                        error_message=result.get("error_message"),
+                        accepted_amount=result.get("accepted_amount"),
+                        simulated_amount=(candidate.get("stake_amount")
+                                          if cfg.dry_run and status == STATUS_ACCEPTED
+                                          else None),
+                        execution_state=("WOULD_BET" if cfg.dry_run
+                                         and status == STATUS_ACCEPTED else status),
+                        rejection_reason=(result.get("error_message")
+                                          if status in (STATUS_REJECTED, STATUS_FAILED)
+                                          else None))
     store.audit("result", idempotency_key=ik, execution_id=execution_id,
                 reason=result.get("error_message") or status,
                 details={"result": status,

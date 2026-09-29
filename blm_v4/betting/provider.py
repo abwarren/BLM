@@ -60,7 +60,8 @@ class BetProvider(ABC):
     @abstractmethod
     def submit(self, *, execution_id: str, game_id: str, alert_id: str,
                selection: str, price: Optional[float],
-               stake_amount: float) -> dict:
+               stake_amount: float, market: str = "TOTAL",
+               line: Optional[float] = None) -> dict:
         """Submit one bet.  Returns ``{"status": ..., "provider_ref":
         ..., "error_code": ..., "error_message": ...}`` with status in
         SUBMITTED / ACCEPTED / REJECTED / FAILED / UNKNOWN."""
@@ -75,7 +76,8 @@ class DryRunProvider(BetProvider):
 
     def submit(self, *, execution_id: str, game_id: str, alert_id: str,
                selection: str, price: Optional[float],
-               stake_amount: float) -> dict:
+               stake_amount: float, market: str = "TOTAL",
+               line: Optional[float] = None) -> dict:
         return {"status": "ACCEPTED",
                 "provider_ref": f"dryrun-{execution_id}",
                 "error_code": None,
@@ -110,7 +112,8 @@ class PokerBetProvider(BetProvider):
 
     def submit(self, *, execution_id: str, game_id: str, alert_id: str,
                selection: str, price: Optional[float],
-               stake_amount: float) -> dict:
+               stake_amount: float, market: str = "TOTAL",
+               line: Optional[float] = None) -> dict:
         # Credential presence check (values never leave this method).
         self._credentials()
         # ── STUB: the real transport is intentionally not implemented.
