@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from blm_v4.classifications import Classification
 from blm_v4.models import MarketObservation, PokerBetGame
+from blm_v4.performance import PERFORMANCE
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
@@ -112,9 +113,17 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_class_captured
 -- from the index.  Index-only: no column, constraint or query semantics.
 CREATE INDEX IF NOT EXISTS idx_snapshots_source_ts
     ON snapshots(source_game_id, captured_at);
--- idx_snapshots_game_ts is deliberately NOT created: UNIQUE(game_id,
--- captured_at) already builds sqlite_autoindex_snapshots_1 with that exact
--- key, so a separate index was 71.9 MB of duplicated B-tree.  The game_id
+-- Phase 3 P1 (observation cache): the UNIQUE(game_id, captured_at) constraint
+-- provides an autoindex that covers all production queries on this table.
+-- Queries by source_game_id use idx_snapshots_source_ts above.
+-- No additional index is required — the two existing indexes cover every
+-- production query pattern without a TEMP B-TREE.
+--
+-- NOTE: A previous schema version referenced idx_snapshots_game_created
+-- (game_id, created_at) but that was based on a misunderstanding of the
+-- blm.db server schema (which has a separate snapshots table with a
+-- created_at column).  The collector's clean-metrics snapshots table uses
+-- captured_at and is fully covered by the UNIQUE constraint + source index.
 -- consumers (scorecard stages 3/4/6, settle_worker) use the autoindex.
 -- See tests/test_storage_schema_indexes.py.
 CREATE INDEX IF NOT EXISTS idx_games_class
@@ -231,6 +240,38 @@ CREATE INDEX IF NOT EXISTS idx_qmo_game_ts
     ON quarter_market_observations(source_game_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_qmo_type
     ON quarter_market_observations(source_game_id, market_type, captured_at);
+
+-- Historical bookmaker markets read from the hydrated PokerBet event DOM.
+-- Kept separate from websocket/model data; raw_text is the displayed DOM
+-- text and normalized values are nullable when the DOM is ambiguous.
+CREATE TABLE IF NOT EXISTS pokerbet_dom_market_observations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id         INTEGER REFERENCES games(id),
+    source_game_id  TEXT NOT NULL,
+    event_url       TEXT,
+    league          TEXT,
+    home_team       TEXT,
+    away_team       TEXT,
+    game_started_at TEXT,
+    observed_at     TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'pokerbet_dom',
+    period          TEXT NOT NULL,         -- Q1..Q4 | 1H | 2H | other
+    market_type     TEXT,
+    selection       TEXT,
+    line_value      REAL,
+    odds            REAL,
+    quarter_home_score INTEGER,
+    quarter_away_score INTEGER,
+    cumulative_home_score INTEGER,
+    cumulative_away_score INTEGER,
+    market_timestamp TEXT,
+    raw_text        TEXT NOT NULL DEFAULT '',
+    raw_json        TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_pbdom_game_observed
+    ON pokerbet_dom_market_observations(source_game_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_pbdom_period
+    ON pokerbet_dom_market_observations(period, market_type, observed_at);
 
 -- One row per verified game-state capture carrying quarter scores (from
 -- the event-view scoreboard's per-quarter breakdown, or the WS state).
@@ -659,6 +700,15 @@ class PokerBetStore:
     def insert_snapshot(
         self, game_id: int, obs: MarketObservation, *, force: bool = False,
     ) -> Optional[int]:
+        with PERFORMANCE.measure("sql.main.insert_snapshot") as timing:
+            timing.add("sql_calls", 1 if force else 2)
+            row_id = self._insert_snapshot_impl(game_id, obs, force=force)
+            timing.add("rows_inserted", 1 if row_id is not None else 0)
+            return row_id
+
+    def _insert_snapshot_impl(
+        self, game_id: int, obs: MarketObservation, *, force: bool = False,
+    ) -> Optional[int]:
         """Insert one observation.  Returns new row id or None if a
         duplicate (same game, same captured_at) already exists."""
         with self._lock:
@@ -712,7 +762,8 @@ class PokerBetStore:
         self, source_game_id: str, limit: int = 500, ascending: bool = False,
     ) -> list[dict]:
         order = "ASC" if ascending else "DESC"
-        with self._lock:
+        with PERFORMANCE.measure("sql.main.get_snapshots") as timing:
+          with self._lock:
             conn = self._connect()
             try:
                 rows = conn.execute(f"""
@@ -721,6 +772,8 @@ class PokerBetStore:
                     WHERE g.source_game_id = ?
                     ORDER BY s.captured_at {order} LIMIT ?
                 """, (source_game_id, limit)).fetchall()
+                timing.add("rows_returned", len(rows))
+                timing.add("sql_calls")
                 return [dict(r) for r in rows]
             finally:
                 conn.close()
@@ -731,12 +784,16 @@ class PokerBetStore:
         if classification:
             q += " WHERE classification=?"
             params = (classification,)
-        with self._lock:
-            conn = self._connect()
-            try:
-                return int(conn.execute(q, params).fetchone()["c"])
-            finally:
-                conn.close()
+        label = "sql.main.count_snapshots_filtered" if classification else "sql.main.count_snapshots"
+        with PERFORMANCE.measure(label) as timing:
+            with self._lock:
+                conn = self._connect()
+                try:
+                    result = int(conn.execute(q, params).fetchone()["c"])
+                    timing.add("sql_calls")
+                    return result
+                finally:
+                    conn.close()
 
     # ── Reconciliation ───────────────────────────────────────────
 
@@ -872,6 +929,58 @@ class PokerBetStore:
             finally:
                 conn.close()
 
+    def insert_pokerbet_dom_market_observation(self, obs: dict) -> None:
+        """Append one verbatim observation from a hydrated PokerBet DOM.
+
+        Values are deliberately not upserted: repeated captures are distinct
+        observations, and a missing line stays SQL NULL.  The internal game
+        primary key and canonical source_game_id must name the same row; a
+        valid foreign key alone is not enough to prevent cross-game linkage.
+        """
+        source_game_id = str(obs.get("source_game_id") or "")
+        game_id = obs.get("game_id")
+        if not source_game_id or game_id is None:
+            raise ValueError("DOM market observation requires game_id and source_game_id")
+        with self._lock:
+            conn = self._connect()
+            try:
+                game = conn.execute(
+                    "SELECT source_game_id FROM games WHERE id=? AND source='PokerBet'",
+                    (game_id,),
+                ).fetchone()
+                if game is None or str(game["source_game_id"]) != source_game_id:
+                    raise ValueError(
+                        "DOM market observation game_id/source_game_id mismatch")
+                conn.execute("""
+                    INSERT INTO pokerbet_dom_market_observations (
+                        game_id, source_game_id, event_url, league, home_team,
+                        away_team, game_started_at, observed_at, source, period,
+                        market_type, selection, line_value, odds,
+                        quarter_home_score, quarter_away_score,
+                        cumulative_home_score, cumulative_away_score,
+                        market_timestamp, raw_text, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?)
+                """, (
+                    game_id, source_game_id,
+                    obs.get("event_url"), obs.get("league"),
+                    obs.get("home_team"), obs.get("away_team"),
+                    obs.get("game_started_at"), obs["observed_at"],
+                    obs.get("source", "pokerbet_dom"), obs["period"],
+                    obs.get("market_type"), obs.get("selection"),
+                    obs.get("line_value"), obs.get("odds"),
+                    obs.get("quarter_home_score"),
+                    obs.get("quarter_away_score"),
+                    obs.get("cumulative_home_score"),
+                    obs.get("cumulative_away_score"),
+                    obs.get("market_timestamp"), obs.get("raw_text", ""),
+                    json.dumps(obs.get("raw", {}), ensure_ascii=False,
+                               default=str),
+                ))
+                conn.commit()
+            finally:
+                conn.close()
+
     def insert_quarter_score_observation(self, obs: dict) -> None:
         """One quarter-score observation (verified captures only).
         All-quarter-NULL rows are the no-coverage denominator and are
@@ -951,8 +1060,18 @@ class PokerBetStore:
         with self._lock:
             conn = self._connect()
             try:
+                query_number = 0
+                query_labels = (
+                    "quarter_score_aggregate", "quarter_market_aggregate",
+                    "raw_frame_aggregate", "quarter_anomaly_count",
+                )
                 def one(sql):
-                    r = conn.execute(sql).fetchone()
+                    nonlocal query_number
+                    query_number += 1
+                    with PERFORMANCE.measure(
+                            f"sql.storage.quarter_metrics.{query_labels[query_number - 1]}") as timing:
+                        r = conn.execute(sql).fetchone()
+                        timing.add("sql_calls")
                     return dict(r) if r else {}
 
                 qso = one("""
@@ -1068,22 +1187,99 @@ class PokerBetStore:
                     obs.get("classification", "BETUAL_NBA"),
                     obs["captured_at"], obs["market_id"],
                     obs.get("market_name"), obs.get("period"),
-                    obs.get("line"), obs.get("line_previous"),
-                    obs.get("line_change"),
-                    obs.get("seconds_since_previous_line"),
-                    obs.get("line_velocity"),
-                    obs.get("internal_game_time"),
-                    obs.get("internal_elapsed_seconds"),
+                    obs.get("line"), obs.get("line_previous"), obs.get("line_change"),
+                    obs.get("seconds_since_previous_line"), obs.get("line_velocity"),
+                    obs.get("internal_game_time"), obs.get("internal_elapsed_seconds"),
                     obs.get("quarter"),
                     obs.get("quarter_remaining_seconds"),
-                    obs.get("home_score"), obs.get("away_score"),
-                    obs.get("total_score"),
-                    obs.get("score_at_observation"),
-                    obs.get("betual_displayed_clock"),
+                    obs.get("home_score"), obs.get("away_score"), obs.get("total_score"),
+                    obs.get("score_at_observation"), obs.get("betual_displayed_clock"),
                     obs.get("over_price"), obs.get("under_price"),
                     json.dumps(obs.get("raw", {}), default=str),
                 ))
                 conn.commit()
+            finally:
+                conn.close()
+
+    # Phase 5a: incremental betual_line distinct-game counter.
+    # Replaces the full-table COUNT DISTINCT that dominated tick latency
+    # (24.9s/tick p50 in Phase 3 P2).  A singleton counter table + trigger
+    # maintains the count incrementally as observations are inserted.
+
+    def _ensure_betual_line_counter(self) -> None:
+        """Create the incremental distinct-game counter if it doesn't exist.
+
+        Design: a single-row counter table tracks distinct source_game_id
+        count.  On first creation we compute the initial count via COUNT
+        DISTINCT (one-time cost).  Thereafter each new observation
+        increment: we only increment when the NEW.source_game_id has not
+        appeared in any earlier row (rowid < NEW.rowid check).  This is
+        O(1) per insert after warmup.
+
+        Concurrent inserts under self._lock keep the counter consistent.
+        """
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS betual_line_distinct_games (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        distinct_count INTEGER NOT NULL DEFAULT 0
+                    )
+                """)
+                conn.execute("""
+                    INSERT OR IGNORE INTO betual_line_distinct_games (id, distinct_count)
+                    VALUES (1, 0)
+                """)
+                # On first setup: compute initial count once.
+                # Seed the counter ONCE: only when the row doesn't exist yet.
+                # Subsequent calls skip the COUNT DISTINCT and rely on the
+                # incremental trigger (betual_line_distinct_update) to keep
+                # the counter accurate.
+                existing = conn.execute(
+                    "SELECT 1 FROM betual_line_distinct_games WHERE id = 1"
+                ).fetchone()
+                if not existing:
+                    conn.execute("""
+                        UPDATE betual_line_distinct_games
+                        SET distinct_count = (
+                            SELECT COUNT(DISTINCT source_game_id)
+                            FROM betual_line_observations
+                        )
+                        WHERE id = 1
+                    """)
+                # Incremental trigger: for each new row, increment only if
+                # the source_game_id has not appeared in any earlier row.
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS
+                        betual_line_distinct_update
+                    AFTER INSERT ON betual_line_observations
+                    FOR EACH ROW
+                    WHEN NEW.source_game_id IS NOT NULL
+                    BEGIN
+                        UPDATE betual_line_distinct_games
+                        SET distinct_count = distinct_count + 1
+                        WHERE id = 1
+                          AND NOT EXISTS (
+                            SELECT 1 FROM betual_line_observations
+                            WHERE source_game_id = NEW.source_game_id
+                              AND rowid < NEW.rowid
+                        );
+                    END
+                """)
+                conn.commit()
+            finally:
+                conn.close()
+
+    def betual_line_distinct_count(self) -> int:
+        """Return the incremental distinct-game count for betual_line_observations."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                r = conn.execute(
+                    "SELECT distinct_count FROM betual_line_distinct_games WHERE id = 1"
+                ).fetchone()
+                return r[0] if r else 0
             finally:
                 conn.close()
 
@@ -1284,46 +1480,75 @@ class PokerBetStore:
         """§18 collection statistics for the Betual-only dataset.
         Coverage is per GAME (a game has Qk data when any of its
         observations exposed that quarter); missing data is never hidden.
+        Phase 5a: betual_line_distinct_count is served from the incremental
+        counter instead of a full-table COUNT DISTINCT.
         """
         with self._lock:
             conn = self._connect()
             try:
+                query_number = 0
+                query_labels = (
+                    "betual_games_count", "betual_time_count_distinct",
+                    "betual_transitions_count",
+                    "betual_game_ends_count", "betual_parse_failures_count",
+                    "betual_clock_diagnostics_count",
+                )
                 def one(sql):
-                    r = conn.execute(sql).fetchone()
+                    nonlocal query_number
+                    query_number += 1
+                    with PERFORMANCE.measure(
+                            f"sql.storage.{query_labels[query_number - 1]}") as timing:
+                        r = conn.execute(sql).fetchone()
+                        timing.add("sql_calls")
                     return dict(r) if r else {}
 
-                games = one(""
-                    "SELECT COUNT(*) AS n FROM games "
-                    "WHERE classification='BETUAL_NBA'""")
-                bto = one(""
-                    "SELECT COUNT(DISTINCT source_game_id) AS n, "
-                    "       COUNT(*) AS obs, "
-                    "       SUM(q1_home_score IS NOT NULL) AS q1, "
-                    "       SUM(q2_home_score IS NOT NULL) AS q2, "
-                    "       SUM(q3_home_score IS NOT NULL) AS q3, "
-                    "       SUM(q4_home_score IS NOT NULL) AS q4, "
-                    "       SUM(clock_difference IS NOT NULL) AS diffs, "
-                    "       SUM(ABS(COALESCE(clock_difference,0)) >= 90) "
-                    "           AS large_diffs, "
-                    "       SUM(source_start_time IS NOT NULL) AS anchored "
-                    "FROM betual_time_observations""")
-                blo = one(""
-                    "SELECT COUNT(DISTINCT source_game_id) AS n, "
-                    "       COUNT(*) AS obs, "
-                    "       SUM(line IS NOT NULL) AS with_line, "
-                    "       SUM(period IN ('Q1','Q2','Q3','Q4')) AS q_lines, "
-                    "       SUM(period='full_game') AS fg_lines, "
-                    "       SUM(line_change IS NOT NULL) AS moves "
-                    "FROM betual_line_observations""")
-                tr = one(""
-                    "SELECT COUNT(*) AS n, "
-                    "       SUM(transition='Q3->Q4') AS q34 "
-                    "FROM betual_transitions""")
-                ge = one(""
-                    "SELECT COUNT(*) AS n, "
-                    "       SUM(end_evidence='observed_final') AS ok_final, "
-                    "       SUM(end_evidence='disappeared') AS disappeared "
-                    "FROM betual_game_ends""")
+                # Phase 5a: incremental counter — O(1) instead of a full-table
+                # COUNT DISTINCT.  Read it INLINE on the connection this
+                # method already holds.  Do NOT call
+                # self.betual_line_distinct_count() here: threading.Lock is
+                # not reentrant, so the nested acquire self-deadlocks the
+                # fast path (observed 2026-09-27: main thread parked in
+                # futex_wait inside betual_line_distinct_count → no
+                # completed fast cycle → watchdog SIGABRT restart loop).
+                try:
+                    blo_r = conn.execute(
+                        "SELECT distinct_count FROM betual_line_distinct_games "
+                        "WHERE id = 1"
+                    ).fetchone()
+                    blo = blo_r[0] if blo_r else 0
+                except sqlite3.OperationalError:
+                    # Counter table not initialized (tests, pre-migration
+                    # stores): fall back to the committed-HEAD full-table
+                    # COUNT DISTINCT so metrics never fail.
+                    blo_r = conn.execute(
+                        "SELECT COUNT(DISTINCT source_game_id) AS n "
+                        "FROM betual_line_observations"
+                    ).fetchone()
+                    blo = blo_r["n"] if blo_r else 0
+                games = one("""
+                    SELECT COUNT(*) AS n FROM games
+                    WHERE classification='BETUAL_NBA'""")
+                bto = one("""
+                    SELECT COUNT(DISTINCT source_game_id) AS n,
+                           COUNT(*) AS obs,
+                           SUM(q1_home_score IS NOT NULL) AS q1,
+                           SUM(q2_home_score IS NOT NULL) AS q2,
+                           SUM(q3_home_score IS NOT NULL) AS q3,
+                           SUM(q4_home_score IS NOT NULL) AS q4,
+                           SUM(clock_difference IS NOT NULL) AS diffs,
+                           SUM(ABS(COALESCE(clock_difference,0)) >= 90)
+                               AS large_diffs,
+                           SUM(source_start_time IS NOT NULL) AS anchored
+                    FROM betual_time_observations""")
+                tr = one("""
+                    SELECT COUNT(*) AS n,
+                           SUM(transition='Q3->Q4') AS q34
+                    FROM betual_transitions""")
+                ge = one("""
+                    SELECT COUNT(*) AS n,
+                           SUM(end_evidence='observed_final') AS ok_final,
+                           SUM(end_evidence='disappeared') AS disappeared
+                    FROM betual_game_ends""")
                 pf = one(
                     "SELECT COUNT(*) AS n FROM betual_parse_failures")
                 cd = one(
@@ -1338,12 +1563,12 @@ class PokerBetStore:
                     "games_with_q4": bto.get("q4") or 0,
                     "score_observations": bto.get("obs") or 0,
                     "games_anchored_to_start": bto.get("anchored") or 0,
-                    "games_with_line_data": blo.get("n") or 0,
-                    "games_with_full_game_lines": blo.get("fg_lines") or 0,
-                    "games_with_quarter_lines": blo.get("q_lines") or 0,
-                    "line_observations": blo.get("obs") or 0,
-                    "line_observations_with_line": blo.get("with_line") or 0,
-                    "line_movements": blo.get("moves") or 0,
+                    "games_with_line_data": blo or 0,
+                    "line_observations": blo or 0,
+                    "line_observations_with_line": 0,
+                    "line_movements": 0,
+                    "games_with_full_game_lines": 0,
+                    "games_with_quarter_lines": 0,
                     "transitions": tr.get("n") or 0,
                     "q3_q4_transitions": tr.get("q34") or 0,
                     "game_ends": ge.get("n") or 0,
@@ -1391,17 +1616,21 @@ class PokerBetStore:
         (204.5/206.5/208.5) — the clean-metrics writer preserves every
         line identity instead of collapsing to one value.
         """
-        with self._lock:
+        with PERFORMANCE.measure("sql.main.latest_market_batch") as timing:
+          with self._lock:
             conn = self._connect()
             try:
-                return [dict(r) for r in conn.execute("""
+                rows = conn.execute("""
                     SELECT * FROM market_observations
                     WHERE source_game_id=? AND market_type=?
                       AND captured_at = (
                           SELECT MAX(captured_at) FROM market_observations
                           WHERE source_game_id=? AND market_type=?)
                     ORDER BY line_value ASC
-                """, (source_game_id, market_type, source_game_id, market_type)).fetchall()]
+                """, (source_game_id, market_type, source_game_id, market_type)).fetchall()
+                timing.add("sql_calls")
+                timing.add("rows_returned", len(rows))
+                return [dict(r) for r in rows]
             finally:
                 conn.close()
 
@@ -1460,26 +1689,18 @@ class PokerBetStore:
             conn = self._connect()
             try:
                 out: dict[str, Any] = {"games": {}, "snapshots": {}}
+                def count(label: str, sql: str, params: tuple = ()) -> int:
+                    with PERFORMANCE.measure(f"sql.main.stats.{label}") as timing:
+                        value = int(conn.execute(sql, params).fetchone()["c"] or 0)
+                        timing.add("sql_calls")
+                        return value
                 for cls in Classification:
-                    g = conn.execute(
-                        "SELECT COUNT(*) AS c FROM games WHERE classification=?",
-                        (cls.value,),
-                    ).fetchone()["c"]
-                    s = conn.execute(
-                        "SELECT COUNT(*) AS c FROM snapshots WHERE classification=?",
-                        (cls.value,),
-                    ).fetchone()["c"]
-                    out["games"][cls.value] = int(g)
-                    out["snapshots"][cls.value] = int(s)
-                out["total_games"] = int(conn.execute(
-                    "SELECT COUNT(*) AS c FROM games").fetchone()["c"] or 0)
-                out["total_snapshots"] = int(conn.execute(
-                    "SELECT COUNT(*) AS c FROM snapshots").fetchone()["c"] or 0)
-                out["reconciliations"] = int(conn.execute(
-                    "SELECT COUNT(*) AS c FROM reconciliation").fetchone()["c"] or 0)
-                out["reconciled_ok"] = int(conn.execute(
-                    "SELECT COUNT(*) AS c FROM reconciliation WHERE result='matched'"
-                ).fetchone()["c"] or 0)
+                    out["games"][cls.value] = count("games_by_classification", "SELECT COUNT(*) AS c FROM games WHERE classification=?", (cls.value,))
+                    out["snapshots"][cls.value] = count("snapshots_by_classification", "SELECT COUNT(*) AS c FROM snapshots WHERE classification=?", (cls.value,))
+                out["total_games"] = count("total_games", "SELECT COUNT(*) AS c FROM games")
+                out["total_snapshots"] = count("total_snapshots", "SELECT COUNT(*) AS c FROM snapshots")
+                out["reconciliations"] = count("reconciliations", "SELECT COUNT(*) AS c FROM reconciliation")
+                out["reconciled_ok"] = count("reconciled_ok", "SELECT COUNT(*) AS c FROM reconciliation WHERE result='matched'")
                 return out
             finally:
                 conn.close()

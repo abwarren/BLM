@@ -47,7 +47,15 @@ def _same_identity(entry: dict, sel: Selection) -> bool:
     """Identity match tolerant of the bookmaker's RENDERING (case, team
     order, event-name suffixes) but EXACT on the betting semantics:
     position must be the requested position — an UNDER request is never
-    satisfied by an OVER entry on the same event."""
+    satisfied by an OVER entry on the same event.
+
+    GAME ID BINDING (directive 2026-09-23, "verify: game ID"): when the
+    selection carries a canonical BLM ``game_id`` AND the bookmaker's
+    slip entry exposes one, the two must be EQUAL — name similarity is
+    never accepted in place of the id (virtuals reuse team names across
+    consecutive fixtures).  A missing id on either side degrades to the
+    name-based identity — the older, id-less contract keeps working.
+    """
     pos = str(entry.get("position") or "").strip().upper()
     mkt = str(entry.get("market") or "").strip().upper()
     ev = str(entry.get("event") or "").strip().upper()
@@ -55,7 +63,13 @@ def _same_identity(entry: dict, sel: Selection) -> bool:
     ev_ok = ev == want_ev or (
         all(t in ev for t in want_ev.split(" VS ")) if " VS " in want_ev
         else want_ev in ev or ev in want_ev)
-    return pos == sel.position.upper() and "TOTAL" in mkt and ev_ok
+    if not (pos == sel.position.upper() and "TOTAL" in mkt and ev_ok):
+        return False
+    want_gid = str(getattr(sel, "game_id", None) or "").strip()
+    got_gid = str(entry.get("game_id") or "").strip()
+    if want_gid and got_gid and want_gid != got_gid:
+        return False                       # same teams, DIFFERENT game
+    return True
 
 
 def _num(v) -> Optional[float]:

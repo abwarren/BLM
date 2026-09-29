@@ -53,6 +53,14 @@ class Selection:
     ``snapshot_line`` / ``snapshot_price`` are informational market
     state captured at creation time ONLY — they never take part in
     equality, hashing or execution matching.
+
+    ``game_id`` is the CANONICAL BLM game binding (the directive's
+    "verify: game ID").  It is deliberately OUTSIDE equality/hash (the
+    matrix treats same-name events as the same event) — its role is
+    VERIFICATION: the betslip verifier rejects a slip entry that names
+    the right teams but carries a different game id, the pre-placement
+    guard re-checks it, and the ledger stores it so every recorded
+    execution joins back to the game's history.
     """
 
     event: str
@@ -60,6 +68,7 @@ class Selection:
     position: str = POSITION_UNDER
     snapshot_line: Optional[float] = None
     snapshot_price: Optional[float] = None
+    game_id: Optional[str] = None
     selection_id: str = ""
 
     def __post_init__(self) -> None:
@@ -94,6 +103,7 @@ class Selection:
             "position": self.position,
             "snapshot_line": self.snapshot_line,
             "snapshot_price": self.snapshot_price,
+            "game_id": self.game_id,
         }
 
     @staticmethod
@@ -104,6 +114,7 @@ class Selection:
             position=str(d.get("position") or POSITION_UNDER),
             snapshot_line=d.get("snapshot_line"),
             snapshot_price=d.get("snapshot_price"),
+            game_id=d.get("game_id"),
         )
 
 
@@ -146,6 +157,7 @@ RECOVERABLE_STATES = (
 TERMINAL_FAILURE_REASONS = (
     "EVENT_NOT_FOUND", "MARKET_NOT_FOUND", "MAX_RETRIES_EXCEEDED",
     "WATCHDOG_TIMEOUT", "BROWSER_DISCONNECTED", "BETSLIP_VERIFICATION_FAILED",
+    "MARKET_NOT_ACTIVE",
 )
 
 TERMINAL_STATES = (STATE_ORDER_PLACED, STATE_COMPLETE,
@@ -191,6 +203,19 @@ class ParlayJob:
         self.attempts_per_leg = [[] for _ in self.legs]
 
     @property
+    def game_ids(self) -> list:
+        """The canonical BLM game ids of this job's legs (deduplicated,
+        order-preserving; legs without a binding contribute nothing).
+        The directive's execution record requires the game id on every
+        recorded execution — this is its single source."""
+        seen: list = []
+        for leg in self.legs:
+            gid = getattr(leg, "game_id", None)
+            if gid and gid not in seen:
+                seen.append(gid)
+        return seen
+
+    @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATES
 
@@ -199,6 +224,7 @@ class ParlayJob:
             "parlay_id": self.parlay_id,
             "combination_id": self.combination_id,
             "fold_size": self.fold_size,
+            "game_ids": self.game_ids,
             "stake_amount": self.stake_amount,
             "status": self.status,
             "current_leg": self.current_leg,

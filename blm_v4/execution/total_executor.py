@@ -323,13 +323,41 @@ class TotalExecutor:
     def _final_verify(self, execution_id: str, job: ParlayJob, mode: str,
                       lines: list, prices: list, job_started: float) -> None:
         """Pre-placement gate: EVERY requested leg present, exactly once,
-        in the CURRENT slip.  Missing/problem legs are re-added
-        (recoverably) before the gate can pass."""
+        in the CURRENT slip; identity verified; and — immediately before
+        placement — every leg's market re-confirmed STILL ACTIVE on the
+        bookmaker (a resolved-once suspended market must never be placed
+        into).  Missing/problem legs are re-added (recoverably) before
+        the gate can pass."""
         for round_no in range(1 + self.cfg.max_selection_retries):
             self.abort.check("final betslip verification")
             self._check_job_deadline(job, job_started)
             full = verify_full_betslip(self.adapter, job.legs, lines, prices)
             if full["ok"]:
+                # MARKET STILL ACTIVE (directive 2026-09-23, step 5):
+                # a FRESH suspended check of every leg at the placement
+                # boundary.  An observation that cannot be re-resolved
+                # right now is treated as not active (the earlier
+                # resolution is stale; fail closed, recoverably).
+                inactive: list[str] = []
+                for sel in job.legs:
+                    try:
+                        cur = self.adapter.find_position(
+                            sel.event, sel.market, sel.position)
+                    except AdapterUnavailable:
+                        raise
+                    except Exception:
+                        cur = None
+                    if cur is None or cur.suspended:
+                        inactive.append(
+                            f"{sel.event} {sel.position} (resolved={bool(cur)},"
+                            f" suspended={bool(cur and cur.suspended)})")
+                if inactive:
+                    self.audit.log(
+                        "MARKET_NOT_ACTIVE", parlay_id=job.parlay_id,
+                        reason="; ".join(inactive))
+                    raise ExecutionFailure(
+                        "MARKET_NOT_ACTIVE at placement: "
+                        + "; ".join(inactive))
                 self.audit.log("BETSLIP_READY_VERIFIED",
                                parlay_id=job.parlay_id,
                                details={"legs": len(job.legs)})
@@ -375,7 +403,8 @@ class TotalExecutor:
             recorded = (self.store.record_order(
                 execution_id, job.parlay_id, 1, job.stake_amount, status,
                 provider_ref=result.get("provider_ref"),
-                error_code=result.get("error_code"))
+                error_code=result.get("error_code"),
+                game_ids=job.game_ids)
                 if self.store else True)
             if not recorded:
                 self.audit.log("ORDER_LEDGER_REFUSED",

@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     started_at_utc    TEXT,
     completed_at_utc  TEXT,
     created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    game_ids_json     TEXT,
     UNIQUE(execution_id, parlay_id)
 );
 CREATE INDEX IF NOT EXISTS idx_exec_jobs_run
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS leg_attempts (
     event             TEXT NOT NULL,
     market            TEXT NOT NULL,
     position          TEXT NOT NULL,
+    game_id           TEXT,
     discovered_line   REAL,
     discovered_price  REAL,
     clicked_line      REAL,
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS order_submissions (
     status            TEXT NOT NULL,
     provider_ref      TEXT,
     error_code        TEXT,
+    game_ids_json     TEXT,
     at_utc            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -111,6 +114,30 @@ class ExecutionStore:
         self._lock = threading.Lock()
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
+
+    # ── migrations (idempotent; pre-game_id ledgers keep working) ──────
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add the game-id provenance columns to pre-existing ledgers.
+        Fresh DBs get them from CREATE TABLE; older files are ALTERed in
+        place — no historical data is ever dropped."""
+        jobs = {r[1] for r in conn.execute(
+            "PRAGMA table_info(execution_jobs)")}
+        if "game_ids_json" not in jobs:
+            conn.execute(
+                "ALTER TABLE execution_jobs ADD COLUMN game_ids_json TEXT")
+        attempts = {r[1] for r in conn.execute(
+            "PRAGMA table_info(leg_attempts)")}
+        if "game_id" not in attempts:
+            conn.execute(
+                "ALTER TABLE leg_attempts ADD COLUMN game_id TEXT")
+        orders = {r[1] for r in conn.execute(
+            "PRAGMA table_info(order_submissions)")}
+        if "game_ids_json" not in orders:
+            conn.execute(
+                "ALTER TABLE order_submissions ADD COLUMN game_ids_json TEXT")
+        conn.commit()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -126,14 +153,17 @@ class ExecutionStore:
                 """INSERT INTO execution_jobs
                    (execution_id, parlay_id, combination_id, fold_size,
                     mode, stake_amount, status, current_leg, retry_count,
-                    legs_json, last_error, started_at_utc, completed_at_utc)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    legs_json, last_error, started_at_utc, completed_at_utc,
+                    game_ids_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(execution_id, parlay_id) DO UPDATE SET
                      status=excluded.status,
                      current_leg=excluded.current_leg,
                      retry_count=excluded.retry_count,
                      last_error=excluded.last_error,
                      stake_amount=excluded.stake_amount,
+                     game_ids_json=COALESCE(excluded.game_ids_json,
+                                            execution_jobs.game_ids_json),
                      completed_at_utc=COALESCE(
                          excluded.completed_at_utc,
                          execution_jobs.completed_at_utc)""",
@@ -142,7 +172,8 @@ class ExecutionStore:
                  mode, job.get("stake_amount"), job.get("status"),
                  job.get("current_leg", 0), job.get("retry_count", 0),
                  _safe_json(job.get("legs")), job.get("last_error"),
-                 job.get("started_at"), job.get("completed_at")))
+                 job.get("started_at"), job.get("completed_at"),
+                 _safe_json(job.get("game_ids"))))
             c.commit()
 
     def update_job_status(self, execution_id: str, parlay_id: str,
@@ -187,12 +218,13 @@ class ExecutionStore:
             c.execute(
                 """INSERT INTO leg_attempts
                    (execution_id, parlay_id, leg_index, attempt_no, event,
-                    market, position, discovered_line, discovered_price,
-                    clicked_line, clicked_price, outcome, verified_line,
-                    verified_price, error_code)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    market, position, game_id, discovered_line,
+                    discovered_price, clicked_line, clicked_price, outcome,
+                    verified_line, verified_price, error_code)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (execution_id, parlay_id, leg_index, attempt_no,
                  sel.get("event"), sel.get("market"), sel.get("position"),
+                 sel.get("game_id"),
                  discovered_line, discovered_price, clicked_line,
                  clicked_price, outcome, verified_line, verified_price,
                  error_code))
@@ -202,7 +234,8 @@ class ExecutionStore:
     def record_order(self, execution_id: str, parlay_id: str,
                      attempt_no: int, stake_amount, status: str,
                      provider_ref: Optional[str] = None,
-                     error_code: Optional[str] = None) -> bool:
+                     error_code: Optional[str] = None,
+                     game_ids: Optional[list] = None) -> bool:
         """Returns False when a submission row ALREADY exists for this
         parlay — the persistence-level guard against duplicate orders
         (the engine must also re-inspect the slip, this is the ledger)."""
@@ -211,10 +244,11 @@ class ExecutionStore:
                 c.execute(
                     """INSERT INTO order_submissions
                        (execution_id, parlay_id, attempt_no, stake_amount,
-                        status, provider_ref, error_code)
-                       VALUES (?,?,?,?,?,?,?)""",
+                        status, provider_ref, error_code, game_ids_json)
+                       VALUES (?,?,?,?,?,?,?,?)""",
                     (execution_id, parlay_id, attempt_no, stake_amount,
-                     status, provider_ref, error_code))
+                     status, provider_ref, error_code,
+                     _safe_json(game_ids)))
                 c.commit()
             return True
         except sqlite3.IntegrityError:
