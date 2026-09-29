@@ -49,7 +49,7 @@ Train:
   python ml_training/train_qwen.py --config ml_training/config/qwen3-8b-qlora.yaml
 
 Evaluate:
-  python ml_training/evaluate.py --model ml_training/artifacts/qwen3-8b-qlora/final_adapter --validation ml_training/data/qwen3_8b/validation.jsonl
+  python ml_training/evaluate.py --base-model Qwen/Qwen3-8B --adapter ml_training/artifacts/qwen3-8b-qlora/final_adapter --validation ml_training/data/qwen3_8b/validation.jsonl
 
 The output is an adapter. Merge/deploy only after an explicit out-of-sample comparison against v4-pace-1.
 
