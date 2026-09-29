@@ -22,6 +22,106 @@ import pytest
 # reliably unfreezes prediction generation for machinery tests.
 os.environ.setdefault("BLM_PREDICTION_FREEZE", "0")
 
+# ── AUTHENTICATION TEST HARNESS ────────────────────────────────────────
+# Shared by the tests/test_auth_*.py suites.  Every fixture builds an
+# isolated auth database in tmp_path with two throwaway accounts whose
+# passwords are generated per run — no credential literal ever exists in
+# source, and no test can reach the production auth database.
+
+ADMIN_USERNAME = "t-admin"
+USER_USERNAME = "t-user"
+
+
+@pytest.fixture
+def auth_root(tmp_path, monkeypatch):
+    """Environment for an isolated auth stack (auth ON, cheap hashing)."""
+    import secrets
+
+    admin_pw = "A-" + secrets.token_urlsafe(16)
+    user_pw = "U-" + secrets.token_urlsafe(16)
+    monkeypatch.setenv("BLM_ENV", "test")
+    monkeypatch.setenv("BLM_AUTH_ENABLED", "1")
+    monkeypatch.setenv("BLM_AUTH_DB", str(tmp_path / "blm_auth.db"))
+    monkeypatch.setenv("BLM_AUTH_COOKIE_SECURE", "0")
+    monkeypatch.setenv("BLM_AUTH_TRUST_PROXY", "0")
+    monkeypatch.setenv("BLM_AUTH_BCRYPT_ROUNDS", "4")
+    monkeypatch.delenv("BLM_AUTH_PUBLIC_PATHS", raising=False)
+    monkeypatch.delenv("BLM_SEED_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("BLM_SEED_USER_PASSWORD", raising=False)
+    return {"root": tmp_path, "admin_pw": admin_pw, "user_pw": user_pw,
+            "admin": ADMIN_USERNAME, "user": USER_USERNAME}
+
+
+@pytest.fixture
+def auth_stack(auth_root):
+    """(app, state, TestClient) for a minimal app with the production guard.
+
+    The routes mirror the real surfaces (page, /dashboard, an /api/v4 read,
+    a mutating /api/v4 write and a WebSocket) so authorisation is exercised
+    against the same shapes the BLM application serves.
+    """
+    from fastapi import FastAPI, WebSocket
+    from fastapi.responses import HTMLResponse
+    from fastapi.testclient import TestClient
+
+    from blm_v4.auth import install as install_auth
+    from blm_v4.auth.config import AuthConfig
+    from blm_v4.auth.seed import seed
+    from blm_v4.auth.store import AuthStore
+
+    root = auth_root["root"]
+    app = FastAPI()
+
+    @app.get("/")
+    def dashboard_page():
+        return HTMLResponse("<h1>BLM DASHBOARD</h1>")
+
+    @app.get("/dashboard")
+    def dashboard_alias():
+        return HTMLResponse("<h1>BLM DASHBOARD</h1>")
+
+    @app.get("/healthz")
+    def healthz():
+        return {"status": "ok"}
+
+    @app.get("/api/v4/live")
+    def v4_live():
+        return {"games": [], "classification": None}
+
+    @app.get("/api/v2/status")
+    def v2_status():
+        return {"status": "ok"}
+
+    @app.post("/api/v4/betting/settings")
+    def bet_settings(payload: dict):
+        return {"ok": True, "received": payload}
+
+    @app.websocket("/ws")
+    async def ws(websocket: WebSocket):
+        await websocket.accept()
+        await websocket.send_text("hello")
+        await websocket.close()
+
+    config = AuthConfig.from_env(root)
+    seed(AuthStore(config.db_path), rounds=4,
+         accounts=[
+             {"username": ADMIN_USERNAME, "password": auth_root["admin_pw"],
+              "role": "admin", "email": "admin@blm.test", "label": "admin"},
+             {"username": USER_USERNAME, "password": auth_root["user_pw"],
+              "role": "user", "email": None, "label": "user"},
+         ],
+         out=open(os.devnull, "w"))
+    state = install_auth(app, root, trust_proxy=False)
+    client = TestClient(app)
+    yield {"app": app, "state": state, "client": client, **auth_root}
+
+
+def login(client, username, password, **kwargs):
+    """POST /api/auth/login and return the response."""
+    body = {"username": username, "password": password}
+    body.update(kwargs)
+    return client.post("/api/auth/login", json=body)
+
 
 def pytest_configure(config):
     """Register the asyncio mode marker."""
@@ -29,3 +129,13 @@ def pytest_configure(config):
         "markers",
         "asyncio: mark test as async (auto-detected in auto mode)",
     )
+
+
+@pytest.fixture
+def signed_in(auth_stack):
+    """An authenticated client (admin role) with its CSRF header attached."""
+    client = auth_stack["client"]
+    resp = login(client, auth_stack["admin"], auth_stack["admin_pw"])
+    assert resp.status_code == 200, resp.text
+    client.headers.update({"X-CSRF-Token": resp.json()["csrf_token"]})
+    return auth_stack
