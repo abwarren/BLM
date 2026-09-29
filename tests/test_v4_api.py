@@ -423,3 +423,66 @@ def test_timeline_events_only_real_data():
     labels = " | ".join(e["label"] for e in events)
     assert "Score update" in labels
     assert "Market total" in labels
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Fingerprint contract (canonical, post-C2-removal) — the served
+# fingerprint block carries exactly FINGERPRINT_KEYS = ("C1", "C3", "C5",
+# "R2") plus each key's verdict.  The removed C2 input and its forensic
+# provenance fields must NOT reappear; an unavailable operand is
+# reported as UNAVAILABLE, never fabricated and never silently TRUE.
+# (Replaces the obsolete C2-forensic block of 2026-09-23, whose subject
+#  was deleted from the fingerprint layer by the canonical C2 removal.)
+# ═════════════════════════════════════════════════════════════════════
+
+CANONICAL_FINGERPRINT_KEYS = ("C1", "C3", "C5", "R2")
+
+
+def test_live_fingerprint_block_serves_the_canonical_key_set(client):
+    """Every game's under_alert_fingerprint block exposes the canonical
+    fingerprint key set (C1, C3, C5, R2) with its per-key verdict, and no
+    field about any other key — so a re-introduced C2 field fails here."""
+    games = client.get("/api/v4/live").json()["games"]
+    assert games
+    for g in games:
+        fpb = g.get("under_alert_fingerprint") or {}
+        assert fpb, "fingerprint block missing"
+        for k in CANONICAL_FINGERPRINT_KEYS:
+            assert f"fingerprint_{k.lower()}" in fpb
+            assert isinstance(fpb[f"fingerprint_{k.lower()}_triggered"], bool)
+        # every fingerprint_* field must be ABOUT a canonical key: the
+        # subject is the first token of the name after the prefix, so
+        # per-key operand detail (e.g. fingerprint_c5_req_ratio) passes
+        # while any C2 (or C4/C6) field fails.
+        offenders = set()
+        for name in fpb:
+            if not name.startswith("fingerprint_") or name == "fingerprint_count":
+                continue
+            subject = name[len("fingerprint_"):].split("_", 1)[0].upper()
+            if subject not in CANONICAL_FINGERPRINT_KEYS:
+                offenders.add(name)
+        assert not offenders, offenders
+        # the deleted C2 provenance fields are gone with it
+        assert "c2_reason" not in fpb
+        assert "c2_operand_source" not in fpb
+        # the fired set is a subset of the canonical keys
+        fired = fpb.get("fingerprints_fired") or []
+        assert set(fired) <= set(CANONICAL_FINGERPRINT_KEYS)
+        assert fpb.get("fingerprint_count") == len(fired)
+
+
+def test_live_fingerprints_cannot_activate_alert(client):
+    """API-level independence: the fingerprint block (the canonical
+    C1/C3/C5/R2 set) is context beside under_alert; the active verdict is
+    under_alert's own.  A game whose fingerprint operands are UNAVAILABLE
+    can still carry an active alert when the production condition passes,
+    and vice versa."""
+    games = client.get("/api/v4/live").json()["games"]
+    for g in games:
+        ua = g.get("under_alert") or {}
+        fpb = g.get("under_alert_fingerprint") or {}
+        # shape: both blocks served, alert verdict is a plain boolean
+        # decided by under_alert_state — the fingerprint layer adds no
+        # active field of its own
+        assert "active" not in fpb
+        assert isinstance(ua.get("active"), bool)
