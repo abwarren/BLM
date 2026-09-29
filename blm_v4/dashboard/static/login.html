@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="same-origin">
+<title>BLM — Sign in · Basketball Live Markets</title>
+<link rel="stylesheet" href="/static/login.css">
+<link rel="preload" as="image" href="/static/blm-login-arena.jpg">
+</head>
+<body>
+
+<div class="login-shell">
+  <div class="arena-veil" aria-hidden="true"></div>
+  <div class="arena-grid" aria-hidden="true"></div>
+
+  <!-- ═══════════════ HERO / BRAND ═══════════════ -->
+  <section class="hero">
+    <div>
+      <div class="brand-row">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        <div>
+          <div class="brand-wordmark">BLM</div>
+          <div class="brand-tagline">Basketball Live Markets</div>
+        </div>
+      </div>
+      <div class="brand-chips" style="margin-top:18px">
+        <span>Data</span><i></i><span>Alerts</span><i></i><span>Edge</span>
+      </div>
+    </div>
+
+    <ul class="features" style="list-style:none;margin:0;padding:0">
+      <li class="feature">
+        <span class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/>
+            <path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>
+          </svg>
+        </span>
+        <span>
+          <span class="feature-title">Live Monitoring</span>
+          <span class="feature-sub">Real-time market analysis</span>
+        </span>
+      </li>
+      <li class="feature">
+        <span class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>
+          </svg>
+        </span>
+        <span>
+          <span class="feature-title">Smart Alerts</span>
+          <span class="feature-sub">Data-driven opportunities</span>
+        </span>
+      </li>
+      <li class="feature">
+        <span class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="6" rx="8" ry="3"/>
+            <path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/>
+            <path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>
+          </svg>
+        </span>
+        <span>
+          <span class="feature-title">Historical Analysis</span>
+          <span class="feature-sub">Backtest and validate</span>
+        </span>
+      </li>
+      <li class="feature">
+        <span class="feature-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 17l5-6 4 4 5-8 4 5"/>
+          </svg>
+        </span>
+        <span>
+          <span class="feature-title">Better Decisions</span>
+          <span class="feature-sub">Turn data into an edge</span>
+        </span>
+      </li>
+    </ul>
+
+    <div class="market-strip" aria-hidden="true">
+      <div class="market-card">
+        <div class="market-row"><span>Pace Reality</span><b>5.63</b></div>
+        <div class="market-row"><span>Line Movement</span><b>+2.5</b></div>
+        <div class="market-row"><span>Trap Meter</span><b>72</b></div>
+        <div class="market-row"><span>Market Efficiency</span><b>14%</b></div>
+      </div>
+      <div>
+        <div class="spark">
+          <i class="down" style="height:40%"></i><i class="down" style="height:62%"></i>
+          <i class="down" style="height:34%"></i><i class="down" style="height:78%"></i>
+          <i class="up"   style="height:48%"></i><i class="up"   style="height:70%"></i>
+          <i class="down" style="height:30%"></i><i class="down" style="height:56%"></i>
+          <i class="up"   style="height:84%"></i><i class="up"   style="height:96%"></i>
+          <i class="up"   style="height:52%"></i><i class="up"   style="height:44%"></i>
+        </div>
+        <div class="spark-axis"><span>Q1</span><span>Q2</span><span>Q3</span><span>Q4</span></div>
+      </div>
+    </div>
+
+    <div class="hero-foot">
+      <span>Analyse</span><i></i><span>Track</span><i></i><em>Find the Edge</em>
+    </div>
+  </section>
+
+  <!-- ═══════════════ AUTH ═══════════════ -->
+  <main class="auth-col">
+    <div class="auth-card">
+      <div class="auth-head">
+        <h1 class="auth-title">Welcome Back</h1>
+        <p class="auth-sub">Sign in to access the BLM dashboard</p>
+      </div>
+
+      <div class="alert alert-error" id="loginError" role="alert" aria-live="assertive">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.4v.2"/>
+        </svg>
+        <span id="loginErrorText">Invalid username or password</span>
+      </div>
+
+      <form id="loginForm" method="post" action="/api/auth/login" novalidate>
+        <input type="hidden" name="next" id="nextField" value="/">
+
+        <div class="field">
+          <label for="identifier">Email or Username</label>
+          <div class="control" id="identifierControl">
+            <svg class="lead" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/>
+              <path d="M3 6.5l9 6 9-6"/>
+            </svg>
+            <input id="identifier" name="username" type="text" inputmode="text"
+                   autocomplete="username" autocapitalize="none" spellcheck="false"
+                   placeholder="Enter your email or username"
+                   aria-label="Email or username" required>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="control" id="passwordControl">
+            <svg class="lead" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="4" y="10.5" width="16" height="10" rx="2.4"/>
+              <path d="M8 10.5V7.6a4 4 0 0 1 8 0v2.9"/>
+            </svg>
+            <input id="password" name="password" type="password"
+                   autocomplete="current-password"
+                   placeholder="Enter your password"
+                   aria-label="Password" required>
+            <button class="toggle-pw" id="togglePw" type="button"
+                    aria-label="Show password" aria-pressed="false" title="Show password">
+              <svg id="eyeOpen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M2.4 12S6 5.8 12 5.8 21.6 12 21.6 12 18 18.2 12 18.2 2.4 12 2.4 12Z"/>
+                <circle cx="12" cy="12" r="2.9"/>
+              </svg>
+              <svg id="eyeOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none">
+                <path d="M3 3l18 18"/>
+                <path d="M10.6 6.2A9.6 9.6 0 0 1 12 6.1c6 0 9.6 5.9 9.6 5.9a17 17 0 0 1-3.2 3.6"/>
+                <path d="M6.3 7.9A17 17 0 0 0 2.4 12s3.6 5.9 9.6 5.9c1.3 0 2.4-.2 3.4-.6"/>
+                <path d="M9.9 10.2a3 3 0 0 0 4 4"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="row-between">
+          <label class="remember" for="remember">
+            <input type="checkbox" id="remember" name="remember" value="1">
+            <span>Remember me</span>
+          </label>
+          <a class="link-quiet" id="forgotLink" href="#"
+             aria-disabled="true" title="Password recovery is not enabled on this deployment">Forgot password?</a>
+        </div>
+
+        <button class="btn-primary" id="submitBtn" type="submit">
+          <span class="btn-label" id="submitLabel">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M14 3.5h4.5A2.5 2.5 0 0 1 21 6v12a2.5 2.5 0 0 1-2.5 2.5H14"/>
+            </svg>
+            <span>Sign In</span>
+          </span>
+          <span class="btn-label" id="submitBusy" style="display:none">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>Signing in…</span>
+          </span>
+        </button>
+      </form>
+
+      <div class="divider" aria-hidden="true"><span>OR</span></div>
+
+      <button class="btn-ghost" id="ssoBtn" type="button" aria-disabled="true"
+              title="Single sign-on is not enabled on this deployment">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21.5 12.2c0-.7-.06-1.35-.18-2H12v3.8h5.3a4.55 4.55 0 0 1-1.97 2.99v2.48h3.18c1.86-1.71 2.99-4.24 2.99-7.27Z"/>
+          <path d="M12 22c2.7 0 4.96-.9 6.6-2.43l-3.18-2.48c-.88.6-2.01.95-3.42.95-2.63 0-4.86-1.77-5.66-4.16H3.06v2.56A10 10 0 0 0 12 22Z"/>
+          <path d="M6.34 13.88a6 6 0 0 1 0-3.76V7.56H3.06a10 10 0 0 0 0 8.88l3.28-2.56Z"/>
+          <path d="M12 6.04c1.47 0 2.79.51 3.83 1.5l2.82-2.82A10 10 0 0 0 3.06 7.56l3.28 2.56C7.14 7.73 9.37 6.04 12 6.04Z"/>
+        </svg>
+        <span>Continue with Google</span>
+      </button>
+
+      <div class="card-foot">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="4.5" y="10.5" width="15" height="9.5" rx="2.2"/>
+          <path d="M8.2 10.5V7.8a3.8 3.8 0 0 1 7.6 0v2.7"/>
+        </svg>
+        <span>Secure access</span><i>·</i><span>Encrypted</span><i>·</i><span>POPIA Compliant</span>
+      </div>
+    </div>
+
+    <noscript>
+      <p class="alert alert-info show" style="max-width:468px;margin-top:16px">
+        JavaScript is disabled — submit the form to sign in. You will be
+        redirected to the dashboard.
+      </p>
+    </noscript>
+  </main>
+</div>
+
+<script src="/static/login.js"></script>
+</body>
+</html>
