@@ -326,6 +326,9 @@ def _start(c: PokerBetCollector, monkeypatch) -> None:
 
     def _fake_tick(page):
         entered_loop.set()          # we are inside the fast loop body
+        # stand-in for a REAL fully-completed cycle: _tick_body's
+        # completion block sets this (audit completeness gate)
+        c._tick_completed_fully = True
         c._running = False          # end start() cleanly after this pass
         return page
 
@@ -530,3 +533,113 @@ def test_starvation_warning_fires_once_per_episode(monkeypatch, caplog):
         assert caplog.text.count("fresh again") == 1, (
             "recovery must log 'fresh again — resuming' exactly once")
     c._watchdog_stop.set()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 5. Watchdog completeness gate (2026-09-29 correctness audit): the
+#    liveness marker must advance ONLY for ticks that completed their
+#    real work — never for skipped, early-returned, or failed ticks.
+# ────────────────────────────────────────────────────────────────────────
+
+def test_exception_tick_does_not_advance_watchdog_marker(monkeypatch):
+    """A tick that RAISES must leave the watchdog liveness marker
+    untouched — previously the loop set _last_fast_completed_at
+    unconditionally after the except handlers, so a wedge that reliably
+    threw kept the dog fed while producing zero observations (audit
+    finding §5.1).
+
+    Drives start()'s REAL loop: _tick raises TargetClosedError and the
+    relaunch is mocked to fail, which is the loop's deterministic
+    one-pass exit (running=False + break) — no sleeps, no second pass.
+    """
+    c, log = _make_collector(monkeypatch, tick_s=5.0,
+                             env={"WATCHDOG_USEC": "90000000", "NOTIFY_SOCKET": "@blm"})
+    _start(c, monkeypatch)
+    marker = c._last_fast_completed_at
+    assert marker > 0.0  # _start()'s single fake tick completed
+
+    def _dead_page(page):
+        raise colmod.TargetClosedError("tab died mid-tick")
+
+    def _failed_relaunch(reason):
+        raise RuntimeError(f"relaunch failed on purpose: {reason}")
+
+    c._tick = _dead_page
+    c._relaunch = _failed_relaunch
+    # attrs the loop's exception handlers touch (created in real __init__)
+    c.stats = {"ticks": 1, "errors": 0, "games_seen": 0, "snapshots": 0}
+    c._last_error_iso = ""
+    c._running = False  # start() returns instantly if _running is already set
+    t = threading.Thread(target=c.start, daemon=True)
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "start() did not exit after the relaunch failure"
+    # start() #2 legitimately reset the marker to 0.0 at init; the
+    # failing pass must NOT have set it (pre-fix the loop set it
+    # unconditionally after the except handlers — it would be nonzero)
+    assert c._last_fast_completed_at == 0.0, (
+        "an exception tick advanced the watchdog marker")
+    assert c._tick_completed_fully is False, (
+        "a pass that raised must not be flagged as fully completed")
+    c._watchdog_stop.set()
+
+
+def test_source_loop_marker_is_flag_gated(monkeypatch):
+    """Pin the loop's completion marker to the _tick_completed_fully
+    gate: the unconditional marker (pre-fix) must be gone, the flag
+    reset must exist at _tick_body entry, and _tick_body's real
+    completion block must set it.  A regression that un-gates the
+    marker re-opens the 'complete while incomplete' hole."""
+    import inspect
+    src = inspect.getsource(PokerBetCollector.start)
+    assert "if self._tick_completed_fully or self._tick_liveness_only:" in src, (
+        "loop-level completion marker is no longer gated on "
+        "_tick_completed_fully / _tick_liveness_only")
+    # the db-lock path must be the ONLY liveness-only escape hatch
+    assert src.count("self._tick_liveness_only = True") == 1
+    assert src.count("self._tick_liveness_only = False") == 2
+    body = inspect.getsource(PokerBetCollector._tick_body)
+    assert "self._tick_completed_fully = False" in body, (
+        "_tick_body must reset the completeness flag at entry")
+    assert body.count("self._tick_completed_fully = True") == 2, (
+        "exactly two completions may set the flag: the full tick and "
+        "the empty-panel cycle")
+
+
+def test_db_lock_skip_keeps_dog_fed(monkeypatch):
+    """Policy pin: a db-lock skip is liveness-only — the loop is alive
+    (browser, parsing, WS fine) and the code deliberately does NOT
+    relaunch on cross-process SQLite contention, so it must not starve
+    the dog into a restart that would kill the WS subscription and
+    re-enter the same lock.  Every OTHER non-completing path stays
+    unfed (test_exception_tick_does_not_advance_watchdog_marker)."""
+    import inspect
+    src = inspect.getsource(PokerBetCollector.start)
+    lock_idx = src.find("except sqlite3.OperationalError as exc:")
+    assert lock_idx != -1, "db-lock handler vanished"
+    window = src[lock_idx:src.find("_prev_fast_started_at", lock_idx)]
+    assert "self._tick_liveness_only = True" in window, (
+        "the db-lock skip must set the liveness-only flag")
+
+
+def test_empty_panel_is_a_complete_cycle(monkeypatch):
+    """An empty panel early-return is a COMPLETE cycle that found
+    nothing: it must still count as completed for the watchdog (else a
+    genuine site-side empty period becomes a restart storm), while the
+    state file keeps recording consecutive_empty_ticks.
+
+    Source-shaped pin: the empty-parse branch must set the completeness
+    flag BEFORE writing state(success=False), and the full-completion
+    block must keep writing state(success=True) after the flag.
+    """
+    import inspect
+    body = inspect.getsource(PokerBetCollector._tick_body)
+    empty_idx = body.find("self._empty_ticks += 1")
+    assert empty_idx != -1, "empty-parse block vanished from _tick_body"
+    window = body[empty_idx:body.find("self._empty_ticks = 0")]
+    assert "self._tick_completed_fully = True" in window, (
+        "the empty-panel early-return must count as a COMPLETE cycle")
+    assert window.find("self._tick_completed_fully = True") < \
+        window.find("_write_state(success=False)"), (
+        "the flag must be set before the stalled-state write so the "
+        "watchdog thread never observes a stale marker")

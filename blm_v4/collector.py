@@ -1814,6 +1814,24 @@ class PokerBetCollector:
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
         self._last_fast_completed_at = 0.0  # monotonic; 0 = never
+        # Watchdog completeness gate (2026-09-29 correctness audit): the
+        # loop-level completion marker used to be set on EVERY iteration —
+        # including ticks that raised (db-lock skip, relaunch) or took an
+        # early return inside _tick_body (fresh-context recycle, empty
+        # parse).  A wedge that reliably produced exceptions therefore
+        # fed the dog while producing zero observations.  Set ONLY when
+        # _tick_body ran to its end (see the flag set next to the real
+        # completion block inside _tick_body); the loop-level marker is
+        # now gated on it.
+        self._tick_completed_fully = False
+        # External-throttle exception: a db-lock skip defers persistence
+        # but the loop is provably alive (browser, parsing, WS all fine);
+        # the code deliberately does NOT relaunch on cross-process SQLite
+        # contention (see the db-lock handler below), so it must not
+        # starve the dog either — a restart would kill the WS market
+        # subscription and re-enter the same lock.  Feeding on THIS path
+        # is documented policy, not the completeness hole fix 2 closes.
+        self._tick_liveness_only = False
         self._watchdog_enabled = (
             SD_NOTIFY_AVAILABLE
             and bool(os.environ.get("WATCHDOG_USEC"))
@@ -1886,6 +1904,11 @@ class PokerBetCollector:
                     if self._next_tick_target <= 0.0:
                         self._next_tick_target = tick_start + self.tick_s
                     prev_started = self._prev_fast_started_at
+                    # Reset BEFORE the tick runs: an exception raised
+                    # between here and _tick_body's own entry-reset must
+                    # not inherit the previous pass's completed flag.
+                    self._tick_completed_fully = False
+                    self._tick_liveness_only = False
                     try:
                         page = self._tick(page)
                     except sqlite3.OperationalError as exc:
@@ -1899,6 +1922,9 @@ class PokerBetCollector:
                         # observation is lost by skipping.
                         self.stats["errors"] += 1
                         self._last_error_iso = utcnow_iso()
+                        # liveness-only: keep the dog fed (see the gate
+                        # comment in start()); nothing else advances
+                        self._tick_liveness_only = True
                         logger.warning("tick db lock — skipping tick: %s", exc)
                     except TargetClosedError as exc:
                         # the fast page's tab/browser died (SPA crash, OOM
@@ -1929,8 +1955,14 @@ class PokerBetCollector:
                             self._running = False
                             break
                     self._prev_fast_started_at = tick_start
-                    self._fast_cycle_completed_at_iso = utcnow_iso()
-                    self._last_fast_completed_at = time.monotonic()
+                    if self._tick_completed_fully or self._tick_liveness_only:
+                        self._fast_cycle_completed_at_iso = utcnow_iso()
+                        self._last_fast_completed_at = time.monotonic()
+                    else:
+                        logger.info(
+                            "tick %s did NOT reach completion — watchdog "
+                            "liveness marker not advanced",
+                            getattr(self, "stats", {}).get("ticks", "?"))
                     # SPA sessions degrade over hours — rotate regardless
                     if (time.monotonic() - self._browser_started_at
                             > BROWSER_MAX_LIFETIME_S):
@@ -2573,6 +2605,12 @@ class PokerBetCollector:
         t_tick = time.monotonic()
         self.stats["ticks"] += 1
         self._tick_no += 1
+        # Watchdog completeness gate: reset at entry so any early return
+        # (fresh context, empty parse, exception escape) leaves it False —
+        # only a full pass through persistence, subscriptions, rotation
+        # bookkeeping, deviation flush and the state write reaches the
+        # completion block that sets it True.
+        self._tick_completed_fully = False
         logger.info("fast tick %d start (url=%s)", self.stats["ticks"], page.url)
 
         # ── PHASE 5 TICK BUDGET ───────────────────────────────────────
@@ -2617,6 +2655,14 @@ class PokerBetCollector:
                 comps = find_relevant_competitions(html)
         if not comps:
             self._empty_ticks += 1
+            # An empty panel is a COMPLETE cycle that found nothing to
+            # collect — not an incomplete one.  The loop is demonstrably
+            # cycling (capture, parse, state write all ran); feeding the
+            # dog here is honest.  Counting it as incomplete would turn a
+            # genuine site-side empty period into a systemd restart
+            # storm; the state file's consecutive_empty_ticks +
+            # status=stalled are the observability signal for emptiness.
+            self._tick_completed_fully = True
             self._write_state(success=False)
             logger.warning(
                 "still no relevant competitions on page "
@@ -2730,6 +2776,13 @@ class PokerBetCollector:
         # write so the watchdog thread sees a completed cycle even if the
         # state file write stalls (1.7MB JSON on every tick, DB lock
         # contention with the deviation backfill thread).
+        # Watchdog completeness gate: the tick has NOW done its real work
+        # (capture, parse, persistence, subscriptions, ended-marking).
+        # Set before the deviation flush + state write so the watchdog
+        # sees a completed cycle even if those tail steps stall (they are
+        # failure-isolated and re-run next tick); this preserves the
+        # 59f6791 placement rationale documented below.
+        self._tick_completed_fully = True
         self._last_fast_completed_at = time.monotonic()
         self._fast_cycle_completed_at_iso = utcnow_iso()
         t_deviation = time.monotonic()
