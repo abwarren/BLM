@@ -14,6 +14,7 @@ legacy / re-authorizable path, so the default UNDER TEST is unfrozen
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -129,6 +130,55 @@ def pytest_configure(config):
         "markers",
         "asyncio: mark test as async (auto-detected in auto mode)",
     )
+
+
+# ── PRODUCTION COLLECTOR HOST GUARD (2026-09-30 directive) ────────────
+# This box RUNS THE PRODUCTION COLLECTOR as a systemd user unit.  The
+# 2026-09-29 restart-storm forensics measured the host at swap-full
+# memory thrash (PSI-mem 40%, PSI-io 78%) while test/browser workloads
+# ran beside it; every pytest pass adds browser trees and CPU load to a
+# box that has none to spare.  Heavy pytest runs here are therefore
+# DENIED by default while a production collector/server process is
+# alive.  Run the targeted collector/liveness sets on a scratch tree,
+# or pass BLM_ALLOW_HEAVY_TESTS=1 to accept the production impact
+# explicitly (e.g. for the 2–3 file liveness set, NOT the full suite).
+
+def _production_pipeline_pids() -> list[tuple[int, str]]:
+    """(pid, cmdline) of live production pipeline processes."""
+    found: list[tuple[int, str]] = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            cmd = (proc / "cmdline").read_bytes().replace(
+                b"\x00", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if "blm_v4.collector" in cmd or "BLM/server.py" in cmd:
+            found.append((int(proc.name), cmd.strip()))
+    return found
+
+
+def _refuse_production_host_run() -> None:
+    if os.environ.get("BLM_ALLOW_HEAVY_TESTS") == "1":
+        return
+    procs = _production_pipeline_pids()
+    if not procs:
+        return
+    detail = "\n".join(
+        f"  pid {pid}: {cmd[:90]}" for pid, cmd in sorted(procs))
+    raise pytest.UsageError(
+        "REFUSED: a production BLM pipeline is running on this host:\n"
+        f"{detail}\n"
+        "pytest workloads on this box compete with the collector for the\n"
+        "CPU/RAM the 2026-09-29 restart-storm forensics showed to be the\n"
+        "root kill driver.  Options:\n"
+        "  * run the targeted set in a scratch checkout (see AGENTS.md),\n"
+        "  * or re-run with BLM_ALLOW_HEAVY_TESTS=1 to accept the\n"
+        "    production impact explicitly.")
+
+
+_refuse_production_host_run()
 
 
 @pytest.fixture
