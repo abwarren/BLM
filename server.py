@@ -46,6 +46,19 @@ RECONCILER_INTERVAL_S = float(
 #: (blm_v4/settle_worker.py) and changes no thresholds, gates or logic.
 SETTLE_INTERVAL_S = float(
     os.environ.get("BLM_SETTLE_INTERVAL_S", "45"))
+#: WAL HYGIENE cadence (incident 2026-09-29, open item 1) — periodic
+#: PRAGMA wal_checkpoint(PASSIVE) so the collector's high-churn WAL can
+#: never balloon again (it reached 7.1 GB and turned every server restart
+#: into lost "database is locked" races).  PASSIVE never blocks readers
+#: or writers, so this cannot reintroduce the startup lock races; the
+#: checkpoint runs only when the WAL exceeds WAL_HYGIENE_THRESHOLD_MB.
+#: 0 disables the worker.
+WAL_HYGIENE_INTERVAL_S = float(
+    os.environ.get("BLM_WAL_HYGIENE_INTERVAL_S", "300"))
+#: run a hygiene checkpoint only when the WAL file is at least this big —
+#: below it the default wal_autocheckpoint is managing fine alone.
+WAL_HYGIENE_THRESHOLD_MB = float(
+    os.environ.get("BLM_WAL_HYGIENE_THRESHOLD_MB", "256"))
 #: a live-flagged game with NO snapshot AND NO WS observation for this
 #: long has left the source's live board — its authoritative final state
 #: exists upstream, so reconcile it to ended.
@@ -404,6 +417,26 @@ def main() -> None:
         app.state._settle_worker = settle_worker
         logger.info("settle_worker_started", interval_s=SETTLE_INTERVAL_S)
 
+        # ── WAL HYGIENE worker (incident 2026-09-29, open item 1) ────
+        # The sibling janitor: stat-gates the WAL file and, when it has
+        # grown past WAL_HYGIENE_THRESHOLD_MB, runs one
+        # wal_checkpoint(PASSIVE) — the only mode that never waits on
+        # readers/writers, so a pass can never add lock pressure to the
+        # pipeline it is protecting.  No table is read or written; the
+        # scorecard is not imported; failure is logged and retried on
+        # the next tick.  0 disables the worker.
+        if WAL_HYGIENE_INTERVAL_S > 0:
+            from blm_v4.wal_hygiene import WalHygieneWorker
+            wal_hygiene_worker = WalHygieneWorker(
+                root / "blm_pokerbet.db",
+                interval_s=WAL_HYGIENE_INTERVAL_S,
+                threshold_mb=WAL_HYGIENE_THRESHOLD_MB)
+            wal_hygiene_worker.start()
+            app.state._wal_hygiene_worker = wal_hygiene_worker
+            logger.info("wal_hygiene_worker_started",
+                        interval_s=WAL_HYGIENE_INTERVAL_S,
+                        threshold_mb=WAL_HYGIENE_THRESHOLD_MB)
+
         # ── PACE REFERENCE worker (empty-live-data fix) ───────────────
         # Started early: its FIRST scan is the expensive one (the Q3
         # whole-table GROUP BY), and until it lands /live serves empty
@@ -511,6 +544,9 @@ def main() -> None:
         settle_worker = getattr(app.state, "_settle_worker", None)
         if settle_worker is not None:
             settle_worker.stop(timeout=2)
+        wal_hygiene_worker = getattr(app.state, "_wal_hygiene_worker", None)
+        if wal_hygiene_worker is not None:
+            wal_hygiene_worker.stop(timeout=2)
         result_reconciler = getattr(app.state, "_result_reconciler", None)
         if result_reconciler is not None:
             result_reconciler.stop(timeout=2)
