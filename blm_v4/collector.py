@@ -626,7 +626,13 @@ def _tick_timing_summary(stats: dict[str, deque]) -> dict[str, Any]:
     out: dict[str, Any] = {"n": len(stats.get("work", []))}
     for key in ("fast_cycle_interval_ms", "fast_work_ms",
                 "slow_event_view_ms", "ws_subscription_ms",
-                "persistence_ms"):
+                "persistence_ms",
+                # PHASE 2 buckets — full percentile exposure so the
+                # overrun component can never hide behind a mean.
+                "tick_total_ms", "game_discovery_ms",
+                "page_content_ms", "score_parse_ms",
+                "board_parse_ms", "line_parse_ms", "db_write_ms",
+                "retry_ms", "ended_game_ms"):
         out[key] = _percentiles(list(stats.get(key, ())))
     out.update({
         "mean_work_ms": _mean_ms("work"),
@@ -741,7 +747,30 @@ class PokerBetCollector:
             for key in ("work", "sleep", "cycle", "event", "sub",
                         "fast_cycle_interval_ms", "fast_work_ms",
                         "slow_event_view_ms", "ws_subscription_ms",
-                        "persistence_ms")}
+                        "persistence_ms",
+                        # Capture-efficiency instrumentation (directive
+                        # 2026-09-30 PHASE 2): per-component tick timing so
+                        # the overrun source is MEASURED, never assumed.
+                        "tick_total_ms", "game_discovery_ms",
+                        "page_content_ms", "score_parse_ms",
+                        "board_parse_ms", "line_parse_ms", "db_write_ms",
+                        "retry_ms", "ended_game_ms")}
+        # ── Capture-efficiency state (directive 2026-09-30) ──────────
+        # PHASE 3 lifecycle cache: gids whose capture stage is DONE.
+        # 'ended' on the game object == DONE; this cache also holds gids
+        # that left tracking via _mark_ended's disappeared path, so the
+        # WS bridge can suppress them even after _tracked deletion.
+        # In-memory only, tiny (one short str per ended game).
+        self._end_state_terminal: dict[str, str] = {}
+        # PHASE 4 bounded NULL-score recovery bookkeeping.
+        self._null_score_streak: dict[str, int] = {}     # gid -> consecutive unrecovered retries
+        self._null_score_backoff_until: dict[str, int] = {}  # gid -> tick_no until which re-reads are skipped
+        self._null_incomplete_marked: set[str] = set()   # gids logged as incomplete in the current episode
+        self._null_recovery_stats = {
+            "attempts": 0, "recovered": 0, "incomplete_marked": 0,
+            "backoff_skips": 0, "budget_skips": 0,
+        }
+        self._ws_lifecycle_suppressed = 0
         self._instances: dict[str, str] = {}  # base game_id -> current instance id
         # ── Phase 3 P2 — deviation dirty gating ──────────────────────
         # A game is "dirty" when an accepted clean observation (or a
@@ -1039,6 +1068,24 @@ class PokerBetCollector:
                 game = self._find_tracked(cur)
         if game is None:
             return
+        # ── PHASE 3 (capture-efficiency directive 2026-09-30) ────────
+        # Explicit game lifecycle: LIVE -> FINALIZING -> DONE.
+        #   FINALIZING: the final-capture window (_final_capture_gids) —
+        #     the game's terminal capture is still in progress; WS frames
+        #     for it are STILL accepted.
+        #   DONE: the game object is 'ended' OR the gid has left tracking
+        #     via the disappeared path — WS capture stops.  A DONE game
+        #     must not consume collector budget: this was the dominant
+        #     post-final capture waste (game 31075046: 294 snapshots in
+        #     the ~31 min AFTER result_at, 2026-09-30 audit).
+        if game.status == "ended" or (
+                game.source_game_id in self._end_state_terminal):
+            self._ws_lifecycle_suppressed += 1
+            logger.debug(
+                "ws bridge suppressed (game DONE): %s", game.source_game_id)
+            return
+        if game.source_game_id in self._final_capture_gids:
+            pass  # FINALIZING: final capture in progress — frames accepted
         # current-instance identity: never write a base-keyed frame back
         # onto the completed base game
         obs["source_game_id"] = game.source_game_id
@@ -1680,6 +1727,11 @@ class PokerBetCollector:
             # LIVE freshness: collection cadence vs observation age are
             # reported separately (see _freshness_summary).
             "market_freshness": self._freshness_summary(),
+            # Capture-efficiency counters (directive 2026-09-30):
+            # PHASE 3 lifecycle suppression + PHASE 4 bounded NULL-score
+            # recovery — pure counters, no decision logic reads them.
+            "null_score_recovery": dict(self._null_recovery_stats),
+            "ws_lifecycle_suppressed": self._ws_lifecycle_suppressed,
             # market-rotation diagnostics: ATTEMPT vs OBSERVED MARKET — a
             # served request is not a fresh observation; only "observed"
             # re-arms the freshness gate.  Per-game streaks expose
@@ -2549,6 +2601,15 @@ class PokerBetCollector:
     TICK_TARGET_S = 10.0
     TICK_HARD_CEILING_S = 30.0
 
+    # ── Capture-efficiency knobs (directive 2026-09-30, PHASE 4) ──
+    # NULL-score recovery is BOUNDED on every axis: at most this many
+    # games re-read per tick, each at most once, only while the
+    # page-capture budget lasts; a game that stays NULL after this many
+    # consecutive retry episodes is marked incomplete and backed off.
+    NULL_SCORE_RECOVER_MAX_PER_TICK = 2
+    NULL_SCORE_INCOMPLETE_AFTER = 3
+    NULL_SCORE_BACKOFF_TICKS = 30
+
     def _page_content_timed(
         self, page: Page, label: str = "", timeout_s: Optional[float] = None,
     ) -> str | None:
@@ -2675,11 +2736,15 @@ class PokerBetCollector:
             logger.warning("page.content() timed out — requesting fresh context")
             return self._fresh_context("page.content() timed out")
         spend = time.monotonic() - t_capture
+        self._tick_stats["page_content_ms"].append(spend)
         page_capture_budget_remaining -= spend
         logger.debug("tick page.content() used %.3fs, %.3fs budget remaining",
                      spend, page_capture_budget_remaining)
+        t_board = time.monotonic()
         with PERFORMANCE.measure("collector.competition_parsing"):
             comps = find_relevant_competitions(html)
+        self._tick_stats["board_parse_ms"].append(
+            time.monotonic() - t_board)
         if not comps:
             logger.warning("no relevant competitions found — refreshing page")
             self._ensure_discovery_page(page)
@@ -2692,11 +2757,17 @@ class PokerBetCollector:
                 logger.warning("retry page.content() timed out — requesting fresh context")
                 return self._fresh_context("page.content() timed out (retry)")
             spend = time.monotonic() - t_retry
+            # bucketed as retry_ms (NOT page_content_ms) so the two
+            # capture classes stay separable in the percentiles
+            self._tick_stats["retry_ms"].append(spend)
             page_capture_budget_remaining -= spend
             logger.debug("retry page.content() used %.3fs, %.3fs budget remaining",
                          spend, page_capture_budget_remaining)
+            t_board = time.monotonic()
             with PERFORMANCE.measure("collector.competition_parsing"):
                 comps = find_relevant_competitions(html)
+            self._tick_stats["board_parse_ms"].append(
+                time.monotonic() - t_board)
         if not comps:
             self._empty_ticks += 1
             # An empty panel is a COMPLETE cycle that found nothing to
@@ -2755,7 +2826,21 @@ class PokerBetCollector:
                         self._queue_resolve(cls, row)
                     else:
                         to_snapshot.append((game, row, cls))
+        self._tick_stats["game_discovery_ms"].append(
+            time.monotonic() - t_snapshot)
         logger.info("tick %d tracked_row_processing took %.3fs", self.stats["ticks"], time.monotonic() - t_snapshot)
+
+        # 2b. PHASE 4 — bounded NULL-score recovery.  Rows whose scores
+        # rendered blank get AT MOST ONE immediate re-read each, for at
+        # most NULL_SCORE_RECOVER_MAX_PER_TICK games per tick, only while
+        # the page-capture budget lasts, and never for a game inside its
+        # backoff window.  A game that stays NULL is marked incomplete
+        # (logged + counted, persisted exactly as before — the observation
+        # semantics are unchanged) and backed off so one blank-rendering
+        # game can never monopolize the tick's capture budget.
+        (to_snapshot, page_capture_budget_remaining) = (
+            self._recover_null_scores(
+                to_snapshot, page, page_capture_budget_remaining))
 
         # 3. Persist list-level snapshots (DB work OUTSIDE the track lock;
         #    _store_list_snapshot re-takes it only around dict mutations)
@@ -2790,6 +2875,7 @@ class PokerBetCollector:
         t_end = time.monotonic()
         self._mark_ended(seen_keys)
         self._prune_pending_resolve(seen_keys)
+        self._tick_stats["ended_game_ms"].append(time.monotonic() - t_end)
         logger.info("tick %d mark_ended+prune took %.3fs", self.stats["ticks"], time.monotonic() - t_end)
 
         # 5. Request a SLOW round (event-view rotation) when due.  This is
@@ -2802,6 +2888,8 @@ class PokerBetCollector:
             self._slow_wake.set()
 
         self.stats["games_seen"] = sum(len(v) for v in self._tracked.values())
+        self._tick_stats["tick_total_ms"].append(
+            time.monotonic() - t_tick)
         logger.info(
             "fast tick %d done in %.2fs: tracked=%d snapshots=%d errors=%d"
             "%s",
@@ -2842,6 +2930,103 @@ class PokerBetCollector:
         self._tick_stats["fast_work_ms"].append(time.monotonic() - t_tick)
         self._tick_stats["work"].append(time.monotonic() - t_tick)
         return page
+
+    def _recover_null_scores(
+            self,
+            to_snapshot: list,
+            page: "Page",
+            budget_remaining: float,
+    ) -> tuple[list, float]:
+        """PHASE 4 — bounded NULL-score recovery (directive 2026-09-30).
+
+        Rows whose scores rendered blank get AT MOST ONE immediate re-read
+        each, for at most NULL_SCORE_RECOVER_MAX_PER_TICK games per tick,
+        only while the page-capture budget lasts, and never for a game
+        inside its backoff window.  A game that stays NULL after
+        NULL_SCORE_INCOMPLETE_AFTER consecutive attempts is marked
+        INCOMPLETE (logged + counted) and backed off for
+        NULL_SCORE_BACKOFF_TICKS ticks so one blank-rendering game can
+        never monopolize the tick's capture budget.  Returns the (possibly
+        score-filled) snapshot list and the remaining budget.  Persisted
+        exactly as before on failure — observation semantics unchanged.
+        Pure bookkeeping + one timed DOM read per candidate.
+        """
+        null_recovered: list[tuple[PokerBetGame, RowGame, object]] = []
+        null_candidates = [
+            (g, r, c) for (g, r, c) in to_snapshot
+            if r.home_score is None or r.away_score is None
+        ]
+        if not null_candidates:
+            return to_snapshot, budget_remaining
+        t_null = time.monotonic()
+        try:
+            recover_budget = self.NULL_SCORE_RECOVER_MAX_PER_TICK
+            for game, row, cls in null_candidates:
+                if recover_budget <= 0:
+                    break
+                gid = game.source_game_id
+                if self._null_score_backoff_until.get(gid, 0) > self._tick_no:
+                    self._null_recovery_stats["backoff_skips"] += 1
+                    continue
+                if budget_remaining <= 0:
+                    self._null_recovery_stats["budget_skips"] += 1
+                    break
+                t_ncap = time.monotonic()
+                html_n = self._page_content_timed(
+                    page, "null-retry",
+                    timeout_s=min(self.PAGE_CONTENT_RETRY_TIMEOUT_S,
+                                  max(0.5, budget_remaining)))
+                n_spend = time.monotonic() - t_ncap
+                budget_remaining -= n_spend
+                if html_n is None:
+                    break
+                self._null_recovery_stats["attempts"] += 1
+                recover_budget -= 1
+                n_comps = find_relevant_competitions(html_n)
+                n_row = None
+                for n_comp in n_comps:
+                    if n_comp.classification != cls:
+                        continue
+                    want = f"{row.home_team}|{row.away_team}"
+                    for cand in n_comp.games:
+                        if (f"{cand.home_team}|{cand.away_team}" == want
+                                and cand.home_score is not None
+                                and cand.away_score is not None):
+                            n_row = cand
+                            break
+                    if n_row is not None:
+                        break
+                if n_row is not None:
+                    self._null_recovery_stats["recovered"] += 1
+                    self._null_score_streak.pop(gid, None)
+                    self._null_incomplete_marked.discard(gid)
+                    null_recovered.append((game, n_row, cls))
+                    logger.info(
+                        "null-score recovery: %s scores filled from re-read "
+                        "(%s-%s)", gid, n_row.home_score, n_row.away_score)
+                else:
+                    streak = self._null_score_streak.get(gid, 0) + 1
+                    self._null_score_streak[gid] = streak
+                    if streak >= self.NULL_SCORE_INCOMPLETE_AFTER:
+                        self._null_score_backoff_until[gid] = (
+                            self._tick_no + self.NULL_SCORE_BACKOFF_TICKS)
+                        if gid not in self._null_incomplete_marked:
+                            self._null_incomplete_marked.add(gid)
+                            self._null_recovery_stats["incomplete_marked"] += 1
+                            logger.warning(
+                                "null-score INCOMPLETE: %s still blank after "
+                                "%d bounded retries — marked incomplete, "
+                                "re-reads backed off %d ticks",
+                                gid, streak, self.NULL_SCORE_BACKOFF_TICKS)
+        finally:
+            self._tick_stats["score_parse_ms"].append(
+                time.monotonic() - t_null)
+        for game, n_row, cls in null_recovered:
+            for i, (g, r, _c) in enumerate(to_snapshot):
+                if g.source_game_id == game.source_game_id:
+                    to_snapshot[i] = (g, n_row, cls)
+                    break
+        return to_snapshot, budget_remaining
 
     # ── Pending identity resolution (fast -> slow worker channel) ──
 
@@ -3200,6 +3385,7 @@ class PokerBetCollector:
         and the snapshot is recorded under a NEW instance record so the
         two games never share a history.
         """
+        t_dbw = time.monotonic()
         if game.status == "ended":
             return
         with PERFORMANCE.measure("collector.instance_reset_check"):
@@ -3232,9 +3418,12 @@ class PokerBetCollector:
         )
         with PERFORMANCE.measure("collector.game_db_lookup"):
             game_id = self._game_db_id(game)
+        t_dbw = time.monotonic()
         with PERFORMANCE.measure("collector.insert_snapshot") as insert_measure:
             row_id = self.store.insert_snapshot(game_id, obs)
             insert_measure.add("sql_calls", 2)  # duplicate SELECT + INSERT attempt
+        self._tick_stats["db_write_ms"].append(
+            time.monotonic() - t_dbw)
         if row_id:
             self.stats["snapshots"] += 1
             self._record_clean(game, obs)
@@ -3495,6 +3684,9 @@ class PokerBetCollector:
         if game.status != "ended":
             game.status = "ended"
             self.store.upsert_game(game)
+        # PHASE 3: lifecycle LIVE -> FINALIZING -> DONE — a verified final
+        # is the DONE transition; the WS bridge stops accepting frames.
+        self._end_state_terminal[game.source_game_id] = "ended"
         cls_val = game.classification
         key = f"{game.home_team}|{game.away_team}"
         with self._track_lock:
@@ -3532,6 +3724,80 @@ class PokerBetCollector:
             return vals[index]
         return None
 
+    # ── PHASE 5 — checkpoint-aware scheduling (directive 2026-09-30) ─
+
+    # Progress tier of a tracked game, computed WITHOUT touching any
+    # checkpoint definition: pure arithmetic over the clean trajectory.
+    #   1  checkpoint-critical  — latest clean projection is at/after an
+    #                            alert checkpoint boundary (75/50) and the
+    #                            closest one is still ahead (within 2
+    #                            game-minutes) — captures feed LIVE alert
+    #                            evaluation right now
+    #   2  active-valid         — a clean projection exists and its
+    #                            captured_at is fresh (< 40s)
+    #   3  normal-live          — tracked + no fresh clean state (young
+    #                            games, projections disabled, etc.)
+    #   4  stale/uncertain      — clean state exists but is older than
+    #                            PROGRESS_STALENESS_S (state drifted)
+    #   5  finalizing           — inside the final-capture window
+    #   6  DONE                 — ended / terminal
+    # Defaults to tier 3 on ANY error — scheduling degrades gracefully.
+    PROGRESS_STALENESS_S = 40.0
+    CHECKPOINT_CRITICAL_LOOKAHEAD_MIN = 2.0
+
+    def _progress_tier(self, gid: str) -> tuple:
+        try:
+            if (gid in self._final_capture_gids
+                    or gid in self._final_capture_armed):
+                return (5, 0.0)
+            game = self._find_tracked(gid)
+            if (game is None or game.status == "ended"
+                    or gid in self._end_state_terminal):
+                return (6, 0.0)
+            with self._track_lock:
+                eff_gid = self._instances.get(gid, gid)
+            if self.clean_metrics is None:
+                return (3, 0.0)
+            row = self.clean_metrics.db.execute(
+                "SELECT captured_at, progress_pct FROM clean_projections "
+                "WHERE source_game_id=? ORDER BY captured_at DESC LIMIT 1",
+                (eff_gid,)).fetchone()
+            if row is None:
+                return (3, 0.0)
+            from datetime import datetime, timezone
+            cap = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - cap).total_seconds()
+            if age > self.PROGRESS_STALENESS_S:
+                return (4, 0.0)
+            prog = row[1]
+            if prog is not None:
+                # The alert's checkpoint set, expressed as a boundary list
+                # (semantic constants stay in live_analytics.under_alert —
+                # checkpoint DEFINITIONS are not modified).
+                boundaries = [b for b in (75, 50) if b > float(prog)]
+                if boundaries:
+                    nxt = min(boundaries)
+                    if float(prog) >= 50.0 and (
+                            nxt - float(prog)) * self._full_game_minutes(
+                                eff_gid) / 100.0 <= self.CHECKPOINT_CRITICAL_LOOKAHEAD_MIN:
+                        return (1, nxt)
+            return (2, 0.0)
+        except Exception:
+            return (3, 0.0)
+
+    def _full_game_minutes(self, gid: str) -> float:
+        """Full game length in minutes for the game's classification
+        (Betual 4x10, Cyber 4x12).  Read from the DURATION basis the pace
+        projector itself uses (projection.duration_for), never redefined
+        here.  Falls back to 48 (NBA-length) on any error."""
+        try:
+            from blm_v4.projection import duration_for
+            game = self._find_tracked(gid)
+            cls_val = game.classification if game is not None else None
+            return float(duration_for(cls_val)[1])
+        except Exception:
+            return 48.0
+
     def _never_line_gids(self) -> set[str]:
         """Tracked games that have NEVER had a verified MatchTotal market
         line persisted (no market_observations MatchTotal row AND no
@@ -3551,6 +3817,24 @@ class PokerBetCollector:
                 if not has_line:
                     gids.add(gid)
         return gids
+
+    def _sort_market_queue_checkpoint_aware(
+            self, never_line: set[str]) -> None:
+        """PHASE 5 — order the market-rotation queue by capture priority.
+
+        never-line games first (early-checkpoint line coverage, existing
+        behavior verbatim), then checkpoint-critical (tier 1), then the
+        remaining tiers (2 active-valid, 3 normal-live, 4 stale/uncertain,
+        5 finalizing, 6 DONE).  Stable on gid within a tier.  No checkpoint
+        definition is consulted or changed — tiers are pure arithmetic over
+        the clean trajectory (_progress_tier).
+        """
+        def _sort_key(gid: str) -> tuple:
+            if gid in never_line:
+                return (0, gid)      # never-line priority preserved verbatim
+            tier, _sub = self._progress_tier(gid)
+            return (tier, gid)
+        self._market_queue.sort(key=_sort_key)
 
     def _ensure_slow_page(self) -> None:
         """Create the dedicated SLOW event-view page on the WORKER'S OWN
@@ -3715,6 +3999,17 @@ class PokerBetCollector:
         # Consulted per slow run (cheap: one indexed SELECT per candidate
         # only when the fast path found no line for that game).
         never_line = self._never_line_gids()
+        # PHASE 5 — checkpoint-aware ordering: the WHOLE round visits
+        # checkpoint-critical games FIRST (their captures feed live alert
+        # evaluation at the 75%/50% boundaries), then everyone else in the
+        # existing never-line-first + freshness-gated rotation order.
+        # One indexed SELECT per game, once per round — negligible against
+        # a multi-second per-game event-view visit.
+        try:
+            self._sort_market_queue_checkpoint_aware(never_line)
+        except Exception:
+            logger.error("progress-tier sort failed (rotation continues "
+                         "in queue order):\n%s", traceback.format_exc())
         for _ in range(len(self._market_queue)):
             if captured >= MARKET_BATCH:
                 break
@@ -3745,6 +4040,8 @@ class PokerBetCollector:
                 if last and _ts_age_s(last) < 15:
                     self._market_stats["skipped_fresh_arms"] += 1
                     continue  # just visited; avoid a hot loop
+            elif self._progress_tier(gid)[0] == 1:
+                pass  # checkpoint-critical: exempt from the freshness gate
             elif (last and _ts_age_s(last) < MARKET_REFRESH_S
                   and not final_capture):
                 # Fresh-observation gate: armed ONLY by an actual observed
@@ -3801,7 +4098,13 @@ class PokerBetCollector:
                     self._attempt_streak[gid] = self._attempt_streak.get(gid, 0) + 1
                     continue
                 text = page.inner_text("body", timeout=10000)
+                # PHASE 2: line-parse timing (event-view scoreboard +
+                # market text -> structured parse) is its own bucket so a
+                # slow parse is never misattributed to page capture.
+                t_lp = time.monotonic()
                 parsed = parse_event_view(text)
+                self._tick_stats["line_parse_ms"].append(
+                    time.monotonic() - t_lp)
                 if not self._verified_event_view(game, parsed):
                     # The eu-swarm feed subscribed by this visit is an
                     # independent, verified capture of the SAME game — when
@@ -4199,6 +4502,10 @@ class PokerBetCollector:
                     if game.status != "ended":
                         game.status = "ended"
                         to_end.append(game)
+                    # PHASE 3: the game has left the live capture set —
+                    # record it terminal so the WS bridge suppresses any
+                    # further frames for it (lifecycle DONE).
+                    self._end_state_terminal[game.source_game_id] = "ended"
                     # keep the game record; drop from live tracking
                     del games[key]
                     if game.source_game_id in self._market_queue:
