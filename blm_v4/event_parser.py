@@ -58,6 +58,38 @@ _RE_HANDICAP = re.compile(r"^[+-]\d{1,2}\.\d$")
 _RE_QUARTER_SCORES = re.compile(r"\((\d{1,2}):(\d{1,2})\)")
 
 SECTION_HEADERS = ("Points Handicap", "Total Points", "Match Winner")
+
+# ── Selected-section extraction (2026-09-30) ────────────────────────
+# BetConstruct obfuscates class names per deploy, but the LEFT-MENU
+# "selected" game section has kept stable markers across deploys
+# (captured fixture 2026-09-30, betual_eventview_31067951.html):
+#
+#   <div class="market-game-section active">
+#     <div class="selected-game-indicator"></div>
+#     <p class="market-game-team"><span class="market-game-team-name ...">HOME</span><b>83</b></p>
+#     <p class="market-game-team"><span class="market-game-team-name ...">AWAY</span><b>90</b></p>
+#     <span class="market-game-part">4th Quarter</span>
+#     <span class="market-game-additional-info">83 : 90, (26:18), ... 03:31</span>
+#
+# The page contains MANY such sections (the whole live sidebar) — the
+# SELECTED one ("active" + selected-game-indicator) is THIS event's.
+# Everything outside it is ANOTHER game's data: the pre-2026-09-30
+# global regexes happily attributed the first "83 : 90, (...)" on the
+# page — a WNBA game from the same sidebar — to every fixture.
+_RE_SELECTED_SECTION = re.compile(
+    r'class="market-game-section[^"]*active[^"]*"'
+    r'(?P<body>(?:(?!class="market-game-section).){0,6000})',
+    re.S,
+)
+_RE_TEAM_BLOCK = re.compile(
+    r'class="market-game-team-name[^"]*"[^>]*>([^<]{1,80})</span>'
+    r'(?:.(?!market-game-team-name)){0,400}?<b[^>]*>(\d{1,3})</b>',
+    re.S,
+)
+_RE_SELECTED_PART = re.compile(
+    r'class="market-game-part"[^>]*>([^<]{1,40})<')
+_RE_SELECTED_INFO = re.compile(
+    r'class="market-game-additional-info"[^>]*>([^<]{1,200})<')
 TEAM_TOTAL_SUFFIX = "Total Points"
 
 # ── Total Points market-line selection policy (2026-09-16) ──────────
@@ -198,14 +230,32 @@ def parse_event_view(text: str) -> dict[str, Any]:
 
     Returns fields consumable by MarketObservation plus ``markets_json``
     (full parsed market state) and ``raw_json`` (the raw page text).
+
+    Identity and scoreboard data come from the SELECTED game section of
+    the live sidebar (see the _RE_SELECTED_* note) when present; the
+    legacy whole-page text heuristics remain as fallback for older
+    deploys where no selected section renders.
     """
     lines = _lines(text)
     period, quarter, clock = parse_period_label(text)
 
     # ── Scoreboard: compact line "100 : 73, (32:22), ... 09:46" ──
+    # GLOBAL SEARCH IS UNSAFE: the live sidebar repeats other games'
+    # "N : M, (...)" blocks (audit 2026-09-30: an Aces–Fever scoreboard
+    # was being attributed to an Olympiacos fixture).  Search ONLY the
+    # selected section; fall back to the legacy whole-text search when
+    # the section is absent (older deploys), never on top of it.
     home_score = away_score = None
     quarter_scores: list[tuple[int, int]] = []
-    m = _RE_COMPACT_SCORE.search(text)
+    sel = _RE_SELECTED_SECTION.search(text)
+    sel_body = sel.group("body") if sel else ""
+    m = None
+    if sel_body:
+        mi = _RE_SELECTED_INFO.search(sel_body)
+        if mi:
+            m = _RE_COMPACT_SCORE.search(mi.group(1))
+    if m is None:
+        m = _RE_COMPACT_SCORE.search(text)
     if m:
         home_score = int(m.group(1))
         away_score = int(m.group(2))
@@ -215,15 +265,24 @@ def parse_event_view(text: str) -> dict[str, Any]:
         if not clock:
             clock = m.group(4)
 
-    # ── Team names from scoreboard area ─────────────────────────
+    # ── Team names: selected section first, legacy fallback ─────
     home_team = away_team = ""
-    for k, l in enumerate(lines[:30]):
-        if _RE_CLOCK.match(l):
-            if k + 1 < len(lines) and not _RE_PERIOD.match(lines[k + 1]):
-                home_team = lines[k + 1]
-            if k + 2 < len(lines):
-                away_team = lines[k + 2]
-            break
+    if sel_body:
+        teams = _RE_TEAM_BLOCK.findall(sel_body)
+        if len(teams) >= 2:
+            home_team, away_team = teams[0][0].strip(), teams[1][0].strip()
+        if not period:
+            pm = _RE_SELECTED_PART.search(sel_body)
+            if pm and _RE_PERIOD.match(pm.group(1).strip()):
+                period = pm.group(1).strip()
+    if not (home_team and away_team):
+        for k, l in enumerate(lines[:30]):
+            if _RE_CLOCK.match(l):
+                if k + 1 < len(lines) and not _RE_PERIOD.match(lines[k + 1]):
+                    home_team = lines[k + 1]
+                if k + 2 < len(lines):
+                    away_team = lines[k + 2]
+                break
 
     # ── Market sections (token-stream) ──────────────────────────
     totals: dict[str, Any] = {}
