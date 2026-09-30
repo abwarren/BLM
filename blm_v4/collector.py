@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import re
+import contextlib
 import signal
 import socket
 import sqlite3
@@ -59,7 +60,7 @@ import threading
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from urllib.parse import unquote
 
 from playwright.sync_api import (
@@ -250,6 +251,35 @@ def _block_deadline_signal() -> None:
     """
     if hasattr(signal, "pthread_sigmask"):
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+
+
+@contextlib.contextmanager
+def _alarm_blocked() -> "Iterator[None]":
+    """Run a block with the capture-deadline SIGALRM blocked, restoring
+    the calling thread's PRIOR mask on exit.
+
+    59f6791 made the deadline handler flag-only, so a late alarm can no
+    longer abort a SQLite commit — but it can still fire while a WS
+    frame callback (dispatched NESTED on the capturing thread while
+    page.content() is in flight) is inside a store call: the flag write
+    is harmless, yet the same delivery could land between the armed
+    window and the finally that disarms it.  Persisting under a blocked
+    mask keeps every store call's read-modify-write sequences atomic
+    with respect to the alarm regardless of which thread runs them.
+
+    The prior mask is RESTORED, not reset: the slow worker permanently
+    blocks SIGALRM (_slow_worker_main calls _block_deadline_signal), so
+    blindly unblocking would weaken that guarantee.  On threads without
+    pthread_sigmask this is a no-op.
+    """
+    if not hasattr(signal, "pthread_sigmask"):
+        yield
+        return
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
 # A fast cycle is "fresh" when it completed within this multiple of the
 # 5s tick.  6× = 30s: two full missed cycles plus margin, far below the
 # minutes-long wedges observed, and below typical WatchdogSec values.
@@ -1014,12 +1044,13 @@ class PokerBetCollector:
         obs["source_game_id"] = game.source_game_id
         obs["game_id"] = self._game_db_id(game)
         try:
-            self.store.upsert_market_observation(obs)
-            # A pushed MatchTotal IS an observed market: arm the freshness
-            # gate (and the freshness report) so the event-view rotation
-            # never spends a visit re-fetching a game the socket already
-            # covers.  Same key the slow path uses (tracked instance id).
-            self._last_market_at[game.source_game_id] = obs["captured_at"]
+            with _alarm_blocked():
+                self.store.upsert_market_observation(obs)
+                # A pushed MatchTotal IS an observed market: arm the freshness
+                # gate (and the freshness report) so the event-view rotation
+                # never spends a visit re-fetching a game the socket already
+                # covers.  Same key the slow path uses (tracked instance id).
+                self._last_market_at[game.source_game_id] = obs["captured_at"]
         except Exception:
             logger.error(
                 "market observation persist failed:\n%s",
@@ -1037,11 +1068,12 @@ class PokerBetCollector:
             if snap is not None and (
                     last is None
                     or _ts_age_s(last) >= WS_MARKET_DEDUP_S):
-                if self.store.insert_snapshot(
-                        self._game_db_id(game), snap):
-                    self._ws_snap_last[gid] = obs["captured_at"]
-                    self.stats["snapshots"] += 1
-                    self._record_clean(game, snap)
+                with _alarm_blocked():
+                    if self.store.insert_snapshot(
+                            self._game_db_id(game), snap):
+                        self._ws_snap_last[gid] = obs["captured_at"]
+                        self.stats["snapshots"] += 1
+                        self._record_clean(game, snap)
         except Exception:
             logger.error("ws snapshot bridge failed:\n%s",
                          traceback.format_exc())
@@ -1064,6 +1096,15 @@ class PokerBetCollector:
         market_id = str(raw.get("market_id") or "")
         if not market_id:
             return
+        if not obs.get("market_type"):
+            # Defense-in-depth for the quarter-market NOT NULL violation
+            # (2026-09-29): normalize_observations now drops unclassifiable
+            # rows at the source, but historical frames (or any future
+            # producer) must never reach the store with a NULL market_type.
+            logger.warning(
+                "quarter market dropped: NULL market_type (market_id=%s)",
+                market_id)
+            return
         game = self._find_tracked(gid)
         if game is None:
             cur = self._instances.get(gid)      # base -> current instance
@@ -1083,8 +1124,9 @@ class PokerBetCollector:
             logger.error("betual line record failed:\n%s",
                          traceback.format_exc())
         try:
-            self.store.insert_quarter_market_observation({
-                "game_id": self._game_db_id(game),
+            with _alarm_blocked():
+                self.store.insert_quarter_market_observation({
+                    "game_id": self._game_db_id(game),
                 "source_game_id": game.source_game_id,
                 "classification": game.classification,
                 "captured_at": obs["captured_at"],
@@ -1137,22 +1179,23 @@ class PokerBetCollector:
             qso[f"q{i}_home_score"] = h
             qso[f"q{i}_away_score"] = a
         try:
-            prev = self.store.last_quarter_score_observation(
-                game.source_game_id)
-            self.store.insert_quarter_score_observation(qso)
-            self._q_score_obs += 1
-            for an in validate_quarter_scores(qso, prev):
-                self._q_anomalies += 1
-                self.store.record_quarter_anomaly(
-                    source_game_id=game.source_game_id,
-                    captured_at=qso["captured_at"],
-                    check_name=an["check"],
-                    detail=an["detail"],
-                    anomaly=an,
-                )
-                logger.warning(
-                    "quarter anomaly %s for %s: %s",
-                    an["check"], game.source_game_id, an["detail"])
+            with _alarm_blocked():
+                prev = self.store.last_quarter_score_observation(
+                    game.source_game_id)
+                self.store.insert_quarter_score_observation(qso)
+                self._q_score_obs += 1
+                for an in validate_quarter_scores(qso, prev):
+                    self._q_anomalies += 1
+                    self.store.record_quarter_anomaly(
+                        source_game_id=game.source_game_id,
+                        captured_at=qso["captured_at"],
+                        check_name=an["check"],
+                        detail=an["detail"],
+                        anomaly=an,
+                    )
+                    logger.warning(
+                        "quarter anomaly %s for %s: %s",
+                        an["check"], game.source_game_id, an["detail"])
         except Exception:
             logger.error("quarter score observation persist failed:\n%s",
                          traceback.format_exc())
@@ -1168,17 +1211,18 @@ class PokerBetCollector:
         if rec is None:
             return
         try:
-            home, away = (rec.prev_score if rec.prev_score else (None, None))
-            self.store.upsert_betual_timer(
-                source_game_id=game.source_game_id,
-                game_start_wall=rec.anchors.game_start_wall,
-                observed_at_wall=rec.anchors.observed_at_wall,
-                quarter_seconds=rec.anchors.quarter_seconds,
-                break_seconds=rec.anchors.break_seconds,
-                timer_model=rec.anchors.model,
-                last_home=home, last_away=away,
-                last_line=rec.prev_line, last_line_at=rec.prev_line_at,
-                last_capture_at=rec.last_capture_at)
+            with _alarm_blocked():
+                home, away = (rec.prev_score if rec.prev_score else (None, None))
+                self.store.upsert_betual_timer(
+                    source_game_id=game.source_game_id,
+                    game_start_wall=rec.anchors.game_start_wall,
+                    observed_at_wall=rec.anchors.observed_at_wall,
+                    quarter_seconds=rec.anchors.quarter_seconds,
+                    break_seconds=rec.anchors.break_seconds,
+                    timer_model=rec.anchors.model,
+                    last_home=home, last_away=away,
+                    last_line=rec.prev_line, last_line_at=rec.prev_line_at,
+                    last_capture_at=rec.last_capture_at)
         except Exception:
             logger.error("betual timer persist failed:\n%s",
                          traceback.format_exc())

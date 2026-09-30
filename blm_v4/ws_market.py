@@ -179,7 +179,18 @@ def normalize_observations(payloads: list[dict], captured_at: Optional[str] = No
     obs: list[dict] = []
     for p in payloads:
         for m in p["markets"]:
-            name = _TOTAL_TYPES.get(m["type"])
+            mtype = m.get("type")
+            if not mtype:
+                # The feed occasionally pushes a market row with a
+                # NULL/empty ``type`` (151 IntegrityErrors on
+                # quarter_market_observations.market_type on 2026-09-29
+                # alone).  Such a row is unclassifiable — it is not a
+                # total market and its period cannot be inferred — so it
+                # is dropped at this single choke point, which every
+                # emission path below shares, keeping the store's NOT
+                # NULL guarantee intact.
+                continue
+            name = _TOTAL_TYPES.get(mtype)
             over = under = None
             for ev in m["events"]:
                 if ev["type_1"] == "Over":
@@ -190,7 +201,7 @@ def normalize_observations(payloads: list[dict], captured_at: Optional[str] = No
                 obs.append({
                     "source_game_id": p["game_id"],
                     "captured_at": ts,
-                    "market_type": m["type"],
+                    "market_type": mtype,
                     "market_name": m["name"] or name,
                     "line_value": m["base"],
                     "over_price": over,
@@ -229,7 +240,7 @@ def normalize_observations(payloads: list[dict], captured_at: Optional[str] = No
                 obs.append({
                     "source_game_id": p["game_id"],
                     "captured_at": ts,
-                    "market_type": m["type"],
+                    "market_type": mtype,
                     "market_name": m["name"] or m.get(
                         "name_template") or "",
                     "line_value": base if base is not None else m.get(

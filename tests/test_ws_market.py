@@ -100,6 +100,42 @@ def test_ws_parser_ignores_non_market_frames():
     assert ws_market.parse_market_frame('{"code":0,"data":{"sport":{"1":{}}}}') == []
 
 
+def test_ws_normalize_drops_null_market_type():
+    """A market row with a NULL/empty ``type`` is unclassifiable — it is
+    not a total market and its period cannot be inferred — so it must be
+    dropped at the parser, never persisted (151 IntegrityErrors on
+    quarter_market_observations.market_type on 2026-09-29 alone).
+
+    Well-typed rows in the same frame must survive untouched."""
+    payloads = ws_market.parse_market_frame(REAL_FRAME)
+    assert payloads, "fixture must parse"
+    payloads[0]["markets"].insert(0, {
+        "type": None,           # the historical failure shape
+        "name": "Mystery Market",
+        "id": 1,
+        "base": 199.5,
+        "event": {
+            "1": {"id": 1, "price": 1.9, "type_1": "Over",
+                  "name": "Over", "base": 199.5},
+            "2": {"id": 2, "price": 1.9, "type_1": "Under",
+                  "name": "Under", "base": 199.5},
+        },
+    })
+    payloads[0]["markets"].append({
+        "type": "",             # empty string is equally unclassifiable
+        "name": "Empty Type Market",
+        "id": 2,
+        "base": 210.5,
+        "event": {},
+    })
+    obs = ws_market.normalize_observations(payloads, "2026-09-29T00:00:00.000Z")
+    assert obs, "well-typed markets must still be emitted"
+    assert all(o["market_type"] for o in obs), (
+        "a NULL/empty market_type reached the observation list")
+    assert any(o["market_type"] == "MatchTotal" for o in obs), (
+        "legitimate totals must survive the NULL-type drop")
+
+
 def test_ws_market_store_roundtrip_and_dedupe(tmp_path):
     store = PokerBetStore(tmp_path / "t.db")
     payloads = ws_market.parse_market_frame(REAL_FRAME)

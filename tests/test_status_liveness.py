@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import sqlite3
 import time
 import threading
@@ -620,6 +621,94 @@ def test_db_lock_skip_keeps_dog_fed(monkeypatch):
     window = src[lock_idx:src.find("_prev_fast_started_at", lock_idx)]
     assert "self._tick_liveness_only = True" in window, (
         "the db-lock skip must set the liveness-only flag")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 6. _alarm_blocked: WS/quarter/timer persistence under the capture-
+#    deadline SIGALRM (fix 1, 2026-09-29 correctness audit §4)
+# ────────────────────────────────────────────────────────────────────────
+
+def test_alarm_blocked_blocks_and_restores_prior_mask():
+    """Inside the block SIGALRM is blocked; on exit the thread's PRIOR
+    mask is restored (unblocked stays unblocked)."""
+    prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    assert signal.SIGALRM not in prior
+    with colmod._alarm_blocked():
+        cur = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        assert signal.SIGALRM in cur
+    after = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    assert signal.SIGALRM not in after
+
+
+def test_alarm_blocked_restores_previously_blocked_mask():
+    """The slow worker PERMANENTLY blocks SIGALRM (_slow_worker_main →
+    _block_deadline_signal).  A nested _alarm_blocked on such a thread
+    must restore the blocked state on exit — never unblock it."""
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    try:
+        with colmod._alarm_blocked():
+            pass
+        cur = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        assert signal.SIGALRM in cur, (
+            "_alarm_blocked unblocked a permanently-blocked thread — "
+            "the slow worker's alarm immunity was weakened")
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+
+
+def test_alarm_during_persist_does_not_abort_write(tmp_path):
+    """End-to-end reproduction of the historical failure mode (159
+    events pre-59f6791): the capture-deadline alarm fires while a store
+    call is mid-write.  With the flag-only handler (59f6791) plus the
+    _alarm_blocked guard, the write must complete and no exception may
+    surface; the alarm must demonstrably have fired (as a pending
+    signal flushed after the guarded block)."""
+    import sqlite3 as s3
+    db = tmp_path / "t.db"
+    conn = s3.connect(db)
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    flag = {"hit": False}
+
+    def _on_alarm(signum, frame):
+        flag["hit"] = True
+
+    old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.05)
+        with colmod._alarm_blocked():
+            end = time.monotonic() + 0.25  # alarm fires mid-write window
+            while time.monotonic() < end:
+                conn.execute("INSERT INTO t (x) VALUES (1)")
+            conn.commit()
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        n = conn.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+        assert n > 0, "guarded write produced no rows"
+        assert flag["hit"], "alarm never fired — timing window too generous"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        conn.close()
+
+
+def test_ws_persist_sites_run_with_alarm_blocked():
+    """Every WS/nested-path store call identified by the audit must sit
+    inside a _alarm_blocked guard: the WS market upsert, the WS→snapshot
+    bridge insert, the quarter-market insert, the quarter-score insert +
+    anomaly record, and the Betual timer upsert."""
+    import inspect
+    src = inspect.getsource(colmod.PokerBetCollector)
+    for call in (
+        "self.store.upsert_market_observation(obs)",
+        "self.store.insert_snapshot(",
+        "self.store.insert_quarter_market_observation({",
+        "self.store.insert_quarter_score_observation(qso)",
+        "self.store.upsert_betual_timer(",
+    ):
+        idx = src.find(call)
+        assert idx != -1, f"persist site vanished: {call}"
+        seg = src[max(0, idx - 400):idx]
+        assert "_alarm_blocked()" in seg, (
+            f"{call} is no longer wrapped in _alarm_blocked")
 
 
 def test_empty_panel_is_a_complete_cycle(monkeypatch):
