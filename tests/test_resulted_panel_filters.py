@@ -72,7 +72,8 @@ module.exports = { UNDER_ALERTS, Q3B_ALERTS, resultColorClass,
   loadAlertHistory, saveAlertHistory, resultFilters, RESULT_FILTER_STATES,
   resultedRowFilterFacts, resultedRowVisible, filterResultedRows,
   timeWindowMinutes, triggeredMinutesUTC, anyResultFilterActive,
-  clearResultFilters };
+  clearResultFilters, resultLimit, RESULT_LAST_N_CHOICES,
+  limitResultedRows, anyResultLimitActive, clearResultLimit };
 """
 
 # Records whose identities cover every filter surface.  All are RESOLVED
@@ -444,6 +445,142 @@ def test_empty_state_names_the_filters(tmp_path):
     assert "No alerts triggered" not in r["html"], r
 
 
+# ════════════════════════════════════════════════════════════════════
+# 6. SHOW LAST N — the newest-N cap (display only, composes with filters)
+# ════════════════════════════════════════════════════════════════════
+
+@node
+def test_show_last_caps_to_the_newest_n(tmp_path):
+    """'Show last' keeps the NEWEST N of the newest-first list and hides the
+    rest; ALL (0, the default) shows everything."""
+    r = _run(tmp_path, """
+      // 12 records, triggered 12:00 back to 11:49 — store order OLDEST first
+      const recs = [];
+      for (let i = 0; i < 12; i++) {
+        recs.push(REC({ id: "N" + i + "|25", game_id: "N" + i,
+          triggered_at: new Date(Date.parse("2026-09-18T12:00:00Z")
+            - i * 60000).toISOString() }));
+      }
+      seed(recs);
+      OUT.defaultAll = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+      m.resultLimit.last = 10;
+      OUT.last10 = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+      OUT.last10Newest = m.historyAlertsHTML().includes("Game N0");
+      OUT.last10OldestGone = !m.historyAlertsHTML().includes("Game N11");
+      m.resultLimit.last = 20;
+      OUT.last20ShowsAll = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+      m.resultLimit.last = 0;
+      OUT.backToAll = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+      OUT.storeKeptEverything = m.UNDER_ALERTS.history.length;
+    """)
+    assert r["defaultAll"] == 12, r
+    assert r["last10"] == 10, r
+    assert r["last10Newest"] is True, r      # N0 (12:00, newest) shown
+    assert r["last10OldestGone"] is True, r  # N11 (11:49, oldest) hidden
+    assert r["last20ShowsAll"] == 12, r      # cap above the population
+    assert r["backToAll"] == 12, r
+    assert r["storeKeptEverything"] == 12, r  # display only
+
+
+@node
+def test_show_last_composes_with_the_filters(tmp_path):
+    """The cap keeps the newest N OF THE FILTERED SET — filters narrow,
+    the cap then counts within what remains."""
+    r = _run(tmp_path, """
+      // 5 KBL records (older) + 5 NBA records (newer), interleaved in store
+      const recs = [];
+      for (let i = 0; i < 5; i++) {
+        recs.push(REC({ id: "K" + i + "|25", game_id: "K" + i,
+          competition_slug: "betual-kbl",
+          triggered_at: new Date(Date.parse("2026-09-18T11:00:00Z")
+            - i * 60000).toISOString() }));
+        recs.push(REC({ id: "B" + i + "|25", game_id: "B" + i,
+          competition_slug: "betual-nba",
+          triggered_at: new Date(Date.parse("2026-09-18T12:00:00Z")
+            - i * 60000).toISOString() }));
+      }
+      seed(recs);
+      m.resultLimit.last = 6;
+      OUT.all6 = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+      m.resultFilters.league = "betual-kbl";
+      OUT.kbl6 = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;   // 6 newest OF THE KBL SET
+      OUT.kbl6NewestK = m.historyAlertsHTML().includes("Game K0");
+      m.resultLimit.last = 2;
+      OUT.kbl2 = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+      m.resultFilters.league = "";
+      m.resultLimit.last = 0;
+      OUT.resetShowsEverything = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+    """)
+    assert r["all6"] == 6, r
+    assert r["kbl6"] == 5, r      # only 5 KBL records exist — all survive
+    assert r["kbl6NewestK"] is True, r
+    assert r["kbl2"] == 2, r      # newest 2 OF the KBL set (K0, K1)
+    assert r["resetShowsEverything"] == 10, r
+
+
+@node
+def test_show_last_is_display_only_and_resets_with_clear(tmp_path):
+    """A capped row is still stored, still settled, still persisted; Clear
+    (clearResultFilters) restores the COMPLETE panel including the cap."""
+    r = _run(tmp_path, """
+      seed(ALL());   // 7 records; PD is the unsettled one
+      m.resultLimit.last = 3;
+      OUT.capped3 = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+      // a poll settles a HIDDEN record while the cap is active
+      m.applyFinalOutcomes([{ game_id: "PD", under_alert_outcome:
+        { by_checkpoint: { "25": { status: "push", trigger_total: 187.5,
+          final_total: 187.5 } } } }]);
+      const pd = m.UNDER_ALERTS.history.find((x) => x.game_id === "PD");
+      OUT.pdSettledWhileCapped = m.alertOutcomeClass(pd.outcome);
+      m.clearResultFilters();
+      OUT.activeAfterClear = m.anyResultFilterActive(m.resultFilters);
+      OUT.afterClear = (m.historyAlertsHTML()
+        .match(/<li class="al-row/g) || []).length;
+      OUT.limitStateAfterClear = m.resultLimit.last;
+    """)
+    assert r["capped3"] == 3, r
+    assert r["pdSettledWhileCapped"] == "al-push", r  # settled while hidden
+    assert r["activeAfterClear"] is False, r
+    assert r["afterClear"] == 7, r
+    assert r["limitStateAfterClear"] == 0, r
+
+
+@node
+def test_show_last_bar_renders_control_and_header_count(tmp_path):
+    """The bar ships a 'Show last' select (10/20/50/100/200 + ALL) and the
+    header names the cap while it is active."""
+    r = _run(tmp_path, """
+      seed(ALL());
+      OUT.html = m.historyAlertsHTML();
+      OUT.choices = m.RESULT_LAST_N_CHOICES;
+      m.resultLimit.last = 20;
+      OUT.html20 = m.historyAlertsHTML();
+      OUT.active20 = m.anyResultFilterActive(m.resultFilters);
+      OUT.cleared = m.clearResultLimit();
+      OUT.activeAfter = m.anyResultFilterActive(m.resultFilters);
+    """)
+    assert r["choices"] == [10, 20, 50, 100, 200], r
+    html = r["html"]
+    assert 'id="rfLast"' in html, html
+    assert "Show last" in html, html
+    for choice in ("10", "20", "50", "100", "200"):
+        assert f'<option value="{choice}">{choice}</option>' in html, choice
+    assert '<option value="">ALL</option>' in html, html
+    assert "ALL RESULTS" in html                 # the result filter unchanged
+    assert r["html20"].count('<li class="al-row') == 7, r  # 7 < 20: all shown
+    assert r["active20"] is True, r
+    assert r["activeAfter"] is False, r
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 5. SOURCE — the bar ships in the page and the panel paints through it
 # ══════════════════════════════════════════════════════════════════════
@@ -462,9 +599,15 @@ def test_filter_contract_source_pins():
     hist = js[js.index("function historyAlertsHTML("):]
     hist = hist[:hist.index("\n}\n")]
     assert "filterResultedRows(" in hist
+    # the 'Show last' cap is a pure step between the filters and the render
+    assert "limitResultedRows(" in hist
+    assert "function limitResultedRows(" in js
     # the verdict identity comes from the shipped state function
     facts = js[js.index("function resultedRowFilterFacts("):]
     facts = facts[:facts.index("\n}\n")]
     assert "alertVerdictStateFor(" in facts
-    # clear restores everything
+    # clear restores everything — filters AND the cap
     assert "function clearResultFilters(" in js
+    clear_body = js[js.index("function clearResultFilters("):]
+    clear_body = clear_body[:clear_body.index("\n}\n")]
+    assert "clearResultLimit()" in clear_body

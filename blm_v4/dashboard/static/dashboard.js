@@ -1669,6 +1669,14 @@ const RESULT_FILTER_STATES = ["under", "over", "push", "noline", "nofinal",
   "pending"];
 const resultFilters = { league: "", date: "", timeFrom: "", timeTo: "",
   result: "" };
+/* HOW MANY — the newest-N cap ('Show last').  Like the filters above it is
+   DISPLAY ONLY: it caps how many of the NEWEST rows the panel renders and
+   never touches the stores or settlement.  0 = ALL (the default; a reload
+   resets to it).  It composes with the other filters: they narrow the set,
+   the cap then keeps the newest N OF THAT SET. */
+const RESULT_LAST_N_CHOICES = [10, 20, 50, 100, 200];
+const RESULT_LAST_N_ALL = 0;
+const resultLimit = { last: RESULT_LAST_N_ALL };
 
 /* A record's filter-identity — computed ONCE from the record itself, with
    the SAME verdict-state function the rendered row uses, so what the filter
@@ -1725,7 +1733,8 @@ function timeWindowMinutes(hhmm) {
 }
 
 function anyResultFilterActive(f) {
-  return !!(f.league || f.date || f.timeFrom || f.timeTo || f.result);
+  return !!(f.league || f.date || f.timeFrom || f.timeTo || f.result)
+    || anyResultLimitActive(resultLimit);
 }
 
 function clearResultFilters() {
@@ -1734,6 +1743,7 @@ function clearResultFilters() {
   resultFilters.timeFrom = "";
   resultFilters.timeTo = "";
   resultFilters.result = "";
+  clearResultLimit();
 }
 
 /* Pure filter application — returns the rows to RENDER.  The stores are
@@ -1742,6 +1752,58 @@ function clearResultFilters() {
 function filterResultedRows(rows, f) {
   if (!anyResultFilterActive(f)) return rows;
   return rows.filter((r) => resultedRowVisible(r, f));
+}
+
+/* Pure newest-N cap — the 'Show last' control.  Keeps the FIRST n of an
+   already-newest-first list (the newest N) and everything after it is
+   hidden, never dropped: the stores keep every record and clearing the cap
+   restores every row.  n = 0 (ALL) returns the list unchanged. */
+function limitResultedRows(rows, n) {
+  if (!n || n <= 0) return rows;
+  return rows.slice(0, n);
+}
+
+function anyResultLimitActive(l) {
+  return !!(l && l.last && l.last > 0);
+}
+
+function clearResultLimit() {
+  resultLimit.last = RESULT_LAST_N_ALL;
+}
+
+/* The ONE newest-first merge across BOTH alert families, each record kept
+   with its own row renderer.  A record lacking a usable trigger timestamp
+   (defensive; none is created without one) sorts after every timestamped
+   row.
+
+   TIES fall back to newest-INSERTED first (``seq``, the record's own
+   position in its append-ordered store).  This is load-bearing, not
+   cosmetic: the settlement colour contract renders the newest record at
+   the top, so two records sharing a trigger instant — or the
+   timestamp-less case — must still come out newest-first.  A plain
+   stable 0-return would leave them in oldest-first store order and
+   invert the panel (the settle-worker colour regression, 2026-09-28).
+
+   Extracted so EVERY consumer — the panel render, the header count, a
+   future pager — walks the SAME list: the 'Show last N' cap keeps the
+   newest N of exactly the list the header counts. */
+function mergedNewestFirst() {
+  const merged = [
+    ...UNDER_ALERTS.history.map((rec, i) => ({ rec, rowHTML: historyRowHTML,
+                                               seq: i })),
+    ...Q3B_ALERTS.history.map((rec, i) => ({
+      rec, rowHTML: q3HistoryRowHTML, seq: UNDER_ALERTS.history.length + i })),
+  ];
+  for (const item of merged) {
+    const t = Date.parse(item.rec && item.rec.triggered_at);
+    item.ts = isFinite(t) ? t : NaN;
+  }
+  merged.sort((a, b) => {
+    if (isFinite(a.ts) && isFinite(b.ts) && a.ts !== b.ts) return b.ts - a.ts;
+    if (isFinite(a.ts) !== isFinite(b.ts)) return isFinite(a.ts) ? -1 : 1;
+    return b.seq - a.seq;   // equal / absent timestamps: newest-inserted first
+  });
+  return merged;
 }
 
 function resultedFilterBarHTML() {
@@ -1772,6 +1834,10 @@ function resultedFilterBarHTML() {
       <label class="rf-item">Result
         <select id="rfResult">
           <option value="">ALL RESULTS</option>${stateOpts}</select></label>
+      <label class="rf-item">Show last
+        <select id="rfLast">${opts(RESULT_LAST_N_CHOICES.map(String),
+          resultLimit.last === RESULT_LAST_N_ALL ? "" : String(resultLimit.last),
+          "ALL")}</select></label>
       <button class="rf-clear" id="rfClear"${
         anyResultFilterActive(resultFilters) ? "" : " hidden"
       }>Clear filters</button>
@@ -1784,35 +1850,12 @@ function historyAlertsHTML() {
   if (!UNDER_ALERTS.history.length && !Q3B_ALERTS.history.length) {
     return `<div class="alerts-empty">No alerts triggered</div>`;
   }
-  // NEWEST FIRST across BOTH alert families (directive): one merged list,
-  // each record kept with its own row renderer.  A record lacking a
-  // usable trigger timestamp (defensive; none is created without one)
-  // sorts after every timestamped row.
-  //
-  // TIES fall back to newest-INSERTED first (``seq``, the record's own
-  // position in its append-ordered store).  This is load-bearing, not
-  // cosmetic: the settlement colour contract renders the newest record at
-  // the top, so two records sharing a trigger instant — or the
-  // timestamp-less case — must still come out newest-first.  A plain
-  // stable 0-return would leave them in oldest-first store order and
-  // invert the panel (the settle-worker colour regression, 2026-09-28).
-  const merged = [
-    ...UNDER_ALERTS.history.map((rec, i) => ({ rec, rowHTML: historyRowHTML,
-                                               seq: i })),
-    ...Q3B_ALERTS.history.map((rec, i) => ({
-      rec, rowHTML: q3HistoryRowHTML, seq: UNDER_ALERTS.history.length + i })),
-  ];
-  for (const item of merged) {
-    const t = Date.parse(item.rec && item.rec.triggered_at);
-    item.ts = isFinite(t) ? t : NaN;
-  }
-  merged.sort((a, b) => {
-    if (isFinite(a.ts) && isFinite(b.ts) && a.ts !== b.ts) return b.ts - a.ts;
-    if (isFinite(a.ts) !== isFinite(b.ts)) return isFinite(a.ts) ? -1 : 1;
-    return b.seq - a.seq;   // equal / absent timestamps: newest-inserted first
-  });
-  const rows = filterResultedRows(
-    merged.map((item) => item.rec), f);
+  const merged = mergedNewestFirst();
+  // the filters narrow, then the 'Show last' cap keeps the newest N of
+  // THAT SET — both pure steps over the same merged list
+  const rows = limitResultedRows(
+    filterResultedRows(merged.map((item) => item.rec), f),
+    resultLimit.last);
   const visible = new Set(rows.map((r) => r.id == null ? r : r.id));
   const shown = merged.filter((item) => visible.has(
     item.rec.id == null ? item.rec : item.rec.id));
@@ -1903,6 +1946,16 @@ async function hydrateResultedOutcomes(liveGameIds) {
   return games.length > 0;
 }
 
+/* How many rows the panel is currently SHOWING: the merged list, narrowed
+   by the filters, then capped by 'Show last'.  Same pure steps, same order
+   as the render — the header can never disagree with the panel. */
+function limitShownCount() {
+  return limitResultedRows(
+    filterResultedRows(
+      mergedNewestFirst().map((item) => item.rec), resultFilters),
+    resultLimit.last).length;
+}
+
 /* ONE painter for the RESULTED ALERTS panel — used by the poll and by the
    out-of-window hydration, so both surfaces always show the same rows. */
 function paintResultedPanel() {
@@ -1912,14 +1965,17 @@ function paintResultedPanel() {
     const shown = filterResultedRows(
       UNDER_ALERTS.history, resultFilters).length
       + filterResultedRows(Q3B_ALERTS.history, resultFilters).length;
+    const shownN = limitShownCount();
     const total = UNDER_ALERTS.history.length + Q3B_ALERTS.history.length;
     hc.textContent = total
       ? (anyResultFilterActive(resultFilters)
-        ? `${shown} of ${total} shown · filters active`
-        : `${total} triggered · ${
-          UNDER_ALERTS.history.filter((r) => !r.resolved_at).length
-          + Q3B_ALERTS.history.filter((r) => !r.resolved_at).length
-          } still active`)
+        ? `${shownN} of ${total} shown · filters active`
+        : (resultLimit.last > 0
+          ? `${shownN} of ${total} shown · last ${resultLimit.last}`
+          : `${total} triggered · ${
+            UNDER_ALERTS.history.filter((r) => !r.resolved_at).length
+            + Q3B_ALERTS.history.filter((r) => !r.resolved_at).length
+            } still active`))
       : "";
   }
   bindResultedFilters();
@@ -1931,20 +1987,19 @@ function paintResultedPanel() {
    alert condition.  Clear restores the complete unfiltered panel. */
 function bindResultedFilters() {
   const bar = $("resultedFilters");
-  if (!bar) return;
-  const repaint = () => {
+  if (!bar) return;    const repaint = () => {
     paintAlerts("alertHistory", historyAlertsHTML());
     bindResultedFilters();
     const hc = $("alertHistoryCount");
     if (hc) {
-      const shown = filterResultedRows(
-        UNDER_ALERTS.history, resultFilters).length
-        + filterResultedRows(Q3B_ALERTS.history, resultFilters).length;
+      const shownN = limitShownCount();
       const total = UNDER_ALERTS.history.length + Q3B_ALERTS.history.length;
       hc.textContent = total
         ? (anyResultFilterActive(resultFilters)
-          ? `${shown} of ${total} shown · filters active`
-          : `${total} triggered`)
+          ? `${shownN} of ${total} shown · filters active`
+          : (resultLimit.last > 0
+            ? `${shownN} of ${total} shown · last ${resultLimit.last}`
+            : `${total} triggered`))
         : "";
     }
   };
@@ -1964,6 +2019,15 @@ function bindResultedFilters() {
   bind("rfTimeFrom", "timeFrom");
   bind("rfTimeTo", "timeTo");
   bind("rfResult", "result");
+  const last = $("rfLast");
+  if (last && typeof last.addEventListener === "function"
+      && !last.dataset.bound) {
+    last.dataset.bound = "1";
+    last.addEventListener("change", () => {
+      resultLimit.last = parseInt(last.value, 10) || RESULT_LAST_N_ALL;
+      repaint();
+    });
+  }
   const clear = $("rfClear");
   if (clear && typeof clear.addEventListener === "function"
       && !clear.dataset.bound) {
