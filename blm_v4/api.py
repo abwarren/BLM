@@ -1983,8 +1983,160 @@ def _projection_lines_map(source_game_ids: list) -> dict:
 
 
 # a module-level sentinel so the in-process betting worker can pass an
+# ── /LIVE SINGLE-FLIGHT + SHORT-TTL CACHE (directive 2026-10-01) ─────────
+# /api/v4/live is a SYNC route, so FastAPI runs its body on the AnyIO worker
+# pool (default CapacityLimiter = 40).  The body is a per-game deep analysis
+# (snapshot tails + historical context + pace projector for every served
+# game) that costs tens of seconds on the production DB, while the dashboard
+# polled it every 5 s with NO overlap guard.  Requests therefore piled up,
+# every pool token was consumed by /live, and the framework work that runs
+# on that SAME pool starved — FileResponse for /login and StaticFiles for
+# the dashboard's JS/CSS — so the page could not even load its assets, and
+# the 8 s /status poll timed out and was painted as "COLLECTOR OFFLINE"
+# (2026-10-01 incident).
+#
+# Fix: at most ONE analysis runs at a time (single-flight), its result is
+# reused for a short TTL, and concurrent callers are served the last
+# completed payload (stale-while-revalidate) instead of each launching
+# their own analysis.  This changes WHERE the same numbers come from —
+# never the analysis itself: the build body below is the pre-existing
+# route body, byte-for-byte.
+#
+# Every threshold is read from the environment PER CALL so tests (and any
+# operator) can retune without a reimport; TTL 0 disables caching entirely
+# and makes every call build afresh (the pre-fix semantics the rest of the
+# suite relies on — see tests/conftest.py).
+def _live_env(name: str, dflt: float) -> float:
+    try:
+        return float(os.environ.get(name, dflt))
+    except (TypeError, ValueError):
+        return dflt
+
+
+_LIVE_LOCK = threading.Lock()
+_LIVE_CACHE: dict[str, dict] = {}                 # key -> {value, at}
+_LIVE_INFLIGHT: dict[str, threading.Event] = {}   # key -> build-complete event
+_LIVE_FAILED_AT: dict[str, float] = {}            # key -> mono of last failure
+#: The cache is keyed by `classification`; bound it so an unusual client
+#: cannot grow the dict without limit (the _PROJ_LINE_CACHE pattern).
+_LIVE_MAX_KEYS = 16
+
+
+def _live_payload(classification: Optional[str]) -> dict:
+    """Single-flight, short-TTL access to the /live analysis.
+
+    Exactly one caller builds; everyone else reuses the fresh payload or
+    the last completed one.  A failed build is NEVER cached as a value and
+    never poisons a good payload: it clears its in-flight marker, wakes any
+    waiter, and arms a short fail-fast cooldown so a burst of concurrent
+    callers cannot each re-run the expensive analysis against a broken
+    database.
+    """
+    key = classification or ""
+    # TTL bounds how often the analysis may run; the served payload is never
+    # older than this under normal cadence.
+    ttl = _live_env("BLM_LIVE_CACHE_TTL_S", 5.0)
+    # Absolute staleness bound: a concurrent caller is served the last
+    # completed payload while it is younger than this.  Bounded (never
+    # indefinite) and VISIBLE — the payload carries generated_at, so the
+    # dashboard's freshness pill reports the age.  A long build on the
+    # production DB means this path is the normal steady state, not an
+    # error: serving a knowably-old payload beats erroring out.
+    max_stale = _live_env("BLM_LIVE_MAX_STALE_S", 300.0)
+    # Bounded wait, used ONLY when there is no payload at all (cold start).
+    # Deliberately short so a caller cannot park a pool token for long.
+    wait_s = _live_env("BLM_LIVE_SINGLEFLIGHT_WAIT_S", 8.0)
+    # After a failed build, concurrent callers fail fast for this long
+    # instead of each re-running the expensive analysis.
+    cooldown = _live_env("BLM_LIVE_ERROR_COOLDOWN_S", 5.0)
+
+    ev = None
+    leader = False
+    with _LIVE_LOCK:
+        now = time.monotonic()
+        entry = _LIVE_CACHE.get(key)
+        if entry is not None and ttl > 0 and (now - entry["at"]) < ttl:
+            return entry["value"]
+        inflight = _LIVE_INFLIGHT.get(key)
+        if inflight is None:
+            # Nobody is building.  Fail fast when the previous attempt has
+            # just failed and there is nothing good to serve: a burst of
+            # callers must not each re-run the expensive analysis against a
+            # broken database.
+            if entry is None and (now - _LIVE_FAILED_AT.get(key, 0.0)) < cooldown:
+                raise HTTPException(
+                    status_code=503,
+                    detail="live payload temporarily unavailable")
+            ev = threading.Event()
+            _LIVE_INFLIGHT[key] = ev
+            leader = True
+        else:
+            # A build is already running.  Serve the last completed payload
+            # so a caller never parks a pool token waiting on it; only fall
+            # through to a bounded wait when there is nothing usable.
+            if entry is not None and (now - entry["at"]) < max_stale:
+                return entry["value"]
+            if entry is None and (now - _LIVE_FAILED_AT.get(key, 0.0)) < cooldown:
+                raise HTTPException(
+                    status_code=503,
+                    detail="live payload temporarily unavailable")
+
+    if not leader:
+        # Nothing within the staleness bound: wait (bounded) for the
+        # in-flight build, then serve whatever it produced.
+        waiter = _LIVE_INFLIGHT.get(key)
+        if waiter is not None:
+            waiter.wait(timeout=max(0.0, wait_s))
+        with _LIVE_LOCK:
+            entry = _LIVE_CACHE.get(key)
+        if entry is not None:
+            return entry["value"]
+        raise HTTPException(
+            status_code=503, detail="live payload temporarily unavailable")
+
+    try:
+        value = _v4_live_uncached(classification)
+    except BaseException:
+        # Never cache a failure, never poison a good payload, never leak the
+        # in-flight marker.  If a payload within the staleness bound is still
+        # held, serve it: a FAILED REFRESH must degrade to the last known
+        # good view rather than take the dashboard down.  Either way, arm the
+        # fail-fast cooldown so a burst cannot each re-run the analysis.
+        with _LIVE_LOCK:
+            _LIVE_INFLIGHT.pop(key, None)
+            _LIVE_FAILED_AT[key] = time.monotonic()
+            fallback = _LIVE_CACHE.get(key)
+            ev.set()
+        if fallback is not None and \
+                (time.monotonic() - fallback["at"]) < max_stale:
+            return fallback["value"]
+        raise
+    with _LIVE_LOCK:
+        _LIVE_CACHE[key] = {"value": value, "at": time.monotonic()}
+        _LIVE_FAILED_AT.pop(key, None)
+        _LIVE_INFLIGHT.pop(key, None)
+        if len(_LIVE_CACHE) > _LIVE_MAX_KEYS:
+            for k in sorted(_LIVE_CACHE,
+                            key=lambda k: _LIVE_CACHE[k]["at"]
+                            )[:len(_LIVE_CACHE) - _LIVE_MAX_KEYS]:
+                _LIVE_CACHE.pop(k, None)
+        ev.set()
+    return value
+
+
 @router.get("/live")
 def v4_live(classification: Optional[str] = Query(None)) -> dict:
+    """LIVE view, single-flight + short-TTL cached (see ``_live_payload``).
+
+    The analysis and its fields are unchanged; only the concurrency
+    behaviour is: one build at a time, reused for ``BLM_LIVE_CACHE_TTL_S``,
+    with concurrent callers served the last completed payload instead of
+    each launching their own analysis.
+    """
+    return _live_payload(classification)
+
+
+def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
     """LIVE view — CLEAN post-epoch games ONLY (the frontend's current
     analytical surface).  Legacy/pre-clean games never appear here; their
     data is reachable only through explicitly labeled legacy paths.

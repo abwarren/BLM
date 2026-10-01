@@ -53,7 +53,13 @@ const BLM_AUTH = (() => {
     }
     return originalFetch(input, init).then((res) => {
       if (res.status === 401 && !isLoginUrl(input)) {
-        window.location.replace(LOGIN_URL);
+        // SESSION EXPIRED.  A 401 is an AUTHENTICATION fact, never a
+        // collector fact: it must not be rendered as "COLLECTOR OFFLINE"
+        // (2026-10-01 incident: a tab left open past the idle timeout sat
+        // on a 401 wall for hours while collection was healthy).  Stop
+        // hammering the protected endpoints first, show an explicit
+        // SESSION EXPIRED state, then send the user to authentication.
+        onSessionExpired();
       }
       return res;
     });
@@ -79,8 +85,38 @@ const BLM_AUTH = (() => {
   };
 })();
 
+/* ── SESSION EXPIRED — one-shot, idempotent ────────────────────────────
+   Invoked by the fetch guard above on the first 401 from any protected
+   endpoint.  Halts every poller (no more requests to protected endpoints),
+   paints an unmistakable state, and redirects to the login page carrying
+   the reason so the login screen explains itself.  A silent redirect looks
+   like a random logout.  Guarded so concurrent 401s fire it once. */
+let sessionExpiredFired = false;
+function onSessionExpired() {
+  if (sessionExpiredFired) return;
+  sessionExpiredFired = true;
+  try { stopAllPolling(); } catch (_) {}
+  try { paintSessionExpired(); } catch (_) {}
+  // Give the paint one frame before navigating.  `error=expired` is the
+  // login page's existing flash code ("Your session expired…").
+  setTimeout(() => {
+    window.location.replace("/login?error=expired");
+  }, 400);
+}
+
 const POLL_MS = 5000;
 const API_LIVE = "/api/v4/live";
+/* /api/v4/live is a heavy server-side analysis (tens of seconds on the
+   production DB) served behind a short single-flight cache.  It therefore
+   gets its OWN cadence, deliberately longer than the server cache TTL, and
+   is NEVER allowed to overlap itself: a new poll cannot start while the
+   previous request is still in flight.  Overlap is prevented by GATING,
+   not by aborting — an aborted fetch does NOT cancel the server-side
+   Python work, so relying on AbortController to stop concurrent builds
+   would be a lie.  The abort below is only a safety valve for a request
+   that never returns at all. */
+const LIVE_POLL_MS = 20000;
+const LIVE_TIMEOUT_MS = 45000;
 // READ-ONLY: the settled outcome block for games OUTSIDE the /live window.
 // /live carries only the 100 most recent games, so an alert record whose game
 // has since dropped out of it would never receive a verdict — this delivers
@@ -2205,21 +2241,14 @@ function renderStatus(payload) {
         : sa <= 300 ? "var(--orange)" : "var(--red)";
     }
   }
-  const col = payload.collector;
-  const cpill = $("collectorPill");
-  if (col) {
-    const lastTick = col.last_tick_at ? new Date(col.last_tick_at).getTime() : 0;
-    const tickAge = (now - lastTick) / 1000;
-    let label;
-    if (tickAge < 90) label = col.status === "running" ? "collector: RUNNING" : "collector: STALLED";
-    else label = "collector: OFFLINE";
-    cpill.textContent = label;
-    cpill.style.color = label === "collector: RUNNING" ? "var(--green)" :
-      label === "collector: STALLED" ? "var(--orange)" : "var(--red)";
-  } else {
-    cpill.textContent = "collector: --";
-    cpill.style.color = "";
-  }
+  // COLLECTOR HEALTH IS OWNED ELSEWHERE (directive 2026-10-01).  The
+  // collector pill and banner are written ONLY by the dedicated /status
+  // channel (paintCollectorStatus), which polls the cheap collector-state
+  // route on its own cadence.  renderStatus used to write the pill from
+  // this payload too — so the two channels raced, and a /live payload that
+  // was slow, cached or failed could overwrite a healthy verdict.  Keeping
+  // one writer is what makes collector health independent of the /live
+  // analysis.  (The payload still carries `collector` for provenance.)
   $("lastUpdatePill").textContent = `update ${fmtTime(payload.generated_at)}`;
   // live count comes from the SAME predicate the cards use, so the header
   // can never advertise a live game the grid refuses to render (or vice
@@ -3612,9 +3641,22 @@ async function loadModalDetail(gameId) {
 
 /* ── Polling ─────────────────────────────────────────────── */
 
+let livePollInFlight = false;
+
 async function refresh() {
+  // SINGLE-FLIGHT ON THE CLIENT (directive 2026-10-01): a new /live poll
+  // must never start while the previous one is still in flight.  The
+  // server coalesces concurrent builds, but overlapping client polls still
+  // queue needlessly and can hide a slow build behind a backlog.
+  if (livePollInFlight) return;
+  livePollInFlight = true;
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), LIVE_TIMEOUT_MS);
   try {
-    const resp = await fetch(API_LIVE);
+    const resp = await fetch(API_LIVE, { signal: ctrl.signal, cache: "no-store" });
+    // 401 is handled by the auth guard (SESSION EXPIRED → login): an
+    // authentication fact, not a data fault, so it is not reported here.
+    if (resp.status === 401) return;
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const payload = await resp.json();
     state.lastPayload = payload;
@@ -3643,11 +3685,19 @@ async function refresh() {
       loadModalDetail(state.modalGameId);
     }
   } catch (err) {
+    // A failed /live poll is an API/DATA-AVAILABILITY fact.  It is NOT
+    // evidence about the collector: the dedicated /status channel is the
+    // single authority for collector health, so nothing here may touch the
+    // collector pill (2026-10-01 incident: an API failure was rendered as
+    // "COLLECTOR OFFLINE" while collection was healthy).
     const livePill = $("livePill");
     livePill.className = "pill live-pill bad";
     $("liveLabel").textContent = "OFFLINE";
-    $("collectorPill").textContent = `api error: ${esc(err.message)}`;
-    $("collectorPill").style.color = "var(--red)";
+    const up = $("lastUpdatePill");
+    if (up) up.textContent = `live: api error (${err.message})`;
+  } finally {
+    clearTimeout(to);
+    livePollInFlight = false;
   }
 }
 
@@ -3658,14 +3708,47 @@ async function refresh() {
    "collector: OFFLINE" while collection was healthy — and vice versa,
    /live answers from cache so a genuinely dead collector could still
    look alive for minutes.  This channel polls /status DIRECTLY on its
-   own cadence with a hard 8s abort, and paints BOTH the header pill
-   and a full-width banner when the collector is not provably running.
-   The banner is intentionally impossible to miss: THE COLLECTOR MUST
-   NEVER BE DOWN (directive 2026-09-26). */
+   own cadence with a hard 8s abort, and paints BOTH the header pill and
+   a full-width banner.
+
+   SEMANTICS (directive 2026-10-01) — collector health and API
+   availability are DIFFERENT QUESTIONS and must never be conflated:
+
+     GREEN   collector: RUNNING     verified from a live /status read:
+                                    heartbeat fresh, process says "running".
+     ORANGE  collector: STALLED     verified: heartbeat fresh, but the
+                                    process state is not "running".
+     RED     collector: OFFLINE     verified: heartbeat age exceeds
+                                    COLLECTOR_STALE_AFTER_S.  ONLY a
+                                    heartbeat read can ever produce this.
+     AMBER   collector: UNVERIFIED  the /status request failed or timed
+                                    out — the collector's state cannot be
+                                    ASKED FOR, which is not evidence that
+                                    it is down.  The last VERIFIED tick age
+                                    is shown for context.
+     AUTH    SESSION EXPIRED        HTTP 401 is an authentication fact.
+                                    Never rendered as COLLECTOR OFFLINE;
+                                    polling halts and the user is sent to
+                                    the login page (see onSessionExpired).
+
+   2026-10-01 incident: every /status request timed out behind a
+   saturated worker pool AND every 401 from an expired session were both
+   rendered as "COLLECTOR OFFLINE" while the collector was ticking
+   normally.  A timeout is now AMBER; a 401 is SESSION EXPIRED. */
 
 const API_STATUS = "/api/v4/status";
 const STATUS_POLL_MS = 10000;
+// Explicit heartbeat-age threshold: beyond this a VERIFIED heartbeat is
+// genuinely stale and the collector is reported OFFLINE.
+const COLLECTOR_STALE_AFTER_S = 90;
 let statusTimer = null;
+let liveTimer = null;
+let bettingTimer = null;
+let traceTimer = null;
+// Last VERIFIED collector block and when we read it — the reference used
+// to report heartbeat age while the API itself is unreachable.
+let lastCollectorState = null;
+let lastCollectorStateAt = 0;
 
 function ensureCollectorBanner() {
   let b = document.getElementById("collectorBanner");
@@ -3681,53 +3764,102 @@ function ensureCollectorBanner() {
   return b;
 }
 
-function paintCollectorStatus(st) {
-  const cpill = $("collectorPill");
+// level: "red" (collector OFFLINE) | "amber" (unverified / stalled / auth)
+// | null (healthy — hide).
+function setCollectorBanner(level, text) {
   const banner = ensureCollectorBanner();
-  const col = st && st.collector ? st.collector : null;
+  if (!level) { banner.hidden = true; return; }
+  banner.style.background = level === "red" ? "var(--red)" : "var(--orange)";
+  banner.textContent = text;
+  banner.hidden = false;
+}
+
+/* paintCollectorStatus(statusPayload, verified)
+
+   `verified` is true ONLY when the /status request actually completed and
+   returned the collector block.  When it is false the collector is NEVER
+   reported offline: the state is UNVERIFIED and the last known tick age is
+   surfaced instead. */
+function paintCollectorStatus(st, verified) {
+  const cpill = $("collectorPill");
   const now = Date.now();
-  const lastTick = col && col.last_tick_at ? new Date(col.last_tick_at).getTime() : 0;
-  const tickAge = lastTick ? (now - lastTick) / 1000 : Infinity;
-  let label, ok;
-  if (st && st.status === "running" && tickAge < 90) {
-    label = "collector: RUNNING"; ok = true;
-  } else if (st && tickAge < 90) {
-    label = "collector: STALLED"; ok = false;
-  } else {
-    label = "collector: OFFLINE"; ok = false;
+  if (verified && st && st.collector) {
+    lastCollectorState = st.collector;
+    lastCollectorStateAt = now;
   }
-  if (cpill) {
-    cpill.textContent = label;
-    cpill.style.color = ok ? "var(--green)"
-      : label === "collector: STALLED" ? "var(--orange)" : "var(--red)";
+  const col = verified && st ? st.collector : null;
+
+  if (col) {
+    const lastTick = col.last_tick_at ? new Date(col.last_tick_at).getTime() : 0;
+    const tickAge = lastTick ? (now - lastTick) / 1000 : Infinity;
+    if (tickAge > COLLECTOR_STALE_AFTER_S) {
+      // VERIFIED staleness — the only path that may say OFFLINE.
+      if (cpill) { cpill.textContent = "collector: OFFLINE"; cpill.style.color = "var(--red)"; }
+      setCollectorBanner("red",
+        `COLLECTOR OFFLINE — data collection is DOWN · last tick ${fmtAgeExact(tickAge)} ago`);
+      return;
+    }
+    if (col.status === "running") {
+      if (cpill) { cpill.textContent = "collector: RUNNING"; cpill.style.color = "var(--green)"; }
+      setCollectorBanner(null);
+      return;
+    }
+    if (cpill) { cpill.textContent = "collector: STALLED"; cpill.style.color = "var(--orange)"; }
+    setCollectorBanner("amber",
+      `COLLECTOR STALLED — heartbeat fresh but state is "${col.status}" · last tick ${fmtAgeExact(tickAge)} ago`);
+    return;
   }
-  if (!ok) {
-    const detail = st && st.collector && st.collector.last_tick_at
-      ? `last tick ${fmtAgeExact(tickAge)} ago` : "no heartbeat";
-    banner.textContent = `COLLECTOR ${label.replace("collector: ", "")} — data collection is DOWN · ${detail}`;
-    banner.hidden = false;
+
+  // UNVERIFIED — the API could not be asked.  Never OFFLINE.
+  if (cpill) { cpill.textContent = "collector: UNVERIFIED"; cpill.style.color = "var(--orange)"; }
+  if (lastCollectorState && lastCollectorState.last_tick_at) {
+    const ageS = (now - new Date(lastCollectorState.last_tick_at).getTime()) / 1000;
+    setCollectorBanner("amber",
+      `API/DATA UNAVAILABLE — collector state cannot be verified · last verified tick ${fmtAgeExact(ageS)} ago`);
   } else {
-    banner.hidden = true;
+    setCollectorBanner("amber",
+      "API/DATA UNAVAILABLE — collector state cannot be verified · no heartbeat read yet");
   }
 }
 
+// AUTH state — distinct from every collector state above.
+function paintSessionExpired() {
+  const cpill = $("collectorPill");
+  if (cpill) { cpill.textContent = "SESSION EXPIRED"; cpill.style.color = "var(--orange)"; }
+  setCollectorBanner("amber",
+    "SESSION EXPIRED — signed out · redirecting to login…");
+}
+
+// Halt every poller (used on session expiry so the tab stops hammering
+// protected endpoints with a dead session).
+function stopAllPolling() {
+  for (const t of [liveTimer, statusTimer, bettingTimer, traceTimer]) {
+    if (t) clearInterval(t);
+  }
+  liveTimer = statusTimer = bettingTimer = traceTimer = null;
+}
+
 async function pollCollectorStatus() {
+  if (sessionExpiredFired) return;
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), 8000);
   try {
     const resp = await fetch(API_STATUS, { signal: ctrl.signal, cache: "no-store" });
+    // 401 → the auth guard fires SESSION EXPIRED; never a collector state.
+    if (resp.status === 401) return;
     if (!resp.ok) throw new Error(`http ${resp.status}`);
-    paintCollectorStatus(await resp.json());
+    paintCollectorStatus(await resp.json(), true);
   } catch (err) {
-    // /status unreachable or too slow — that IS the down state.
-    paintCollectorStatus(null);
+    // Unreachable or too slow: UNVERIFIED — NOT offline.  The collector is
+    // only ever reported down from a heartbeat read that says so.
+    paintCollectorStatus(null, false);
   } finally {
     clearTimeout(to);
   }
 }
 
 function startStatusPolling() {
-  if (statusTimer) return;
+  if (statusTimer || sessionExpiredFired) return;
   pollCollectorStatus();
   statusTimer = setInterval(pollCollectorStatus, STATUS_POLL_MS);
 }
@@ -4265,8 +4397,11 @@ initAccordionSection({
   prefKey: RESULTED_COLLAPSED_PREF,
   defaultCollapsed: true,
 });
-setInterval(refresh, POLL_MS);
-setInterval(refreshBettingStatus, POLL_MS);
+// /live runs on its OWN cadence (LIVE_POLL_MS), longer than the server's
+// single-flight cache TTL, and refresh() self-gates so polls never overlap.
+// The light-weight channels keep the original fast cadence.
+liveTimer = setInterval(refresh, LIVE_POLL_MS);
+bettingTimer = setInterval(refreshBettingStatus, POLL_MS);
 startStatusPolling();
 
 [ ["checkpointFilter", "checkpointFilter"], ["directionFilter", "directionFilter"],
@@ -4299,7 +4434,7 @@ const TRACE_RECONCILE_STATES = ["UNKNOWN", "RECONCILING", "EXPIRED"];
 function traceStateOf(el) {
   try { return JSON.parse(el.dataset.bstate || "null"); } catch (_) { return null; }
 }
-setInterval(() => {
+traceTimer = setInterval(() => {
   document.querySelectorAll(".tr-row[data-game-id]").forEach((el) => {
     const b = traceStateOf(el);
     if (b && TRACE_RECONCILE_STATES.includes(b.reconciliation_state)) {
