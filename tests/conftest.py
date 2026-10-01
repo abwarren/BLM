@@ -23,6 +23,16 @@ import pytest
 # reliably unfreezes prediction generation for machinery tests.
 os.environ.setdefault("BLM_PREDICTION_FREEZE", "0")
 
+# /api/v4/live single-flight cache (directive 2026-10-01).  The route now
+# reuses one build for BLM_LIVE_CACHE_TTL_S seconds.  Tests assert on the
+# result of a CALL, so the default under test is TTL 0 — every call builds
+# afresh, exactly the pre-fix semantics the suite was written against.
+# The dedicated cache/coalescing tests (tests/test_live_singleflight_cache.py)
+# set an explicit TTL via monkeypatch to exercise the cached behaviour.
+# The api module reads this env PER CALL, so monkeypatch takes effect
+# without a reimport.
+os.environ.setdefault("BLM_LIVE_CACHE_TTL_S", "0")
+
 # ── AUTHENTICATION TEST HARNESS ────────────────────────────────────────
 # Shared by the tests/test_auth_*.py suites.  Every fixture builds an
 # isolated auth database in tmp_path with two throwaway accounts whose
