@@ -157,3 +157,22 @@ re-verified (see `01_AUTHORITATIVE_SOURCE_CONTRACT.md`).
 - **Note:** this directive explicitly FORBIDS implementing the rule as a fixed point
   difference (e.g. `-1.0`); the canonical implementation is in RUNGS
   (`rungs_moved >= -1`).
+
+## G-07 — Rung rule + stake modes are implemented as canonical modules but not wired into `evaluate`
+
+- **Modules (authoritative):** `blm_v4/betting/rung.py` (canonical rung
+  calculation + shared `validate_execution`) and `blm_v4/betting/stake.py`
+  (three execution modes + unit size + R2.00).
+- **Wiring status:** the canonical validator is callable by both producers
+  (`manual_execution_command` / `autonomous_execution_command`), but
+  `blm_v4/betting/executor.py::evaluate` and
+  `blm_v4/betting/api.py::manual_bet` do NOT yet call it. The production
+  end-to-end path (UI → extension → execution, and the live autonomous engine)
+  is unprovable in this environment (no loadable browser extension; no
+  authenticated live PokerBet window). `wired_into_production` therefore remains
+  `false`.
+- **Gates:** `docs/autobet/RUNG_PRODUCTION_WIRING_GATE.md` (PW-01..16). PW-02,
+  PW-03, PW-14 are the unproven gates.
+- **Why a gap, not a contradiction:** nothing contradicts the rule; it is
+  additive and specified + unit-tested. Full wiring is a PRODUCTION BEHAVIOUR
+  CHANGE requiring its own authorization.

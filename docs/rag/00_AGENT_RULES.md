@@ -297,3 +297,30 @@ a bucket/percentage label.
 **Forbidden.** Deleting terminal rows (they are retained for settlement/audit).
 
 **Verify.** `is_terminal_checkpoint(...)` on the row's own fields.
+
+---
+
+## Rule 0.12 — Auto-Bet safety hierarchy (non-negotiable)
+
+**Rule.** Before any Auto-Bet work, hold this priority order:
+
+1. Safety / execution authorization
+2. R2.00 exact real-money TEST stake constraint
+3. Alert Monitor as the betting-opportunity source
+4. Frozen alert trigger line
+5. Rung validation
+6. Execution
+
+`R2.00` (ZAR 2.00) is the EXACT authorized real-money **test** stake only — never
+the production stake. The production stake is the user-configured **BLM Unit
+Size**. No valid unit size → FAIL CLOSED → NO BET. Auto-Bet consumes an existing
+BLM alert and must NOT discover an opportunity, establish a new baseline, or
+create a new trigger line.
+
+**Source.** `docs/autobet/AUTOBET_SAFETY_CONTRACT.md`;
+`blm_v4/betting/stake.py`; `blm_v4/betting/rung.py`.
+
+**Forbidden.** Hard-coding a production stake; treating R2.00 as the production
+default; performing the R2.00 real-money test without its own authorization.
+
+**Verify.** `tests/test_autobet_stake_and_unit_size_2026_10_03.py`.
