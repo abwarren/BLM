@@ -2795,37 +2795,12 @@ class PokerBetCollector:
             return page
         self._empty_ticks = 0
 
-        seen_keys: dict[str, set[str]] = {
-            comp.classification.value: set() for comp in comps
-        }
-        to_snapshot: list[tuple[PokerBetGame, RowGame, object]] = []
-
         # 2. Snapshot the tracked state under the lock (pure dict reads —
         #    the worker mutates _tracked concurrently) and queue identity
         #    resolution for NEW rows.  The fast path NEVER clicks/navigates
         #    for a new game: resolution happens on the slow worker.
         t_snapshot = time.monotonic()
-        with PERFORMANCE.measure("collector.tracked_row_processing") as row_measure:
-            with self._track_lock:
-                for comp in comps:
-                    cls = comp.classification
-                    for row in comp.games:
-                        row_measure.add("rows_seen")
-                    # Canonical identity boundary: Betual rows are
-                    # normalized ONCE at discovery so the panel key, the
-                    # tracked key, the DB record and the API payload all
-                    # share the canonical name (Betual's "Virtual"
-                    # presentation marker stripped; a no-op for Cyber /
-                    # conventional names).  Idempotent.
-                    row.home_team, row.away_team = self._canonical_teams(
-                        row.home_team, row.away_team, cls.value)
-                    key = f"{row.home_team}|{row.away_team}"
-                    seen_keys[cls.value].add(key)
-                    game = self._tracked[cls.value].get(key)
-                    if game is None:
-                        self._queue_resolve(cls, row)
-                    else:
-                        to_snapshot.append((game, row, cls))
+        seen_keys, to_snapshot = self._discover_panel_rows(comps)
         self._tick_stats["game_discovery_ms"].append(
             time.monotonic() - t_snapshot)
         logger.info("tick %d tracked_row_processing took %.3fs", self.stats["ticks"], time.monotonic() - t_snapshot)
@@ -3027,6 +3002,52 @@ class PokerBetCollector:
                     to_snapshot[i] = (g, n_row, cls)
                     break
         return to_snapshot, budget_remaining
+
+    # ── Panel discovery (fast path) ──────────────────────────────────
+
+    def _discover_panel_rows(
+        self, comps: list,
+    ) -> tuple[dict[str, set[str]], list[tuple[PokerBetGame, RowGame, object]]]:
+        """Fold the live panel's rows into (seen_keys, to_snapshot).
+
+        EVERY row of EVERY relevant competition is processed: canonical
+        identity, ``seen_keys`` (the ``_mark_ended`` denominator), a resolve
+        request for NEW rows, and the list-snapshot queue for tracked ones.
+        The panel renders ~46 relevant games across ~6 competitions live
+        (2026-10-03), so processing one row per COMPETITION — as a
+        2026-09-27 re-indentation regression did — caps tracked coverage at
+        ~6 games and starves resolution, discovery and quarter-score capture.
+
+        Dict-only work under the track lock.  The caller persists
+        ``to_snapshot`` outside the lock.
+        """
+        seen_keys: dict[str, set[str]] = {
+            comp.classification.value: set() for comp in comps
+        }
+        to_snapshot: list[tuple[PokerBetGame, RowGame, object]] = []
+        with PERFORMANCE.measure(
+                "collector.tracked_row_processing") as row_measure:
+            with self._track_lock:
+                for comp in comps:
+                    cls = comp.classification
+                    for row in comp.games:
+                        row_measure.add("rows_seen")
+                        # Canonical identity boundary: Betual rows are
+                        # normalized ONCE at discovery so the panel key,
+                        # the tracked key, the DB record and the API
+                        # payload all share the canonical name (Betual's
+                        # "Virtual" presentation marker stripped; a no-op
+                        # for Cyber / conventional names).  Idempotent.
+                        row.home_team, row.away_team = self._canonical_teams(
+                            row.home_team, row.away_team, cls.value)
+                        key = f"{row.home_team}|{row.away_team}"
+                        seen_keys[cls.value].add(key)
+                        game = self._tracked[cls.value].get(key)
+                        if game is None:
+                            self._queue_resolve(cls, row)
+                        else:
+                            to_snapshot.append((game, row, cls))
+        return seen_keys, to_snapshot
 
     # ── Pending identity resolution (fast -> slow worker channel) ──
 
