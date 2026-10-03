@@ -166,5 +166,20 @@ AUTOBET_RUNG:                         # operator directive 2026-10-03; docs/rag/
   trigger_line_immutable: true         # ADR-001; under_outcome.trigger_observation
   dom_rerender_resets_trigger: false   # read ua["trigger_line"], never recompute from DOM
   manual_and_autonomous_same_calc: true
-  integration_point: "blm_v4/betting/executor.py::evaluate (market gate; market.total_line vs ua.trigger_line)"
-  wired_into_production: false         # wiring is a behaviour change needing its own authorization
+  canonical_module: "blm_v4/betting/rung.py (rungs_moved, under_rung_decision, infer_rung_size, validate_execution)"
+  integration_point: "blm_v4/betting/rung.py::validate_execution (shared by manual + autonomous producers; executor.evaluate is the runtime boundary)"
+  architecture: "ALERT MONITOR IS THE ONLY OPPORTUNITY SOURCE; Auto-Bet consumes an existing alert and never creates a new trigger line"
+  wired_into_production: false         # every PW gate must pass; PW-02/PW-03/PW-14 unprovable here
+
+AUTOBET_STAKE:                        # operator directive 2026-10-03; docs/autobet/AUTOBET_SAFETY_CONTRACT.md
+  source: "blm_v4/betting/stake.py"
+  modes: [ZERO_STAKE, REAL_MONEY_TEST, PRODUCTION_AUTO_BET]
+  currency: ZAR
+  zero_stake: 0.00                    # simulation only
+  real_money_test_stake: R2.00        # EXACT authorized test stake; NOT production
+  real_money_test_max_stake: R2.00    # same value; maximum and exact separately checkable
+  production_stake: "EXACTLY the user-configured BLM Unit Size (never R2.00, never bankroll-derived, never a hidden default)"
+  unit_size_required_fields: [unit_size, currency, updated_at, updated_by]
+  no_unit_size: fail_closed           # -> NO BET
+  authorization_required_for_real_money: true
+  real_money_test_is_separate_gate: true

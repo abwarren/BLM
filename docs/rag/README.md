@@ -1,5 +1,13 @@
 # BLM RAG Knowledge Base
 
+> ## ⚠️ AUTO-BET SAFETY (read before any betting work)
+> **R2.00 (ZAR 2.00) is the ONLY authorized real-money TEST stake — it is NOT the
+> production stake.** The production stake is the user-configured **BLM Unit
+> Size**. Three modes: `ZERO_STAKE` (R0.00) · `REAL_MONEY_TEST` (exactly R2.00) ·
+> `PRODUCTION_AUTO_BET` (exactly the configured unit size). No valid unit size →
+> FAIL CLOSED → NO BET. The R2.00 real-money test is a separate, explicitly-
+> authorized gate. Authoritative: `docs/autobet/AUTOBET_SAFETY_CONTRACT.md`.
+
 Operational knowledge packs for future BLM agents. This is **not** a copy of the
 repository. It is a retrieval-oriented operating system: for each rule it records
 the exact rule, its source of truth in the live code, why it exists, a valid
@@ -50,6 +58,14 @@ higher level, then correct the lower one.
 | `13_AUTOBET_RUNG.md` | The PokerBet RUNG rule (line-increment guard for Auto-Bet) |
 | `DECISIONS/` | Architectural Decision Records (permanent) |
 | `EXAMPLES/` | Real positive / negative / edge-case cases |
+
+## Auto-Bet companion docs (outside `docs/rag/`)
+
+| File | Purpose |
+|---|---|
+| `docs/autobet/AUTOBET_SAFETY_CONTRACT.md` | R2.00 test-stake invariant, Unit Size, the three execution modes |
+| `docs/autobet/RUNG_PRODUCTION_WIRING_GATE.md` | PW-01..16 production wiring gate status + evidence |
+| `docs/autobet/RUNG_INTEGRATION_REPORT.md` | Rung integration report (call path, files, tests, evidence) |
 
 ## Verified against
 

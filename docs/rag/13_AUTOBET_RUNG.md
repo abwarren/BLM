@@ -1,5 +1,17 @@
 # 13 — Auto-Bet: the PokerBet RUNG rule (line-increment guard)
 
+> **UPDATE 2026-10-03 (production wiring).** The canonical implementation now
+> lives in **`blm_v4/betting/rung.py`** (`rungs_moved`, `under_rung_decision`,
+> `infer_rung_size`, `validate_execution`, `manual_execution_command`,
+> `autonomous_execution_command`) — ONE implementation shared by the manual path,
+> the autonomous path and the pre-execution validation. **Architecture:** the BLM
+> Alert Monitor is the ONLY betting-opportunity source; Auto-Bet consumes an
+> existing alert and never creates a new trigger line. The frozen alert
+> `trigger_line` is the reference for BOTH manual and autonomous. Gate status and
+> evidence: `docs/autobet/RUNG_PRODUCTION_WIRING_GATE.md`;
+> report: `docs/autobet/RUNG_INTEGRATION_REPORT.md`. `wired_into_production`
+> remains `false` (PW-02/PW-03/PW-14 unprovable in this environment).
+
 Retrieval keywords: rung, rung size, rungs moved, line increment, line movement,
 tick size, auto-bet gate, under execution, manual vs autonomous, trigger line immutable,
 DOM re-render, fail closed, current line vs trigger line, -1 rung, execution rule,
