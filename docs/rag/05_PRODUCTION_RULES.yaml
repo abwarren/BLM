@@ -1,0 +1,150 @@
+# 05 — Production Rules Registry (machine-readable)
+#
+# Retrieval keywords: production rules, thresholds, constants, alert formula,
+# gates, machine readable, UNDER_ALERT, TRIGGER_LINE, SETTLEMENT, ELIGIBILITY,
+# FRESHNESS, FINGERPRINTS, BETTING, RECONCILER, CHECKPOINTS, TERMINAL.
+#
+# Every value below is transcribed from the live source file named in `source`.
+# On any conflict, the source file wins (re-read it and correct this file).
+
+meta:
+  model_version: "v4-pace-1"                    # blm_v4/projection.py::MODEL_VERSION
+  projector_model_version: "v4-pace-projector-1" # blm_v4/pace_projector.py
+  schema_reader: "read-only sqlite3 -readonly (2026-10-03)"
+  classification_duration:                       # blm_v4/projection.py::CLASSIFICATION_DURATION
+    BETUAL_NBA: {quarter_minutes: 10.0, full_game_minutes: 40.0}
+    CYBER_2K26: {quarter_minutes: 12.0, full_game_minutes: 48.0}
+    default:    {quarter_minutes: 10.0, full_game_minutes: 40.0}
+
+UNDER_ALERT:
+  source: "blm_v4/live_analytics/under_alert.py::under_alert_state"
+  progress_min: 75.0                 # ALERT_PROGRESS_PCT
+  pace_multiplier: 1.04              # REQUIRED_MARGIN
+  comparison: strict_gt              # required > league_avg * 1.04 (NOT >=)
+  league_reference: own_competition  # competition_pace, never global
+  actual_pace_role: reported_only    # takes no part in `active`
+  fail_closed: true                  # any missing/non-finite operand => active=False
+  mid_tier: removed                  # 50% tier removed (48.51% historical = coin flip)
+
+ELIGIBILITY:                          # under_alert_eligibility + api._alert_gate
+  source: "blm_v4/live_analytics/under_alert.py::under_alert_eligibility; blm_v4/api.py"
+  market_required: LIVE              # market_status == LIVE (age <= 300s)
+  eligible_reason: market_live
+  ineligible_reasons: [market_stale, market_missing, not_live, stale_state,
+                       game_finished, unsupported_status, no_live_observation,
+                       stale_observation, invalid_quality, "terminal_*"]
+  opening_line_substitution: forbidden  # never substitute O/L for a stale/missing live line
+  can_only_suppress: true
+
+FRESHNESS:                            # blm_v4/api.py; blm_v4/pace_projector.py
+  alert_max_state_age_s: 300.0        # ALERT_MAX_STATE_AGE_S (accepted game state)
+  alert_max_obs_age_s: 300.0          # ALERT_MAX_OBS_AGE_S (projector observation)
+  line_fresh_seconds: 300.0           # pace_projector.FRESH_LINE_SECONDS
+  market_status_rule: "LIVE if age<=300 else STALE; no line time => MISSING"
+  stale_state: fail_closed
+
+TRIGGER_LINE:
+  source: "blm_v4/live_analytics/under_outcome.py::trigger_observation"
+  backing_store: clean_projections    # live_total_line (canonical, ruling 2026-09-20)
+  fallback_store: snapshots           # total_line, only if canonical has no line by boundary
+  anchor: progress_75_crossing        # first observation at/after 75% progress
+  selection: last_non_null_at_or_before_boundary
+  mutable_after_trigger: false
+  unprovable_if_no_line: true         # never fabricated
+  q3_break_shares_boundary_line: true # Q3_BREAK uses the same 75% boundary line
+
+CHECKPOINTS:
+  numeric: [25, 50, 75]               # under_alert.CHECKPOINTS
+  q3_break: "Q3_BREAK"                # string identity, additive, at 75.0 progress
+  fixed_pcts_for_scorecard: [10,20,30,40,50,60,70,75,80,90]  # scorecard.FIXED_CHECKPOINT_PCTS
+  prediction_identities: ["q1","q2","q3","q4","final"]
+  terminal_bucket: pct100             # settlement/audit only, never terminal evidence
+
+SETTLEMENT:
+  source: "blm_v4/live_analytics/under_outcome.py::outcome_status"
+  final_source: game_results
+  required_status: OK
+  comparison: final_total_vs_trigger_total
+  under: "final < trigger"
+  over:  "final > trigger"
+  push:  "final == trigger"
+  missing_final: PENDING
+  authoritative_final_source: settled   # final_source=="settled" & authoritative=True
+  non_authoritative_final_source: observation
+  page_verdict_immutable: true          # result_source==RESULTS_PAGE AND status OK
+
+RESULT_VALIDITY:                      # blm_v4/result_policy.py::validate_page_result
+  required: [identity_match, render_complete, quarter_sums_valid, history_consistent]
+  parse_quality_complete: full
+  history_rule: "final side never below a score already observed for the fixture"
+
+RECONCILER:                           # blm_v4/result_reconciler.py
+  retry_cooldown_s: 3600.0            # RETRY_COOLDOWN_S
+  max_attempts: 3                     # retired as a terminal cap (re-arm replaces it)
+  fixture_grace_s: 300                # _FIXTURE_GRACE_S
+  identity_window_lower_bound: "max(regulation, observed_span)"
+  template_failed_terminal: true
+  outcomes: [VERIFIED, REJECTED, FAILED_ATTEMPT, TEMPLATE_FAILED, CONFLICT]
+  sources: [RESULTS_PAGE, LIVE_DOM, DB_EXISTING, MANUAL_REVIEW]
+  worker_runs_in: blm-server
+  interval_s_env: BLM_RESULT_RECONCILE_INTERVAL_S   # default 300
+  batch_env: BLM_RESULT_RECONCILE_BATCH             # default 25
+
+SETTLE_WORKER:                        # blm_v4/settle_worker.py
+  interval_s_default: 45.0            # DEFAULT_INTERVAL_S (env BLM_SETTLE_INTERVAL_S)
+  batch_limit_default: 25
+  never_overwrites_results_page_ok: true
+  guard_atomic_at_write_time: true
+
+FINGERPRINTS:                         # blm_v4/live_analytics/under_fingerprints.py
+  source: "blm_v4/live_analytics/under_fingerprints.py"
+  approved_keys: [C1, C3, C5, R2]     # exactly four
+  c1: "1.10 <= req_ratio < 1.20"      # lower inclusive, upper exclusive
+  c3: "req_ratio > 1.04 AND q3_ratio < 1.00"
+  c5: "req_ratio > 1.10 AND q3_ratio < 1.00"
+  r2: "q3_ratio < 0.90"
+  three_state: [TRUE, FALSE, UNAVAILABLE]
+  gating: none                        # recorded context; gates nothing; creates no alert
+  retired: [C2, C4, C6]               # removed from the live layer (do not resurrect)
+  excluded: [R1]                      # widened req band below baseline
+
+BETTING:                              # blm_v4/betting/config.py + executor.py
+  dry_run_default: true               # BETTING_DRY_RUN=true
+  kill_switch: persisted, OFF unless enabled (server-side)
+  stake_units_default: 1.0
+  max_stake_per_bet_env: BETTING_MAX_STAKE_PER_BET
+  max_bets_per_day_env: BETTING_MAX_BETS_PER_DAY
+  max_daily_exposure_env: BETTING_MAX_DAILY_EXPOSURE
+  limits_not_configured_block: true
+  alert_max_age_s_default: 90.0       # BETTING_ALERT_MAX_AGE_S (projector freshness for a bet)
+  min_unit_price_default: 1.0
+  max_unit_price_default: 1000.0
+  provider_timeout_s_default: 20.0
+  one_unit_hard_limit: true
+  idempotent: true
+
+COLLECTOR:
+  source: "blm_v4/collector.py"
+  fast_tick_s_default: 5.0            # FAST_TICK_S (unit uses --tick 10)
+  live_market_fresh_target_s: 30.0    # LIVE_MARKET_FRESH_TARGET_S
+  resolve_batch: 2                    # RESOLVE_BATCH per slow-worker wake
+  resolve_retry_s: 30.0
+  market_refresh_s: 240               # MARKET_REFRESH_S
+  event_view_min_interval_s: 10.0     # EVENT_VIEW_MIN_INTERVAL_S
+  ws_market_dedup_s: 30.0
+  active_game_window_s: 300.0
+  ended_grace_s: 60.0
+  watchdog_sec: 90                    # unit WatchdogSec (systemd)
+  browser_max_lifetime_s: 3600.0
+
+TERMINAL:                             # blm_v4/terminal_eligibility.py
+  rule_order: [FINISHED_LABEL, ELAPSED_FULL_DURATION, PROGRESS_100, Q4_CLOCK_SENTINEL, GAME_ENDED]
+  bucket_name_is_evidence: false      # pct100 is NOT terminal evidence
+  terminal_rows: {terminal: 1, predictive_eligible: 0, exclusion_reason: "TERMINAL CHECKPOINT"}
+  rows_deleted: false
+
+PROJECTION:                           # blm_v4/projection.py::project
+  expected_total: "0.7*pace + 0.3*total_line"
+  tie_quantization: half_up           # floor(2x + 0.5 + 1e-9)/2; NOT banker's rounding
+  live_score_floor: true
+  pace_valid_range: [20, 400]
