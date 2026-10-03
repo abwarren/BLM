@@ -47,6 +47,7 @@ higher level, then correct the lower one.
 | `10_TRAP_METER.md` | Trap/line-vs-score signals + retired logic (never resurrect) |
 | `11_TESTING_CONTRACT.md` | What counts as proof |
 | `12_PRODUCTION_RUNBOOK.md` | Inspect / change / deploy / rollback |
+| `13_AUTOBET_RUNG.md` | The PokerBet RUNG rule (line-increment guard for Auto-Bet) |
 | `DECISIONS/` | Architectural Decision Records (permanent) |
 | `EXAMPLES/` | Real positive / negative / edge-case cases |
 
