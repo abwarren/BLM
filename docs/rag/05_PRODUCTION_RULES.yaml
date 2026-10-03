@@ -148,3 +148,23 @@ PROJECTION:                           # blm_v4/projection.py::project
   tie_quantization: half_up           # floor(2x + 0.5 + 1e-9)/2; NOT banker's rounding
   live_score_floor: true
   pace_valid_range: [20, 400]
+
+AUTOBET_RUNG:                         # operator directive 2026-10-03; docs/rag/13_AUTOBET_RUNG.md
+  source: "operator directive; reference impl tests/test_autobet_rung_rule_2026_10_03.py"
+  definition: "one valid line increment in the currently observed PokerBet market"
+  rung_size_source: live_market_observed   # MUST NOT be globally hard-coded
+  rung_size_example: 0.5               # EXAMPLE ONLY, not universal
+  rung_size_min_distinct_values: 3     # <3 distinct -> ambiguous -> fail closed
+  formula: "(current_line - trigger_line) / rung_size"
+  under_allow_if: "rungs_moved >= -1"  # expressed in RUNGS, never a point difference
+  under_reject_if: "rungs_moved < -1"
+  upward_movement: unrestricted
+  zero_movement: allow
+  exactly_one_rung_down: allow
+  more_than_one_rung_down: reject
+  ambiguous_rung_size: fail_closed     # REJECT
+  trigger_line_immutable: true         # ADR-001; under_outcome.trigger_observation
+  dom_rerender_resets_trigger: false   # read ua["trigger_line"], never recompute from DOM
+  manual_and_autonomous_same_calc: true
+  integration_point: "blm_v4/betting/executor.py::evaluate (market gate; market.total_line vs ua.trigger_line)"
+  wired_into_production: false         # wiring is a behaviour change needing its own authorization

@@ -138,3 +138,22 @@ out of scope. Not verified in this build; treat as a known open item.
 This KB is authored against HEAD `d864988`. It is NOT auto-regenerated. On a material
 change to `blm_v4/**`, `05_PRODUCTION_RULES.yaml` and the affected packs must be
 re-verified (see `01_AUTHORITATIVE_SOURCE_CONTRACT.md`).
+
+## G-06 — The Auto-Bet RUNG rule is operator-specified and NOT yet wired
+
+- **Spec (authoritative for the rule):** `docs/rag/13_AUTOBET_RUNG.md` (operator
+  directive, 2026-10-03) + reference/tests in
+  `tests/test_autobet_rung_rule_2026_10_03.py`.
+- **Code reality:** a full-tree search finds NO `rung` concept anywhere in `blm_v4/**`.
+  `blm_v4/betting/executor.py::evaluate` computes the frozen trigger line
+  (`trig_line`, line 112) but uses it ONLY in the recorded candidate — no gate
+  compares it to the current line.
+- **Status:** the rule is SPECIFIED and TESTED; it is NOT wired into production. The
+  documented integration point is the market gate in `executor.evaluate`
+  (`market["total_line"]` vs `ua["trigger_line"]`).
+- **Why a gap, not a contradiction:** nothing in the code contradicts the rule because
+  no rung logic exists; the rule is additive. Wiring it is a PRODUCTION BEHAVIOUR
+  CHANGE (it can newly block bets) and requires its own explicit authorization.
+- **Note:** this directive explicitly FORBIDS implementing the rule as a fixed point
+  difference (e.g. `-1.0`); the canonical implementation is in RUNGS
+  (`rungs_moved >= -1`).
