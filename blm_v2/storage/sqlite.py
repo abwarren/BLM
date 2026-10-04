@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -20,8 +21,13 @@ from blm_v2.storage.base import StorageDB
 logger = logging.getLogger(__name__)
 
 # ── Default path (same DB as V1 for data continuity) ─────────────
+# Data root: BLM_DATA_ROOT when set (production data dir), else the code tree
+# (prior behaviour) — so a clean worktree never resolves the DB into itself.
 
-_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "blm.db"
+_ROOT = (Path(os.environ["BLM_DATA_ROOT"])
+         if os.environ.get("BLM_DATA_ROOT")
+         else Path(__file__).resolve().parent.parent.parent)
+_DEFAULT_DB_PATH = _ROOT / "blm.db"
 
 
 # ── Schema ────────────────────────────────────────────────────────
@@ -286,5 +292,9 @@ class SQLiteStorage(StorageDB):
 
 
 # ── Module-level init ─────────────────────────────────────────────
+# Import-time ensure runs ONLY when an explicit data root is configured, so a
+# code-only checkout never creates runtime databases inside the source tree.
+# SQLiteStorage initialises lazily on first use regardless.
 
-_init_db(_DEFAULT_DB_PATH)
+if os.environ.get("BLM_DATA_ROOT"):
+    _init_db(_DEFAULT_DB_PATH)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -22,8 +23,13 @@ from blm_v2.timeseries.base import SnapshotData, TimeSeriesDB
 logger = logging.getLogger(__name__)
 
 # ── Default DB path ───────────────────────────────────────────────
+# Data root: BLM_DATA_ROOT when set (production data dir), else the code tree
+# (prior behaviour) — so a clean worktree never resolves the DB into itself.
 
-_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "blm_ts.db"
+_ROOT = (Path(os.environ["BLM_DATA_ROOT"])
+         if os.environ.get("BLM_DATA_ROOT")
+         else Path(__file__).resolve().parent.parent.parent)
+_DEFAULT_DB_PATH = _ROOT / "blm_ts.db"
 
 
 # ── Live-game staleness ──────────────────────────────────────────
@@ -636,5 +642,9 @@ class SQLiteTimeSeries(TimeSeriesDB):
 
 
 # ── Module-level initialisation guard ─────────────────────────────
+# Import-time ensure runs ONLY when an explicit data root is configured, so a
+# code-only checkout never creates runtime databases inside the source tree.
+# SQLiteTimeSeries initialises lazily on first use regardless.
 
-_init_db(_DEFAULT_DB_PATH)
+if os.environ.get("BLM_DATA_ROOT"):
+    _init_db(_DEFAULT_DB_PATH)

@@ -5,13 +5,20 @@ Immutable, append-only snapshot storage.
 WAL mode for concurrent reads during writes.
 """
 
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-DB_PATH = Path(__file__).parent.parent / "blm.db"
+# Data root — where the runtime DB lives.  Defaults to the code location
+# (prior behaviour); BLM_DATA_ROOT redirects it to a production data directory
+# so a clean code worktree never resolves its DB into its own tree.
+_DATA_ROOT = (Path(os.environ["BLM_DATA_ROOT"])
+              if os.environ.get("BLM_DATA_ROOT")
+              else Path(__file__).parent.parent)
+DB_PATH = _DATA_ROOT / "blm.db"
 
 _local = threading.local()
 
@@ -176,4 +183,8 @@ def get_recent_games(limit: int = 20) -> list[dict]:
 
 # ── Initialization ───────────────────────────────────────────────
 
-init_db()
+# Import-time ensure runs ONLY when an explicit data root is configured, so a
+# code-only checkout (no BLM_DATA_ROOT) never creates runtime databases inside
+# the source tree.  Callers initialise lazily on first use either way.
+if os.environ.get("BLM_DATA_ROOT"):
+    init_db()

@@ -113,8 +113,14 @@ from blm_v4.terminal_eligibility import (ENDED_STATUSES,
 # Helpers
 # ────────────────────────────────────────────────────────────────────────
 
-DEFAULT_DB = Path(__file__).resolve().parent.parent / "blm_pokerbet.db"
-STATE_FILE = Path(__file__).resolve().parent / "state" / "collector_state.json"
+# Data root — where runtime DB/state live.  Defaults to the code location
+# (prior behaviour); BLM_DATA_ROOT redirects it to a production data directory
+# so a clean code worktree never resolves runtime state into its own tree.
+_DATA_ROOT = (Path(os.environ["BLM_DATA_ROOT"])
+              if os.environ.get("BLM_DATA_ROOT")
+              else Path(__file__).resolve().parent.parent)
+DEFAULT_DB = _DATA_ROOT / "blm_pokerbet.db"
+STATE_FILE = _DATA_ROOT / "blm_v4" / "state" / "collector_state.json"
 
 # A game is considered LIVE if its latest snapshot is fresher than this.
 # Freshness is NECESSARY but NEVER SUFFICIENT — see _live_state.

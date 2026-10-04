@@ -20,6 +20,12 @@ _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+# Data root — where runtime databases/state live.  Defaults to the code
+# location (prior behaviour); set BLM_DATA_ROOT to run THIS checkout against a
+# production data directory without shipping the code tree's working files.
+_data_root_env = os.environ.get("BLM_DATA_ROOT")
+_DATA_ROOT = os.path.abspath(_data_root_env) if _data_root_env else _project_root
+
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "262"))
 RELOAD = os.environ.get("RELOAD", "false").lower() in ("true", "1", "yes")
@@ -114,7 +120,8 @@ RESULT_RECONCILE_SWARM = os.environ.get(
 
 def main() -> None:
     from pathlib import Path
-    root = Path(_project_root)
+    root = Path(_DATA_ROOT)          # runtime data (DBs/state)
+    code_root = Path(_project_root)  # this checkout (code assets only)
 
     from blm_v2.telemetry.logging import setup_logging, get_logger
     setup_logging(environment=ENVIRONMENT)
@@ -245,7 +252,7 @@ def main() -> None:
     # /api/v2/live and /api/v4/* remain the API/debug endpoints.
     from fastapi.staticfiles import StaticFiles
     from fastapi.responses import FileResponse
-    _dashboard_static = root / "blm_v4" / "dashboard" / "static"
+    _dashboard_static = code_root / "blm_v4" / "dashboard" / "static"
     if _dashboard_static.is_dir():
         app.mount(
             "/static",
