@@ -249,7 +249,13 @@ def test_persistence_failure_is_observable(caplog):
     c._betual_record_line = boom
     with caplog.at_level(logging.ERROR):
         c._enqueue_betual_line(game, _obs(line=77.0), "full_game")
-        assert _wait(lambda: c.betual_line_worker_stats()["failed"] == 1)
+        # Wait for BOTH the counter and the ERROR record: the worker increments
+        # ``failed`` BEFORE emitting the log, so waiting on the counter alone
+        # races the caplog read below (same latent race as the quarter test).
+        assert _wait(
+            lambda: c.betual_line_worker_stats()["failed"] == 1
+            and any("betual line persist failed" in r.message
+                    for r in caplog.records))
     assert c.betual_line_worker_stats()["persisted"] == 0
     assert any("betual line persist failed" in r.message
                for r in caplog.records)

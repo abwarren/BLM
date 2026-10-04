@@ -243,7 +243,13 @@ def test_timer_and_end_failure_is_observable(caplog):
     with caplog.at_level(logging.ERROR):
         c._enqueue_betual_timer(game)
         c._enqueue_betual_end(game)
-        assert _wait(lambda: c.betual_line_worker_stats()["failed"] >= 2)
+        # Wait for BOTH the counter and the ERROR record: the worker increments
+        # ``failed`` BEFORE emitting the log, so waiting on the counter alone
+        # races the caplog read below (same latent race as the quarter test).
+        assert _wait(
+            lambda: c.betual_line_worker_stats()["failed"] >= 2
+            and any("betual timer job failed" in r.message
+                    for r in caplog.records))
     assert any("betual timer job failed" in r.message for r in caplog.records)
     c._stop_betual_line_worker()
 
