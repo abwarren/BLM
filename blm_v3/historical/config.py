@@ -7,13 +7,19 @@ visualisation engine. All thresholds, paths, and tunables live here.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
 # ── Database ─────────────────────────────────────────────────────────
 
-DEFAULT_DB_DIR: Path = Path(__file__).resolve().parent.parent.parent
-"""Default directory for the historical SQLite database (project root)."""
+# Data root: BLM_DATA_ROOT when set (production data dir), else the code tree
+# (prior behaviour) — so a clean code worktree never resolves the historical
+# DB into its own tree.
+DEFAULT_DB_DIR: Path = (Path(os.environ["BLM_DATA_ROOT"])
+                        if os.environ.get("BLM_DATA_ROOT")
+                        else Path(__file__).resolve().parent.parent.parent)
+"""Default directory for the historical SQLite database (BLM_DATA_ROOT or the project root)."""
 
 DEFAULT_DB_FILENAME: str = "blm_historical.db"
 """Filename for the historical time-series database."""
