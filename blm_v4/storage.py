@@ -12,8 +12,12 @@ Append-only snapshot store with full source provenance:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
+import time
+import traceback
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -21,6 +25,15 @@ from typing import Any, Optional
 from blm_v4.classifications import Classification
 from blm_v4.models import MarketObservation, PokerBetGame
 from blm_v4.performance import PERFORMANCE
+
+logger = logging.getLogger("blm_v4.storage")
+
+# Bounded retry for a whole-batch flush before falling back to per-row writes
+# (2026-10-04 hardening).  A transient failure gets BATCH_FLUSH_RETRIES whole-
+# batch attempts with linear backoff; only then does the flush fall back — and
+# that fallback is COUNTED (never a silent per-row collapse).
+BATCH_FLUSH_RETRIES = 3
+BATCH_FLUSH_BACKOFF_S = 0.2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
@@ -518,6 +531,14 @@ class PokerBetStore:
     def __init__(self, db_path: Path | str, read_only: bool = False):
         self._db_path = Path(db_path)
         self._lock = threading.Lock()
+        # Per-thread write buffer for the batched-write session (batch()).
+        self._tls = threading.local()
+        # Batch-flush observability (2026-10-04 hardening): a fallback to
+        # per-row writes is COUNTED, never silent.
+        self._batch_stats = {
+            "flushes": 0, "rows": 0, "committed": 0, "retries": 0,
+            "fallback_events": 0, "fallback_rows_failed": 0,
+        }
         if not read_only:
             self._init()
 
@@ -540,6 +561,114 @@ class PokerBetStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
+
+    # ── batched write session (drain worker only, 2026-10-04) ──────────
+    # Per-row ``open → execute → commit → close`` capped the Betual worker at
+    # ~150 rows/s (measured); the per-row commit dominated, far below the WS
+    # producer rate, so the bounded queue overflowed and dropped observations.
+    # ``batch()`` buffers this thread's writes and flushes them in ONE
+    # transaction (one connection, one commit) — measured ~50k rows/s.  Every
+    # caller outside a batch keeps the exact per-row path, unchanged.
+    @contextmanager
+    def batch(self):
+        """Buffer writes on THIS thread; flush them in one transaction on exit.
+
+        Re-entrant: a nested ``with batch()`` shares the outer buffer and only
+        the outermost flush runs.  A flush failure rolls back and retries each
+        write in its own transaction so one bad row never loses the batch.
+        """
+        prev = getattr(self._tls, "wbuf", None)
+        buf = [] if prev is None else prev
+        self._tls.wbuf = buf
+        try:
+            yield buf
+        finally:
+            if prev is None:
+                self._tls.wbuf = None
+                self._flush_batch(buf)
+
+    def in_batch(self) -> bool:
+        """True if THIS thread is inside an open ``batch()`` (writes buffered).
+
+        Used by the Betual worker helpers so a job is counted as ``persisted``
+        only when its write COMMITS: inline (per-row, not batched) they count
+        immediately; inside the drain's batch the drain counts after the flush
+        (persisted == committed)."""
+        return getattr(self._tls, "wbuf", None) is not None
+
+    def _write(self, sql: str, params: tuple) -> None:
+        """One write: buffered inside ``batch()``, else the per-row commit path."""
+        buf = getattr(self._tls, "wbuf", None)
+        if buf is not None:
+            buf.append((sql, params))
+            return
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(sql, params)
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _flush_batch(self, buf: list) -> None:
+        """Whole batch in one transaction; BOUNDED retry, then a COUNTED
+        per-row fallback that keeps failures isolated.
+
+        The caller (the Betual drain) bounds ``buf`` to a max job count, so a
+        flush never holds ``self._lock`` / the SQLite write lock for an
+        unbounded transaction.  A whole-batch failure is retried up to
+        BATCH_FLUSH_RETRIES times (linear backoff); only then does the flush
+        fall back to per-row writes — and that event is COUNTED in
+        ``self._batch_stats`` (surfaced by worker telemetry), so telemetry can
+        never silently report failed=0 while throughput has collapsed to the
+        per-row path."""
+        if not buf:
+            return
+        st = self._batch_stats
+        with self._lock:
+            st["flushes"] += 1
+            st["rows"] += len(buf)
+            last_exc: Optional[BaseException] = None
+            for attempt in range(BATCH_FLUSH_RETRIES):
+                conn = self._connect()
+                try:
+                    for sql, params in buf:
+                        conn.execute(sql, params)
+                    conn.commit()
+                    st["committed"] += len(buf)
+                    return
+                except Exception as exc:      # noqa: BLE001
+                    last_exc = exc
+                    conn.rollback()
+                    st["retries"] += 1
+                    if attempt < BATCH_FLUSH_RETRIES - 1:
+                        time.sleep(BATCH_FLUSH_BACKOFF_S * (attempt + 1))
+                finally:
+                    conn.close()
+            # Bounded retry exhausted → explicit, COUNTED per-row fallback.
+            st["fallback_events"] += 1
+            logger.error(
+                "batch flush fell back to per-row after %d whole-batch "
+                "attempt(s) (%d rows); last error: %r",
+                BATCH_FLUSH_RETRIES, len(buf), last_exc, exc_info=last_exc)
+            conn = self._connect()
+            try:
+                for sql, params in buf:
+                    try:
+                        conn.execute(sql, params)
+                        conn.commit()
+                        st["committed"] += 1
+                    except Exception:
+                        conn.rollback()
+                        st["fallback_rows_failed"] += 1
+                        logger.error("per-row fallback write failed:\n%s",
+                                     traceback.format_exc())
+            finally:
+                conn.close()
+
+    def batch_stats(self) -> dict:
+        """Copy of the batch-flush counters (fallback is never silent)."""
+        return dict(self._batch_stats)
 
     def _init(self) -> None:
         with self._lock:
@@ -902,10 +1031,7 @@ class PokerBetStore:
         total).  Raw market tree entry preserved; a NULL line is stored
         as NULL — never fabricated.  Same game+market+line+timestamp is
         a duplicate by definition and is ignored."""
-        with self._lock:
-            conn = self._connect()
-            try:
-                conn.execute("""
+        self._write("""
                     INSERT INTO quarter_market_observations (
                         game_id, source_game_id, classification, captured_at,
                         market_id, market_type, market_name, market_period,
@@ -925,9 +1051,6 @@ class PokerBetStore:
                     obs.get("period_label"), obs.get("clock"),
                     json.dumps(obs.get("raw", {}), default=str),
                 ))
-                conn.commit()
-            finally:
-                conn.close()
 
     def insert_pokerbet_dom_market_observation(self, obs: dict) -> None:
         """Append one verbatim observation from a hydrated PokerBet DOM.
@@ -1164,10 +1287,7 @@ class PokerBetStore:
         """One Betual line observation with movement fields.  Dedup
         collapses only same game+market+line+timestamp; a line that
         changed and returned at distinct timestamps is RETAINED (§10)."""
-        with self._lock:
-            conn = self._connect()
-            try:
-                conn.execute("""
+        self._write("""
                     INSERT INTO betual_line_observations (
                         source_game_id, classification, captured_at,
                         market_id, market_name, period, line,
@@ -1197,9 +1317,6 @@ class PokerBetStore:
                     obs.get("over_price"), obs.get("under_price"),
                     json.dumps(obs.get("raw", {}), default=str),
                 ))
-                conn.commit()
-            finally:
-                conn.close()
 
     # Phase 5a: incremental betual_line distinct-game counter.
     # Replaces the full-table COUNT DISTINCT that dominated tick latency
@@ -1329,10 +1446,7 @@ class PokerBetStore:
     def insert_betual_game_end(self, row: dict) -> None:
         """One §12 game-end capture (final status from source evidence
         only — never from internal-timer expiry)."""
-        with self._lock:
-            conn = self._connect()
-            try:
-                conn.execute("""
+        self._write("""
                     INSERT INTO betual_game_ends (
                         source_game_id, classification, captured_at,
                         internal_game_time, internal_elapsed_seconds,
@@ -1366,9 +1480,6 @@ class PokerBetStore:
                     row.get("source_quarter"),
                     json.dumps(row.get("raw", {}), default=str),
                 ))
-                conn.commit()
-            finally:
-                conn.close()
 
     def record_betual_clock_diagnostic(
         self, source_game_id: str, captured_at: str, kind: str,
@@ -1419,10 +1530,7 @@ class PokerBetStore:
                             last_line_at: Optional[float],
                             last_capture_at: str) -> None:
         """Persist the §13 restart anchor + caches for one Betual game."""
-        with self._lock:
-            conn = self._connect()
-            try:
-                conn.execute("""
+        self._write("""
                     INSERT INTO betual_game_timers (
                         source_game_id, game_start_wall, observed_at_wall,
                         quarter_seconds, break_seconds, timer_model,
@@ -1450,9 +1558,6 @@ class PokerBetStore:
                       quarter_seconds, break_seconds, timer_model,
                       last_home, last_away, last_line, last_line_at,
                       last_capture_at, _utcnow()))
-                conn.commit()
-            finally:
-                conn.close()
 
     def get_betual_timer(self, source_game_id: str) -> Optional[dict]:
         """The persisted §13 anchor row for one game, if any."""

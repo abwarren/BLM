@@ -51,6 +51,7 @@ import logging
 import os
 import re
 import contextlib
+import queue
 import signal
 import socket
 import sqlite3
@@ -344,6 +345,43 @@ TICK_STATS_MAX = 17280
 # this window — the feed pushes every price change, so movements still land,
 # but a game that stays flat is not spammed into the DB every second.
 WS_MARKET_DEDUP_S = 30.0
+
+# WS snapshot-bridge persistence queue (2026-10-04).  The eu-swarm frame
+# handler runs on the Playwright event-loop thread; persisting a bridge
+# snapshot there with a synchronous SQLite insert froze the entire fast loop
+# whenever the DB was write-locked by the server scorecard / the deviation
+# backfill (observed: MainThread wedged in storage.insert_snapshot →
+# watchdog SIGABRT every ~2.5 min).  The handler now only throttles +
+# enqueues; the dedicated ``blm-ws-persist`` worker does the insert off the
+# MainThread.  Bounded so a long lock cannot grow memory without limit.
+WS_SNAP_QUEUE_MAX = 2000
+
+# Betual line/timer persistence queue (2026-10-04).  The eu-swarm frame
+# handler ALSO persisted Betual dataset lines + start timers synchronously on
+# the Playwright MainThread; py-spy confirmed it as the dominant residual
+# stall (28/45 samples wedged in storage.insert_betual_line_observation /
+# upsert_betual_timer → watchdog SIGABRT).  The handler now only enqueues; the
+# dedicated ``blm-betual-persist`` worker performs the identical
+# _betual_record_line() writes off the MainThread.  Capacity is sized far
+# above the observed WS rate so overflow is a genuine fault, not routine
+# backpressure (see BETUAL_LINE_QUEUE_MAX rationale in the report).
+BETUAL_LINE_QUEUE_MAX = 2000
+
+# Max jobs committed in ONE batched transaction by the Betual drain
+# (2026-10-04 hardening).  The original whole-drain-in-one-transaction form
+# held the store lock + the SQLite write lock for the ENTIRE backlog; bounding
+# each flush hands the lock back between chunks so a large backlog can never
+# starve the fast tick (or the ws-persist worker) on one unbounded transaction.
+BETUAL_LINE_BATCH_MAX = 500
+
+# Bounded linger / cadence for the Betual drain (2026-10-04).  Wake-per-enqueue
+# is ELIMINATED: the producer no longer signals the worker on each observation
+# (that made the worker wake + open a transaction per observation, collapsing
+# back to the per-row path).  The worker instead wakes on this fixed, BOUNDED
+# interval (approved 50-100ms band), so every drain commits a real batch and
+# nothing waits longer than this.  ONE job per observation is still enqueued —
+# never coalesced (repeated WS frames can carry new state).
+BETUAL_LINE_LINGER_S = 0.075
 
 # ── Quarter-specific collection (directive 2026-09-22, DATA COLLECTION
 # ONLY) ─────────────────────────────────────────────────────────────
@@ -819,6 +857,29 @@ class PokerBetCollector:
         self._event_view_failures = 0         # consecutive unverified event views
         self._ws_market_last: dict[tuple[str, Optional[float]], str] = {}
         self._ws_snap_last: dict[str, str] = {}  # gid -> last bridge snapshot ts
+        # WS snapshot-bridge persistence off the Playwright MainThread
+        # (2026-10-04).  _ingest_ws_observation only throttles + enqueues;
+        # these guard the handoff to the blm-ws-persist worker.
+        self._ws_snap_inflight: set[str] = set()   # enqueued, not yet persisted
+        self._ws_snap_lock = threading.Lock()
+        self._ws_snap_queue: "queue.Queue[tuple]" = queue.Queue(
+            maxsize=WS_SNAP_QUEUE_MAX)
+        self._ws_snap_wake = threading.Event()
+        self._ws_snap_stop = threading.Event()
+        self._ws_snap_worker_thread: Optional[threading.Thread] = None
+        self._ws_snap_dropped = 0
+        # Betual line/timer persistence off the Playwright MainThread
+        # (2026-10-04).  on_frame / _ingest_quarter_market_observation only
+        # enqueue; these guard the handoff to the blm-betual-persist worker.
+        self._betual_line_queue: "queue.Queue[tuple]" = queue.Queue(
+            maxsize=BETUAL_LINE_QUEUE_MAX)
+        self._betual_line_wake = threading.Event()
+        self._betual_line_stop = threading.Event()
+        self._betual_line_worker_thread: Optional[threading.Thread] = None
+        self._betual_line_telemetry = {
+            "enqueued": 0, "persisted": 0, "failed": 0,
+            "dropped": 0, "max_depth": 0,
+        }
         # quarter-collection state (directive 2026-09-22)
         self._ws_raw_last: dict[str, str] = {}  # gid -> last raw-frame ts
         self._q_parse_failures = 0
@@ -1001,15 +1062,13 @@ class PokerBetCollector:
                             frame_game = payload_game_index.get(
                                 obs["source_game_id"])
                             if frame_game is not None:
-                                try:
-                                    self._betual_record_line(
-                                        frame_game, obs, "full_game")
-                                except BetualDatasetError:
-                                    pass    # dataset is BETUAL-only (§1)
-                                except Exception:
-                                    logger.error(
-                                        "betual full-game line failed:\n%s",
-                                        traceback.format_exc())
+                                # Persist the Betual line + start timer OFF
+                                # the Playwright MainThread (2026-10-04): the
+                                # synchronous write here was the dominant
+                                # residual fast-path stall (py-spy).  Ordering
+                                # + dedup are preserved by the FIFO worker.
+                                self._enqueue_betual_line(
+                                    frame_game, obs, "full_game")
                         else:
                             self._ingest_quarter_market_observation(obs)
                 except Exception:
@@ -1115,15 +1174,579 @@ class PokerBetCollector:
             if snap is not None and (
                     last is None
                     or _ts_age_s(last) >= WS_MARKET_DEDUP_S):
-                with _alarm_blocked():
-                    if self.store.insert_snapshot(
-                            self._game_db_id(game), snap):
-                        self._ws_snap_last[gid] = obs["captured_at"]
-                        self.stats["snapshots"] += 1
-                        self._record_clean(game, snap)
+                # Persist OFF the Playwright MainThread (2026-10-04): a
+                # synchronous insert here froze the fast loop on DB-lock
+                # contention.  Enqueue when the dedicated worker is live;
+                # fall back to an inline persist when it is not (unit
+                # tests / pre-start), preserving prior semantics exactly.
+                if self._ws_snap_worker_alive():
+                    self._enqueue_ws_snapshot(
+                        game, snap, gid, obs["captured_at"])
+                else:
+                    self._persist_ws_snapshot(
+                        game, snap, gid, obs["captured_at"])
         except Exception:
             logger.error("ws snapshot bridge failed:\n%s",
                          traceback.format_exc())
+
+    # ── WS snapshot-bridge persistence worker (2026-10-04) ───────────
+    # The eu-swarm frame callback runs on the Playwright event-loop thread.
+    # Persisting the bridge snapshot there with a synchronous SQLite insert
+    # froze the whole fast loop on DB-write-lock contention (observed wedged
+    # in storage.insert_snapshot).  This worker owns the insert; the frame
+    # handler only throttles + enqueues.  When the worker is not running
+    # (unit tests / pre-start) the handler persists inline, preserving the
+    # original semantics exactly.
+
+    def _ws_snap_sync(self):
+        """Ensure the WS-persist sync primitives exist.
+
+        Production always sets these in ``__init__``; the lazy path exists
+        only so unit tests that build the collector via ``object.__new__``
+        (never running ``__init__``) keep working — production never takes it.
+        """
+        if getattr(self, "_ws_snap_lock", None) is None:
+            self._ws_snap_inflight = set()
+            self._ws_snap_lock = threading.Lock()
+            self._ws_snap_queue = queue.Queue(maxsize=WS_SNAP_QUEUE_MAX)
+            self._ws_snap_wake = threading.Event()
+            self._ws_snap_stop = threading.Event()
+            self._ws_snap_worker_thread = None
+            self._ws_snap_dropped = 0
+        return self
+
+    def _ws_snap_worker_alive(self) -> bool:
+        t = getattr(self, "_ws_snap_worker_thread", None)
+        return t is not None and t.is_alive()
+
+    def _persist_ws_snapshot(
+        self, game: PokerBetGame, snap: MarketObservation,
+        gid: str, captured_at: str,
+    ) -> bool:
+        """Insert one bridge snapshot (caller throttles).  Returns True when
+        the row was accepted.  Same semantics as the previous inline bridge:
+        ``_ws_snap_last`` and the snapshot counter advance ONLY on
+        acceptance."""
+        with _alarm_blocked():
+            if self.store.insert_snapshot(self._game_db_id(game), snap):
+                self._ws_snap_last[gid] = captured_at
+                self.stats["snapshots"] += 1
+                self._record_clean(game, snap)
+                return True
+        return False
+
+    def _enqueue_ws_snapshot(
+        self, game: PokerBetGame, snap: MarketObservation,
+        gid: str, captured_at: str,
+    ) -> None:
+        """Hand one bridge snapshot to the persist worker (non-blocking).
+
+        Dedup against BOTH the last PERSISTED ts and any still-inflight gid
+        so the MainThread cannot flood the queue while the worker is behind.
+        On a full queue the snapshot is dropped and counted (bounded memory);
+        the 30 s per-game throttle keeps overflow rare."""
+        self._ws_snap_sync()
+        with self._ws_snap_lock:
+            if gid in self._ws_snap_inflight:
+                return
+            last = self._ws_snap_last.get(gid)
+            if last is not None and _ts_age_s(last) < WS_MARKET_DEDUP_S:
+                return
+            self._ws_snap_inflight.add(gid)
+        try:
+            self._ws_snap_queue.put_nowait((game, snap, gid, captured_at))
+        except queue.Full:
+            with self._ws_snap_lock:
+                self._ws_snap_inflight.discard(gid)
+            self._ws_snap_dropped += 1
+            logger.warning(
+                "ws snapshot queue full — dropped bridge snapshot for %s "
+                "(total dropped %d)", gid, self._ws_snap_dropped)
+            return
+        self._ws_snap_wake.set()
+
+    def _drain_ws_snapshot_queue(self) -> int:
+        """Persist every currently-queued bridge snapshot (worker thread).
+
+        Returns the number accepted.  Never raises."""
+        self._ws_snap_sync()
+        n = 0
+        while True:
+            try:
+                game, snap, gid, captured = self._ws_snap_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                if self._persist_ws_snapshot(game, snap, gid, captured):
+                    n += 1
+            except Exception:
+                logger.error("ws snapshot persist failed:\n%s",
+                             traceback.format_exc())
+            finally:
+                with self._ws_snap_lock:
+                    self._ws_snap_inflight.discard(gid)
+        return n
+
+    def _start_ws_snap_worker(self) -> None:
+        """Start the dedicated WS snapshot-persist consumer (daemon)."""
+        self._ws_snap_sync()
+        if self._ws_snap_worker_thread is not None:
+            return
+        self._ws_snap_stop.clear()
+        self._ws_snap_worker_thread = threading.Thread(
+            target=self._ws_snap_worker_main, name="blm-ws-persist",
+            daemon=True)
+        self._ws_snap_worker_thread.start()
+        logger.info("ws snapshot persist worker started")
+
+    def _stop_ws_snap_worker(self) -> None:
+        """Signal the persist worker to stop and drain the last backlog."""
+        self._ws_snap_sync()
+        self._ws_snap_stop.set()
+        self._ws_snap_wake.set()
+        t = self._ws_snap_worker_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=30.0)
+
+    def _ws_snap_worker_main(self) -> None:
+        """The WS snapshot-persist loop — lives entirely on this thread."""
+        _block_deadline_signal()
+        while not self._ws_snap_stop.is_set():
+            self._ws_snap_wake.wait(timeout=1.0)
+            self._ws_snap_wake.clear()
+            try:
+                self._drain_ws_snapshot_queue()
+            except Exception:
+                logger.error("ws snapshot worker drain error:\n%s",
+                             traceback.format_exc())
+        try:
+            self._drain_ws_snapshot_queue()
+        except Exception:
+            pass
+
+    # ── Betual line/timer + quarter-market persistence worker (2026-10-04) ──
+    # The eu-swarm frame callback ALSO persisted Betual dataset lines and
+    # start timers synchronously on the Playwright event-loop thread — py-spy
+    # confirmed this as the dominant residual fast-path stall (28/45 samples
+    # wedged in storage.insert_betual_line_observation / upsert_betual_timer →
+    # watchdog SIGABRT).  This worker owns those writes; on_frame and
+    # _ingest_quarter_market_observation only enqueue (bounded, non-blocking).
+    # The worker calls the SAME ``_betual_record_line()`` with the SAME
+    # arguments, so record_line_observation / upsert_betual_timer receive
+    # equivalent inputs and ordering + dedup semantics are unchanged.
+    #
+    # (2026-10-04 residual) The SAME worker also owns the quarter-market
+    # insert (``store.insert_quarter_market_observation``) — the residual
+    # MainThread blocker after the Betual line/timer move (py-spy: 24/25
+    # WS-handler samples in insert_quarter_market_observation).  Two job
+    # shapes share ONE FIFO queue and ONE telemetry/accounting block:
+    #   3-tuple ``(game, obs, period)``        → _persist_betual_line
+    #   4-tuple ``(game, obs, period, qnum)``  → _persist_quarter_observation
+    # When the worker is not running (unit tests / pre-start) the caller
+    # persists inline, preserving the original semantics exactly.
+
+    def _betual_line_sync(self):
+        """Ensure the Betual-writer sync primitives exist.
+
+        Production always sets these in ``__init__``; the lazy path exists
+        only so unit tests that build the collector via ``object.__new__``
+        (never running ``__init__``) keep working — production never takes it.
+        """
+        if getattr(self, "_betual_line_wake", None) is None:
+            self._betual_line_queue = queue.Queue(maxsize=BETUAL_LINE_QUEUE_MAX)
+            self._betual_line_wake = threading.Event()
+            self._betual_line_stop = threading.Event()
+            self._betual_line_worker_thread = None
+            self._betual_line_telemetry = {
+                "enqueued": 0, "persisted": 0, "failed": 0,
+                "dropped": 0, "max_depth": 0,
+            }
+        return self
+
+    def _betual_line_worker_alive(self) -> bool:
+        t = getattr(self, "_betual_line_worker_thread", None)
+        return t is not None and t.is_alive()
+
+    def _persist_betual_line(
+        self, game: PokerBetGame, obs: dict, period: str,
+    ) -> None:
+        """Persist one Betual line/timer observation (worker thread).
+
+        Delegates to the UNCHANGED ``_betual_record_line`` with the SAME
+        arguments, so both storage calls (record_line_observation and the
+        upsert_betual_timer inside _betual_persist_timer) receive equivalent
+        inputs.  A non-Betual game is a legitimate skip (BetualDatasetError);
+        any other failure is counted + logged, never raised."""
+        try:
+            self._betual_record_line(game, obs, period)
+            if not self.store.in_batch():
+                # Inline (per-row) path committed already; inside the drain's
+                # batch the drain counts persisted AFTER the flush commits.
+                self._betual_line_telemetry["persisted"] += 1
+        except BetualDatasetError:
+            pass        # dataset is BETUAL-only (§1) — legitimate skip
+        except Exception:
+            self._betual_line_telemetry["failed"] += 1
+            logger.error("betual line persist failed:\n%s",
+                         traceback.format_exc())
+
+    def _persist_quarter_observation(
+        self, game: PokerBetGame, obs: dict, period: Optional[str],
+        qnum: Optional[int],
+    ) -> None:
+        """Persist one non-game-total O/U market observation (worker thread).
+
+        Runs the UNCHANGED ``store.insert_quarter_market_observation`` with the
+        EXACT same dict/values the fast path built before the offload, so the
+        persisted row and the §19 failure isolation are identical.  Called both
+        by the worker (queued job) and inline when the worker is not running.
+        Failure-isolated: a persistence error is counted + logged, never raised
+        (quarter collection is data-collection-only and must never affect the
+        collector loop)."""
+        raw = obs.get("raw") or {}
+        try:
+            with _alarm_blocked():
+                self.store.insert_quarter_market_observation({
+                    "game_id": self._game_db_id(game),
+                    "source_game_id": game.source_game_id,
+                    "classification": game.classification,
+                    "captured_at": obs["captured_at"],
+                    "market_id": str(raw.get("market_id") or ""),
+                    "market_type": obs["market_type"],
+                    "market_name": obs.get("market_name"),
+                    "market_period": period,
+                    "period_number": qnum,
+                    "line_value": obs.get("line_value"),
+                    "over_price": obs.get("over_price"),
+                    "under_price": obs.get("under_price"),
+                    "home_score": obs.get("home_score"),
+                    "away_score": obs.get("away_score"),
+                    "period_label": obs.get("period_label"),
+                    "clock": obs.get("clock"),
+                    "raw": raw,
+                })
+            self._q_market_obs += 1
+            if not self.store.in_batch():
+                self._betual_line_telemetry["persisted"] += 1
+        except Exception:
+            self._betual_line_telemetry["failed"] += 1
+            logger.error("quarter market observation persist failed:\n%s",
+                         traceback.format_exc())
+
+    def _persist_betual_timer_job(self, game: PokerBetGame) -> None:
+        """Persist one game's timer anchor on the worker (job 1-tuple).
+
+        ``_betual_persist_timer`` is internally failure-isolated (it logs its
+        own DB errors), so a completed call counts as persisted; the try only
+        guards the telemetry against an unexpected raise."""
+        try:
+            self._betual_persist_timer(game)
+            if not self.store.in_batch():
+                self._betual_line_telemetry["persisted"] += 1
+        except Exception:
+            self._betual_line_telemetry["failed"] += 1
+            logger.error("betual timer job failed: %s", traceback.format_exc())
+
+    def _persist_betual_end_job(self, game: PokerBetGame,
+                                parsed: Optional[dict]) -> None:
+        """Persist one game-end row on the worker (job 2-tuple).
+
+        Runs the UNCHANGED ``_betual_end_game`` with the SAME arguments; the
+        original callers wrapped it in try/except, reproduced here."""
+        try:
+            self._betual_end_game(game, parsed)
+            if not self.store.in_batch():
+                self._betual_line_telemetry["persisted"] += 1
+        except Exception:
+            self._betual_line_telemetry["failed"] += 1
+            logger.error("betual end job failed: %s", traceback.format_exc())
+        # Discard the dataset rec ONLY AFTER the game-end row is written — the
+        # SAME order as the previous inline caller, so the §12 row still reads
+        # the rec's internal-timer anchors (a recreated rec would zero them).
+        try:
+            self.betual.discard(game.source_game_id)
+        except Exception:
+            pass
+
+    def _enqueue_betual_line(
+        self, game: PokerBetGame, obs: dict, period: str,
+    ) -> None:
+        """Hand one Betual line/timer observation to the persist worker.
+
+        NON-BLOCKING: never waits for SQLite, the worker, a join, a drain or a
+        DB lock — the frame callback returns immediately.  Falls back to an
+        inline persist when the worker is not running (unit tests / pre-start)
+        so the original synchronous semantics are preserved exactly."""
+        self._betual_line_sync()
+        if not self._betual_line_worker_alive():
+            self._persist_betual_line(game, obs, period)
+            return
+        try:
+            self._betual_line_queue.put_nowait((game, obs, period))
+        except queue.Full:
+            # NEVER a silent drop: surface the loss as an explicit fault.
+            t = self._betual_line_telemetry
+            t["dropped"] += 1
+            logger.error(
+                "BETUAL LINE QUEUE OVERFLOW — observation DROPPED for %s "
+                "(enqueued=%d persisted=%d failed=%d dropped=%d): the writer "
+                "cannot keep up with the WS rate — INVESTIGATE",
+                obs.get("source_game_id"), t["enqueued"], t["persisted"],
+                t["failed"], t["dropped"])
+            return
+        t = self._betual_line_telemetry
+        t["enqueued"] += 1
+        depth = self._betual_line_queue.qsize()
+        if depth > t["max_depth"]:
+            t["max_depth"] = depth
+        # No per-enqueue wake (2026-10-04): the worker drains on its bounded
+        # linger cadence — wake-per-enqueue is eliminated.
+
+    def _enqueue_quarter_observation(
+        self, game: PokerBetGame, obs: dict, period: Optional[str],
+        qnum: Optional[int],
+    ) -> None:
+        """Hand one quarter-market observation to the SAME Betual persist
+        worker (non-blocking).
+
+        Shares the worker's single FIFO queue and telemetry/accounting block
+        with the Betual line jobs (a 4-tuple shape marks the quarter kind).
+        NON-BLOCKING: never waits for SQLite, the worker, a join, a drain or a
+        DB lock — the frame callback returns immediately.  Falls back to an
+        inline persist when the worker is not running (unit tests / pre-start)
+        so the original synchronous semantics are preserved exactly.  On a full
+        queue the observation is NOT silently discarded — the loss is counted
+        and surfaced as an explicit ERROR fault (normal op: dropped = 0)."""
+        self._betual_line_sync()
+        if not self._betual_line_worker_alive():
+            self._persist_quarter_observation(game, obs, period, qnum)
+            return
+        try:
+            self._betual_line_queue.put_nowait((game, obs, period, qnum))
+        except queue.Full:
+            # NEVER a silent drop: surface the loss as an explicit fault.
+            t = self._betual_line_telemetry
+            t["dropped"] += 1
+            logger.error(
+                "BETUAL LINE QUEUE OVERFLOW — quarter observation DROPPED "
+                "for %s (enqueued=%d persisted=%d failed=%d dropped=%d): the "
+                "writer cannot keep up with the WS rate — INVESTIGATE",
+                obs.get("source_game_id"), t["enqueued"], t["persisted"],
+                t["failed"], t["dropped"])
+            return
+        t = self._betual_line_telemetry
+        t["enqueued"] += 1
+        depth = self._betual_line_queue.qsize()
+        if depth > t["max_depth"]:
+            t["max_depth"] = depth
+        # No per-enqueue wake (2026-10-04): the worker drains on its bounded
+        # linger cadence — wake-per-enqueue is eliminated.
+
+    def _enqueue_betual_timer(self, game: PokerBetGame) -> None:
+        """Hand one game's Betual timer persist to the SAME worker (job kind:
+        1-tuple ``(game,)``).
+
+        NON-BLOCKING: never waits for SQLite, the worker, a join, a drain or a
+        DB lock.  Falls back to an inline persist when the worker is not running
+        (unit tests / pre-start) so the original semantics are preserved."""
+        self._betual_line_sync()
+        if not self._betual_line_worker_alive():
+            self._persist_betual_timer_job(game)
+            return
+        self._enqueue_betual_job((game,), game.source_game_id, "timer persist")
+
+    def _enqueue_betual_end(
+        self, game: PokerBetGame, parsed: Optional[dict] = None,
+    ) -> None:
+        """Hand one game-end persist to the SAME worker (job kind: 2-tuple
+        ``(game, parsed)``).
+
+        NON-BLOCKING; inline fallback preserves the original semantics when the
+        worker is not running.  Game-ending DETECTION is unchanged — only the
+        game-end ROW write is moved off the Playwright MainThread."""
+        self._betual_line_sync()
+        if not self._betual_line_worker_alive():
+            self._persist_betual_end_job(game, parsed)
+            return
+        self._enqueue_betual_job(
+            (game, parsed), game.source_game_id, "game-end persist")
+
+    def _enqueue_betual_job(
+        self, job: tuple, source_game_id: str, kind: str,
+    ) -> None:
+        """Bounded, non-blocking enqueue of ONE typed job onto the shared
+        worker FIFO.
+
+        Never waits for SQLite / the worker / a join / a drain / a DB lock.  On
+        a full queue the job is NOT silently discarded — the loss is counted and
+        surfaced as an explicit ERROR fault (normal operation: dropped = 0)."""
+        self._betual_line_sync()
+        try:
+            self._betual_line_queue.put_nowait(job)
+        except queue.Full:
+            t = self._betual_line_telemetry
+            t["dropped"] += 1
+            logger.error(
+                "BETUAL LINE QUEUE OVERFLOW — %s DROPPED for %s "
+                "(enqueued=%d persisted=%d failed=%d dropped=%d): the writer "
+                "cannot keep up with the WS rate — INVESTIGATE",
+                kind, source_game_id, t["enqueued"], t["persisted"],
+                t["failed"], t["dropped"])
+            return
+        t = self._betual_line_telemetry
+        t["enqueued"] += 1
+        depth = self._betual_line_queue.qsize()
+        if depth > t["max_depth"]:
+            t["max_depth"] = depth
+        # No per-enqueue wake (2026-10-04): the worker drains on its bounded
+        # linger cadence — wake-per-enqueue is eliminated.
+
+    def _drain_betual_line_queue(self) -> int:
+        """Persist every currently-queued Betual job (worker thread).
+
+        FIFO order is preserved (a single queue drained head-first).  Four job
+        shapes share this queue, distinguished by length: a 1-tuple ``(game,)``
+        timer persist, a 2-tuple ``(game, parsed)`` game-end persist, a
+        3-tuple ``(game, obs, period)`` Betual line job and a 4-tuple
+        ``(game, obs, period, qnum)`` quarter-market job.  Returns the number
+        processed.  Never raises."""
+        self._betual_line_sync()
+        n = 0
+        # Batched write session (2026-10-04): jobs drained into ONE transaction
+        # per flush (measured ~25k rows/s vs ~370 rows/s for the per-row
+        # open/commit/close) so the worker outruns the WS producer.  Each flush
+        # is BOUNDED to BETUAL_LINE_BATCH_MAX rows so a large backlog cannot hold
+        # self._lock / the SQLite write lock for one unbounded transaction (a
+        # bounded flush hands the lock back between chunks, keeping the fast tick
+        # responsive).  FIFO + dedup are unchanged; storage._flush_batch retries
+        # then falls back to per-row on error and COUNTS that event.
+        while True:
+            failed_before = self._betual_line_telemetry["failed"]
+            with self.store.batch():
+                drained = 0
+                while drained < BETUAL_LINE_BATCH_MAX:
+                    try:
+                        job = self._betual_line_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        if len(job) == 4:
+                            game, obs, period, qnum = job
+                            self._persist_quarter_observation(
+                                game, obs, period, qnum)
+                        elif len(job) == 3:
+                            game, obs, period = job
+                            self._persist_betual_line(game, obs, period)
+                        elif len(job) == 2:
+                            game, parsed = job
+                            self._persist_betual_end_job(game, parsed)
+                        else:
+                            (game,) = job
+                            self._persist_betual_timer_job(game)
+                    finally:
+                        n += 1
+                        drained += 1
+            # The batch has COMMITTED here.  Count jobs as persisted only NOW
+            # (persisted == committed): the per-job helpers deliberately do NOT
+            # increment inside a batch, so a reader that sees persisted==N also
+            # sees those N jobs' rows committed.  Jobs that raised while
+            # buffering are excluded (they are counted in ``failed``).
+            committed_jobs = drained - (
+                self._betual_line_telemetry["failed"] - failed_before)
+            if committed_jobs > 0:
+                self._betual_line_telemetry["persisted"] += committed_jobs
+            if drained < BETUAL_LINE_BATCH_MAX:
+                # The queue ran dry mid-chunk → nothing more is pending NOW.
+                # Deliberately do NOT re-check queue.empty(): a producer that
+                # refills during the flush must not drag the worker into a
+                # small-batch chase — the next linger tick picks those up, so
+                # the linger keeps yielding real batches.
+                break
+        return n
+
+    def _start_betual_line_worker(self) -> None:
+        """Start the dedicated Betual line/timer persistence consumer."""
+        self._betual_line_sync()
+        if self._betual_line_worker_thread is not None:
+            return
+        self._betual_line_stop.clear()
+        self._betual_line_worker_thread = threading.Thread(
+            target=self._betual_line_worker_main, name="blm-betual-persist",
+            daemon=True)
+        self._betual_line_worker_thread.start()
+        logger.info("betual line persist worker started")
+
+    def _stop_betual_line_worker(self) -> None:
+        """Stop the Betual worker, draining pending queued writes first."""
+        self._betual_line_sync()
+        self._betual_line_stop.set()
+        self._betual_line_wake.set()
+        t = self._betual_line_worker_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=30.0)
+        # Safety net: if the worker never drained (dead / timed out), persist
+        # whatever is still queued inline so shutdown loses no observation.
+        try:
+            self._drain_betual_line_queue()
+        except Exception:
+            logger.error("betual line drain-on-shutdown failed:\n%s",
+                         traceback.format_exc())
+
+    def _betual_line_worker_main(self) -> None:
+        """The Betual line/timer persistence loop — entirely on this thread."""
+        _block_deadline_signal()
+        last_telemetry_log = time.monotonic()
+        while not self._betual_line_stop.is_set():
+            # Bounded linger/cadence (2026-10-04): wake on the approved
+            # 50-100ms interval (or on stop), NOT per enqueue — every drain
+            # commits a real batch.  Wake-per-enqueue is eliminated.
+            self._betual_line_wake.wait(timeout=BETUAL_LINE_LINGER_S)
+            self._betual_line_wake.clear()
+            try:
+                self._drain_betual_line_queue()
+            except Exception:
+                logger.error("betual line worker drain error:\n%s",
+                             traceback.format_exc())
+            now = time.monotonic()
+            if now - last_telemetry_log >= 60.0:
+                last_telemetry_log = now
+                logger.info("betual line worker telemetry: %s",
+                            self.betual_line_worker_stats())
+        # Drain the backlog queued before shutdown — no observation is lost.
+        try:
+            self._drain_betual_line_queue()
+        except Exception:
+            pass
+
+    def betual_line_worker_stats(self) -> dict:
+        """Observable telemetry for the Betual line/timer persistence path."""
+        self._betual_line_sync()
+        t = self._betual_line_telemetry
+        try:
+            depth = self._betual_line_queue.qsize()
+        except Exception:
+            depth = 0
+        try:
+            batch = self.store.batch_stats()
+        except Exception:
+            batch = {}
+        return {
+            "worker_alive": self._betual_line_worker_alive(),
+            "queue_depth": depth,
+            "max_queue_depth": t["max_depth"],
+            "enqueued": t["enqueued"],
+            "persisted": t["persisted"],
+            "failed": t["failed"],
+            "dropped": t["dropped"],
+            "batch_flushes": batch.get("flushes"),
+            "batch_rows": batch.get("rows"),
+            "batch_committed_rows": batch.get("committed"),
+            "batch_max_rows_per_flush": BETUAL_LINE_BATCH_MAX,
+            "batch_linger_s": BETUAL_LINE_LINGER_S,
+            "batch_retries": batch.get("retries"),
+            "batch_fallback_events": batch.get("fallback_events"),
+            "batch_fallback_rows_failed": batch.get("fallback_rows_failed"),
+        }
 
     # ── LIVE market subscriptions (30s freshness) ────────────────
 
@@ -1163,37 +1786,31 @@ class PokerBetCollector:
         # Betual-only dataset (§1/§6/§7): quarter-total lines feed the
         # prospective dataset with line-movement fields; failure-isolated
         # and decision-free (§19).
+        # Persist OFF the Playwright MainThread (2026-10-04): the synchronous
+        # Betual line/timer write here blocked the fast tick on DB-lock
+        # contention.  Failure-isolated (§19): a Betual-layer error must never
+        # affect the quarter-market collection path.  _enqueue_betual_line is
+        # non-blocking and never raises in production; the guard mirrors the
+        # previous inline call's isolation exactly.
         try:
-            self._betual_record_line(game, obs, period or "other")
-        except BetualDatasetError:
-            pass                      # non-Betual: dataset is BETUAL-only
+            self._enqueue_betual_line(game, obs, period or "other")
         except Exception:
-            logger.error("betual line record failed:\n%s",
+            logger.error("betual line enqueue failed:\n%s",
                          traceback.format_exc())
+        # Persist the quarter-market observation OFF the Playwright MainThread
+        # (2026-10-04 residual): the synchronous insert here was the residual
+        # fast-path stall (py-spy: 24/25 WS-handler samples in
+        # insert_quarter_market_observation → watchdog SIGABRT).  The SAME
+        # blm-betual-persist worker now runs the IDENTICAL
+        # insert_quarter_market_observation with the SAME values; this enqueue
+        # is bounded + non-blocking.  Failure-isolated (§19): a persistence
+        # error must never affect the quarter-market collection path.  Falls
+        # back to an inline persist when the worker is not running (unit tests
+        # / pre-start), preserving the original semantics exactly.
         try:
-            with _alarm_blocked():
-                self.store.insert_quarter_market_observation({
-                    "game_id": self._game_db_id(game),
-                "source_game_id": game.source_game_id,
-                "classification": game.classification,
-                "captured_at": obs["captured_at"],
-                "market_id": market_id,
-                "market_type": obs["market_type"],
-                "market_name": obs.get("market_name"),
-                "market_period": period,
-                "period_number": qnum,
-                "line_value": obs.get("line_value"),
-                "over_price": obs.get("over_price"),
-                "under_price": obs.get("under_price"),
-                "home_score": obs.get("home_score"),
-                "away_score": obs.get("away_score"),
-                "period_label": obs.get("period_label"),
-                "clock": obs.get("clock"),
-                "raw": raw,
-            })
-            self._q_market_obs += 1
+            self._enqueue_quarter_observation(game, obs, period, qnum)
         except Exception:
-            logger.error("quarter market observation persist failed:\n%s",
+            logger.error("quarter market enqueue failed:\n%s",
                          traceback.format_exc())
 
     def _record_quarter_scores(self, game: PokerBetGame,
@@ -1319,7 +1936,10 @@ class PokerBetCollector:
         elapsed_at_join = max(0.0, seen_wall - start_wall)
         rec.adopt_start_evidence(start_wall, seen_wall,
                                  elapsed_at_adoption=elapsed_at_join)
-        self._betual_persist_timer(game)
+        # Persist OFF the Playwright MainThread (2026-10-04 residual): the
+        # synchronous upsert_betual_timer here was a residual fast-path stall.
+        # Detection/adoption stay inline (in-memory, first-evidence-wins).
+        self._enqueue_betual_timer(game)
 
     def _betual_record_score(self, game: PokerBetGame, parsed: dict,
                              captured_at: str) -> None:
@@ -1682,6 +2302,11 @@ class PokerBetCollector:
             if self._browser_started_at else 0,
             "games_tracked": self.stats["games_seen"],
             "snapshots_total": self.stats["snapshots"],
+            # WS-frame Betual line/timer persistence worker telemetry
+            # (2026-10-04 directive): queue depth / max depth / enqueued /
+            # persisted / failed / dropped must be observable, and dropped
+            # must be 0 in normal operation.
+            "betual_line_worker": self.betual_line_worker_stats(),
             "games_resolved": self.stats["games_resolved"],
             "reconciliations": self.stats["reconciliations"],
             "errors": self.stats["errors"],
@@ -1978,6 +2603,9 @@ class PokerBetCollector:
                 target=self._deviation_backfill, name="blm-deviation-backfill",
                 daemon=True)
             self._deviation_backfill_thread.start()
+        # WS-frame persistence off the Playwright MainThread.
+        self._start_ws_snap_worker()
+        self._start_betual_line_worker()
         # Slow worker first: its failures are isolated from the fast loop
         self._start_slow_worker()
         try:
@@ -2086,6 +2714,8 @@ class PokerBetCollector:
             logger.error("collector crashed:\n%s", traceback.format_exc())
         finally:
             self._stop_slow_worker()
+            self._stop_ws_snap_worker()
+            self._stop_betual_line_worker()
             if self._browser:
                 try:
                     self._browser.close()
@@ -2226,8 +2856,12 @@ class PokerBetCollector:
             stop_evt.set()
         self._slow_stop.set()
         self._slow_wake.set()
-
-    # ── SLOW worker (event-view path — own thread, own Playwright) ──
+        # WS snapshot-persist consumer: signal stop; its final drain runs on
+        # its own thread (never blocks stop()'s caller here).
+        ws_snap_stop = getattr(self, "_ws_snap_stop", None)
+        if ws_snap_stop is not None:
+            ws_snap_stop.set()
+            self._ws_snap_wake.set()
 
     def _start_slow_worker(self) -> None:
         """Start the dedicated slow-path worker thread.
@@ -4538,15 +5172,17 @@ class PokerBetCollector:
                     # final — the NO-FINAL diagnosis data (evidence=
                     # 'disappeared', never recorded as final).
                     ended_game = game
+                    # Persist OFF the Playwright MainThread (2026-10-04
+                    # residual): the synchronous game-end ROW write + rec
+                    # discard here were a residual fast-path stall.  Ending
+                    # DETECTION (status/grace/window) is unchanged; the worker
+                    # writes the row THEN discards the rec (same order as the
+                    # previous inline pair), so the §12 row is never lost.
                     try:
-                        self._betual_end_game(ended_game)
+                        self._enqueue_betual_end(ended_game)
                     except Exception:
-                        logger.error("betual disappeared-end failed:\n%s",
+                        logger.error("betual disappeared-end enqueue failed: %s",
                                      traceback.format_exc())
-                    try:
-                        self.betual.discard(game.source_game_id)
-                    except Exception:
-                        pass
             for game in to_end:
                 self.store.upsert_game(game)
                 logger.info("game ended (disappeared): %s", game.source_game_id)
