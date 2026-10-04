@@ -1,0 +1,125 @@
+# =============================================================================
+# UNDER FINGERPRINTS — the five fingerprints (C1, C2, C3, C5, R2)
+# -----------------------------------------------------------------------------
+# Thresholds are FROZEN (exactly the audited definitions). The model must
+# never re-tune them. Three-state semantics, fail closed.
+#
+# Sources:
+#   blm_v4/live_analytics/under_fingerprints.py
+#   blm_v4/live_analytics/fingerprint_c5.py
+#
+# Status: SCAFFOLDING (blm-model-spec/1). No training. No synthetic labels.
+# =============================================================================
+
+meta:
+  spec_version: "blm-model-spec/1"
+  area: "ml/"
+  generated: "2026-10-03"
+  layer_name: "HISTORICAL_UNDER_FINGERPRINTS"
+  role: "ENRICHMENT on the existing alert; never a second alert source; never a loosening of the rule"
+
+# --- operands (all point-in-time; available at the trigger instant) ----------
+operands:
+  req_ratio:
+    formula: "required_pts_per_min / league_average_pace"
+    available_when: "both operands finite AND league_average_pace > 0"
+  q3_ratio:
+    formula: "q3_ppm / q3_league_avg"
+    available_when: "both operands finite AND q3_league_avg > 0"
+  q3_ppm:
+    formula: "q3_delta / quarter_minutes"
+  q3_delta:
+    formula: "max(3rd Quarter cumulative score) - max(2nd Quarter cumulative score)"
+    note: "cumulative only rises within a segment, so the segment MAX is its end state"
+
+# --- three-state semantics (fail closed) ------------------------------------
+states:
+  TRUE: "every operand provable AND every comparison passes"
+  FALSE: "every operand provable AND at least one comparison fails"
+  UNAVAILABLE: "any operand missing / non-finite / unprovable"
+rules:
+  - "a conjunction is UNAVAILABLE if ANY leg is UNAVAILABLE (a partial pattern is never a pass)"
+  - "fingerprint_count counts ONLY TRUE fingerprints"
+  - "fingerprints_fired lists exact fired keys in C1, C3, C5, R2 order"
+
+# --- the four approved fingerprints (EXACT, frozen) -------------------------
+fingerprints:
+
+  - key: C1
+    name: "HISTORICAL_UNDER_FINGERPRINT_C1"
+    label: "Required pace 1.10-1.20x league avg"
+    condition: "1.10 <= req_ratio < 1.20"     # lower INCLUSIVE, upper EXCLUSIVE
+    constants: {C1_REQ_RATIO_MIN: 1.10, C1_REQ_RATIO_MAX: 1.20}
+    note: >-
+      The upper cut at 1.20 is PART OF THE MEANING: the widened band
+      [1.10,1.35) (analysis 'R1') measured BELOW baseline and is deliberately
+      excluded from the layer.
+
+  - key: C2
+    name: "HISTORICAL_UNDER_FINGERPRINT_C2"
+    label: "Recent deceleration"
+    condition: "c2_offset <= -0.5"      # inclusive; c2_offset = recent_pace_3m - actual_pts_per_min
+    constants: {C2_MOMENTUM_MAX: -0.5}
+    note: >-
+      Market-agnostic momentum leg: it reads neither the frozen line nor the
+      required pace. Restored 2026-10-04 (ADR-006) as a RECORDED, non-gating
+      fingerprint.
+
+  - key: C3
+    name: "HISTORICAL_UNDER_FINGERPRINT_C3"
+    label: "Required pace >1.04x + Q3 below average"
+    condition: "req_ratio > 1.04 (STRICT) AND q3_ratio < 1.00 (STRICT)"
+    constants: {C3_REQ_RATIO_MIN: 1.04, Q3_BELOW_AVG_MAX: 1.00}
+    note: "the required leg reuses the production REQUIRED_MARGIN (1.04)"
+
+  - key: C5
+    name: "HISTORICAL_UNDER_FINGERPRINT_C5"
+    label: "Required pace >1.10x + Q3 below average"
+    condition: "req_ratio > 1.10 (STRICT) AND q3_ratio < 1.00 (STRICT)"
+    constants: {C5_REQ_RATIO_MIN: 1.10, C5_Q3_RATIO_MAX: 1.00}
+
+  - key: R2
+    name: "HISTORICAL_UNDER_FINGERPRINT_R2"
+    label: "Q3 <0.90x league Q3 average"
+    condition: "q3_ratio < 0.90 (STRICT)"     # a MATERIAL Q3 slump
+    constants: {R2_Q3_RATIO_MAX: 0.90}
+
+# --- deliberately absent ----------------------------------------------------
+excluded:
+  R1: "widened req/avg band [1.10,1.35); measured below baseline; NOT implemented"
+  C4: "C2 composite; removed from the live historical fingerprint layer (do not resurrect)"
+  C6: "C2 composite; removed from the live historical fingerprint layer (do not resurrect)"
+
+# --- historical observation values (context, NOT accuracy claims) -----------
+historical_observations:
+  note: >-
+    Read-only analysis 2026-09-21. Reported as CONTEXT beside the frozen
+    definitions, NOT as established production accuracy. C1 N=17 is a small
+    sample. The model must quote these only with their n, never as a promise.
+  values:
+    - {key: C1, n: 17,  under_pct: 88.24}
+    - {key: C2, n: 111, under_pct: 74.77}
+    - {key: C3, n: 147, under_pct: 72.79}
+    - {key: C5, n: 103, under_pct: 76.70}
+    - {key: R2, n: 87,  under_pct: 78.16}
+  ladder_note: >-
+    The fingerprint ladder is MONOTONE historically (0->4 fingers: ~53%->91%)
+    but is NOT a validated filter. Do not present the ladder as a betting edge.
+
+# --- leakage guarantee ------------------------------------------------------
+leakage_guarantee:
+  provided: "required pace, league pace, Q1-Q3 cumulative scores, Q3 league archive"
+  never_read:
+    - "the final total"
+    - "the closing line"
+    - "any Q4/future-quarter data"
+    - "post-trigger pace or momentum"
+    - "a settlement result"
+  enforcement: "pure arithmetic over its operands; opens no database, reads no game state (test-pinned)"
+
+# --- what the model must always say about fingerprints ----------------------
+model_contract:
+  - "Fingerprints are RECORDED CONTEXT ONLY: not a threshold, gates nothing, creates no alert."
+  - "The production decision remains under_alert_state(...) verbatim."
+  - "Fingerprint_count is recorded for analysis, never a gate."
+  - "Never flip a status: UNAVAILABLE is never a pass."

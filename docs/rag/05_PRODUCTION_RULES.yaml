@@ -73,6 +73,47 @@ SETTLEMENT:
   non_authoritative_final_source: observation
   page_verdict_immutable: true          # result_source==RESULTS_PAGE AND status OK
 
+ALERT_WIN_RATE:                       # canonical metric contract (2026-10-04 directive)
+  source: "blm_v4/live_analytics/fingerprint_stats.py::compute_stats /::_rate_block"
+  authority_order: "code > prod state > DECISIONS.md > docs/rag > index"
+  primary_question: >
+    Of the games BLM alerted on, how many subsequently finished UNDER the
+    frozen triggered line?
+  definition: >
+    Alert Win Rate = settled alerted games that finish UNDER the immutable
+    triggered line / all settled alerted games (UNDER + OVER + PUSH).
+  numerator: "count(outcome == UNDER) == count(final_total < trigger_line)"
+  denominator: "count(UNDER) + count(OVER) + count(PUSH), over SETTLED alerted games only"
+  outcome_framework:
+    under: "final_total <  trigger_line"
+    over:  "final_total >  trigger_line"
+    push:  "final_total == trigger_line"
+  push_in_denominator: true           # PUSH is its own bucket AND is in the denominator
+  win_is: "final_total < trigger_line (the alert is always UNDER, so under_pct IS the win rate)"
+  qualifying_footprint:               # the alert cohort = the trigger condition ALONE
+    - "progress_pct >= 75"            # ALERT_PROGRESS_PCT (under_alert.py)
+    - "required_pts_per_min > league_avg_pace * 1.04"  # REQUIRED_MARGIN strict_gt, own competition
+  reported_rates:                     # report BOTH, never one alone
+    cohort: "trigger condition alone (headline)"
+    actionable: "cohort AND a LIVE market at the trigger (the bettable rate)"
+  exclude_from_denominator:
+    - games with no alert
+    - discovered games without an alert
+    - games merely observed at 75% (progress reached, trigger never fired)
+    - games that never triggered a qualifying footprint
+    - pending / unsettled alerts (no authoritative settled final)
+    - the overall population's UNDER/OVER distribution
+  not_the_same_as:                    # never substitute any of these for the win rate
+    - game_population_under_rate
+    - collector_coverage
+    - alert_volume
+    - settlement_rate
+    - pending_rate
+    - data_collection_quality
+  trigger_line_immutable: true        # ADR-001; settle vs the line frozen at the 75% crossing
+  never_resettle_history: true        # names the denominator only; redefines no result
+  verify: "n == under+over+push AND under_pct == 100*under/n (compute_stats / _rate_block)"
+
 RESULT_VALIDITY:                      # blm_v4/result_policy.py::validate_page_result
   required: [identity_match, render_complete, quarter_sums_valid, history_consistent]
   parse_quality_complete: full
@@ -98,14 +139,15 @@ SETTLE_WORKER:                        # blm_v4/settle_worker.py
 
 FINGERPRINTS:                         # blm_v4/live_analytics/under_fingerprints.py
   source: "blm_v4/live_analytics/under_fingerprints.py"
-  approved_keys: [C1, C3, C5, R2]     # exactly four
+  approved_keys: [C1, C2, C3, C5, R2] # exactly five (C2 restored 2026-10-04)
   c1: "1.10 <= req_ratio < 1.20"      # lower inclusive, upper exclusive
+  c2: "recent_pace_3m - actual_pts_per_min <= -0.5"  # recent deceleration, inclusive
   c3: "req_ratio > 1.04 AND q3_ratio < 1.00"
   c5: "req_ratio > 1.10 AND q3_ratio < 1.00"
   r2: "q3_ratio < 0.90"
   three_state: [TRUE, FALSE, UNAVAILABLE]
   gating: none                        # recorded context; gates nothing; creates no alert
-  retired: [C2, C4, C6]               # removed from the live layer (do not resurrect)
+  retired: [C4, C6]                   # C2's composites; removed from the live layer (do not resurrect)
   excluded: [R1]                      # widened req band below baseline
 
 BETTING:                              # blm_v4/betting/config.py + executor.py

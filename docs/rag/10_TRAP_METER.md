@@ -1,8 +1,8 @@
 # 10 — Trap Meter & Signal Layer
 
 Retrieval keywords: trap meter, trap, bull trap, bear trap, reverse bull trap, late trap,
-sharp trap, dead market, false momentum, fingerprints, C1, C3, C5, R2, C2 retired,
-retired logic, do not resurrect, line vs score, Q3 collapse.
+sharp trap, dead market, false momentum, fingerprints, C1, C2, C3, C5, R2, C2 restored,
+C4/C6 retired, retired logic, do not resurrect, line vs score, Q3 collapse.
 
 **What this pack answers:** what the trap/line-vs-score signals are, what the
 fingerprint layer is, and — critically — which logic is RETIRED and must never be
@@ -45,17 +45,19 @@ Pure function of the snapshot history; seven signals, each `{active, confidence}
 
 ---
 
-## Part B — The fingerprint layer (C1, C3, C5, R2)
+## Part B — The fingerprint layer (C1, C2, C3, C5, R2)
 
-**Rule.** The approved historical fingerprints are EXACTLY four, in canonical order:
+**Rule.** The approved historical fingerprints are EXACTLY five, in canonical order:
 
 ```
 C1  1.10 <= req_ratio < 1.20                       (lower INCLUSIVE, upper EXCLUSIVE)
+C2  c2_offset <= -0.5                              (recent deceleration, INCLUSIVE)
 C3  req_ratio > 1.04  AND q3_ratio < 1.00          (req leg STRICT > production margin)
 C5  req_ratio > 1.10  AND q3_ratio < 1.00
 R2  q3_ratio < 0.90                                (material Q3 slump)
 where req_ratio = required_pts_per_min / league_average_pace
       q3_ratio  = q3_ppm / league Q3 average (same competition)
+      c2_offset = recent_pace_3m - actual_pts_per_min
 ```
 
 Three-state semantics: TRUE / FALSE / UNAVAILABLE (any missing operand ⇒
@@ -83,35 +85,29 @@ using it) is UNAVAILABLE, not FALSE.
 
 ## Part C — RETIRED / EXCLUDED logic (do not resurrect)
 
-## Rule 10.C.1 — C2, C4, C6 are RETIRED
+## Rule 10.C.1 — C2 RESTORED; C4, C6 remain RETIRED
 
-**Rule.** The live fingerprint layer is EXACTLY C1, C3, C5, R2. **C2 and its
-dependent composites (C4, C6) were REMOVED.** They must NOT be restored from
-historical code or docs.
+**Rule.** The live fingerprint layer is EXACTLY C1, C2, C3, C5, R2 (C2 restored
+2026-10-04). **C4 and C6 — C2's composites — remain REMOVED** and must NOT be
+restored from historical code or docs. C2 is a RECORDED, NON-GATING fingerprint:
+it gates nothing and creates no alert.
 
-**Source.** `under_fingerprints.py` module docstring: "C2/C4/C6 are deliberately
-absent"; `FINGERPRINT_KEYS = ("C1","C3","C5","R2")`; the legacy momentum operands
-(`recent3_pace`/`actual_pace`/`recent3_minus_act`) are accepted for compatibility
-but "deliberately ignored: C2 and its dependent composites were removed from the
-live historical fingerprint layer."
+**Source.** `under_fingerprints.py`: `FINGERPRINT_KEYS = ("C1","C2","C3","C5","R2")`;
+the momentum operands (`recent3_pace`/`actual_pace`/`recent3_minus_act`) drive C2 as
+`recent_pace_3m - actual_pts_per_min <= -0.5` (inclusive). Restored by ADR-006
+(2026-10-04), which supersedes ADR-005's C2 clause.
 
-**Why.** C2 (`recent3_minus_act <= -0.5`) and its composites were retired. The
-operands still exist for API compatibility, so an agent reading old code could
-wrongly decide to restore them.
+**Why.** C2's unique pocket and the semantics were re-examined; C2 is re-instated
+for observation. C4/C6 (which combine C2 with other legs) carry no unique edge and
+stay retired.
 
-> ⚠️ **Contradiction:** `DECISIONS.md` §16.K still describes SEVEN fingerprints
-> (C1..C6 + R2) including C2/C4/C6, with per-fingerprint rates. That description
-> predates the retirement and is STALE. Current code (four fingerprints) is
-> authoritative. See `CONTRADICTIONS.md`.
+**Valid.** A live payload may now include `fingerprint_c2`.
 
-**Valid.** A live payload shows at most C1, C3, C5, R2.
+**Invalid.** Re-adding C4/C6; treating any fingerprint as a gate.
 
-**Invalid.** Re-adding `fingerprint_c2` because an old doc lists it.
+**Forbidden.** Registering C4/C6 as active conditions; gating on any fingerprint.
 
-**Forbidden.** Registering C2/C4/C6 as active conditions.
-
-**Verify.** `FINGERPRINT_KEYS` == `("C1","C3","C5","R2")`; AST test asserts no C2
-key.
+**Verify.** `FINGERPRINT_KEYS` == `("C1","C2","C3","C5","R2")`.
 
 ---
 
