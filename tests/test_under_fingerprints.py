@@ -1,7 +1,7 @@
-"""Historical UNDER fingerprint tests — C1, C3, C5 + R2.
+"""Historical UNDER fingerprint tests — C1, C2, C3, C5 + R2.
 
-C2 and its dependent composites C4/C6 are deliberately absent from the
-live fingerprint layer. Fingerprints remain enrichment only and never
+C2 (recent deceleration) is present; its dependent composites C4/C6
+remain absent, as does R1. Fingerprints remain enrichment only and never
 create or gate production alerts.
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import math
 
 from blm_v4.live_analytics.under_alert import under_alert_state
 from blm_v4.live_analytics.under_fingerprints import (
-    C1_REQ_RATIO_MAX, C1_REQ_RATIO_MIN, C3_REQ_RATIO_MIN,
+    C1_REQ_RATIO_MAX, C1_REQ_RATIO_MIN, C2_MOMENTUM_MAX, C3_REQ_RATIO_MIN,
     FP_FALSE, FP_TRUE, FP_UNAVAILABLE, FINGERPRINT_KEYS,
     R2_Q3_RATIO_MAX, evaluate_fingerprints,
 )
@@ -23,8 +23,8 @@ LEAGUE_Q3 = 3.00
 
 def fp(required=4.0, league=LEAGUE, q3=3.0, q3avg=LEAGUE_Q3,
        recent3=None, actual=None):
-    # Legacy momentum arguments remain accepted by the function but are
-    # intentionally ignored after C2 removal.
+    # Momentum arguments drive C2 (recent deceleration). When omitted, C2
+    # is UNAVAILABLE — so every call that omits them is unchanged.
     return evaluate_fingerprints(required, league, q3, q3avg,
                                  recent3, actual)
 
@@ -111,25 +111,53 @@ def test_directive_example_without_c2():
     assert b["fingerprint_count"] == 2
 
 
-def test_fingerprint_keys_exclude_c2_and_dependents():
-    assert FINGERPRINT_KEYS == ("C1", "C3", "C5", "R2")
+def test_fingerprint_keys_include_c2_and_exclude_dependents():
+    # C2 restored 2026-10-04 as a RECORDED fingerprint; C4/C6 stay absent.
+    assert FINGERPRINT_KEYS == ("C1", "C2", "C3", "C5", "R2")
     b = fp(required=req_for(1.15), q3=2.5, recent3=3.0, actual=3.5)
-    assert not any(k in b["fingerprints_fired"] for k in ("C2", "C4", "C6"))
-    assert "fingerprint_c2" not in b
+    assert "C2" in b["fingerprints_fired"]
+    assert "fingerprint_c2" in b
+    assert b["fingerprint_c2"] == FP_TRUE
+    assert b["fingerprint_c2_triggered"] is True
     assert "fingerprint_c4" not in b
     assert "fingerprint_c6" not in b
+    assert not any(k in b["fingerprints_fired"] for k in ("C4", "C6"))
 
 
-def test_legacy_momentum_arguments_do_not_change_result():
+def test_c2_boundary_values_and_fail_closed():
+    # inclusive at the -0.5 boundary; strict above it; UNAVAILABLE when missing
+    assert fp(required=req_for(1.15), q3=2.5, recent3=3.0,
+              actual=3.5)["fingerprint_c2"] == FP_TRUE        # offset -0.5
+    assert fp(required=req_for(1.15), q3=2.5, recent3=3.49,
+              actual=3.5)["fingerprint_c2"] == FP_FALSE       # offset -0.01
+    assert fp(required=req_for(1.15), q3=2.5, recent3=2.0,
+              actual=4.0)["fingerprint_c2"] == FP_TRUE        # offset -2.0
+    assert fp(required=req_for(1.15), q3=2.5)["fingerprint_c2"] == FP_UNAVAILABLE
+    assert fp(required=req_for(1.15), q3=2.5,
+              recent3=3.0)["fingerprint_c2"] == FP_UNAVAILABLE
+    # an explicit authoritative offset wins over the derived paces
+    assert evaluate_fingerprints(
+        req_for(1.15), LEAGUE, 2.5, LEAGUE_Q3, None, None,
+        recent3_minus_act=-0.7)["fingerprint_c2"] == FP_TRUE
+    assert C2_MOMENTUM_MAX == -0.5
+
+
+def test_momentum_arguments_drive_c2_only():
+    # Supplying momentum operands adds C2 to the fired set; the other four
+    # fingerprints are byte-identical.
     plain = fp(required=req_for(1.15), q3=2.5)
     decel = fp(required=req_for(1.15), q3=2.5, recent3=3.0, actual=3.5)
-    assert plain["fingerprints_fired"] == decel["fingerprints_fired"]
-    assert plain["fingerprint_count"] == decel["fingerprint_count"]
+    assert set(decel["fingerprints_fired"]) - set(
+        plain["fingerprints_fired"]) == {"C2"}
+    assert decel["fingerprint_count"] == plain["fingerprint_count"] + 1
+    for k in ("C1", "C3", "C5", "R2"):
+        assert (plain[f"fingerprint_{k.lower()}"]
+                == decel[f"fingerprint_{k.lower()}"])
 
 
 def test_under_alert_contract_untouched():
     b = fp(required=req_for(1.15), q3=2.5, recent3=3.0, actual=3.5)
-    assert b["fingerprint_count"] == 4
+    assert b["fingerprint_count"] == 5
     assert under_alert_state(4.0, req_for(1.15), LEAGUE, 74.9)["active"] is False
     assert under_alert_state(4.0, 5.0, 4.5, 80)["active"] is True
 

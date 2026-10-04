@@ -13,6 +13,7 @@ THE FINGERPRINTS (directive 2026-09-21 — the approved set, EXACTLY the
 definitions the read-only analysis measured; thresholds frozen)::
 
     C1  1.10 <= req_ratio < 1.20          (lower INCLUSIVE, upper EXCLUSIVE)
+    C2  c2_offset <= -0.5                 (recent deceleration, INCLUSIVE)
     C3  req_ratio > 1.04  AND q3_ratio < 1.00
     C5  req_ratio > 1.10  AND q3_ratio < 1.00
     R2  q3_ratio < 0.90
@@ -22,6 +23,7 @@ guarantee below)::
 
     req_ratio          = required_pts_per_min / league_average_pace
     q3_ratio           = q3_ppm / league average Q3 pace (same competition)
+    c2_offset          = recent_pace_3m - actual_pts_per_min
 
 R1 IS EXCLUDED — deliberately, by directive.  The widened required-pace
 band [1.10, 1.35) measured BELOW the historical UNDER baseline (56.47% vs
@@ -67,7 +69,8 @@ HISTORICAL OBSERVATIONS (read-only analysis 2026-09-21, reported as
 context — NOT established production accuracy; C1 N=17 is a small sample)::
 
     C1  N= 17   UNDER%=88.24%      C5  N=103   UNDER%=76.70%
-    C3  N=147   UNDER%=72.79%      R2  N= 87   UNDER%=78.16%
+    C2  N=111   UNDER%=74.77%      R2  N= 87   UNDER%=78.16%
+    C3  N=147   UNDER%=72.79%
 """
 from __future__ import annotations
 
@@ -100,29 +103,37 @@ C3_REQ_RATIO_MIN = REQUIRED_MARGIN
 #: The Q3-below-average leg (C3/C5/C6) — STRICTLY below 1.00 (reusing the
 #: C5 constant: one authority for the Q3 comparison).
 Q3_BELOW_AVG_MAX = C5_Q3_RATIO_MAX
+#: C2 — recent deceleration: the trailing 3-minute pace at least this far
+#: BELOW the game-to-date pace (INCLUSIVE).  A market-agnostic momentum leg
+#: (it reads neither the frozen line nor the required pace).  Restored
+#: 2026-10-04 as a RECORDED fingerprint — it gates nothing (see docstring).
+C2_MOMENTUM_MAX = -0.5
 #: R2 — the Q3 slump must be MATERIAL: strictly below 0.90x the league's
 #: average Q3 pace (a ratio exactly at 0.90 does NOT qualify).
 R2_Q3_RATIO_MAX = 0.90
 
 # ── identities ─────────────────────────────────────────────────────────
 C1_NAME = "HISTORICAL_UNDER_FINGERPRINT_C1"
+C2_NAME = "HISTORICAL_UNDER_FINGERPRINT_C2"
 C3_NAME = "HISTORICAL_UNDER_FINGERPRINT_C3"
 R2_NAME = "HISTORICAL_UNDER_FINGERPRINT_R2"
 
-#: The approved fingerprint keys, in canonical order.  Exactly four.
-#: C2/C4/C6 are deliberately absent; R1 is also absent (see module docstring).
-FINGERPRINT_KEYS = ("C1", "C3", "C5", "R2")
+#: The fingerprint keys, in canonical order.  Exactly five — C2 restored
+#: 2026-10-04 as a RECORDED, non-gating fingerprint.  C4/C6 (its retired
+#: composites) are absent; R1 is also absent (see module docstring).
+FINGERPRINT_KEYS = ("C1", "C2", "C3", "C5", "R2")
 
 #: Operator-facing labels — the same wording the read-only analysis used.
 FINGERPRINT_LABELS = {
     "C1": "Required pace 1.10-1.20x league avg",
+    "C2": "Recent deceleration",
     "C3": "Required pace >1.04x + Q3 below average",
     "C5": "Required pace >1.10x + Q3 below average",
     "R2": "Q3 <0.90x league Q3 average",
 }
 
 _FINGERPRINT_NAMES = {
-    "C1": C1_NAME, "C3": C3_NAME, "C5": C5_NAME, "R2": R2_NAME,
+    "C1": C1_NAME, "C2": C2_NAME, "C3": C3_NAME, "C5": C5_NAME, "R2": R2_NAME,
 }
 
 
@@ -148,10 +159,10 @@ def evaluate_fingerprints(required_pace: Any, league_average_pace: Any,
       * ``q3_ppm`` / ``q3_league_avg`` — the game's own Q3 pace and its
         competition's average Q3 pace (see
         :func:`fingerprint_c5.q3_pace_reference`);
-      * Legacy momentum arguments (``recent3_pace`` / ``actual_pace`` /
-        ``recent3_minus_act``) are accepted for API/backward compatibility
-        but are deliberately ignored: C2 and its dependent composites were
-        removed from the live historical fingerprint layer.
+      * The momentum arguments (``recent3_pace`` / ``actual_pace`` /
+        ``recent3_minus_act``) DRIVE the C2 deceleration fingerprint: an
+        explicit ``recent3_minus_act`` offset is authoritative when supplied,
+        otherwise C2 is derived as ``recent3_pace - actual_pace``.
 
     Returns the flat fingerprint block: one three-state status per
     fingerprint (``fingerprint_c1`` .. ``fingerprint_r2``), a boolean
@@ -209,8 +220,25 @@ def evaluate_fingerprints(required_pace: Any, league_average_pace: Any,
         r2 = FP_TRUE
     else:
         r2 = FP_FALSE
+    # C2: recent deceleration — the trailing 3-minute pace at least 0.5
+    # pts/min BELOW the game-to-date pace.  Pure momentum: it reads neither
+    # the frozen line nor the required pace.  An explicit authoritative
+    # offset wins when supplied; otherwise it is derived from the two paces.
+    # Missing operands => UNAVAILABLE (fail closed — never silently TRUE).
+    offset = finite(recent3_minus_act)
+    if offset is None:
+        r3_f = finite(recent3_pace)
+        act_f = finite(actual_pace)
+        offset = ((r3_f - act_f)
+                  if (r3_f is not None and act_f is not None) else None)
+    if offset is None:
+        c2 = FP_UNAVAILABLE
+    elif offset <= C2_MOMENTUM_MAX:
+        c2 = FP_TRUE
+    else:
+        c2 = FP_FALSE
 
-    status = {"C1": c1, "C3": c3, "C5": c5, "R2": r2}
+    status = {"C1": c1, "C2": c2, "C3": c3, "C5": c5, "R2": r2}
     fired = [k for k in FINGERPRINT_KEYS if status[k] == FP_TRUE]
 
     block = {
@@ -233,6 +261,11 @@ def evaluate_fingerprints(required_pace: Any, league_average_pace: Any,
         "q3_pace": q3,
         "league_q3_avg": q3avg,
         "q3_ratio": (round(q3_ratio, 6) if q3_ratio is not None else None),
+        # ── C2 supporting values (recent deceleration) ──────────────────
+        "recent3_pace": finite(recent3_pace),
+        "actual_pace": finite(actual_pace),
+        "recent3_minus_act": (round(offset, 6) if offset is not None
+                              else None),
         # ── C5-compat aliases — the pre-layer C5 block's field names, so
         #    consumers of the 2026-09-21 C5 authorization (and dashboard
         #    history records that sealed that shape) keep reading one truth

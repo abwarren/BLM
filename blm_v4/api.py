@@ -2275,8 +2275,8 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 entry.get("games"), eligible=eligibility["eligible"],
                 **trigger)
             # ── HISTORICAL UNDER FINGERPRINT LAYER (authorization
-            # 2026-09-21) — the approved set C1, C3, C5 + R2 evaluated as
-            # CONTEXT on every UNDER evaluation, NEVER a second alert
+            # 2026-09-21; C2 restored 2026-10-04) — the set C1, C2, C3, C5 + R2
+            # evaluated as CONTEXT on every UNDER evaluation, NEVER a second alert
             # source and never a loosening of the condition above (the
             # active verdict was already decided verbatim by
             # under_alert_state).  Evaluated at the SAME checkpoint with
@@ -2291,7 +2291,9 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 proj.get("required_pts_per_min"), entry.get("avg_pace"),
                 _q3_game_ppm(g, rows_asc),
                 (q3_reference.get(g.get("competition_slug")) or {})
-                .get("avg_q3_pace"))
+                .get("avg_q3_pace"),
+                proj.get("recent_pace_3m"),
+                proj.get("actual_pts_per_min"))
             # ── Q3 BREAK checkpoint (directive 2026-09-18) — ADDITIVE, a
             # sibling of the production alert above, never a replacement.
             # The Q3/Q4 break sits at exactly 75.0% progress (3 of 4

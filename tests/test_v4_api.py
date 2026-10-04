@@ -426,22 +426,20 @@ def test_timeline_events_only_real_data():
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Fingerprint contract (canonical, post-C2-removal) — the served
-# fingerprint block carries exactly FINGERPRINT_KEYS = ("C1", "C3", "C5",
-# "R2") plus each key's verdict.  The removed C2 input and its forensic
-# provenance fields must NOT reappear; an unavailable operand is
+# Fingerprint contract (canonical; C2 restored 2026-10-04) — the served
+# fingerprint block carries exactly FINGERPRINT_KEYS = ("C1", "C2", "C3",
+# "C5", "R2") plus each key's verdict.  An unavailable operand is
 # reported as UNAVAILABLE, never fabricated and never silently TRUE.
-# (Replaces the obsolete C2-forensic block of 2026-09-23, whose subject
-#  was deleted from the fingerprint layer by the canonical C2 removal.)
+# The retired C4/C6 composite fields and R1 must NOT appear.
 # ═════════════════════════════════════════════════════════════════════
 
-CANONICAL_FINGERPRINT_KEYS = ("C1", "C3", "C5", "R2")
+CANONICAL_FINGERPRINT_KEYS = ("C1", "C2", "C3", "C5", "R2")
 
 
 def test_live_fingerprint_block_serves_the_canonical_key_set(client):
     """Every game's under_alert_fingerprint block exposes the canonical
-    fingerprint key set (C1, C3, C5, R2) with its per-key verdict, and no
-    field about any other key — so a re-introduced C2 field fails here."""
+    fingerprint key set (C1, C2, C3, C5, R2) with its per-key verdict, and
+    no field about any other key — so a stray C4/C6 field fails here."""
     games = client.get("/api/v4/live").json()["games"]
     assert games
     for g in games:
@@ -453,7 +451,7 @@ def test_live_fingerprint_block_serves_the_canonical_key_set(client):
         # every fingerprint_* field must be ABOUT a canonical key: the
         # subject is the first token of the name after the prefix, so
         # per-key operand detail (e.g. fingerprint_c5_req_ratio) passes
-        # while any C2 (or C4/C6) field fails.
+        # while any C4/C6 field fails.
         offenders = set()
         for name in fpb:
             if not name.startswith("fingerprint_") or name == "fingerprint_count":

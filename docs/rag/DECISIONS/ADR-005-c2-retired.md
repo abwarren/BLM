@@ -1,8 +1,13 @@
 # ADR-005 — C2 and its composites are retired
 
-Status: ACCEPTED
+Status: SUPERSEDED (2026-10-04) by ADR-006 for the C2 clause — C2 is RESTORED as
+a non-gating fingerprint.  Retained as history; C4/C6 remain retired.
 Retrieval keywords: C2 retired, retired logic, fingerprint, C4, C6, do not resurrect,
-under_fingerprints, R1 excluded, ADR.
+under_fingerprints, R1 excluded, ADR, superseded.
+
+> ⚠️ SUPERSEDED 2026-10-04: the C2 clause below no longer holds — C2 is RESTORED
+> to the live fingerprint layer (see `ADR-006-c2-restored.md`).  C4 and C6 remain
+> retired.  R1 remains excluded.
 
 ## What we decided
 
@@ -32,8 +37,10 @@ trap: the code ACCEPTS C2's inputs but must not USE them.
 
 ## Never change without explicit review
 
-- `FINGERPRINT_KEYS == ("C1","C3","C5","R2")` (exactly four).
-- The retirement of C2/C4/C6 and the exclusion of R1 (AST-enforced by test).
+- `FINGERPRINT_KEYS == ("C1","C2","C3","C5","R2")` (exactly five; C2 RESTORED
+  2026-10-04 — supersedes the ADR-005 four-key rule; see ADR-006).
+- The retirement of C4/C6 and the exclusion of R1 (AST-enforced by test).  (C2 is
+  no longer retired.)
 - The context-only role: fingerprints gate nothing and create no alert.
 
 ## Contradiction to be aware of

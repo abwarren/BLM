@@ -12,17 +12,18 @@ Built 2026-10-03 against HEAD `d864988` (branch `handoff-2026-09-07`).
 
 ---
 
-## C-01 — Fingerprint count: 4 (code) vs 7 (DECISIONS.md)
+## C-01 — Fingerprint count: 5 (code) vs 4 / 7 (stale docs)
 
-- **Code (authoritative):** `blm_v4/live_analytics/under_fingerprints.py` —
-  `FINGERPRINT_KEYS = ("C1","C3","C5","R2")`; module docstring: "C2/C4/C6 are
-  deliberately absent"; legacy momentum operands accepted but ignored.
+- **Code (authoritative 2026-10-04):** `blm_v4/live_analytics/under_fingerprints.py` —
+  `FINGERPRINT_KEYS = ("C1","C2","C3","C5","R2")` (exactly five). C2 (recent
+  deceleration) RESTORED 2026-10-04; C4/C6 remain absent.
 - **Doc (stale):** `DECISIONS.md` §16.K describes "seven fingerprints (C1..C6 + R2)"
   including C2/C4/C6 with per-fingerprint rates; §16.J lists C2 74.8% (N=111).
-- **Resolution:** code wins. C2/C4/C6 are RETIRED (see
-  `DECISIONS/ADR-005-c2-retired.md`). `DECISIONS.md` §16.K/§16.J predate the
-  retirement and are stale.
-- **Risk if ignored:** an agent reading §16 would restore C2/C4/C6.
+  ADR-005 ("C2 and its composites are retired") is SUPERSEDED by ADR-006.
+- **Resolution:** code wins — FIVE keys. C2 is a live, non-gating fingerprint; C4/C6
+  retired; R1 excluded. See `DECISIONS/ADR-006-c2-restored.md`.
+- **Risk if ignored:** an agent reading ADR-005 or §16 would (wrongly) strip C2 again
+  or re-add C4/C6.
 
 ## C-02 — Deployment: `deploy/*.service` (stale) vs live `--user` units
 
