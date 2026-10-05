@@ -1128,3 +1128,73 @@ td.ex-st-submitted { color: #3b82f6; }
   .alc-meta { gap: 8px; font-size: 12px; }
   .manual-bet input { width: 68px; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   AUTO-BET PRIMARY CONTROLS (top bar) — frontend-only relocation.
+   The ON/OFF switch, unit price and Save moved out of the collapsed
+   GLOBAL CONTROLS section so they are visible without scrolling.  The
+   element ids (#abSwitch / #abUnitPrice / #abSaveUnit) are unchanged, so
+   the existing status poll, authorization gating and settings API calls
+   all continue to work untouched.  Deliberately RED: this is the one
+   control area that can risk money, so it must never read as decorative.
+   ══════════════════════════════════════════════════════════════════════ */
+.ab-top {
+  display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 5px 12px; border-radius: 8px;
+  border: 1px solid var(--red);
+  background: linear-gradient(180deg, rgba(248, 113, 113, .18) 0%, rgba(248, 113, 113, .07) 100%);
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, .18), 0 0 14px rgba(248, 113, 113, .10) inset;
+}
+.ab-top-switch {
+  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; font-weight: 800;
+  letter-spacing: 1px; color: var(--red); white-space: nowrap;
+}
+.ab-top-switch input[type="checkbox"] {
+  width: 22px; height: 22px; margin: 0; accent-color: var(--red); cursor: pointer;
+}
+.ab-top-switch input[type="checkbox"]:disabled { cursor: not-allowed; }
+.ab-top-switch input[type="checkbox"]:disabled + span { opacity: .65; }
+.ab-top-switch input[type="checkbox"]:not(:disabled):checked + span {
+  color: #fecaca; text-shadow: 0 0 8px rgba(248, 113, 113, .7);
+}
+.ab-top-sep { color: rgba(248, 113, 113, .45); font-family: var(--mono); font-weight: 700; }
+.ab-top-unit {
+  font-family: var(--mono); font-size: 12px; font-weight: 800;
+  letter-spacing: 1px; color: #fecaca; white-space: nowrap;
+}
+.ab-top-input { display: inline-flex; align-items: center; gap: 5px; }
+/* keep "UNIT:" glued to its field + SAVE when the header wraps on narrow screens */
+.ab-top-unit-wrap { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.ab-top-cur { font-family: var(--mono); font-size: 12px; font-weight: 800; color: #fecaca; }
+.ab-top-input input[type="number"] {
+  width: 78px; padding: 3px 7px; border-radius: 6px;
+  border: 1px solid var(--red); background: #1b0c0c; color: #fef2f2;
+  font-family: var(--mono); font-size: 12px; font-weight: 800;
+}
+.ab-top-input input[type="number"]:disabled {
+  /* read-only by design (the server owns the unit price): legible, but
+     visibly inert rather than dimmed into the red background */
+  opacity: 1; color: #fecaca; border-color: rgba(248, 113, 113, .55);
+}
+.ab-top-input button {
+  padding: 3px 11px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--red); background: var(--red); color: #1b0606;
+  font-family: var(--mono); font-size: 11px; font-weight: 800; letter-spacing: 1px;
+}
+.ab-top-input button:hover:not(:disabled) { background: #fca5a5; }
+.ab-top-input button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Narrow screens: give the control block its own full-width row instead of
+   squeezing the header; never let it force horizontal scrolling. */
+@media (max-width: 900px) {
+  .ab-top { width: 100%; justify-content: flex-start; }
+}
+@media (max-width: 520px) {
+  .ab-top { gap: 6px; padding: 5px 8px; }
+  .ab-top-switch { font-size: 11px; }
+  .ab-top-switch input[type="checkbox"] { width: 19px; height: 19px; }
+  .ab-top-sep { display: none; }
+  .ab-top-input input[type="number"] { width: 64px; }
+}
+

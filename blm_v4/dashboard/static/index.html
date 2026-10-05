@@ -15,6 +15,27 @@
       <span class="brand-title">BLM COMMAND CENTER</span>
       <span class="brand-sub">PokerBet · pace-Z under-alert · Cyber 2K26 / Betual NBA</span>
     </div>
+    <!-- ═══ AUTO-BET PRIMARY CONTROLS — top bar, visible without scrolling ═══
+         Frontend-only relocation: these are the SAME #abSwitch / #abUnitPrice /
+         #abSaveUnit elements moved up from the GLOBAL CONTROLS section.  The
+         status poll populates them by id and the /api/v4/betting/status
+         authorization gating is unchanged. -->
+    <div class="ab-top" id="abTop">
+      <label class="ab-top-switch" title="Global Auto-Betting switch — server-side limits and the kill switch still apply">
+        <input type="checkbox" id="abSwitch" disabled>
+        <span id="abSwitchLabel">AUTO BETTING: --</span>
+      </label>
+      <span class="ab-top-sep" aria-hidden="true">|</span>
+      <span class="ab-top-unit-wrap">
+        <label class="ab-top-unit" for="abUnitPrice">UNIT:</label>
+        <span class="ab-top-input">
+          <span class="ab-top-cur">R</span>
+          <input type="number" id="abUnitPrice" min="1" step="0.50" disabled
+                 aria-label="Unit price — stake per unit">
+          <button id="abSaveUnit" type="button" disabled>SAVE</button>
+        </span>
+      </span>
+    </div>
     <div class="status-cluster">
       <span class="pill live-pill" id="livePill"><span class="dot" id="liveDot"></span><span id="liveLabel">LIVE</span></span>
       <span class="pill" id="collectorPill">collector: --</span>
@@ -139,10 +160,7 @@
       <span class="pill muted" id="abSubmitPill" title="Server-side real-submission authorization (BETTING_BROWSER_SUBMIT) — read live from the backend">REAL SUBMIT: --</span>
     </summary>
     <div class="alerts-body" id="autoBettingBody">
-      <label class="ab-switch-wrap muted">
-        <input type="checkbox" id="abSwitch" disabled>
-        <span id="abSwitchLabel">AUTO BETTING: --</span>
-      </label>
+      <div class="ab-note muted">AUTO BETTING ON/OFF and UNIT PRICE are in the top bar ↑ — this section keeps the detailed state, limits and today's totals.</div>
       <!-- global state bar -->
       <div class="ab-global-bar" id="abGlobalBar">
         <div class="ab-state-item">
@@ -164,11 +182,6 @@
       </div>
       <div class="ab-grid">
         <div class="ab-settings">
-          <div class="ab-row">
-            <label for="abUnitPrice">Unit Price:</label>
-            <span class="ab-input-wrap">R <input type="number" id="abUnitPrice" min="1" step="0.50" disabled>
-              <button id="abSaveUnit" disabled>Save</button></span>
-          </div>
           <div class="ab-note muted" id="abLimitsNote">limits: --</div>
           <div class="ab-note muted">stake = unit price × 1 unit · server-side limits cannot be raised from this page</div>
         </div>
