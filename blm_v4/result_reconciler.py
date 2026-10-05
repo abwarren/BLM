@@ -506,34 +506,10 @@ class ResultReconciler:
         return n
 
     # ── candidates (directive §1) ─────────────────────────────────
-    def candidate_games(self, conn: sqlite3.Connection) -> list[dict]:
-        """Games needing reconciliation — the directive's scan set.
-
-        Candidates are games (any status) whose stored result is not
-        VERIFIED OK, whose snapshot history cannot prove a final by the
-        scorecard's own rules, and whose latest attempt is retryable:
-          * never attempted, or
-          * last attempt FAILED_ATTEMPT/REJECTED with attempts < max, or
-            with the RE-ARM COOLDOWN elapsed (see RETRY_COOLDOWN_S: a
-            rejection reflects the feed's render AT THAT MOMENT, and the
-            feed later holds the complete final — a terminal count cap
-            left 2 486 ended games with no final and their alerts stuck
-            RESULT PENDING forever), or
-          * last attempt CONFLICT (re-checked; flagged again, never
-            silently overwritten), or
-          * last attempt VERIFIED while the OK row it produced is NO
-            LONGER persisted (directive 2026-09-24: a verification is
-            terminal only while its persisted verdict stands.  Measured
-            live: the pre-fix writers destroyed 2,592 of 2,907 verified
-            finals and the games were re-attempted NEVER, because the
-            state table still said VERIFIED — the 'no final' the directive
-            forbids, produced by the reconciliation layer itself).
-        VERIFIED-with-OK and TEMPLATE_FAILED games are never re-attempted
-        (the first is final, the second is exhausted).  A game holding a
-        verified OK row is never a candidate (its result is final).
-        """
-        rows = conn.execute(
-            """
+    #: The shared "eligible candidate" predicate — ONE definition used by
+    #: BOTH the newest-first pass and the starvation-proof re-arm slice.
+    #: Placeholders, in order: (max_attempts, retry cutoff).
+    _CANDIDATE_SELECT = """
             SELECT g.source_game_id,
                    COALESCE(g.classification, '') AS classification,
                    g.home_team, g.away_team, g.status,
@@ -576,12 +552,78 @@ class ResultReconciler:
                                 ('00:00', '0:00')))
                     AND (s2.home_score IS NOT NULL
                          OR s2.away_score IS NOT NULL))
-            ORDER BY g.last_seen_at DESC
-            LIMIT ?
-            """,
-            (self._max_attempts, self._retry_cutoff(), self._batch_limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+    """
+
+    #: The bounded re-arm slice is ``batch_limit // _REARM_SLICE_DIVISOR``
+    #: (>= 1) games, so the pass stays bounded at ``batch_limit + slice``.
+    _REARM_SLICE_DIVISOR = 5
+
+    def candidate_games(self, conn: sqlite3.Connection) -> list[dict]:
+        """Games needing reconciliation — the directive's scan set.
+
+        Candidates are games (any status) whose stored result is not
+        VERIFIED OK, whose snapshot history cannot prove a final by the
+        scorecard's own rules, and whose latest attempt is retryable:
+          * never attempted, or
+          * last attempt FAILED_ATTEMPT/REJECTED with attempts < max, or
+            with the RE-ARM COOLDOWN elapsed (see RETRY_COOLDOWN_S: a
+            rejection reflects the feed's render AT THAT MOMENT, and the
+            feed later holds the complete final — a terminal count cap
+            left 2 486 ended games with no final and their alerts stuck
+            RESULT PENDING forever), or
+          * last attempt CONFLICT (re-checked; flagged again, never
+            silently overwritten), or
+          * last attempt VERIFIED while the OK row it produced is NO
+            LONGER persisted (directive 2026-09-24: a verification is
+            terminal only while its persisted verdict stands.  Measured
+            live: the pre-fix writers destroyed 2,592 of 2,907 verified
+            finals and the games were re-attempted NEVER, because the
+            state table still said VERIFIED — the 'no final' the directive
+            forbids, produced by the reconciliation layer itself).
+        VERIFIED-with-OK and TEMPLATE_FAILED games are never re-attempted
+        (the first is final, the second is exhausted).  A game holding a
+        verified OK row is never a candidate (its result is final).
+
+        STARVATION-PROOF RE-ARM SLICE (2026-10-05).  The re-arm mechanism
+        above makes an exhausted game eligible again, but this pass is
+        ``ORDER BY last_seen_at DESC LIMIT batch_limit`` — so with a deep
+        backlog the OLDEST re-armed games are pushed behind the newest
+        candidates on every pass and can starve indefinitely (forensic
+        2026-10-04: ~3 528 eligible; six partial-render games were never
+        reached once their live attempts were spent).  A bounded,
+        deterministic slice of the exhausted ``REJECTED``/``FAILED_ATTEMPT``
+        cohort whose cooldown has elapsed is therefore selected
+        OLDEST-attempt-first and UNIONed (deduplicated) with the
+        newest-first pass.  The newest-first selection itself is UNCHANGED
+        — the slice only ADDS the cohort that order can starve.
+        """
+        params = (self._max_attempts, self._retry_cutoff())
+        newest = [dict(r) for r in conn.execute(
+            self._CANDIDATE_SELECT
+            + " ORDER BY g.last_seen_at DESC LIMIT ?",
+            params + (self._batch_limit,)).fetchall()]
+        seen = {r["source_game_id"] for r in newest}
+
+        # Exhausted REJECTED/FAILED_ATTEMPT cohort whose cooldown elapsed:
+        # exactly the games the newest-first pass can push behind forever.
+        # Oldest attempt first ⇒ deterministic age ordering, no starvation.
+        slice_n = max(1, self._batch_limit // self._REARM_SLICE_DIVISOR)
+        rearm = conn.execute(
+            self._CANDIDATE_SELECT
+            + " AND st.attempt >= ?"
+              " AND st.outcome IN ('FAILED_ATTEMPT', 'REJECTED')"
+              " AND st.updated_at <= ?"
+              " ORDER BY st.updated_at ASC, g.last_seen_at ASC"
+              " LIMIT ?",
+            (self._max_attempts, self._retry_cutoff(),
+             self._max_attempts, self._retry_cutoff(),
+             slice_n)).fetchall()
+        for r in rearm:
+            d = dict(r)
+            if d["source_game_id"] not in seen:
+                newest.append(d)
+                seen.add(d["source_game_id"])
+        return newest
 
     def _retry_cutoff(self) -> str:
         """ISO timestamp before which a REJECTED/FAILED_ATTEMPT game
