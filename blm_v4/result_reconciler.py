@@ -58,7 +58,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -90,6 +90,25 @@ SRC_MANUAL_REVIEW = "MANUAL_REVIEW"
 #: NEEDS_RECONCILIATION is the directive's new state: the game left the
 #: live market without a verified final — reconciliation REQUIRED.
 STATUS_NEEDS_RECONCILIATION = "NEEDS_RECONCILIATION"
+
+#: RE-ARM COOLDOWN for a REJECTED / FAILED_ATTEMPT game (defect
+#: RESULTED-ALERTS-STUCK-PENDING, 2026-10-03).  ``max_attempts`` was a
+#: hard, TERMINAL cap — but the swarm feed it reconciles against is a
+#: LIVE, IMPROVING source whose render for an in-play game is PARTIAL
+#: (``parse_quality != 'full'``, 1–3 quarters) and therefore correctly
+#: rejected by ``validate_page_result``.  That rejection is a statement
+#: about the MOMENT, not about the game: minutes later the same feed
+#: publishes the complete four-quarter final.  Measured 2026-10-03 —
+#: games ``31101100``/``31093644`` sat REJECTED at attempt 3 with NULL
+#: finals while the feed held ``150:115`` (4 quarters) and ``102:115``
+#: (4 quarters) for them; 2 486 such games were permanently exhausted.
+#: A rejected game therefore re-enters the work set once this cooldown
+#: has elapsed since its last attempt, and keeps re-entering (rate-
+#: limited by the pass interval and ``batch_limit``) until it settles OK
+#: — never a request storm, never a permanent NO FINAL.  TEMPLATE_FAILED
+#: stays terminal: that render is SPA-cached, so a retry re-reads the
+#: same page.
+RETRY_COOLDOWN_S = 3600.0
 
 #: the state machine (directive §7), for docs/API surfaces.
 RESULT_STATUS_NOTE = (
@@ -281,10 +300,35 @@ def _fixture_start_consistent(page_start: Optional[str],
             full_min = float(duration_for(classification)[1])
         except Exception:
             full_min = _DEFAULT_FULL_MIN
+        # The LOWER bound's duration is the LONGER of the classification's
+        # regulation length and OUR OWN observed wall-clock span (defect
+        # RESULTED-ALERTS-STUCK-PENDING, 2026-10-03).  Regulation is the
+        # PLAYING time; a fixture's wall-clock span also carries pre-roll,
+        # inter-quarter breaks, stoppages and (for virtuals) a scheduled
+        # slot that can precede tip-off — measured live on the two stalled
+        # games: BETUAL_NBA 2915 s wall clock for 2400 s regulation,
+        # CYBER_2K26 4940 s for 2880 s.  A regulation-only bound therefore
+        # declared our OWN fixture "an earlier replay that had already
+        # finished" (delta -2930 s and -4323 s against windows of -2700 s
+        # and -3180 s) and every CYBER result was REJECTED on identity —
+        # 11.8 % final coverage against BETUAL_NBA's 80.3 %.  Using the
+        # OBSERVED span keeps (and tightens) the anti-neighbour property:
+        # the bound still rejects a same-teams fixture that had already
+        # finished before we last saw ours, because that neighbour started
+        # before WE did, not merely before last_seen.
+        obs = None
+        f = _parse_any_ts(record_first_seen)
+        if f is not None:
+            if f.tzinfo is None or l.tzinfo is None:
+                obs = (l.replace(tzinfo=None) - f.replace(tzinfo=None)).total_seconds()
+            else:
+                obs = (l - f).total_seconds()
+            obs = max(0.0, obs) if obs == obs else None
+        span_s = max(full_min * 60.0, obs or 0.0)
         delta = (p_cmp - l_cmp).total_seconds()
         if delta > _FIXTURE_GRACE_S:
             return False                # started after we stopped watching
-        if -delta > full_min * 60.0 + _FIXTURE_GRACE_S:
+        if -delta > span_s + _FIXTURE_GRACE_S:
             return False                # had already finished before then
         return True
     # no last observation to anchor on — fall back to the historical
@@ -391,6 +435,7 @@ class ResultReconciler:
                  swarm: Optional[Any] = None,
                  max_attempts: int = 3,
                  batch_limit: int = 25,
+                 retry_cooldown_s: float = RETRY_COOLDOWN_S,
                  log: Optional[logging.Logger] = None):
         self._db_path = Path(db_path)
         self._fetcher = fetcher
@@ -400,6 +445,9 @@ class ResultReconciler:
         self._swarm = swarm
         self._max_attempts = max(1, int(max_attempts))
         self._batch_limit = max(1, int(batch_limit))
+        # RE-ARM COOLDOWN for REJECTED/FAILED_ATTEMPT games (see
+        # RETRY_COOLDOWN_S).  0 disables re-arming (the old terminal cap).
+        self._retry_cooldown_s = max(0.0, float(retry_cooldown_s))
         self._log = log or logger
         self._lock = threading.Lock()
         self._init_schema()
@@ -466,6 +514,11 @@ class ResultReconciler:
         scorecard's own rules, and whose latest attempt is retryable:
           * never attempted, or
           * last attempt FAILED_ATTEMPT/REJECTED with attempts < max, or
+            with the RE-ARM COOLDOWN elapsed (see RETRY_COOLDOWN_S: a
+            rejection reflects the feed's render AT THAT MOMENT, and the
+            feed later holds the complete final — a terminal count cap
+            left 2 486 ended games with no final and their alerts stuck
+            RESULT PENDING forever), or
           * last attempt CONFLICT (re-checked; flagged again, never
             silently overwritten), or
           * last attempt VERIFIED while the OK row it produced is NO
@@ -498,7 +551,10 @@ class ResultReconciler:
               AND (st.source_game_id IS NULL
                    OR st.outcome IN ('FAILED_ATTEMPT', 'CONFLICT',
                                      'REJECTED', 'VERIFIED'))
-              AND (st.attempt IS NULL OR st.attempt < ?)
+              AND (st.attempt IS NULL
+                   OR st.attempt < ?
+                   OR (st.outcome IN ('FAILED_ATTEMPT', 'REJECTED')
+                       AND st.updated_at <= ?))
               AND NOT EXISTS (
                   SELECT 1 FROM snapshots s2
                   WHERE s2.source_game_id = g.source_game_id
@@ -523,9 +579,24 @@ class ResultReconciler:
             ORDER BY g.last_seen_at DESC
             LIMIT ?
             """,
-            (self._max_attempts, self._batch_limit),
+            (self._max_attempts, self._retry_cutoff(), self._batch_limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def _retry_cutoff(self) -> str:
+        """ISO timestamp before which a REJECTED/FAILED_ATTEMPT game
+        re-arms (``updated_at <= cutoff``).  Same ``%Y-%m-%dT%H:%M:%S.%fZ``
+        shape as every writer of ``result_reconciliation_state.updated_at``
+        (``rec["fetched_at"]``), so a lexicographic comparison is exact.
+
+        A cooldown of 0 DISABLES re-arming and yields the epoch sentinel —
+        no stored ``updated_at`` can be ``<=`` it, which is exactly the
+        pre-fix terminal ``attempt < max_attempts`` cap."""
+        if self._retry_cooldown_s <= 0:
+            return "0000-01-01T00:00:00.000000Z"
+        return (datetime.now(timezone.utc)
+                - timedelta(seconds=self._retry_cooldown_s)
+                ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     # ── the captured-history bound (directive 2026-09-24) ──────────
     def _attach_history_bounds(self, conn: sqlite3.Connection,
