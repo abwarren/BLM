@@ -1133,6 +1133,12 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
             "closing_line": closing_line,
             "closing_line_at": closing_line_at,
             "total_line": market_total,
+            # the OBSERVED Total-line series (ascending) — the source the
+            # canonical rung rule derives its tick size from
+            # (blm_v4/betting/rung.py::infer_rung_size).  Additive passthrough
+            # of already-computed observations; never a new derivation, never
+            # an alert input, never a re-selection of the frozen trigger line.
+            "observed_lines": [l for l in lines if l is not None],
             "score_line_gap": score_line_gap,
             "total_line_at": (
                 ws_obs["captured_at"] if mkt_src == "ws" and ws_obs

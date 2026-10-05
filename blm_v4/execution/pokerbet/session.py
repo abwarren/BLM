@@ -17,6 +17,11 @@ from urllib.parse import quote
 from blm_v4.execution.pokerbet.browser import CdpBrowser
 
 _BASE = "https://www.pokerbet.co.za"
+# LEGACY fallback shape ONLY — never used when the game record carries its
+# recorded ``source_url``.  This hardcodes the competition id ``1`` and an
+# ``x`` tail and is NOT reliable; ``event_view_url_for`` is the canonical
+# resolver (live-verified 2026-10-05: the real path is
+# ``…/event-view/<Sport>/<Region>/<comp_id>/<slug>/<event_id>/<name>``).
 EVENT_VIEW_URL = (
     _BASE + "/en/sports/live/event-view/Basketball/World/1/"
     "{classification_slug}/{game_id}/x")
@@ -24,12 +29,26 @@ RESULTS_URL = _BASE + "/en/sports/results?game={game_id}"
 
 
 def event_view_url(game_id: str, classification: Optional[str] = None) -> str:
-    """The canonical live event-view URL for a game id."""
+    """LEGACY fallback URL shape (hardcodes competition id + ``x`` tail).
+
+    Kept for backward compatibility / tests only.  Real navigation MUST use
+    ``event_view_url_for`` with the game's recorded ``source_url``.
+    """
     slug = re.sub(
         r"[^a-z0-9]+", "-", (classification or "betual-nba").lower()
     ).strip("-")
     return EVENT_VIEW_URL.format(
         classification_slug=slug, game_id=quote(str(game_id)))
+
+
+def event_view_url_for(record: dict) -> Optional[str]:
+    """Canonical navigation URL: the RECORDED ``source_url`` (never rebuilt).
+
+    Returns None when the record carries no source_url, so the adapter FAILS
+    CLOSED instead of navigating to a fabricated endpoint.
+    """
+    su = str((record or {}).get("source_url") or "").strip()
+    return su or None
 
 
 def results_url(game_id: str) -> str:

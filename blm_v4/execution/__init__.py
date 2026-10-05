@@ -21,10 +21,24 @@ from blm_v4.execution.selection_model import (
     validate_selection,
 )
 from blm_v4.execution.total_executor import TotalExecutor
+from blm_v4.execution.browser_bridge import (
+    BridgeError,
+    BridgeLedger,
+    BridgeReceipt,
+    BridgeTimeout,
+    BridgeUnavailable,
+    BrowserBridge,
+    ExecutionBridge,
+    ResolverBrowserBridge,
+)
 
 __all__ = [
     "AdapterUnavailable", "MarketObservation", "SelectionResolver",
     "ExecutionConfig", "build_matrix", "describe_combo", "AbortEvent",
     "MODE_LIVE", "MODES", "ParlayJob", "Selection", "validate_selection",
     "TotalExecutor",
+    # Auto-Bet browser/extension execution bridge
+    "BrowserBridge", "ResolverBrowserBridge", "ExecutionBridge",
+    "BridgeLedger", "BridgeReceipt", "BridgeError", "BridgeTimeout",
+    "BridgeUnavailable",
 ]

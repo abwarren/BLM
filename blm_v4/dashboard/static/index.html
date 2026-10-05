@@ -31,22 +31,28 @@
               title="Alert audio off — click to enable">AUDIO OFF</button>
     </div>
     <div class="filters" id="filters">
-      <button class="filter active" data-filter="">ALL</button>
-      <button class="filter" data-filter="betual-nba">NBA</button>
-      <button class="filter" data-filter="betual-kbl">KBL</button>
-      <button class="filter" data-filter="betual-cba">CBA</button>
-      <button class="filter" data-filter="betual-tbsl">TBSL</button>
-      <button class="filter" data-filter="betual-euroleague">EUROLEAGUE</button>
-      <button class="filter" data-filter="cyber-basketball-2k26-matches">CYBER 2K26</button>
-      <span class="filter-sep"></span>
-      <button class="filter active" id="liveToggle" data-livefilter="live" title="Show ended/stale games too">SHOWING LIVE</button>
-      <input type="search" id="globalSearch" class="global-search" placeholder="SEARCH teams · league · game id · exec / alert id" spellcheck="false" aria-label="Global search across live games">
-      <label class="filter-select">CHECKPOINT <select id="checkpointFilter"><option value="">ALL</option><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option></select></label>
-      <label class="filter-select">DIRECTION <select id="directionFilter"><option value="">ALL</option><option value="UNDER">UNDER</option><option value="OVER">OVER</option></select></label>
-      <label class="filter-select">ALERT <select id="alertStateFilter"><option value="">ALL</option><option value="ACTIVE">ACTIVE</option><option value="INACTIVE">INACTIVE</option></select></label>
-      <label class="filter-select">BET <select id="betStateFilter"><option value="">ALL</option><option value="EXECUTED">HAS EXECUTION</option><option value="NONE">NO EXECUTION</option></select></label>
-      <label class="filter-select">STATE <select id="gameStateFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="stale">STALE</option><option value="ended">ENDED</option><option value="invalid">INVALID</option></select></label>
-      <span class="muted filter-count" id="liveCount"></span>
+      <span class="filters-label">Filters</span>
+      <div class="fgroup">
+        <button class="filter active" data-filter="">ALL</button>
+        <button class="filter" data-filter="betual-nba">NBA</button>
+        <button class="filter" data-filter="betual-kbl">KBL</button>
+        <button class="filter" data-filter="betual-cba">CBA</button>
+        <button class="filter" data-filter="betual-tbsl">TBSL</button>
+        <button class="filter" data-filter="betual-euroleague">EUROLEAGUE</button>
+        <button class="filter" data-filter="cyber-basketball-2k26-matches">CYBER 2K26</button>
+      </div>
+      <div class="fgroup">
+        <button class="filter active" id="liveToggle" data-livefilter="live" title="Show ended/stale games too">SHOWING LIVE</button>
+        <input type="search" id="globalSearch" class="global-search" placeholder="SEARCH teams · league · game id · exec / alert id" spellcheck="false" aria-label="Global search across live games">
+      </div>
+      <div class="fgroup fgroup-selects">
+        <label class="filter-select">CHECKPOINT <select id="checkpointFilter"><option value="">ALL</option><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option></select></label>
+        <label class="filter-select">DIRECTION <select id="directionFilter"><option value="">ALL</option><option value="UNDER">UNDER</option><option value="OVER">OVER</option></select></label>
+        <label class="filter-select">ALERT <select id="alertStateFilter"><option value="">ALL</option><option value="ACTIVE">ACTIVE</option><option value="INACTIVE">INACTIVE</option></select></label>
+        <label class="filter-select">BET <select id="betStateFilter"><option value="">ALL</option><option value="EXECUTED">HAS EXECUTION</option><option value="NONE">NO EXECUTION</option></select></label>
+        <label class="filter-select">STATE <select id="gameStateFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="stale">STALE</option><option value="ended">ENDED</option><option value="invalid">INVALID</option></select></label>
+        <span class="muted filter-count" id="liveCount"></span>
+      </div>
     </div>
   </header>
 
@@ -124,17 +130,19 @@
   </main>
 
   <!-- ═══════════ GLOBAL CONTROLS — kill switch + auto bet status ═══════════ -->
-  <section class="alerts" id="autoBettingSection">
-    <div class="alerts-head">
+  <section class="alerts sec-collapsible" id="autoBettingSection">
+    <details class="sec-details">
+    <summary class="alerts-head sec-summary">
       <span class="alerts-title">GLOBAL CONTROLS</span>
       <span class="pill ab-mode-pill" id="abModePill">--</span>
       <span class="pill muted" id="abKillSwitchPill" title="Kill-switch state — server-controlled">KILL SWITCH: --</span>
+      <span class="pill muted" id="abSubmitPill" title="Server-side real-submission authorization (BETTING_BROWSER_SUBMIT) — read live from the backend">REAL SUBMIT: --</span>
+    </summary>
+    <div class="alerts-body" id="autoBettingBody">
       <label class="ab-switch-wrap muted">
         <input type="checkbox" id="abSwitch" disabled>
         <span id="abSwitchLabel">AUTO BETTING: --</span>
       </label>
-    </div>
-    <div class="alerts-body" id="autoBettingBody">
       <!-- global state bar -->
       <div class="ab-global-bar" id="abGlobalBar">
         <div class="ab-state-item">
@@ -186,22 +194,25 @@
       <ul class="ab-exec-list" id="abHistoryList"><li class="alerts-empty">Search execution history</li></ul>
       <ul class="ab-audit-list" id="abAuditList"></ul>
     </div>
+    </details>
   </section>
 
   <!-- ═══════════ EXECUTION / AUDIT TRACE — ALERT → GAME → SIGNAL → EXECUTION → RESULT.
        One chain per game that has an execution: every value served by the
        betting status/history endpoints and the per-game state endpoint —
        the browser invents no state, no id and no reason. -->
-  <section class="alerts" id="traceSection">
-    <div class="alerts-head">
+  <section class="alerts sec-collapsible" id="traceSection">
+    <details class="sec-details">
+    <summary class="alerts-head sec-summary">
       <span class="alerts-title">EXECUTION / AUDIT TRACE</span>
       <span class="muted alerts-sub">ALERT → GAME → SIGNAL → EXECUTION → RESULT ·
         states as served by the betting API · UNKNOWN needs provider reconciliation</span>
-      <button id="traceRefresh" type="button">REFRESH</button>
-    </div>
+    </summary>
+    <div class="sec-tools"><button id="traceRefresh" type="button">REFRESH</button></div>
     <div class="alerts-body" id="traceList">
       <div class="alerts-empty">No executions to trace</div>
     </div>
+    </details>
   </section>
 
   </div><!-- /#viewLive -->

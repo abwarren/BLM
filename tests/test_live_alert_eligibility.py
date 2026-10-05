@@ -28,6 +28,10 @@ from blm_v4.api import (ALERT_MAX_OBS_AGE_S, ALERT_MIN_REMAINING_MINUTES,
                         _alert_gate)
 from blm_v4.terminal_eligibility import is_terminal_checkpoint
 
+import blm_v4.api as v4api
+from blm_v4.models import MarketObservation, PokerBetGame
+from blm_v4.storage import PokerBetStore
+
 HERE = Path(__file__).resolve().parent
 DASH_JS = HERE.parent / "blm_v4" / "dashboard" / "static" / "dashboard.js"
 
@@ -330,7 +334,42 @@ def _client():
     return TestClient(app)
 
 
-def test_live_payload_exposes_alert_gate_for_every_game():
+@pytest.fixture
+def live_db(tmp_path, monkeypatch):
+    """``/api/v4/live`` reads the pokerbet DB.  A dev checkout has no DB at
+    the repo-default path and the production DB is far too large to query
+    here, so give the test its own seeded one with exactly ONE live game
+    (the payload shape is what the test asserts, not the alert math)."""
+    db = tmp_path / "blm_pokerbet.db"
+    monkeypatch.setenv("BLM_POKERBET_DB", str(db))
+    monkeypatch.setattr(v4api, "STATE_FILE", tmp_path / "collector_state.json")
+    st = PokerBetStore(db)
+    now = datetime.now(timezone.utc)
+
+    def iso(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    game = PokerBetGame(
+        source="PokerBet", source_game_id="LIVE-ELIG-1",
+        competition_id="comp-elig", competition_slug="betual-nba",
+        competition="Betual NBA", region="Virtual Matches",
+        game_family="betual", classification="BETUAL_NBA",
+        sport="basketball", home_team="Alpha Virtual",
+        away_team="Beta Virtual", game_slug="alpha-virtual-beta-virtual",
+        source_url="https://x/LIVE-ELIG-1", status="live",
+        first_seen_at=iso(now - timedelta(minutes=30)), last_seen_at=iso(now))
+    gid = st.upsert_game(game)
+    st.insert_snapshot(gid, MarketObservation(
+        source="PokerBet", source_game_id="LIVE-ELIG-1",
+        classification="BETUAL_NBA", captured_at=iso(now),
+        home_team="Alpha Virtual", away_team="Beta Virtual",
+        home_score=40, away_score=38, period_label="2nd Quarter", quarter=2,
+        clock="06:00", game_status="live", total_line=180.5, spread=None,
+        w1_odds=None, w2_odds=None, markets_json="{}"), force=True)
+    return db
+
+
+def test_live_payload_exposes_alert_gate_for_every_game(live_db):
     """/live must carry an authoritative `alert` block per game so the
     frontend never has to infer eligibility."""
     resp = _client().get("/api/v4/live")

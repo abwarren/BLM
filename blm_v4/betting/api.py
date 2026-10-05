@@ -16,8 +16,13 @@ from fastapi import APIRouter, HTTPException
 
 from blm_v4.betting.config import BettingConfig, credentials_present
 from blm_v4.betting.executor import evaluate, execute
-from blm_v4.betting.provider import provider_from_config
+from blm_v4.betting.provider import (
+    browser_submit_authorized,
+    provider_from_config,
+)
 from blm_v4.betting.store import BettingStore
+from blm_v4.betting import command as _command
+from blm_v4.betting import stake as _stake
 
 router = APIRouter(prefix="/api/v4/betting", tags=["blm-v4-betting"])
 
@@ -81,6 +86,9 @@ def betting_status() -> dict:
         "enabled": enabled,
         "dry_run": cfg.dry_run,
         "live_money_enabled": cfg.live_money_enabled,
+        # the SECOND server-side interlock — read LIVE (call time) so the UI
+        # shows the real authority, never a cosmetic toggle
+        "browser_submit_authorized": browser_submit_authorized(),
         "mode": "DRY_RUN" if cfg.dry_run else "LIVE",
         "unit_price": unit_price,
         "stake_units": cfg.stake_units,
@@ -288,6 +296,24 @@ def manual_bet(payload: dict) -> dict:
         raise HTTPException(status_code=409, detail="live Total market unavailable or expired")
     if not math.isclose(float(live_line), line, rel_tol=0.0, abs_tol=0.0001):
         raise HTTPException(status_code=409, detail="requested line is not the current observed Total")
+
+    # ── canonical Auto-Bet command gate (gap G-07) ────────────────────
+    # An alert-driven UNDER command (the active-alert card's PLACE BET) is
+    # routed through the ONE shared validator the AUTONOMOUS path uses
+    # (blm_v4/betting/command.py), so manual and autonomous can never
+    # diverge.  IMPLEMENTED but deliberately NOT ARMED until every
+    # Production Wiring Gate passes and the operator authorizes the flip
+    # (see the module docstring).  While disarmed this block is skipped and
+    # the legacy contract above is byte-for-byte unchanged.
+    if _command.WIRED_INTO_PRODUCTION and direction == "UNDER" \
+            and game.get("under_alert"):
+        cmd = _command.manual_command(
+            game, mode=_stake.PRODUCTION_AUTO_BET, unit_size=unit,
+            authorized=True, authorized_by="manual_ui",
+            idempotency_key=idem)
+        if cmd["decision"] != _command.ALLOW:
+            raise HTTPException(status_code=409,
+                                detail=f"command rejected: {cmd['reason']}")
 
     execution_id = "bet-" + hashlib.sha256(idem.encode("utf-8")).hexdigest()[:20]
     alert_id = f"manual:{key}"

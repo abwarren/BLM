@@ -1110,7 +1110,7 @@ function q3ActiveRowHTML(a) {
     <li class="al-row${ocClass ? " " + ocClass : ""}"
         data-game-id="${esc(a.game_id)}" role="button" tabindex="0"
         title="Reveal this game's card">
-      <div class="al-headline">🔥 UNDER ALERT — Q3 BREAK</div>
+      <div class="al-headline">🔥 UNDER ALERT — Q3 BREAK${a.triggered_at ? `<span class="alc-ts">${fmtTime(a.triggered_at)}</span>` : ""}</div>
       <div class="al-ident">${a.home_team || a.away_team
         ? `${esc(a.home_team)} vs ${esc(a.away_team)}` : alertIdent(a)}</div>
       ${alertGameMetaHTML(a)}
@@ -1135,7 +1135,7 @@ function q3HistoryRowHTML(rec) {
   const ocClass = alertOutcomeClass(rec.outcome);
   return `
     <li class="al-row${running ? "" : " al-resolved"}${ocClass ? " " + ocClass : ""}">
-      <div class="al-ident">[Q3 BREAK] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
+      <div class="al-ident">[Q3 BREAK] ${esc(rec.league)} | Game ${esc(rec.game_id)}${rec.triggered_at ? ` <span class="alc-ts">${fmtTime(rec.triggered_at)}</span>` : ""}</div>
       ${(rec.home_team || rec.away_team)
         ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
       ${rec.alert_rule !== Q3B_ALERT_RULE_ID
@@ -1588,7 +1588,7 @@ function activeAlertsHTML() {
     <li class="al-row${ocClass ? " " + ocClass : ""}"
         data-game-id="${esc(a.game_id)}" role="button" tabindex="0"
         title="Reveal this game's card">
-      <div class="al-headline">🔥 UNDER ALERT — ${a.checkpoint}%</div>
+      <div class="al-headline">🔥 UNDER ALERT — ${a.checkpoint}%${a.triggered_at ? `<span class="alc-ts">${fmtTime(a.triggered_at)}</span>` : ""}</div>
       <div class="al-ident">${a.home_team || a.away_team
         ? `${esc(a.home_team)} vs ${esc(a.away_team)}` : alertIdent(a)}</div>
       ${alertGameMetaHTML(a)}
@@ -1658,6 +1658,7 @@ function historyRowHTML(rec) {
         <span class="alc-verdict">${esc(st.word)}${outcomeGlyph(rec.outcome)}</span>
         ${(rec.home_team || rec.away_team)
           ? `<span class="al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</span>` : ""}
+        ${rec.triggered_at ? `<span class="alc-ts">${fmtTime(rec.triggered_at)}</span>` : ""}
       </div>
       <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
       ${rec.alert_rule !== ALERT_RULE_ID
@@ -4074,6 +4075,24 @@ function abStatusHTML(st) {
     ksPill.textContent = `KILL SWITCH: ${st.enabled ? "OFF (armed)" : "ON (blocked)"}`;
     ksPill.style.color = st.enabled ? "var(--amber)" : "var(--green)";
     ksPill.title = "Kill switch controls whether the betting worker will place bets. ON = blocked.";
+  }
+  // ── Real-submission authorization (the SECOND server-side interlock) ──
+  // Read live from the backend: a real click additionally requires
+  // BETTING_BROWSER_SUBMIT to be set.  The UI shows the REAL authority,
+  // never a cosmetic toggle.
+  const submitPill = $("abSubmitPill");
+  if (submitPill) {
+    const authorized = st.browser_submit_authorized === true;
+    submitPill.textContent = authorized ? "REAL SUBMIT: 🟢 AUTHORIZED"
+                                       : "REAL SUBMIT: 🔴 LOCKED";
+    submitPill.style.color = authorized ? "var(--green)" : "var(--red)";
+    submitPill.title =
+      (authorized
+        ? "BETTING_BROWSER_SUBMIT is set — a real submission can occur once "
+          + "Auto-Bet is ON and every gate passes"
+        : "BETTING_BROWSER_SUBMIT is not set — real submission is refused at "
+          + "the submission boundary")
+      + (st.dry_run ? " · DRY_RUN is on" : ` · mode ${st.mode || "--"}`);
   }
   // ── Global state bar ───────────────────────────────────────
   const ksVal = $("abKillSwitchVal");

@@ -382,14 +382,14 @@ def test_unknown_and_submitted_count_toward_exposure(tmp_path):
     assert stats["bets"] == 1 and stats["amount"] == 50.0
 
 
-def test_live_stub_fails_safe(tmp_path):
-    """Even with DRY_RUN=false, today's provider stub fails CLOSED."""
+def test_live_provider_selects_the_browser_transport(tmp_path):
+    """With DRY_RUN=false the configured provider is the REAL browser
+    transport (gate → submit), not the old inert stub.  Constructing it
+    touches no browser — the connection is lazy."""
     cfg = make_cfg(tmp_path, dry_run=False)
-    assert type(provider_from_config(cfg)).__name__ == "PokerBetProvider"
     p = provider_from_config(cfg)
-    with pytest.raises(ProviderUnavailable):
-        p.submit(execution_id="e", game_id="g", alert_id="a",
-                 selection="UNDER", price=100.0, stake_amount=10.0)
+    assert type(p).__name__ == "PokerBetBrowserProvider"
+    assert p._bridge is None and p._adapter is None   # lazy — nothing wired
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -689,17 +689,16 @@ def test_live_mode_requires_dry_run_false(tmp_path):
     assert type(provider_from_config(cfg)).__name__ == "DryRunProvider"
 
 
-def test_live_mode_dry_run_false_still_stub(tmp_path):
-    """Even with dry_run=False, the PokerBet provider is still a stub
-    and raises ProviderUnavailable — no accidental live bets."""
+def test_live_mode_uses_the_browser_transport(tmp_path):
+    """With dry_run=False the configured provider is the real browser
+    transport — selecting the live provider is not itself authority to
+    submit; the executor's kill-switch re-read still gates every submit."""
     cfg = make_cfg(tmp_path, dry_run=False)
     assert cfg.dry_run is False
     assert cfg.live_money_enabled is True
     p = provider_from_config(cfg)
-    assert type(p).__name__ == "PokerBetProvider"
-    with pytest.raises(ProviderUnavailable):
-        p.submit(execution_id="x", game_id="g", alert_id="a",
-                 selection="UNDER", price=193.5, stake_amount=10.0)
+    assert type(p).__name__ == "PokerBetBrowserProvider"
+    assert p._bridge is None and p._adapter is None   # lazy — nothing wired
 
 
 def test_live_mode_evaluate_returns_execute_not_would_bet(tmp_path):

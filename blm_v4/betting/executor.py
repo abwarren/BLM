@@ -32,6 +32,8 @@ from blm_v4.betting.provider import (
 )
 from blm_v4.betting.account_guard import verify_account
 from blm_v4.betting.store import BettingStore
+from blm_v4.betting import command as _command
+from blm_v4.betting import stake as _stake
 
 # directive §5 — the execution-state vocabulary
 STATUS_PENDING = "PENDING"
@@ -154,6 +156,24 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     fp = game.get("under_alert_fingerprint") or {}
     fingerprints_fired = fp.get("fingerprints_fired") or []
     fingerprint_count = fp.get("fingerprint_count")
+    # ── canonical Auto-Bet command gate (gap G-07) ────────────────────
+    # The ONE shared validator — the rung rule + the three stake modes —
+    # that the MANUAL path (blm_v4/betting/api.py) uses too, so the two
+    # producers can never diverge.  IMPLEMENTED but deliberately NOT ARMED
+    # in production until every Production Wiring Gate passes and the
+    # operator authorizes the flip (see blm_v4/betting/command.py).  While
+    # disarmed the ladder above stays authoritative and its behaviour is
+    # byte-for-byte unchanged.  The autonomous production stake mode is the
+    # configured unit size; the live-money authority is cfg.live_money_enabled,
+    # enforced again at the execute() boundary.
+    if _command.WIRED_INTO_PRODUCTION:
+        cmd = _command.validate_for_execution(
+            game, source=_command.SOURCE_AUTONOMOUS,
+            mode=_stake.PRODUCTION_AUTO_BET, unit_size=unit_price,
+            authorized=True, authorized_by="autonomous_worker",
+            idempotency_key=f"auto:{ik}")
+        if cmd["decision"] != _command.ALLOW:
+            return _no(cmd["reason"], ik)
     # ── 10. idempotent claim — AFTER all other gates passed ───────────
     execution_id = "bet-" + hashlib.sha256(ik.encode("utf-8")).hexdigest()[:20]
     rec = {

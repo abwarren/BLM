@@ -102,6 +102,14 @@ class BettingConfig:
     provider_base_url: str = "https://pokerbet.co.za"
     provider_timeout_s: float = 20.0
 
+    # ── the SECOND server-side submission interlock ────────────────────
+    #: Even with DRY_RUN=false and the UI's AUTO-BET switch ON, a REAL
+    #: browser submission requires this flag.  It is a separate authority
+    #: from ``dry_run`` and from the frontend: absent/false ⇒ NO BET.  The
+    #: provider re-reads the flag from the environment at the SUBMISSION
+    #: BOUNDARY (call time), so it can never be baked in at construction.
+    browser_submit: bool = False
+
     # ── paths ──────────────────────────────────────────────────────────
     db_path: str = ""
 
@@ -135,6 +143,7 @@ class BettingConfig:
                 "BETTING_PROVIDER_BASE_URL", "https://pokerbet.co.za"),
             provider_timeout_s=_env_float(
                 "BETTING_PROVIDER_TIMEOUT_S", "20") or 20.0,
+            browser_submit=_env_bool("BETTING_BROWSER_SUBMIT", "false"),
             db_path=_env("BETTING_DB_PATH",
                          str(root / "blm_betting.db")),
         )

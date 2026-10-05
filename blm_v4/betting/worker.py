@@ -32,21 +32,31 @@ from blm_v4.betting.store import BettingStore
 
 class BettingWorker:
     def __init__(self, cfg: BettingConfig, store: BettingStore,
-                 live_payload_fn, poll_interval_s: float = 5.0):
+                 live_payload_fn, poll_interval_s: float = 5.0,
+                 trigger_feed=None):
         """``live_payload_fn()`` returns the current /api/v4/live games
-        list (in-process callable; injected so tests can stub it)."""
+        list (in-process callable; injected so tests can stub it).
+
+        ``trigger_feed`` (optional) switches the worker to EVENT-DRIVEN mode:
+        instead of a full-scan poll cycle it is woken by each newly emitted
+        BLM UNDER trigger transition and evaluates ONLY that game.  The poll
+        path stays the default when no feed is supplied.
+        """
         self.cfg = cfg
         self.store = store
         self._live_payload_fn = live_payload_fn
         self.poll_interval_s = poll_interval_s
+        self.trigger_feed = trigger_feed
         self.provider = provider_from_config(cfg)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.last_error: Optional[str] = None
 
     def start(self) -> None:
+        target = (self._run_trigger_driven if self.trigger_feed is not None
+                  else self._run)
         self._thread = threading.Thread(
-            target=self._run, name="blm-betting-worker", daemon=True)
+            target=target, name="blm-betting-worker", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 3.0) -> None:
@@ -76,38 +86,90 @@ class BettingWorker:
         games = self._live_payload_fn() or []
         stats = self.store.today_stats()
         for g in games:
-            res = evaluate(g, cfg=self.cfg, store=self.store,
-                           enabled=True, unit_price=unit_price,
-                           stats=stats,
-                           game_enabled=self.store.is_game_enabled(
-                               g.get("game_id")))
-            if res["decision"] == "NO_BET":
-                summary["no_bet"] += 1
-                continue
-            summary["candidates"] += 1
-            cand = res["candidate"]
-            if res["decision"] == "WOULD_BET":
-                # DRY_RUN: record the outcome on the claimed record so
-                # the dashboard's recent-executions list shows it
-                self.store.update_status(
-                    cand["execution_id"], "ACCEPTED",
-                    provider_ref=f"dryrun-{cand['execution_id']}",
-                    error_message="DRY_RUN — no real bet submitted",
-                    simulated_amount=cand["stake_amount"],
-                    execution_state="WOULD_BET")
-                summary["would_bet"] += 1
-                # refresh running stats so later candidates in this same
-                # pass respect the updated exposure/count (§4: limits
-                # enforced within a single poll pass, not just across
-                # passes — WOULD_BET records count toward the limits
-                # immediately after they are persisted)
-                stats = self.store.today_stats()
-                continue
-            out = execute(cand, cfg=self.cfg, store=self.store,
-                          provider=self.provider)
-            if out.get("status") in ("ACCEPTED", "SUBMITTED"):
-                summary["executed"] += 1
-            # refresh the running stats so later candidates in this same
-            # pass respect the updated exposure/count
-            stats = self.store.today_stats()
+            stats = self._dispatch_game(g, summary, stats, unit_price)
         return summary
+
+    # ── the SHARED decision block ─────────────────────────────────────
+    def _dispatch_game(self, g: dict, summary: dict, stats: dict,
+                       unit_price=None) -> dict:
+        """Evaluate ONE game and act on the decision.
+
+        Used by BOTH the poll cycle and the event-driven trigger path so the
+        gate has exactly one implementation and the two paths cannot drift.
+        Returns the refreshed running stats.
+        """
+        if unit_price is None:
+            unit_price = self.store.get_unit_price()
+        res = evaluate(g, cfg=self.cfg, store=self.store,
+                       enabled=True, unit_price=unit_price,
+                       stats=stats,
+                       game_enabled=self.store.is_game_enabled(
+                           g.get("game_id")))
+        if res["decision"] == "NO_BET":
+            summary["no_bet"] += 1
+            return stats
+        summary["candidates"] += 1
+        cand = res["candidate"]
+        if res["decision"] == "WOULD_BET":
+            # DRY_RUN: record the outcome on the claimed record so
+            # the dashboard's recent-executions list shows it
+            self.store.update_status(
+                cand["execution_id"], "ACCEPTED",
+                provider_ref=f"dryrun-{cand['execution_id']}",
+                error_message="DRY_RUN — no real bet submitted",
+                simulated_amount=cand["stake_amount"],
+                execution_state="WOULD_BET")
+            summary["would_bet"] += 1
+            # refresh running stats so later candidates in this same
+            # pass respect the updated exposure/count (§4: limits
+            # enforced within a single poll pass, not just across
+            # passes — WOULD_BET records count toward the limits
+            # immediately after they are persisted)
+            return self.store.today_stats()
+        out = execute(cand, cfg=self.cfg, store=self.store,
+                      provider=self.provider)
+        if out.get("status") in ("ACCEPTED", "SUBMITTED"):
+            summary["executed"] += 1
+        # refresh the running stats so later candidates in this same
+        # pass respect the updated exposure/count
+        return self.store.today_stats()
+
+    # ── EVENT-DRIVEN path: dispatch NEW trigger transitions ───────────
+    def dispatch_triggers(self, events) -> dict:
+        """Evaluate ONLY the games that a newly emitted trigger names.
+
+        No scan of the full live payload, no waiting for a poll cycle.  A
+        trigger whose game is not in the current live payload is counted and
+        SKIPPED (fail closed — never a manufactured candidate).  The decision
+        still runs through the same executor gate as the poll path.
+        """
+        summary = {"enabled": False, "triggered": len(events),
+                   "candidates": 0, "executed": 0, "would_bet": 0, "no_bet": 0,
+                   "no_live_payload": 0}
+        if not self.store.is_enabled():
+            return summary                      # kill switch, read fresh
+        summary["enabled"] = True
+        by_id = {str((g or {}).get("game_id")): g
+                 for g in (self._live_payload_fn() or [])}
+        stats = self.store.today_stats()
+        unit_price = self.store.get_unit_price()
+        for ev in events:
+            game = by_id.get(str(getattr(ev, "game_id", "")))
+            if game is None:
+                summary["no_live_payload"] += 1
+                continue
+            stats = self._dispatch_game(game, summary, stats, unit_price)
+        return summary
+
+    def _run_trigger_driven(self) -> None:
+        """Consume the durable trigger stream and dispatch immediately."""
+        while not self._stop.is_set():
+            try:
+                self.trigger_feed.consume(self._on_trigger, stop=self._stop,
+                                          timeout_s=1.0)
+            except Exception:                                  # noqa: BLE001
+                self.last_error = traceback.format_exc()[-2000:]
+                self._stop.wait(1.0)
+
+    def _on_trigger(self, event) -> dict:
+        return self.dispatch_triggers([event])
