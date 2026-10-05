@@ -4127,6 +4127,11 @@ function abStatusHTML(st) {
     `AUTO BETTING: ${st.enabled ? "ON" : "OFF"}${st.dry_run ? " (DRY RUN)" : ""}`;
   const up = $("abUnitPrice");
   if (document.activeElement !== up) up.value = st.unit_price ?? "";
+  // The operator must be able to TYPE the unit price, so enable it under the
+  // SAME successful /api/v4/betting/status gate that enables the switch and
+  // Save.  Range enforcement stays server-side (config.min/max_unit_price) —
+  // nothing here can raise a limit or bypass a check.
+  up.disabled = false;
   $("abSaveUnit").disabled = false;
   const lim = [];
   if (st.max_stake_per_bet != null) lim.push(`max stake ${money(st.max_stake_per_bet)}`);
