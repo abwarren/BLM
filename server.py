@@ -252,17 +252,21 @@ def main() -> None:
     # /api/v2/live and /api/v4/* remain the API/debug endpoints.
     from fastapi.staticfiles import StaticFiles
     from fastapi.responses import FileResponse
+    from blm_v4.dashboard.asset_cache import NoCacheStaticFiles, NO_CACHE
     _dashboard_static = code_root / "blm_v4" / "dashboard" / "static"
     if _dashboard_static.is_dir():
+        # no-cache (with the ETag) so a deploy can never be masked by a
+        # browser reusing a stale bundle — see blm_v4/dashboard/asset_cache.py
         app.mount(
             "/static",
-            StaticFiles(directory=str(_dashboard_static)),
+            NoCacheStaticFiles(directory=str(_dashboard_static)),
             name="blm_operator_dashboard",
         )
 
         @app.get("/", include_in_schema=False)
         async def operator_dashboard():
-            return FileResponse(str(_dashboard_static / "index.html"))
+            return FileResponse(str(_dashboard_static / "index.html"),
+                                headers={"Cache-Control": NO_CACHE})
     else:
         logger.warning("operator dashboard static dir missing: %s", _dashboard_static)
 
