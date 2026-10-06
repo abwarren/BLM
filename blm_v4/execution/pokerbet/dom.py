@@ -944,28 +944,15 @@ class PokerBetDomAdapter(SelectionResolver):
                         _norm_team(rendered):
                     return {"ready": False, "reason": "leg_event_mismatch",
                             "leg": leg, "expected": team}
-            slip_line = _num(leg.get("line"))
-            if want["line"] is not None and (
-                    slip_line is None
-                    or abs(slip_line - want["line"]) > 1e-9):
-                return {"ready": False, "reason": "leg_line_mismatch",
-                        "leg": leg, "expected": want["line"]}
-            # 4. the CURRENT odds — the bookmaker moves the price between the
-            #    observed offer and the slip; accept a move ONLY within the
-            #    bounded window, else fail closed (and record any acceptance).
+            # LINE/PRICE MOVEMENT IS IRRELEVANT (production rule 2026-10-06):
+            # take the UNDER at whatever the slip shows NOW; a moved price is
+            # ACCEPTED and recorded, a moved line is simply accepted.
             slip_price = _num(leg.get("price"))
             if want.get("price") is not None and slip_price is not None:
-                _drift = abs(slip_price - want["price"])
-                if _drift > self.price_tolerance + 1e-9:
-                    if _drift > self.max_odds_drift + 1e-9:
-                        return {"ready": False,
-                                "reason": "odds_moved_out_of_bounds",
-                                "offered_price": want["price"],
-                                "slip_price": slip_price, "drift": _drift,
-                                "max_odds_drift": self.max_odds_drift}
-                    odds_accepted.append({"offered": want["price"],
-                                          "accepted": slip_price,
-                                          "drift": _drift})
+                odds_accepted.append({"offered": want["price"],
+                                      "accepted": slip_price,
+                                      "drift": abs(slip_price
+                                                   - want["price"])})
         self._submit_button = button
         return {"ready": True, "reason": "submit_ready", "leg": leg,
                 "stake": got, "odds_accepted": odds_accepted,
@@ -995,11 +982,22 @@ class PokerBetDomAdapter(SelectionResolver):
                     "error_message": "live betslip unreadable at submit"}
         odds_accepted = []
         for leg in self._pending_legs:
-            matches = [e for e in entries
-                       if e.get("position") == leg["position"]
-                       and _norm_team(leg["event"])
-                       and _norm_team(leg["event"])
-                       in _norm_team(e.get("event") or "")]
+            # IDENTITY-TOLERANT match (production rule 2026-10-06): compare the
+            # normalized TEAM TOKENS of an "A vs B" label instead of the whole
+            # string — normalizing the full "A vs B" leaves the literal "vs"
+            # glued in ("...cybervsgolden..."), which can never be a substring
+            # of the slip's "A - B" rendering, so the leg was reported missing.
+            _want = [_norm_team(t) for t in
+                     re.split(r"\s+vs\s+", str(leg.get("event") or ""),
+                              flags=re.I) if t]
+            matches = []
+            for e in entries:
+                if (str(e.get("position") or "").upper()
+                        != str(leg.get("position") or "").upper()):
+                    continue
+                _ev = _norm_team(e.get("event") or "")
+                if _want and all(t and t in _ev for t in _want):
+                    matches.append(e)
             if len(matches) != 1:
                 return {"status": "FAILED",
                         "error_code": "LEG_NOT_IN_SLIP",
@@ -1013,25 +1011,18 @@ class PokerBetDomAdapter(SelectionResolver):
                 return {"status": "FAILED", "error_code": "GAME_ID_MISMATCH",
                         "error_message": "slip leg carries a different "
                         "game id — refusing to submit"}
-            if abs(float(e["line"]) - float(leg["line"])) > \
-                    self.line_tolerance + 1e-9:
-                return {"status": "FAILED", "error_code": "LINE_MISMATCH",
-                        "error_message": "slip line differs from the "
-                        "verified offer"}
-            _drift = abs(float(e["price"]) - float(leg["price"]))
-            if _drift > self.price_tolerance + 1e-9:
-                # the price moved; accept ONLY within the bounded window
-                if _drift > self.max_odds_drift + 1e-9:
-                    return {"status": "FAILED", "error_code": "ODDS_MISMATCH",
-                            "error_message": "slip odds differ from the "
-                            "verified offer beyond the accepted bound",
-                            "offered_price": float(leg["price"]),
-                            "slip_price": float(e["price"]),
-                            "drift": _drift,
-                            "max_odds_drift": self.max_odds_drift}
-                odds_accepted.append({"offered": float(leg["price"]),
-                                      "accepted": float(e["price"]),
-                                      "drift": _drift})
+            # LINE/PRICE MOVEMENT IS IRRELEVANT (production rule 2026-10-06):
+            # the UNDER is taken at whatever the book shows on the slip at the
+            # instant of placement.  A moved line/price is ACCEPTED and
+            # recorded — never a failure.
+            _line_drift = abs(float(e["line"]) - float(leg["line"]))
+            _price_drift = abs(float(e["price"]) - float(leg["price"]))
+            odds_accepted.append({"offered": float(leg["price"]),
+                                  "accepted": float(e["price"]),
+                                  "price_drift": _price_drift,
+                                  "offered_line": float(leg["line"]),
+                                  "accepted_line": float(e["line"]),
+                                  "line_drift": _line_drift})
         # ── stake: filled and re-read back (F: verify stake) ──────────
         try:
             stake_loc = page.locator(SEL_STAKE_INPUT).first

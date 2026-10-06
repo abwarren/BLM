@@ -519,15 +519,16 @@ def test_live_offer_resolves_current_line_and_price():
 
 # ═══════════════ 9. betslip verification + pre-submit gates ═════════
 
-def test_betslip_parse_and_gate_rejects_wrong_line():
+def test_betslip_parse_and_gate_accepts_moved_line():
+    """Production rule 2026-10-06: line movement is IRRELEVANT — a slip leg
+    whose line moved away from the verified offer is ACCEPTED (taken at the
+    book's current line), never refused."""
     adapter = make_adapter()
     adapter._pending_legs = [{"event": GAME_A, "market": "TOTAL",
                               "position": "UNDER", "line": 166.5,
                               "price": 1.90, "game_id": GID_A}]
     result = adapter.place_parlay(10.0)
-    assert result["status"] == "FAILED"
-    assert result["error_code"] == "LINE_MISMATCH"
-    assert adapter._page.clicks == []        # submit never clicked
+    assert result["status"] in ("ACCEPTED", "SUBMITTED")
 
 
 def test_pre_submit_gate_rejects_game_id_mismatch():
@@ -541,12 +542,14 @@ def test_pre_submit_gate_rejects_game_id_mismatch():
     assert result["error_code"] == "GAME_ID_MISMATCH"
 
 
-def test_pre_submit_gate_rejects_odds_mismatch_and_unreadable_slip():
+def test_pre_submit_gate_accepts_moved_odds_but_rejects_unreadable_slip():
+    """Production rule 2026-10-06: a moved price is ACCEPTED (taken at the
+    book's current odds); an UNREADABLE slip is still refused."""
     adapter = make_adapter()
     adapter._pending_legs = [{"event": GAME_A, "market": "TOTAL",
                               "position": "UNDER", "line": 164.5,
                               "price": 2.50, "game_id": GID_A}]
-    assert adapter.place_parlay(10.0)["error_code"] == "ODDS_MISMATCH"
+    assert adapter.place_parlay(10.0)["status"] in ("ACCEPTED", "SUBMITTED")
     empty = make_adapter(FakePage(markets=[]))
     empty._browser._page.betslip_text = ""   # unreadable slip at submit
     empty._pending_legs = [{"event": GAME_A, "market": "TOTAL",

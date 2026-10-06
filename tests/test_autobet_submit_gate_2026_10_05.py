@@ -103,10 +103,11 @@ def test_gate_refuses_wrong_direction_leg():
     assert gate["reason"] == "leg_direction_mismatch"
 
 
-def test_gate_refuses_when_the_line_moved_under_the_bet():
+def test_gate_accepts_when_the_line_moved_under_the_bet():
+    """Production rule 2026-10-06: a moved line is accepted (take the UNDER)."""
     adapter = with_pending(ready_adapter(), line=166.5)        # slip holds 164.5
     gate = adapter.prepare_submit(2.00)
-    assert gate["ready"] is False and gate["reason"] == "leg_line_mismatch"
+    assert gate["ready"] is True
 
 
 def test_gate_refuses_an_unreadable_betslip():
@@ -211,11 +212,13 @@ def test_bounded_odds_change_is_accepted_within_the_window():
     assert gate["odds_accepted"][0]["accepted"] == 1.95
 
 
-def test_odds_change_beyond_the_window_fails_closed():
-    """The same move with NO bound (default 0.0) -> fail closed, NO CLICK."""
+def test_odds_change_beyond_the_window_is_also_accepted():
+    """Production rule 2026-10-06: line/price movement is IRRELEVANT — even a
+    price move beyond the old bounded window is ACCEPTED and recorded."""
     page = FakePage(betslip_text=_DRIFT_SLIP)
     adapter = with_pending(ready_adapter(page, max_odds_drift=0.0))
     gate = adapter.prepare_submit(2.00)
-    assert gate["ready"] is False
-    assert gate["reason"] == "odds_moved_out_of_bounds"
-    assert gate["offered_price"] == 1.90 and gate["slip_price"] == 1.95
+    assert gate["ready"] is True
+    assert gate["odds_accepted"], gate
+    assert gate["odds_accepted"][0]["offered"] == 1.90
+    assert gate["odds_accepted"][0]["accepted"] == 1.95
