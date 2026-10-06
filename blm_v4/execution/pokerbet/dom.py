@@ -774,6 +774,28 @@ class PokerBetDomAdapter(SelectionResolver):
         """
         if self._page is None:
             return 0
+        # A moved line leaves the slip in a "deleted items" state; the remedy is
+        # the slip's REMOVE ALL control (operator directive 2026-10-06).  Try it
+        # first, then fall back to the per-leg remove icons.
+        try:
+            cont = self._page.locator(SEL_BETSLIP)
+            root = cont.first if cont.count() else self._page.locator("body")
+            cand = root.locator("*")
+            n = min(cand.count(), 250)
+            for i in range(n):
+                try:
+                    t = (cand.nth(i).inner_text() or "").strip().lower()
+                except Exception:
+                    continue
+                if t in ("remove all", "remove all selections", "clear all"):
+                    try:
+                        cand.nth(i).click(timeout=2500)
+                        self._page.wait_for_timeout(400)
+                    except Exception:
+                        pass
+                    break
+        except Exception:
+            pass
         removed = 0
         for _ in range(40):
             try:
