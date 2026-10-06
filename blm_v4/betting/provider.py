@@ -210,6 +210,22 @@ class PokerBetBrowserProvider(BetProvider):
                 pass
         self._bridge = ResolverBrowserBridge(self._adapter)
 
+    def account_balance(self) -> Optional[float]:
+        """The signed-in PokerBet account balance (decimal), or None when it
+        cannot be read.  R5: the executor stakes the whole balance when it is
+        below one unit."""
+        try:
+            self._wire()
+        except Exception:
+            return None
+        rd = getattr(self._adapter, "read_balance", None)
+        if not callable(rd):
+            return None
+        try:
+            return rd()
+        except Exception:
+            return None
+
     def _gate(self, command: dict, stake_amount: float) -> dict:
         """Resolve → select → verify the betslip → PRICE/STAKE gate, then STOP.
         Never submits.  Returns {ready, reason, ...}."""

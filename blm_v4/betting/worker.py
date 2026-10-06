@@ -85,13 +85,24 @@ class BettingWorker:
             return summary
         games = self._live_payload_fn() or []
         stats = self.store.today_stats()
+        balance = self._balance()
         for g in games:
-            stats = self._dispatch_game(g, summary, stats, unit_price)
+            stats = self._dispatch_game(g, summary, stats, unit_price, balance)
         return summary
+
+    def _balance(self):
+        """R5: the signed-in account balance, or None when unprovable."""
+        fn = getattr(self.provider, "account_balance", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn()
+        except Exception:
+            return None
 
     # ── the SHARED decision block ─────────────────────────────────────
     def _dispatch_game(self, g: dict, summary: dict, stats: dict,
-                       unit_price=None) -> dict:
+                       unit_price=None, balance=None) -> dict:
         """Evaluate ONE game and act on the decision.
 
         Used by BOTH the poll cycle and the event-driven trigger path so the
@@ -102,7 +113,7 @@ class BettingWorker:
             unit_price = self.store.get_unit_price()
         res = evaluate(g, cfg=self.cfg, store=self.store,
                        enabled=True, unit_price=unit_price,
-                       stats=stats,
+                       stats=stats, balance=balance,
                        game_enabled=self.store.is_game_enabled(
                            g.get("game_id")))
         if res["decision"] == "NO_BET":
@@ -153,12 +164,14 @@ class BettingWorker:
                  for g in (self._live_payload_fn() or [])}
         stats = self.store.today_stats()
         unit_price = self.store.get_unit_price()
+        balance = self._balance()
         for ev in events:
             game = by_id.get(str(getattr(ev, "game_id", "")))
             if game is None:
                 summary["no_live_payload"] += 1
                 continue
-            stats = self._dispatch_game(game, summary, stats, unit_price)
+            stats = self._dispatch_game(game, summary, stats, unit_price,
+                                        balance)
         return summary
 
     def _run_trigger_driven(self) -> None:

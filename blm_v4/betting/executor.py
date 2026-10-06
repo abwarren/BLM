@@ -74,7 +74,8 @@ def _alert_age_s(game: dict) -> Optional[float]:
 def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
              enabled: bool, unit_price: Optional[float],
              stats: dict, claim: bool = True,
-             game_enabled: bool = True) -> dict:
+             game_enabled: bool = True,
+             balance: Optional[float] = None) -> dict:
     """Evaluate ONE game's payload as a potential execution candidate.
 
     Returns ``{"decision": "EXECUTE"|"NO_BET"|"WOULD_BET", "reason":
@@ -147,6 +148,11 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if units > 1.0:
         return _no("ONE_UNIT_MAXIMUM", ik)
     stake_amount = round(unit_price * units, 2)
+    # ── R5 (operator directive 2026-10-06): if the account BALANCE is below
+    #    one unit, stake the WHOLE balance instead of the unit.
+    if balance is not None and 0 < balance < stake_amount:
+        stake_amount = round(balance, 2)
+        units = round(min(1.0, stake_amount / unit_price), 4)
     if stake_amount <= 0 or not math.isfinite(stake_amount):
         return _no("stake_calculation_failed", ik)
     if cfg.max_stake_per_bet is not None \

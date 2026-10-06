@@ -865,6 +865,21 @@ class PokerBetDomAdapter(SelectionResolver):
         """
         self._pending_legs = []
 
+    def read_balance(self) -> Optional[float]:
+        """The signed-in account balance shown in the header (decimal), or None
+        when it cannot be read.  R5 (operator directive 2026-10-06)."""
+        if self._page is None:
+            return None
+        try:
+            el = self._page.locator(".balanceAmount")
+            if el.count() == 0:
+                return None
+            txt = (el.first.inner_text() or "").replace(" ", "").replace(",", "")
+            m = _FLOAT_RE.search(txt)
+            return float(m.group(0)) if m else None
+        except Exception:
+            return None
+
     def parse_betslip_text(self, text: Optional[str]) -> list[dict]:
         """Tolerant betslip parse → [{event, market, position, line,
         price, game_id?}].  Empty list on unreadable content — the
