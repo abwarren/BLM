@@ -796,6 +796,17 @@ class PokerBetDomAdapter(SelectionResolver):
                 pass
         return removed
 
+    def reset_pending_legs(self) -> None:
+        """Drop the tracked pending legs.
+
+        Called when the slip is cleared before an attempt: ``click_selection``
+        appends on EVERY click and ``place_parlay`` clears the list only after a
+        successful submit, so without this the retry loop piles up pending legs
+        and ``place_parlay`` then demands a leg that is no longer in the slip
+        ("not exactly once in slip").
+        """
+        self._pending_legs = []
+
     def parse_betslip_text(self, text: Optional[str]) -> list[dict]:
         """Tolerant betslip parse → [{event, market, position, line,
         price, game_id?}].  Empty list on unreadable content — the
@@ -879,6 +890,31 @@ class PokerBetDomAdapter(SelectionResolver):
                 button = loc.first
                 break
             self._page.wait_for_timeout(100)
+        if button is None:
+            # Production rule 2026-10-06: a moved line/price puts the slip in a
+            # "changed" state that keeps BET NOW DISABLED until the change is
+            # accepted.  Click the slip's accept/update control (never a
+            # submit), then re-poll the submit control once.
+            try:
+                cand = self._page.locator(
+                    "[class*='betslip'] button, [class*='betslip'] [role='button'],"
+                    " [class*='bs-bet'] button, [class*='bs-bet'] [role='button']")
+                for i in range(min(cand.count(), 15)):
+                    el = cand.nth(i)
+                    t = (el.inner_text() or "").strip().lower()
+                    if any(k in t for k in ("accept", "update", "continue",
+                                            "confirm", "ok", "yes")):
+                        try:
+                            el.click(timeout=2000)
+                            self._page.wait_for_timeout(300)
+                            break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            loc = self._page.locator(SEL_PLACE_BUTTON)
+            if loc.count() == 1 and not loc.first.is_disabled():
+                button = loc.first
         if button is None:
             return {"ready": False, "reason": "submit_control_unavailable",
                     "button_count": self._page.locator(

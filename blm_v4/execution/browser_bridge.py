@@ -381,6 +381,14 @@ class ResolverBrowserBridge(BrowserBridge):
                     clear()
                 except Exception:
                     pass
+            # drop legs tracked by earlier clicks so place_parlay does not
+            # demand a leg that the clear just removed
+            _rst = getattr(self.adapter, "reset_pending_legs", None)
+            if callable(_rst):
+                try:
+                    _rst()
+                except Exception:
+                    pass
 
             # 1. RESOLVE the CURRENT selection (fresh read; any live market)
             try:
