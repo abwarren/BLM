@@ -672,16 +672,17 @@ def test_three_distinct_header_values_fail_closed():
 
 
 def test_basketball_game_total_not_a_team_total():
-    """GAME total + two TEAM totals → the GAME total (182.5) is read, never
-    a team total (84.5 / 98.5)."""
+    """GAME total + two TEAM totals → the GAME total is read, never a team
+    total (84.5 / 98.5).  The LINE is the R6-selected one (smallest UNDER
+    odds >= 1.70 → 184.5 @ 1.75), not simply the first triple."""
     adapter = make_attached_adapter(FakePage(markets=BASKETBALL_MARKETS))
     assert adapter.find_event(GAME_A)
     obs = adapter.find_position(GAME_A, "TOTAL", "OVER")
     assert obs is not None
-    assert obs.line == 182.5                 # the GAME total, not 84.5/98.5
-    assert obs.price == 1.85                 # OVER of the first game triple
+    assert obs.line == 184.5                 # the GAME total, not 84.5/98.5
+    assert obs.price == 1.95                 # OVER of the R6-selected triple
     under = adapter.find_position(GAME_A, "TOTAL", "UNDER")
-    assert (under.line, under.price) == (182.5, 1.85)
+    assert (under.line, under.price) == (184.5, 1.75)
 
 
 def test_reordered_totals_still_find_the_game_total():
@@ -690,7 +691,7 @@ def test_reordered_totals_still_find_the_game_total():
                  BASKETBALL_MARKETS[0]]
     adapter = make_attached_adapter(FakePage(markets=reordered))
     obs = adapter.find_position(GAME_A, "TOTAL", "OVER")
-    assert obs is not None and obs.line == 182.5
+    assert obs is not None and obs.line == 184.5   # R6-selected line
 
 
 def test_missing_game_total_fails_closed():
@@ -752,13 +753,17 @@ def test_live_line_and_decimal_odds_are_distinct():
     assert obs_o.line != obs_o.price
 
 
-def test_multi_triple_grid_reads_first_triple():
+def test_multi_triple_grid_selects_the_r6_line():
+    """R6: with several triples the pick is the SMALLEST UNDER odds >= 1.70
+    (here 1.75 at line 184.5), not the first triple (1.85 @ 182.5)."""
     adapter = make_attached_adapter(FakePage(markets=[
         _market("Total Points", [(182.5, 1.85, 1.85),
                                  (184.5, 1.95, 1.75),
                                  (186.5, 2.20, 1.60)])]))
     obs = adapter.find_position(GAME_A, "TOTAL", "OVER")
-    assert (obs.line, obs.price) == (182.5, 1.85)
+    assert (obs.line, obs.price) == (184.5, 1.95)
+    under = adapter.find_position(GAME_A, "TOTAL", "UNDER")
+    assert (under.line, under.price) == (184.5, 1.75)
 
 
 def test_suspended_market_reported_in_observation():
@@ -819,7 +824,8 @@ def test_game_total_ignores_the_odd_even_market():
     text = item.inner_text()
     assert "193.5" in text and "Even" not in text
     line, over, under = adapter._read_totals()
-    assert (line, over, under) == (193.5, 1.55, 2.30)
+    # R6 picks the smallest UNDER odds >= 1.70 → (195.5, over 1.95, under 1.75)
+    assert (line, over, under) == (195.5, 1.95, 1.75)
 
 
 def test_game_total_still_fails_closed_without_a_real_total():
