@@ -924,35 +924,36 @@ def test_betual_slip_legs_are_read_structurally():
         "position": "UNDER", "line": 180.5, "price": 1.95, "game_id": None}]
 
 
-# ═══════════════ R6 — UNDER odds floor + closest to 1.85 ═══════════════
+# ═══════════════ R6 — UNDER odds floor + closest to the floor ═══════════════
+# Floor revised to 1.70 by the operator (2026-10-06); was 1.85.
 
-def test_r6_picks_the_under_closest_to_1_85():
-    """R6 (operator directive 2026-10-06): of every offered line, take the UNDER
-    whose odds are >= 1.85 and CLOSEST to it — 1.85 preferred over 2.30."""
+def test_r6_picks_the_under_closest_to_the_floor():
+    """R6 (operator directive 2026-10-06, floor 1.70): of every offered line,
+    take the UNDER whose odds are >= 1.70 and CLOSEST to it."""
     a = make_adapter()
     texts = ["Over", "Under",
-             "164.5", "2.10", "1.75",     # 1.75 below floor → not eligible
-             "163.5", "1.95", "1.90",     # eligible
+             "164.5", "2.10", "1.65",     # 1.65 below floor → not eligible
+             "163.5", "1.95", "1.75",     # eligible, closest to 1.70
              "162.5", "1.70", "2.30",     # eligible
-             "161.5", "1.80", "1.86"]     # eligible, closest to 1.85
+             "161.5", "1.80", "1.90"]     # eligible
     best = a._best_under(texts)
     assert best is not None
-    assert best[1] == 161.5 and best[3] == 1.86
+    assert best[1] == 163.5 and best[3] == 1.75
 
 
-def test_r6_no_line_at_or_above_1_85_means_no_bet():
-    """R6: no line >= 1.85 → None → the game is not bet (1.70 does not bet)."""
+def test_r6_no_line_at_or_above_1_70_means_no_bet():
+    """R6: no line >= 1.70 → None → the game is not bet."""
     a = make_adapter()
     texts = ["Over", "Under",
-             "164.5", "2.10", "1.70",
+             "164.5", "2.10", "1.65",
              "163.5", "2.20", "1.60"]
     assert a._best_under(texts) is None
 
 
-def test_r6_exactly_1_85_qualifies_and_is_preferred():
+def test_r6_exactly_1_70_qualifies_and_is_preferred():
     a = make_adapter()
     texts = ["Over", "Under",
-             "164.5", "2.05", "1.85",
+             "164.5", "2.05", "1.70",
              "163.5", "1.90", "1.95"]
     best = a._best_under(texts)
-    assert best is not None and best[3] == 1.85
+    assert best is not None and best[3] == 1.70

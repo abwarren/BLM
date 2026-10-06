@@ -513,10 +513,10 @@ class PokerBetDomAdapter(SelectionResolver):
         except Exception:
             return None
 
-    #: R6 (operator directive 2026-10-06): only take an UNDER whose decimal
-    #: odds are >= this floor, and prefer the value CLOSEST to it (1.85 is
-    #: preferred over 2.30).  No line meets the floor → no bet on that game.
-    MIN_UNDER_ODDS = 1.85
+    #: R6 (operator directive 2026-10-06, floor revised to 1.70): only take an
+    #: UNDER whose decimal odds are >= this floor, and prefer the value CLOSEST
+    #: to it (the smallest qualifying odds).  No line meets the floor → no bet.
+    MIN_UNDER_ODDS = 1.70
 
     def _under_triples(self, texts) -> list:
         """Every ``(line_cell_index, line, over_odds, under_odds)`` triple in
@@ -542,8 +542,9 @@ class PokerBetDomAdapter(SelectionResolver):
         return out
 
     def _best_under(self, texts):
-        """The triple whose UNDER odds are >= 1.85 and CLOSEST to 1.85, or
-        None when no offered line reaches the floor (fail closed → no bet)."""
+        """The triple whose UNDER odds are >= the floor and CLOSEST to it (the
+        smallest qualifying odds), or None when no line reaches the floor
+        (fail closed → no bet)."""
         best = None
         for t in self._under_triples(texts):
             if t[3] >= self.MIN_UNDER_ODDS - 1e-9:
