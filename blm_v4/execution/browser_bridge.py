@@ -307,15 +307,19 @@ class ResolverBrowserBridge(BrowserBridge):
                  event_resolver: Optional[Callable[[dict], str]] = None,
                  session_probe: Optional[Callable[[], bool]] = None,
                  verify_timeout_s: float = 20.0,
-                 verify_poll_s: float = 0.5):
+                 verify_poll_s: float = 0.5,
+                 place_attempts: int = 5,
+                 retry_delay_s: float = 1.5):
         self.adapter = adapter
         self._event = event_resolver or _default_event
         self._session_probe = session_probe
-        # Production rule (2026-10-06): PERSIST the betslip verification —
-        # poll until the slip shows the leg (identity) instead of failing on
-        # the first read of an SPA that has not re-rendered yet.
+        # Production rule (2026-10-06): PERSIST — poll the slip until the leg
+        # appears, and retry the whole resolve→click→verify cycle (on ANY
+        # currently-available market) rather than returning on the first miss.
         self._verify_timeout_s = float(verify_timeout_s)
         self._verify_poll_s = float(verify_poll_s)
+        self._place_attempts = max(1, int(place_attempts))
+        self._retry_delay_s = float(retry_delay_s)
 
     def is_available(self) -> bool:
         """Optional capability probe.  A ``SelectionResolver`` has no cheap
@@ -360,81 +364,94 @@ class ResolverBrowserBridge(BrowserBridge):
         sel = Selection(event=event, market=market, position=position,
                         game_id=str(command.get("game_id") or "") or None)
 
-        # 0. CLEAR stale UNSUBMITTED legs (production rule 2026-10-06: stale
-        #    tickets are ALWAYS cleared before an attempt — failed attempts
-        #    otherwise accumulate legs and break verification).
-        clear = getattr(self.adapter, "clear_betslip", None)
-        if callable(clear):
+        # PERSIST (production rule 2026-10-06): retry the whole
+        # resolve→click→verify cycle on the CURRENTLY-available market until a
+        # leg is verified, then place EXACTLY once.  A transient miss (event
+        # not yet hydrated, slip slow, DOM re-rendered) never ends the attempt.
+        # The slip is cleared before EVERY attempt so stale legs can never
+        # break verification.
+        last: dict = {"status": FAILED, "provider_ref": None,
+                      "error_code": "NOT_ATTEMPTED",
+                      "error_message": "no placement attempt ran"}
+        for _attempt in range(self._place_attempts):
+            # 0. CLEAR stale UNSUBMITTED legs (ALWAYS, before every attempt)
+            clear = getattr(self.adapter, "clear_betslip", None)
+            if callable(clear):
+                try:
+                    clear()
+                except Exception:
+                    pass
+
+            # 1. RESOLVE the CURRENT selection (fresh read; any live market)
             try:
-                clear()
-            except Exception:
-                pass
+                res = resolve_selection(self.adapter, sel)
+            except AdapterUnavailable as e:
+                raise BridgeUnavailable(str(e))
+            if not res.ok:
+                last = {"status": FAILED, "provider_ref": None,
+                        "error_code": res.reason, "error_message": res.reason}
+                _time.sleep(self._retry_delay_s)
+                continue
+            obs = res.observation
+            if obs is None:  # defensive; fail closed and retry
+                last = {"status": FAILED, "provider_ref": None,
+                        "error_code": "DOM_CHANGED",
+                        "error_message": "resolution returned no observation"}
+                _time.sleep(self._retry_delay_s)
+                continue
 
-        # 1. RESOLVE the CURRENT selection (fresh read; never a stored line)
-        try:
-            res = resolve_selection(self.adapter, sel)
-        except AdapterUnavailable as e:
-            raise BridgeUnavailable(str(e))
-        if not res.ok:
-            # a resolution failure is DEFINITIVE — no bet was placed
-            return {"status": FAILED, "provider_ref": None,
-                    "error_code": res.reason, "error_message": res.reason}
-        obs = res.observation
-        if obs is None:  # defensive: ok implies an observation, but fail closed
-            return {"status": FAILED, "provider_ref": None,
-                    "error_code": "DOM_CHANGED",
-                    "error_message": "resolution returned no observation"}
-
-        # 2. CLICK the current selection (a failed click registered nothing)
-        try:
-            clicked = self.adapter.click_selection(obs)
-        except AdapterUnavailable as e:
-            raise BridgeUnavailable(str(e))
-        except Exception as e:  # noqa: BLE001 — click failure is definitive
-            return {"status": FAILED, "provider_ref": None,
-                    "error_code": "CLICK_ERROR", "error_message": str(e)}
-        if not clicked:
-            return {"status": FAILED, "provider_ref": None,
-                    "error_code": "CLICK_NOT_REGISTERED",
-                    "error_message": "click not registered"}
-
-        # 3. VERIFY — PERSIST (production rule): poll until the slip shows the
-        #    leg (identity, line-movement tolerant).  A single read must never
-        #    fail while the SPA is still re-rendering.
-        check = None
-        deadline = _time.monotonic() + self._verify_timeout_s
-        while True:
+            # 2. CLICK the current selection
             try:
-                check = verify_leg_in_betslip(self.adapter, sel, obs.line,
-                                              obs.price)
+                clicked = self.adapter.click_selection(obs)
             except AdapterUnavailable as e:
                 raise BridgeUnavailable(str(e))
             except Exception:  # noqa: BLE001
-                check = None
-            if check is not None and check.outcome == VERIFIED:
-                break
-            if _time.monotonic() >= deadline:
-                break
-            _time.sleep(self._verify_poll_s)
-        if check is None or check.outcome != VERIFIED:
-            oc = check.outcome if check is not None else "BETSLIP_UNREADABLE"
-            return {"status": FAILED, "provider_ref": None,
-                    "error_code": oc,
-                    "error_message": f"betslip not verified: {oc}"}
+                clicked = False
+            if not clicked:
+                last = {"status": FAILED, "provider_ref": None,
+                        "error_code": "CLICK_NOT_REGISTERED",
+                        "error_message": "click not registered"}
+                _time.sleep(self._retry_delay_s)
+                continue
 
-        # 4. PLACE — the outcome is whatever the browser honestly reports
-        try:
-            out = self.adapter.place_parlay(stake_amount)
-        except AdapterUnavailable as e:
-            raise BridgeUnavailable(str(e))
-        out = dict(out or {})
-        out.setdefault("status", UNKNOWN)
-        out.setdefault("provider_ref", None)
-        # the LIVE observation actually resolved+clicked — the current betting
-        # LINE and the DECIMAL ODDS (distinct; never the line as odds).
-        out["observed_line"] = obs.line
-        out["observed_odds"] = obs.price
-        return out
+            # 3. VERIFY — poll this attempt (identity; line-movement tolerant)
+            check = None
+            deadline = _time.monotonic() + self._verify_timeout_s
+            while True:
+                try:
+                    check = verify_leg_in_betslip(self.adapter, sel, obs.line,
+                                                  obs.price)
+                except AdapterUnavailable as e:
+                    raise BridgeUnavailable(str(e))
+                except Exception:  # noqa: BLE001
+                    check = None
+                if check is not None and check.outcome == VERIFIED:
+                    break
+                if _time.monotonic() >= deadline:
+                    break
+                _time.sleep(self._verify_poll_s)
+            if check is None or check.outcome != VERIFIED:
+                oc = check.outcome if check is not None else "BETSLIP_UNREADABLE"
+                last = {"status": FAILED, "provider_ref": None,
+                        "error_code": oc,
+                        "error_message": f"betslip not verified: {oc}"}
+                _time.sleep(self._retry_delay_s)
+                continue
+
+            # 4. PLACE — EXACTLY ONCE, on the first verified leg
+            try:
+                out = self.adapter.place_parlay(stake_amount)
+            except AdapterUnavailable as e:
+                raise BridgeUnavailable(str(e))
+            out = dict(out or {})
+            out.setdefault("status", UNKNOWN)
+            out.setdefault("provider_ref", None)
+            # the LIVE observation actually resolved+clicked — the current
+            # betting LINE and the DECIMAL ODDS (distinct; never line as odds)
+            out["observed_line"] = obs.line
+            out["observed_odds"] = obs.price
+            return out
+        return last
 
     def confirm(self, provider_ref: Optional[str]) -> Optional[dict]:
         try:
