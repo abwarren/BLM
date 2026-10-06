@@ -2443,6 +2443,19 @@ function blmAlertStateRowHTML(g) {
   }
   const sigCls = alertOn ? "blm-sig-active" : "blm-sig-inactive";
   const sigTxt = alertOn ? "BLM ACTIVE" : "BLM —";
+  // BETTABLE vs NON-ACTIONABLE — EXACTLY the Auto-Bet executor's gate: an
+  // actionable opportunity is an ACTIVE under_alert on an ELIGIBLE game
+  // (genuinely live + LIVE market).  Visible-but-ineligible alerts are marked
+  // NON-ACTIONABLE with the reason on hover, so a shown alert is never
+  // mistaken for a bet the engine will actually take.
+  const elig = g.under_alert_eligibility || {};
+  const bettable = !!(ua.active === true && elig.eligible === true);
+  const btTxt = bettable ? "BETTABLE" : "NON-ACTIONABLE";
+  const btCls = bettable ? "blm-bt-yes" : "blm-bt-no";
+  const btWhy = bettable
+    ? "under_alert.active AND eligible — Auto-Bet will take the UNDER"
+    : (ua.active !== true ? "alert not active (no UNDER trigger)"
+       : (elig.reason || "not eligible"));
   return `<div class="blm-signal-row">
     <span class="blm-sig-label">SIGNAL</span>
     <span class="${sigCls}">${sigTxt}</span>
@@ -2453,6 +2466,7 @@ function blmAlertStateRowHTML(g) {
     <span class="blm-sig-label">LINE</span>
     <span class="blm-sig-line">${esc(trigLine)}</span>
     <span class="blm-sig-trap ${trapCls}">${trapTxt}</span>
+    <span class="blm-sig-bettable ${btCls}" title="${esc(btWhy)}">${btTxt}</span>
   </div>`;
 }
 

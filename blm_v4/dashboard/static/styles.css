@@ -850,6 +850,19 @@ td.ex-st-submitted { color: #3b82f6; }
   color: var(--red); border-color: #7f1d1d; background: rgba(239,68,68,.08);
 }
 .blm-sig-trap.trap-none { color: var(--dim); border-color: var(--border); }
+/* BETTABLE vs NON-ACTIONABLE — mirrors the Auto-Bet executor's gate EXACTLY
+   (under_alert.active AND under_alert_eligibility.eligible).  A visible alert
+   that is not actionable says so, with the reason on hover. */
+.blm-sig-bettable {
+  font-size: 9px; letter-spacing: 1px; padding: 2px 6px;
+  border-radius: 4px; border: 1px solid; font-weight: 800; cursor: help;
+}
+.blm-sig-bettable.blm-bt-yes {
+  color: #052e16; background: var(--green); border-color: var(--green);
+}
+.blm-sig-bettable.blm-bt-no {
+  color: var(--dim); border-color: var(--border); background: transparent;
+}
 
 /* ═══════════════════════════════════════════════════════════════
    VIEW TABS + STATS TAB
