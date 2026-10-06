@@ -100,6 +100,15 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if not game_id or ua.get("checkpoint") is None:
         return _no("alert_identity_missing", ik)
     ik = f"{game_id}|{checkpoint}|{alert_id}"
+    # ── R4: ONE auto-bet per game (operator directive 2026-10-06) ─────
+    # A REAL bet already placed for this game is never auto-bet again — the
+    # once-per-game rule is per GAME, so a later checkpoint re-firing for the
+    # same game must NOT produce a second bet.
+    try:
+        if store.has_placed_bet(game_id):
+            return _no("one_bet_per_game", ik)
+    except Exception:
+        pass
     # ── 4. game genuinely live (the eligibility reason is the same one
     #       the alert gate used; live games carry reason null) ─────────
     if game.get("live") is not True:

@@ -188,6 +188,18 @@ class BettingStore:
                 (str(game_id),)).fetchone()
         return True if row is None else bool(row["enabled"])
 
+    def has_placed_bet(self, game_id: str) -> bool:
+        """R4 (operator directive 2026-10-06): True when a REAL bet has already
+        been placed for this game.  ONE auto-bet per game — once a bet is
+        submitted/accepted for a game, that game is never auto-bet again (at any
+        checkpoint)."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM bet_executions WHERE game_id=? AND status IN "
+                "('SUBMITTED','ACCEPTED') LIMIT 1",
+                (str(game_id),)).fetchone()
+        return row is not None
+
     def set_game_enabled(self, game_id: str, enabled: bool) -> None:
         with self._lock, self._conn() as c:
             c.execute(
