@@ -513,14 +513,52 @@ class PokerBetDomAdapter(SelectionResolver):
         except Exception:
             return None
 
+    #: R6 (operator directive 2026-10-06): only take an UNDER whose decimal
+    #: odds are >= this floor, and prefer the value CLOSEST to it (1.85 is
+    #: preferred over 2.30).  No line meets the floor → no bet on that game.
+    MIN_UNDER_ODDS = 1.85
+
+    def _under_triples(self, texts) -> list:
+        """Every ``(line_cell_index, line, over_odds, under_odds)`` triple in
+        the game-total item's cells (cells = [Over hdr, Under hdr, then per
+        line-triple line, OVER odds, UNDER odds])."""
+        out = []
+        k = 2
+        while k + 2 < len(texts):
+            if _LINE_RE.match(str(texts[k] or "")):
+                try:
+                    line = float(texts[k])
+                except (TypeError, ValueError):
+                    k += 1
+                    continue
+                om = _FLOAT_RE.search(str(texts[k + 1] or ""))
+                um = _FLOAT_RE.search(str(texts[k + 2] or ""))
+                if om and um:
+                    out.append((k, line, float(om.group(0)),
+                                float(um.group(0))))
+                k += 3
+            else:
+                k += 1
+        return out
+
+    def _best_under(self, texts):
+        """The triple whose UNDER odds are >= 1.85 and CLOSEST to 1.85, or
+        None when no offered line reaches the floor (fail closed → no bet)."""
+        best = None
+        for t in self._under_triples(texts):
+            if t[3] >= self.MIN_UNDER_ODDS - 1e-9:
+                if best is None or t[3] < best[3]:
+                    best = t
+        return best
+
     def _read_totals(self) -> tuple[Optional[float], Optional[float],
                                     Optional[float]]:
-        """(line, over, under) from the GAME-total item's cells.
+        """(line, over, under) for the R6-selected line.
 
-        Cell mapping (live-verified): cells[0]="Over", cells[1]="Under",
-        then per line-triple ``line, Over odds, Under odds``; the FIRST
-        triple is read.  Fails closed (None, None, None) when the game total
-        is ambiguous or missing — it never falls back to a team total.
+        R6 (operator directive 2026-10-06): of every line the game total
+        offers, take the UNDER whose odds are >= 1.85 and CLOSEST to 1.85
+        (1.85 preferred over 2.30).  No qualifying line → (None, None, None)
+        → the resolver reports no position and the game is not bet.
         """
         item = self._totals_item()
         if item is None:
@@ -532,20 +570,10 @@ class PokerBetDomAdapter(SelectionResolver):
                 return None, None, None
             texts = [str(cells.nth(i).inner_text() or "").strip()
                      for i in range(min(n, 60))]
-
-            def _num(t):
-                m = _FLOAT_RE.search(t or "")
-                return float(m.group(0)) if m else None
-
-            li = next((i for i, t in enumerate(texts)
-                       if _LINE_RE.match(t)), None)
-            if li is None or li + 2 >= n:
+            best = self._best_under(texts)
+            if best is None:
                 return None, None, None
-            line = float(texts[li])
-            over = _num(texts[li + 1])
-            under = _num(texts[li + 2])
-            if over is None or under is None:
-                return None, None, None
+            _k, line, over, under = best
             return line, over, under
         except Exception:
             return None, None, None
@@ -599,10 +627,18 @@ class PokerBetDomAdapter(SelectionResolver):
             n = cells.count()
             texts = [(cells.nth(k).inner_text() or "").strip()
                      for k in range(min(n, 60))]
-            li = next((k for k, t in enumerate(texts) if _LINE_RE.match(t)), None)
+            want_under = str(position).upper() != "OVER"
+            li = None
+            if want_under:
+                best = self._best_under(texts)     # R6: >=1.85 closest to 1.85
+                if best is not None:
+                    li = best[0]
+            if li is None:
+                li = next((k for k, t in enumerate(texts)
+                           if _LINE_RE.match(t)), None)
             if li is None or li + 2 >= n:
                 return None
-            return cells.nth(li + (1 if str(position).upper() == "OVER" else 2))
+            return cells.nth(li + (2 if want_under else 1))
         except Exception:
             return None
 
