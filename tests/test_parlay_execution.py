@@ -309,14 +309,20 @@ class TestBetslipVerifier:
         chk = verify_leg_in_betslip(adapter, under(GAME_A), 164.5, 1.90)
         assert chk.outcome == VERIFIED and chk.matched["line"] == 166.5
 
-    def test_race_path_stale_slip_values_not_updated(self):
+    def test_race_path_stale_slip_values_verified_line_movement_tolerant(self):
+        """Production rule 2026-10-06 (operator directive): line movement is
+        IRRELEVANT — an UNDER position is taken at whatever line/price the
+        book is showing when the alert triggers.  A slip carrying the SAME
+        identity at a DIFFERENT line/price is therefore VERIFIED with the
+        slip's CURRENT values — never BETSLIP_NOT_UPDATED."""
         adapter = FakeBrowserAdapter()
         adapter.set_market(GAME_A, line=167.5, over=1.98, under=1.80)
         adapter.slip.append({"event": GAME_A, "market": "Total Points",
                              "position": "UNDER", "line": 166.5,
                              "price": 1.83})
         chk = verify_leg_in_betslip(adapter, under(GAME_A), 164.5, 1.90)
-        assert chk.outcome == BETSLIP_NOT_UPDATED
+        assert chk.outcome == VERIFIED
+        assert chk.matched["line"] == 166.5 and chk.matched["price"] == 1.83
 
     def test_event_match_tolerates_team_order_and_suffix(self):
         adapter = FakeBrowserAdapter()

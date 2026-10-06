@@ -765,6 +765,37 @@ class PokerBetDomAdapter(SelectionResolver):
             entries = self._parse_betslip_dom()   # BETUAL structured layout
         return entries
 
+    def clear_betslip(self) -> int:
+        """Remove ALL current (UNSUBMITTED) legs from the slip.
+
+        Production rule (2026-10-06): stale tickets are ALWAYS cleared before
+        an attempt — the executor accumulates legs on failed attempts, which
+        then breaks verification.  Returns the number of legs removed.
+        """
+        if self._page is None:
+            return 0
+        removed = 0
+        for _ in range(40):
+            try:
+                legs = self._page.locator(SEL_BETSLIP_LEG)
+                if legs.count() == 0:
+                    break
+                first = legs.first
+                r = first.locator(".remove.bc-i-close-remove")
+                if r.count() == 0:
+                    r = first.locator(".remove")
+                if r.count() == 0:
+                    break
+                r.first.click(timeout=4000)
+                removed += 1
+            except Exception:
+                break
+            try:
+                self._page.wait_for_timeout(400)
+            except Exception:
+                pass
+        return removed
+
     def parse_betslip_text(self, text: Optional[str]) -> list[dict]:
         """Tolerant betslip parse → [{event, market, position, line,
         price, game_id?}].  Empty list on unreadable content — the

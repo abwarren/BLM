@@ -118,19 +118,13 @@ def verify_leg_in_betslip(adapter: SelectionResolver, sel: Selection,
 
     m = matches[0]
     slip_line, slip_price = _num(m.get("line")), _num(m.get("price"))
-    if (slip_line == _num(line_at_click)
-            and slip_price == _num(price_at_click)):
-        return BetslipCheck(VERIFIED, matched=m, slip_entries=entries)
-
-    # Values differ from click time → the race path: is the slip showing
-    # the bookmaker's CURRENT offer for this identity?
-    try:
-        obs = adapter.find_position(sel.event, sel.market, sel.position)
-    except Exception:
-        obs = None
-    if (obs is not None and slip_line is not None
-            and slip_price is not None
-            and slip_line == obs.line and slip_price == obs.price):
+    # LINE-MOVEMENT TOLERANT (production rule 2026-10-06): the UNDER position
+    # is taken at whatever line/price the book is showing at the instant the
+    # alert triggered.  Identity (event + TOTAL + position, plus game_id when
+    # both sides carry one) is the ONLY requirement — a line/price that moved
+    # between the click and this read is NOT a failure.  The slip's CURRENT
+    # values are returned as the confirmed (verified) values.
+    if slip_line is not None and slip_price is not None:
         return BetslipCheck(VERIFIED, matched=m, slip_entries=entries)
     return BetslipCheck(BETSLIP_NOT_UPDATED, matched=m,
                         slip_entries=entries)

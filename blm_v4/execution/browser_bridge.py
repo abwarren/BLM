@@ -305,10 +305,17 @@ class ResolverBrowserBridge(BrowserBridge):
 
     def __init__(self, adapter: SelectionResolver, *,
                  event_resolver: Optional[Callable[[dict], str]] = None,
-                 session_probe: Optional[Callable[[], bool]] = None):
+                 session_probe: Optional[Callable[[], bool]] = None,
+                 verify_timeout_s: float = 20.0,
+                 verify_poll_s: float = 0.5):
         self.adapter = adapter
         self._event = event_resolver or _default_event
         self._session_probe = session_probe
+        # Production rule (2026-10-06): PERSIST the betslip verification —
+        # poll until the slip shows the leg (identity) instead of failing on
+        # the first read of an SPA that has not re-rendered yet.
+        self._verify_timeout_s = float(verify_timeout_s)
+        self._verify_poll_s = float(verify_poll_s)
 
     def is_available(self) -> bool:
         """Optional capability probe.  A ``SelectionResolver`` has no cheap
@@ -346,11 +353,22 @@ class ResolverBrowserBridge(BrowserBridge):
         return res.observation if res.ok else None
 
     def place(self, *, command: dict, stake_amount: float) -> dict:
+        import time as _time
         event = self._event(command)
         market = str(command.get("market") or "TOTAL")
         position = str(command.get("selection") or "UNDER")
         sel = Selection(event=event, market=market, position=position,
                         game_id=str(command.get("game_id") or "") or None)
+
+        # 0. CLEAR stale UNSUBMITTED legs (production rule 2026-10-06: stale
+        #    tickets are ALWAYS cleared before an attempt — failed attempts
+        #    otherwise accumulate legs and break verification).
+        clear = getattr(self.adapter, "clear_betslip", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
 
         # 1. RESOLVE the CURRENT selection (fresh read; never a stored line)
         try:
@@ -380,19 +398,29 @@ class ResolverBrowserBridge(BrowserBridge):
                     "error_code": "CLICK_NOT_REGISTERED",
                     "error_message": "click not registered"}
 
-        # 3. VERIFY the betslip actually shows the leg (a click is never proof)
-        try:
-            check = verify_leg_in_betslip(self.adapter, sel, obs.line, obs.price)
-        except AdapterUnavailable as e:
-            raise BridgeUnavailable(str(e))
-        except Exception as e:  # noqa: BLE001
+        # 3. VERIFY — PERSIST (production rule): poll until the slip shows the
+        #    leg (identity, line-movement tolerant).  A single read must never
+        #    fail while the SPA is still re-rendering.
+        check = None
+        deadline = _time.monotonic() + self._verify_timeout_s
+        while True:
+            try:
+                check = verify_leg_in_betslip(self.adapter, sel, obs.line,
+                                              obs.price)
+            except AdapterUnavailable as e:
+                raise BridgeUnavailable(str(e))
+            except Exception:  # noqa: BLE001
+                check = None
+            if check is not None and check.outcome == VERIFIED:
+                break
+            if _time.monotonic() >= deadline:
+                break
+            _time.sleep(self._verify_poll_s)
+        if check is None or check.outcome != VERIFIED:
+            oc = check.outcome if check is not None else "BETSLIP_UNREADABLE"
             return {"status": FAILED, "provider_ref": None,
-                    "error_code": "BETSLIP_UNREADABLE",
-                    "error_message": str(e)}
-        if check.outcome != VERIFIED:
-            return {"status": FAILED, "provider_ref": None,
-                    "error_code": check.outcome,
-                    "error_message": f"betslip not verified: {check.outcome}"}
+                    "error_code": oc,
+                    "error_message": f"betslip not verified: {oc}"}
 
         # 4. PLACE — the outcome is whatever the browser honestly reports
         try:
