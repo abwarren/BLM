@@ -159,7 +159,15 @@ class BettingWorker:
             summary["no_bet"] += 1
             # keep WHY: the executor names the failing gate, and the count
             # alone cannot tell "nothing in band" from "all below the floor"
-            self._no_bet_reasons[str(res.get("reason") or "unspecified")] += 1
+            reason = str(res.get("reason") or "unspecified")
+            if reason == "alert_not_eligible":
+                # the eligibility dict carries its own, more specific reason
+                # (stale_state, market_missing, not-live, ...).  Read it from
+                # the game rather than widening the executor's return shape.
+                sub = (g.get("under_alert_eligibility") or {}).get("reason")
+                if sub:
+                    reason = f"{reason}:{sub}"
+            self._no_bet_reasons[reason] += 1
             return stats
         summary["candidates"] += 1
         cand = res["candidate"]

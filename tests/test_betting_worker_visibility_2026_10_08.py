@@ -158,3 +158,17 @@ def test_the_reasons_are_a_per_pass_census_not_a_running_total(monkeypatch):
                          "candidate": None})
     w.poll_once()
     assert dict(w._no_bet_reasons) == {"pace_below_execution_threshold": 1}
+
+
+def test_the_eligibility_sub_reason_is_named(monkeypatch):
+    """"alert_not_eligible" alone hides WHY an armed game was excluded."""
+    rec = _capture(monkeypatch)
+    monkeypatch.setattr(
+        worker_mod, "evaluate",
+        lambda *a, **k: {"decision": "NO_BET",
+                         "reason": "alert_not_eligible", "candidate": None})
+    w = _worker(games=[{"game_id": "g1",
+                        "under_alert_eligibility": {"eligible": False,
+                                                    "reason": "stale_state"}}])
+    w.poll_once()
+    assert dict(w._no_bet_reasons) == {"alert_not_eligible:stale_state": 1}
