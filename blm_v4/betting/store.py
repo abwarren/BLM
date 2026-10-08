@@ -267,7 +267,8 @@ class BettingStore:
                       accepted_amount: Optional[float] = None,
                       simulated_amount: Optional[float] = None,
                       rejection_reason: Optional[str] = None,
-                      execution_state: Optional[str] = None) -> None:
+                      execution_state: Optional[str] = None,
+                      price: Optional[float] = None) -> None:
         """Advance a record's state machine (§5 vocabulary only)."""
         assert status in _STATUSES, status
         with self._lock, self._conn() as c:
@@ -293,6 +294,9 @@ class BettingStore:
             if accepted_amount is not None:
                 sets.append("accepted_amount=?")
                 args.append(float(accepted_amount))
+            if price is not None:
+                sets.append("price=?")
+                args.append(float(price))
             if simulated_amount is not None:
                 sets.append("simulated_amount=?")
                 args.append(float(simulated_amount))

@@ -325,7 +325,10 @@ class PokerBetBrowserProvider(BetProvider):
             raise ProviderAmbiguous(f"unmapped bridge status {status!r}")
         return {"status": status, "provider_ref": out.get("provider_ref"),
                 "error_code": out.get("error_code"),
-                "error_message": out.get("error_message")}
+                "error_message": out.get("error_message"),
+                "odds_accepted": out.get("odds_accepted"),
+                "observed_odds": out.get("observed_odds"),
+                "observed_line": out.get("observed_line")}
 
 
 def provider_from_config(cfg) -> BetProvider:

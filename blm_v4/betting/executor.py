@@ -336,11 +336,26 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                             error_message=f"unmapped status {status!r}")
         return {"status": STATUS_UNKNOWN,
                 "error_code": "PROVIDER_RESPONSE_INVALID"}
+    # Accepted-odds reconciliation (operator directive 2026-10-08): the
+    # bookmaker may re-price the selection after the click ("accept odds
+    # changes and resubmit").  Persist the odds the book ACTUALLY took, so
+    # bet_executions.price matches the settled slip instead of the stale
+    # pre-click quote.  Prefer the adapter's explicit odds_accepted entry;
+    # fall back to the odds observed at execution time.
+    accepted_odds = None
+    for entry in (result.get("odds_accepted") or []):
+        if isinstance(entry, dict):
+            v = _finite(entry.get("accepted"))
+            if v is not None:
+                accepted_odds = v
+    if accepted_odds is None:
+        accepted_odds = _finite(result.get("observed_odds"))
     store.update_status(execution_id, status,
                         provider_ref=result.get("provider_ref"),
                         error_code=result.get("error_code"),
                         error_message=result.get("error_message"),
                         accepted_amount=result.get("accepted_amount"),
+                        price=accepted_odds,
                         simulated_amount=(candidate.get("stake_amount")
                                           if cfg.dry_run and status == STATUS_ACCEPTED
                                           else None),
