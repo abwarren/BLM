@@ -506,9 +506,14 @@ class ResolverBrowserBridge(BrowserBridge):
                 # AMBIGUOUS: do NOT retry.  A second submit on a state we
                 # cannot read could place the bet TWICE.
                 return out
-            if _st == "REJECTED":
-                # the bookmaker refused it outright: clear the stale market and
-                # select again.
+            if _st in ("REJECTED", "FAILED"):
+                # NOTHING WAS PLACED in either case.  The adapter returns
+                # FAILED only for a PRE-SUBMIT problem (submit control absent,
+                # stake mismatch, slip unreadable, game mismatch…) and REJECTED
+                # only when the bookmaker refused — in both, no money is at
+                # stake.  So the remedy is the operator's: clear the stale
+                # market (Remove-All) and select the market again.  These ARE
+                # the transport misses that were burning games.
                 last = dict(out)
                 continue
             return out

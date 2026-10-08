@@ -200,3 +200,35 @@ def test_a_rejection_clears_the_slip_and_selects_the_market_again(monkeypatch):
     assert out["status"] == "ACCEPTED"
     assert len(a.clicks) == 2, "the market must be SELECTED AGAIN after clearing"
     assert len(a.placements) == 2, "one refused submit, then the accepted one"
+
+
+def test_a_pre_submit_failure_also_clears_and_selects_again(monkeypatch):
+    """THE TRANSPORT-MISS FIX.
+
+    A FAILED place means the adapter did NOT submit — that is its contract for
+    every pre-submit problem (the submit control never appeared, the stake
+    mismatched, the slip was unreadable).  No money is at stake, so these must
+    clear the stale market and select the market again rather than burning the
+    game, which is what the live SUBMIT_CONTROL_UNAVAILABLE misses were doing.
+    """
+    _install_clock(monkeypatch)
+    a = FakeBrowserAdapter()
+    a.set_market(EVENT, 193.5, 1.95, 1.90)
+    a.place_status = "FAILED"                    # e.g. submit control absent
+    a.place_reject_reason = "submit_control_unavailable"
+
+    seen = {"clicks": 0}
+
+    def _ok_on_retry():
+        seen["clicks"] += 1
+        if seen["clicks"] >= 2:
+            a.place_status = "ACCEPTED"
+
+    a.clear_betslip = lambda: (a.slip.clear() or 0)
+    a.on_before_click = _ok_on_retry
+    b = B.ResolverBrowserBridge(a, place_budget_s=45.0, retry_delay_s=1.5)
+
+    out = b.place(command=CMD, stake_amount=10.0)
+
+    assert out["status"] == "ACCEPTED", out
+    assert len(a.clicks) == 2, "the market must be selected again, not abandoned"
