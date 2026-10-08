@@ -2444,8 +2444,8 @@ function blmAlertStateRowHTML(g) {
   const sigCls = alertOn ? "blm-sig-active" : "blm-sig-inactive";
   const sigTxt = alertOn ? "BLM ACTIVE" : "BLM —";
   // BETTABLE vs NON-ACTIONABLE — EXACTLY the Auto-Bet executor's gate: an
-  // actionable opportunity is an ACTIVE under_alert on an ELIGIBLE game
-  // (genuinely live + LIVE market) INSIDE the trade execution window
+  // actionable opportunity is an ELIGIBLE game (genuinely live + LIVE
+  // market) INSIDE the trade execution window
   // (75% — the alert's own floor — up to 92%, armed at the relaxed execution
   // pace bar, only once 70+ points are on the board, AND at a price above the
   // band's break-even).  Outside the window PokerBet has closed the total market and the
@@ -2456,14 +2456,18 @@ function blmAlertStateRowHTML(g) {
   const elig = g.under_alert_eligibility || {};
   const win = g.under_alert_execution_window || {};
   const inWindow = win.in_window === true;
-  const bettable = !!(ua.active === true && elig.eligible === true && inWindow);
+  // The engine trades on the RELAXED execution bar, NOT on the on-screen
+  // alert (which stays at the alert's own 1.04 class).  This badge mirrors
+  // the ENGINE, so it keys on eligibility + the served window verdict —
+  // and that verdict already folds in the armed pace bar, the score floor
+  // and the price floor, so the two cannot disagree.
+  const bettable = !!(elig.eligible === true && inWindow);
   const btTxt = bettable ? "BETTABLE" : "NON-ACTIONABLE";
   const btCls = bettable ? "blm-bt-yes" : "blm-bt-no";
   const btWhy = bettable
-    ? "under_alert.active AND eligible AND inside the execution window — Auto-Bet will take the UNDER"
-    : (ua.active !== true ? "alert not active (no UNDER trigger)"
-       : (!inWindow ? (win.reason || "outside the execution window")
-          : (elig.reason || "not eligible")));
+    ? "eligible AND inside the execution window (pace armed at the relaxed bar) — Auto-Bet will take the UNDER"
+    : (!inWindow ? (win.reason || "outside the execution window")
+       : (elig.reason || "not eligible"));
   return `<div class="blm-signal-row">
     <span class="blm-sig-label">SIGNAL</span>
     <span class="${sigCls}">${sigTxt}</span>

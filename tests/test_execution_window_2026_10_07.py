@@ -416,12 +416,13 @@ def test_payload_block_shape():
 
 
 def test_badge_requires_the_window():
-    """The dashboard badge mirrors the executor: BETTABLE only with the
-    window verdict, and the reason surfaces when the window is the blocker."""
+    """The dashboard badge mirrors the ENGINE: eligibility plus the served
+    window verdict — which already folds in the armed pace bar, the score
+    floor and the price floor."""
     js = DASH_JS.read_text(encoding="utf-8")
     assert "g.under_alert_execution_window" in js
     assert "win.in_window === true" in js
-    assert "ua.active === true && elig.eligible === true && inWindow" in js
+    assert "elig.eligible === true && inWindow" in js
     assert "outside the execution window" in js[
         js.index("blmAlertStateRowHTML"):]
 
@@ -430,4 +431,4 @@ def test_the_changed_asset_is_cache_busted():
     """dashboard.js is served from disk; a stale browser copy would keep the
     old badge, so the ?v= must have moved with the file."""
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert "/static/dashboard.js?v=6855974.9" in html
+    assert "/static/dashboard.js?v=6855974.10" in html
