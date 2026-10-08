@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # noqa: E402
@@ -71,6 +72,7 @@ def _worker(games, enabled=True):
     w._thread = None
     w.last_error = None
     w._last_pass_log = 0.0
+    w._no_bet_reasons = Counter()
     return w
 
 
@@ -122,3 +124,37 @@ def test_the_logged_pass_carries_games_and_balance(monkeypatch):
     w.poll_once()
     assert rec.events[0][1]["games"] == 0
     assert rec.events[0][1]["balance"] == 127.29
+
+
+def test_the_pass_log_names_which_gate_rejected_the_games(monkeypatch):
+    """100 rejections say nothing; the reason says which gate did it."""
+    rec = _capture(monkeypatch)
+    monkeypatch.setattr(
+        worker_mod, "evaluate",
+        lambda *a, **k: {"decision": "NO_BET",
+                         "reason": "before_execution_window", "candidate": None})
+    w = _worker(games=[{"game_id": "g1"}, {"game_id": "g2"}])
+    summary = w.poll_once()
+    assert summary["no_bet"] == 2
+    assert rec.events[0][1]["no_bet_top"] == "before_execution_window=2"
+    # and the returned summary's contract is untouched by the new tally
+    assert summary == {"enabled": True, "candidates": 0, "executed": 0,
+                       "would_bet": 0, "no_bet": 2}
+
+
+def test_the_reasons_are_a_per_pass_census_not_a_running_total(monkeypatch):
+    """Each pass reports its own reasons — not the day's accumulation."""
+    rec = _capture(monkeypatch)
+    w = _worker(games=[{"game_id": "g1"}])
+    monkeypatch.setattr(
+        worker_mod, "evaluate",
+        lambda *a, **k: {"decision": "NO_BET",
+                         "reason": "score_below_minimum", "candidate": None})
+    w.poll_once()
+    monkeypatch.setattr(
+        worker_mod, "evaluate",
+        lambda *a, **k: {"decision": "NO_BET",
+                         "reason": "pace_below_execution_threshold",
+                         "candidate": None})
+    w.poll_once()
+    assert dict(w._no_bet_reasons) == {"pace_below_execution_threshold": 1}
