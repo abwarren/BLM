@@ -160,7 +160,8 @@ class PokerBetBrowserProvider(BetProvider):
     def __init__(self, *, adapter=None, bridge=None,
                  cdp_url: str = "http://127.0.0.1:9222",
                  db_path: Optional[str] = None, live: bool = False,
-                 hydrate_timeout_ms: int = 15000, event_resolver=None):
+                 hydrate_timeout_ms: int = 15000, event_resolver=None,
+                 place_budget_s: Optional[float] = None):
         self._adapter = adapter
         self._bridge = bridge
         self._cdp_url = cdp_url
@@ -168,6 +169,8 @@ class PokerBetBrowserProvider(BetProvider):
         self._live = bool(live)
         self._hydrate = hydrate_timeout_ms
         self._event_resolver = event_resolver
+        # None ⇒ the bridge's own default (45 s) applies
+        self._place_budget_s = place_budget_s
 
     # ── game_id → the event label the browser resolves ───────────────
     def _event_label(self, game_id: str) -> str:
@@ -208,7 +211,10 @@ class PokerBetBrowserProvider(BetProvider):
                 self._adapter._page = b.page()
             except Exception:
                 pass
-        self._bridge = ResolverBrowserBridge(self._adapter)
+        _kw = {}
+        if self._place_budget_s is not None:
+            _kw["place_budget_s"] = float(self._place_budget_s)
+        self._bridge = ResolverBrowserBridge(self._adapter, **_kw)
 
     def account_balance(self) -> Optional[float]:
         """The signed-in PokerBet account balance (decimal), or None when it
@@ -347,4 +353,5 @@ def provider_from_config(cfg) -> BetProvider:
     return PokerBetBrowserProvider(
         cdp_url=os.environ.get("BETTING_CDP_URL", "http://127.0.0.1:9222"),
         db_path=os.environ.get("BLM_POKERBET_DB") or None,
+        place_budget_s=getattr(cfg, "place_budget_s", None),
         live=True)

@@ -52,6 +52,8 @@ class ExecutionConfig:
     settle_ms: int = 400                 # DOM settle pause after nav
     slip_wait_ms: int = 900              # wait for the slip to reflect a click
     verify_attempts: int = 3             # slip re-reads before declaring failure
+    place_budget_s: float = 45.0         # EXECUTION_PLACE_BUDGET_S — wall-clock
+                                         # persistence before a place aborts
     leg_timeout_s: float = 45.0          # watchdog: one leg's wall clock
     job_timeout_s: float = 600.0         # watchdog: one parlay's wall clock
     max_parlays_per_run: int = 100       # hard run cap
@@ -79,6 +81,7 @@ class ExecutionConfig:
             settle_ms=_env_int("EXECUTION_SETTLE_MS", "400"),
             slip_wait_ms=_env_int("EXECUTION_SLIP_WAIT_MS", "900"),
             verify_attempts=_env_int("EXECUTION_VERIFY_ATTEMPTS", "3"),
+            place_budget_s=_env_float("EXECUTION_PLACE_BUDGET_S", "45"),
             leg_timeout_s=_env_float("EXECUTION_LEG_TIMEOUT_S", "45"),
             job_timeout_s=_env_float("EXECUTION_JOB_TIMEOUT_S", "600"),
             max_parlays_per_run=_env_int(

@@ -288,6 +288,11 @@ class BrowserBridge(ABC):
         return None
 
 
+# Spin guard for the placement loop.  The WALL-CLOCK budget bounds it (see
+# ``place``); this only stops a pathological zero-cost retry loop.
+_PLACE_ATTEMPT_CAP = 60
+
+
 class ResolverBrowserBridge(BrowserBridge):
     """Reference bridge over the existing ``SelectionResolver`` browser contract.
 
@@ -309,7 +314,8 @@ class ResolverBrowserBridge(BrowserBridge):
                  verify_timeout_s: float = 20.0,
                  verify_poll_s: float = 0.5,
                  place_attempts: int = 5,
-                 retry_delay_s: float = 1.5):
+                 retry_delay_s: float = 1.5,
+                 place_budget_s: float = 45.0):
         self.adapter = adapter
         self._event = event_resolver or _default_event
         self._session_probe = session_probe
@@ -320,6 +326,8 @@ class ResolverBrowserBridge(BrowserBridge):
         self._verify_poll_s = float(verify_poll_s)
         self._place_attempts = max(1, int(place_attempts))
         self._retry_delay_s = float(retry_delay_s)
+        # EXECUTION_PLACE_BUDGET_S — how long to keep trying (wall clock)
+        self._place_budget_s = max(0.0, float(place_budget_s))
 
     def is_available(self) -> bool:
         """Optional capability probe.  A ``SelectionResolver`` has no cheap
@@ -373,7 +381,20 @@ class ResolverBrowserBridge(BrowserBridge):
         last: dict = {"status": FAILED, "provider_ref": None,
                       "error_code": "NOT_ATTEMPTED",
                       "error_message": "no placement attempt ran"}
-        for _attempt in range(self._place_attempts):
+        # The give-up point is WALL CLOCK, not an attempt count.  A fixed count
+        # made persistence depend on how slow each attempt happened to be —
+        # measured live at 16 s in one case and 141 s in another for the same
+        # five attempts — so the engine's persistence was inconsistent and often
+        # far shorter than intended.  ``place_attempts`` is retained as a
+        # MINIMUM (never fewer tries than asked); the budget bounds it.
+        started = _time.monotonic()
+        _attempt = 0
+        while True:
+            _over = (_time.monotonic() - started) >= self._place_budget_s
+            if _attempt >= _PLACE_ATTEMPT_CAP or (
+                    _over and _attempt >= self._place_attempts):
+                break
+            _attempt += 1
             # 0. CLEAR stale UNSUBMITTED legs (ALWAYS, before every attempt)
             clear = getattr(self.adapter, "clear_betslip", None)
             if callable(clear):
@@ -422,9 +443,14 @@ class ResolverBrowserBridge(BrowserBridge):
                 _time.sleep(self._retry_delay_s)
                 continue
 
-            # 3. VERIFY — poll this attempt (identity; line-movement tolerant)
+            # 3. VERIFY — poll this attempt (identity; line-movement tolerant).
+            # The poll is clamped to what is LEFT of the placement budget so a
+            # single slow attempt can never overshoot the persistence window.
             check = None
-            deadline = _time.monotonic() + self._verify_timeout_s
+            _vd = _time.monotonic() + self._verify_timeout_s
+            if self._place_budget_s > 0:
+                _vd = min(_vd, started + self._place_budget_s)
+            deadline = _vd
             while True:
                 try:
                     check = verify_leg_in_betslip(self.adapter, sel, obs.line,
