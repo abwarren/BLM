@@ -508,10 +508,22 @@ def main() -> None:
                 if now - _betting_payload_cache["at"] < 4.0:
                     return _betting_payload_cache["games"]
             from blm_v4.api import v4_live as _v4_live
+            _err = None
             try:
                 games = (_v4_live(classification=None).get("games") or [])
-            except Exception:
+            except Exception as _e:
+                _err = f"{type(_e).__name__}: {_e}"[:200]
                 games = []
+            if _err is not None or not games:
+                # VISIBILITY (2026-10-08): this list is the betting worker's
+                # ONLY input, so a swallowed error or an empty payload here is
+                # indistinguishable downstream from "no candidates" — that
+                # ambiguity hid a stale/empty feed for hours.  Throttled to
+                # once a minute so the 4-second cache cannot spam the journal.
+                if now - getattr(_live_games_for_betting, "_last_warn", 0.0) > 60.0:
+                    _live_games_for_betting._last_warn = now
+                    logger.warning("betting_payload_unusable",
+                                   games=len(games), error=_err)
             with _betting_payload_lock:
                 _betting_payload_cache.update(at=time.monotonic(), games=games)
             return games
