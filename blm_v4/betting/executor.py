@@ -34,7 +34,7 @@ from blm_v4.betting.account_guard import verify_account
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import stake as _stake
-from blm_v4.trade_window import execution_window_reason
+from blm_v4.trade_window import execution_window_reason, price_reason
 
 # directive §5 — the execution-state vocabulary
 STATUS_PENDING = "PENDING"
@@ -129,21 +129,20 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if _finite(proj.get("required_pts_per_min")) is None \
             or _finite(proj.get("progress_pct")) is None:
         return _no("market_missing", ik)
-    # ── 5b. the EXECUTION WINDOW (operator directive 2026-10-07) ──────
-    # Placed only in the progress band where the market is still quoted
-    # and the signal's measured ROI is positive — and NEVER inside the
-    # final four minutes of the match (operator directive 2026-10-08; a
-    # game-clock rule, so the ceiling is derived per classification).
-    # Fail closed on an
-    # unprovable progress: a trade outside the band cannot be filled and
-    # a provider call spent there is a wasted attempt (observed live
-    # 2026-10-07: every out-of-band attempt failed EVENT_NOT_FOUND or
-    # SUBMIT_CONTROL_UNAVAILABLE).  The band itself is defined ONCE in
-    # blm_v4.trade_window, shared with the dashboard's BETTABLE badge.
-    window_reason = execution_window_reason(proj.get("progress_pct"),
-                                            game.get("classification"))
+    # ── 5b. the EXECUTION WINDOW + PRICE FLOOR (operator directive) ───
+    # Placed only in the progress band [75%, 92%] — 75 is the alert's own
+    # floor, 92 is the top of the last fully-quoted band (the unfillable
+    # attempts were at 94-96%).  AND only at a price above the band's
+    # measured break-even: the operator's criterion is positive EV, so a
+    # hit rate alone never licenses a trade.  Both come from the ONE
+    # definition in blm_v4.trade_window, shared with the dashboard badge.
+    window_reason = execution_window_reason(proj.get("progress_pct"))
     if window_reason is not None:
         return _no(window_reason, ik)
+    below_break_even = price_reason(market.get("under_odds"),
+                                    proj.get("progress_pct"))
+    if below_break_even is not None:
+        return _no(below_break_even, ik)
     # ── limits must be CONFIGURED before any stake math (§9): an
     #    unconfigured limit cannot be enforced, so betting is blocked —
     #    exactly what the dashboard's "NOT CONFIGURED — betting blocked"

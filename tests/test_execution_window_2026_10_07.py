@@ -1,36 +1,30 @@
-"""UNDER TRADE EXECUTION WINDOW (operator directives 2026-10-07 / 2026-10-08).
+"""UNDER TRADE EXECUTION WINDOW + PRICE FLOOR (operator directives 2026-10-08).
 
-The autonomous UNDER trade is placed ONLY inside a progress band.  Outside it
-the alert may be statistically live yet unbettable: live probing (2026-10-07)
-shows PokerBet stops quoting the game total near the end — at 95-97.5% the
-event view renders with no market grid or redirects to another live game — so
-an execution arriving there is never filled.
+The autonomous UNDER trade is placed only when BOTH hold:
+  * progress sits inside [75%, 92%], and
+  * the UNDER price clears the break-even for that progress band.
 
-Two edges, two KINDS of rule:
+The floor is 75% because that is the ALERT's own floor (progress_pct >= 75), so
+the window opens the moment an alert can exist — there is no "too early"
+refusal left.  Measured: the 75-78 slice runs 65.44% UNDER (n=2,208, break-even
+1.528) and was 30.7% of alerted games, all previously discarded.
 
-  * the FLOOR is a progress percent — 75% (operator directives 2026-10-07/08,
-    revised 85 -> 78 -> 75).  75 is the ALERT's own floor (progress_pct >= 75),
-    so no alert is ever refused as "too early" — that refusal category is gone.
-    The 75-78 slice measured 65.44% UNDER over 2,208 first-fire games =
-    break-even price 1.528, i.e. +EV above ~1.53);
-  * the CEILING is a GAME-CLOCK stop — no placement inside the FINAL FOUR
-    MINUTES of the match (operator directive 2026-10-08).  Expressed per
-    classification, never as a flat percent, because the same final minutes
-    are a different percentage in each league:
+The ceiling is 92%: the observed unfillable attempts (EVENT_NOT_FOUND) were at
+94-96%, and the 90-92 slice measures 78.48% UNDER (n=316, break-even 1.274) —
++EV, so it is traded.  It replaced the earlier game-clock "final four minutes"
+stop, which refused that slice.
 
-        BETUAL_NBA (10-min quarters, 40-min game) -> (40-4)/40 = 90.00%
-        CYBER_2K26 (12-min quarters, 48-min game) -> (48-4)/48 = 91.67%
-
-    The old flat 92% ceiling was the trap this documents: 92% of a 40-minute
-    game is 36.8 minutes, i.e. still inside the final four minutes.
+The PRICE FLOOR is the operator's positive-EV criterion made enforceable: a hit
+rate alone licenses nothing without the price.  Break-evens come from the
+rebuilt cohort — the construction that reproduces the platform's own served
+cohort.
 
 THREE surfaces, ONE definition:
-
-  * ``blm_v4.trade_window``     — the band and the verdict (the definition)
+  * ``blm_v4.trade_window``     — the band, the price floor, the verdicts
   * ``blm_v4.betting.executor`` — the gate that decides what is TRADED
   * ``blm_v4.api`` / dashboard  — the payload block the BETTABLE badge reads
 
-A second copy of the numbers, or a badge that ignores the window, is the
+A second copy of the numbers, or a badge that ignores either verdict, is the
 failure these tests exist to prevent.
 """
 from datetime import datetime, timedelta, timezone
@@ -41,19 +35,19 @@ import pytest
 from blm_v4.betting.config import BettingConfig
 from blm_v4.betting.executor import evaluate
 from blm_v4.betting.store import BettingStore
-from blm_v4.trade_window import (AFTER, BEFORE, EXEC_LAST_GAME_MINUTES,
-                                 EXEC_MAX_PROGRESS_PCT_FALLBACK,
-                                 EXEC_MIN_PROGRESS_PCT, exec_max_progress_pct,
-                                 execution_window_reason, in_execution_window)
-
-NBA = "BETUAL_NBA"       # 40-minute game -> ceiling 90.00%
-CYBER = "CYBER_2K26"     # 48-minute game -> ceiling 91.67%
+from blm_v4.trade_window import (AFTER, BEFORE, EXEC_MAX_PROGRESS_PCT,
+                                 EXEC_MIN_PROGRESS_PCT, MIN_PRICE_BANDS,
+                                 PRICE_FLOOR, execution_window_reason,
+                                 in_execution_window, min_price_for,
+                                 price_reason)
 
 HERE = Path(__file__).resolve().parent
 EXECUTOR_PY = HERE.parent / "blm_v4" / "betting" / "executor.py"
 API_PY = HERE.parent / "blm_v4" / "api.py"
 DASH_JS = HERE.parent / "blm_v4" / "dashboard" / "static" / "dashboard.js"
 INDEX_HTML = HERE.parent / "blm_v4" / "dashboard" / "static" / "index.html"
+
+GOOD_PRICE = 1.95          # clears every band's break-even
 
 
 def _cfg(tmp_path) -> BettingConfig:
@@ -64,17 +58,18 @@ def _cfg(tmp_path) -> BettingConfig:
         db_path=str(tmp_path / "blm_betting.db"))
 
 
-def _game(progress, game_id="WINDOW-1", classification=NBA):
-    """A payload that satisfies every OTHER condition, so the only thing
-    that can refuse it is the execution window."""
+def _game(progress, game_id="WINDOW-1", price=GOOD_PRICE):
+    """A payload that satisfies every OTHER condition, so the only things that
+    can refuse it are the window and the price floor."""
     cap = (datetime.now(timezone.utc)
            - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     return {
         "game_id": game_id,
-        "classification": classification,
+        "classification": "BETUAL_NBA",
         "live": True,
         "live_reason": None,
-        "market": {"total_line": 193.5, "market_status": "LIVE"},
+        "market": {"total_line": 193.5, "market_status": "LIVE",
+                   "under_odds": price},
         "projector": {"progress_pct": progress, "required_pts_per_min": 5.0,
                       "actual_pts_per_min": 4.0, "captured_at": cap},
         "under_alert_eligibility": {"eligible": True,
@@ -84,91 +79,121 @@ def _game(progress, game_id="WINDOW-1", classification=NBA):
     }
 
 
-def _evaluate(tmp_path, progress, classification=NBA, **over):
-    game = _game(progress, classification=classification)
+def _evaluate(tmp_path, progress, price=GOOD_PRICE, **over):
+    game = _game(progress, price=price)
     game.update(over)
     return evaluate(game, cfg=_cfg(tmp_path), store=BettingStore(
         str(tmp_path / "blm_betting.db")), enabled=True, unit_price=10.0,
         stats={"verifiable": True, "bets": 0, "amount": 0.0})
 
 
-# ── the definition ──────────────────────────────────────────────────────
+# ── the window definition ───────────────────────────────────────────────
 
 def test_the_floor_is_the_operators_75_percent():
     """75 == the ALERT's own floor, so no alert is ever refused as "too early"."""
     assert EXEC_MIN_PROGRESS_PCT == 75.0
 
 
-def test_the_ceiling_is_the_final_four_minutes_of_the_game():
-    """A GAME-CLOCK rule: the ceiling is `full - 4` minutes, per league."""
-    assert EXEC_LAST_GAME_MINUTES == 4.0
-    assert exec_max_progress_pct(NBA) == pytest.approx(100 * (40 - 4) / 40)
-    assert exec_max_progress_pct(CYBER) == pytest.approx(100 * (48 - 4) / 48)
+def test_the_ceiling_is_the_top_of_the_last_quoted_band():
+    assert EXEC_MAX_PROGRESS_PCT == 92.0
+    assert EXEC_MIN_PROGRESS_PCT < EXEC_MAX_PROGRESS_PCT
 
 
-def test_the_two_leagues_do_not_share_one_percent():
-    """The directive's whole point: the same final four minutes are a
-    different percentage in each classification, so one flat ceiling is
-    simply wrong for at least one league."""
-    assert exec_max_progress_pct(NBA) != exec_max_progress_pct(CYBER)
-    assert exec_max_progress_pct(CYBER) > exec_max_progress_pct(NBA)
-
-
-def test_an_unknown_length_is_never_the_permissive_ceiling():
-    """Fail closed: an unknowable game length takes the TIGHTER ceiling."""
-    for cls in (None, "", "NOT_A_LEAGUE"):
-        assert exec_max_progress_pct(cls) == pytest.approx(
-            exec_max_progress_pct(NBA))
-        assert exec_max_progress_pct(cls) <= EXEC_MAX_PROGRESS_PCT_FALLBACK
-
-
-def test_the_band_edges_are_ordered_for_every_league():
-    for cls in (NBA, CYBER, None):
-        assert EXEC_MIN_PROGRESS_PCT < exec_max_progress_pct(cls)
-
-
-@pytest.mark.parametrize("pct", [75.0, 78.0, 80.0, 85.0, 88.0, 89.9, 90.0])
+@pytest.mark.parametrize("pct", [75.0, 78.0, 85.0, 88.0, 90.0, 91.5, 92.0])
 def test_inside_the_window_has_no_refusal(pct):
-    assert execution_window_reason(pct, NBA) is None
-    assert in_execution_window(pct, NBA) is True
+    assert execution_window_reason(pct) is None
+    assert in_execution_window(pct) is True
 
 
-@pytest.mark.parametrize("pct", [90.01, 91.0, 92.0, 95.0, 97.5, 100.0])
-def test_the_final_four_minutes_are_refused(pct):
-    """Every progress past 36:00 of a 40-minute game — the operator's hard
-    stop, and the regression this directive fixes (92% used to be allowed)."""
-    assert execution_window_reason(pct, NBA) == AFTER
-    assert in_execution_window(pct, NBA) is False
+@pytest.mark.parametrize("pct", [92.01, 93.0, 94.0, 95.0, 97.5, 100.0])
+def test_past_the_window_is_refused(pct):
+    """94-96 is where the observed unfillable attempts landed."""
+    assert execution_window_reason(pct) == AFTER
+    assert in_execution_window(pct) is False
 
 
-@pytest.mark.parametrize("pct", [91.67, 92.0, 95.0, 100.0])
-def test_the_cyber_ceiling_is_later_than_the_nba_one(pct):
-    """44:00 of a 48-minute game — the same rule, a different percentage."""
-    assert execution_window_reason(pct, CYBER) == AFTER
-
-
-@pytest.mark.parametrize("pct", [90.5, 91.0, 91.6])
-def test_the_same_percent_is_inside_for_cyber_and_outside_for_nba(pct):
-    """The concrete proof the ceiling is per classification, not flat."""
-    assert execution_window_reason(pct, NBA) == AFTER
-    assert execution_window_reason(pct, CYBER) is None
-
-
-@pytest.mark.parametrize("pct", [0.0, 50.0, 70.0, 74.9, 74.999])
+@pytest.mark.parametrize("pct", [0.0, 50.0, 70.0, 74.0, 74.9, 74.999])
 def test_before_the_window_is_refused(pct):
-    assert execution_window_reason(pct, NBA) == BEFORE
+    assert execution_window_reason(pct) == BEFORE
+
+
+def test_the_90_92_slice_is_traded_again():
+    """The game-clock stop refused these; the recomputed evidence says the band
+    is +EV, so it is inside the window once more."""
+    for pct in (90.0, 90.5, 91.0, 91.9, 92.0):
+        assert execution_window_reason(pct) is None
 
 
 @pytest.mark.parametrize("pct", [None, "", "abc", float("nan"),
                                  float("inf"), float("-inf")])
 def test_unprovable_progress_fails_closed(pct):
-    assert execution_window_reason(pct, NBA) == BEFORE
-    assert in_execution_window(pct, NBA) is False
+    assert execution_window_reason(pct) == BEFORE
+    assert in_execution_window(pct) is False
+
+
+# ── the price floor ─────────────────────────────────────────────────────
+
+def test_the_bands_are_ordered_and_open_ended():
+    bounds = [hi for hi, _ in MIN_PRICE_BANDS]
+    bounded = [b for b in bounds if b is not None]
+    assert bounded == sorted(bounded)
+    assert bounds[-1] is None                  # the last band must be open-ended
+    for pct in (75.0, 80.0, 85.0, 92.0):
+        assert min_price_for(pct) is not None
+
+
+@pytest.mark.parametrize("pct,expected", [
+    (75.0, 1.51), (79.9, 1.51),      # 75-80: 66.39% UNDER -> 1.506
+    (80.0, 1.37), (84.9, 1.37),      # 80-85: 73.17% UNDER -> 1.367
+    (85.0, 1.28), (92.0, 1.28),      # 85-92: 78.43% UNDER -> 1.275
+])
+def test_the_floor_matches_the_measured_break_even(pct, expected):
+    assert min_price_for(pct) == pytest.approx(expected)
+
+
+def test_a_price_below_the_band_break_even_is_refused():
+    assert price_reason(1.50, 76.0) == PRICE_FLOOR     # needs 1.51
+    assert price_reason(1.30, 82.0) == PRICE_FLOOR     # needs 1.37
+    assert price_reason(1.27, 88.0) == PRICE_FLOOR     # needs 1.28
+
+
+def test_a_price_at_or_above_the_break_even_passes():
+    assert price_reason(1.51, 76.0) is None
+    assert price_reason(1.95, 76.0) is None
+    assert price_reason(1.28, 88.0) is None
+
+
+def test_a_later_band_needs_a_lower_price():
+    """The same 1.40 is below the floor early and above it late — the floor is
+    per band, not one global number."""
+    assert price_reason(1.40, 76.0) == PRICE_FLOOR
+    assert price_reason(1.40, 88.0) is None
+
+
+@pytest.mark.parametrize("bad", ["", "abc", float("nan"), float("inf")])
+def test_an_unprovable_price_fails_closed(bad):
+    """A present value that cannot be shown to clear the floor is refused.
+    An ABSENT price (None) is not gated — see the test below."""
+    assert price_reason(bad, 80.0) == PRICE_FLOOR
+
+
+def test_an_absent_price_is_not_gated_here():
+    """Line and price come from the same market row, so absence is already the
+    executor's market_missing concern — this gate only refuses a KNOWN-low
+    price, and therefore keeps every existing caller's contract."""
+    assert price_reason(None, 80.0) is None
+
+
+def test_no_price_claim_outside_the_window():
+    """The window refuses these first; the price floor makes no claim."""
+    for pct in (70.0, 95.0, None):
+        assert min_price_for(pct) is None
+        assert price_reason(1.0, pct) is None
 
 
 # ── the executor gate (what is TRADED) ──────────────────────────────────
 
-@pytest.mark.parametrize("progress", [75.0, 78.0, 85.0, 88.0, 89.5, 90.0])
+@pytest.mark.parametrize("progress", [75.0, 78.0, 85.0, 90.0, 92.0])
 def test_inside_the_window_is_traded(tmp_path, progress):
     """Both edges inclusive: a qualifying game inside the band trades."""
     got = _evaluate(tmp_path, progress)
@@ -176,7 +201,7 @@ def test_inside_the_window_is_traded(tmp_path, progress):
     assert got["candidate"] is not None, got
 
 
-@pytest.mark.parametrize("progress", [0.0, 50.0, 70.0, 74.0, 74.9, 74.999])
+@pytest.mark.parametrize("progress", [0.0, 70.0, 74.0, 74.9, 74.999])
 def test_before_the_window_is_refused_by_the_executor(tmp_path, progress):
     got = _evaluate(tmp_path, progress)
     assert got["decision"] == "NO_BET"
@@ -184,30 +209,32 @@ def test_before_the_window_is_refused_by_the_executor(tmp_path, progress):
     assert got["candidate"] is None
 
 
-@pytest.mark.parametrize("progress", [90.5, 91.0, 92.0, 95.0, 97.5, 100.0])
-def test_the_last_four_minutes_are_refused_by_the_executor(tmp_path, progress):
-    """No NBA trade inside the final four minutes, at any progress past it."""
+@pytest.mark.parametrize("progress", [92.01, 94.0, 95.0, 100.0])
+def test_past_the_window_is_refused_by_the_executor(tmp_path, progress):
     got = _evaluate(tmp_path, progress)
     assert got["decision"] == "NO_BET"
     assert got["reason"] == AFTER
     assert got["candidate"] is None
 
 
-def test_the_executor_reads_the_ceiling_per_classification(tmp_path):
-    """End-to-end: 91% is refused for a 40-minute game and traded for a
-    48-minute one — the executor must pass the classification through."""
-    assert _evaluate(tmp_path, 91.0, classification=NBA)["reason"] == AFTER
-    cyber = _evaluate(tmp_path, 91.0, classification=CYBER)
-    assert cyber["decision"] in ("EXECUTE", "WOULD_BET"), cyber
-
-
-def test_the_92_regression_is_closed(tmp_path):
-    """Operator directive 2026-10-08: 92% of a 40-minute game is 36.8 min —
-    inside the final four minutes — so it must be refused, as it was NOT
-    under the old flat 92% ceiling."""
-    got = _evaluate(tmp_path, 92.0)
+def test_the_executor_refuses_a_price_below_the_break_even(tmp_path):
+    """End-to-end: an in-window game at a sub-break-even price is NOT traded —
+    the operator's criterion is positive EV, not volume."""
+    got = _evaluate(tmp_path, 76.0, price=1.50)          # needs 1.51
     assert got["decision"] == "NO_BET"
-    assert got["reason"] == AFTER
+    assert got["reason"] == PRICE_FLOOR
+    assert got["candidate"] is None
+    ok = _evaluate(tmp_path, 76.0, price=1.60)
+    assert ok["decision"] in ("EXECUTE", "WOULD_BET"), ok
+
+
+def test_a_missing_price_is_not_gated_by_this_rule(tmp_path):
+    """An absent price keeps the pre-existing contract: the gate exists to
+    refuse a KNOWN-low price, not to invent a refusal for a payload that omits
+    the field (the line and price share one market row)."""
+    got = _evaluate(tmp_path, 80.0, price=None)
+    assert got["reason"] != PRICE_FLOOR
+    assert got["decision"] in ("EXECUTE", "WOULD_BET"), got
 
 
 def test_out_of_window_never_becomes_a_candidate(tmp_path):
@@ -232,35 +259,34 @@ def test_executor_has_no_second_copy_of_the_band():
     """The executor must CONSUME the shared definition, never re-declare the
     numbers — a second copy is the drift this guards."""
     src = EXECUTOR_PY.read_text(encoding="utf-8")
-    assert "from blm_v4.trade_window import execution_window_reason" in src
-    assert "EXEC_MIN_PROGRESS_PCT =" not in src
-    assert "EXEC_MAX_PROGRESS_PCT =" not in src
-    assert "EXEC_LAST_GAME_MINUTES =" not in src
+    assert ("from blm_v4.trade_window import execution_window_reason, "
+            "price_reason") in src
+    for name in ("EXEC_MIN_PROGRESS_PCT =", "EXEC_MAX_PROGRESS_PCT =",
+                 "MIN_PRICE_BANDS =", "PRICE_FLOOR ="):
+        assert name not in src, name
 
 
 # ── the served payload + the BETTABLE badge (what is SHOWN) ─────────────
 
 def test_api_publishes_the_window_on_both_branches():
     """The badge reads a SERVED verdict; the payload must carry it on the
-    normal path AND the fail-closed path (never an absent block), and every
-    path must pass the classification so the ceiling can be per league."""
+    normal path AND the fail-closed path (never an absent block)."""
     src = API_PY.read_text(encoding="utf-8")
     assert "under_alert_execution_window" in src
     assert src.count("_execution_window_block(") == 3   # def + 2 call sites
-    assert 'None, g.get("classification"))' in src       # fail-closed path
-    assert src.count('g.get("classification"))') >= 2    # both live paths
+    assert '"min_price": min_price_for(progress_pct)' in src
 
 
 def test_payload_block_shape():
     from blm_v4.api import _execution_window_block
-    assert _execution_window_block(88.0, NBA) == {
-        "min": 75.0, "max": 90.0, "in_window": True, "reason": None}
-    cyber = _execution_window_block(91.0, CYBER)
-    assert cyber["in_window"] is True
-    assert cyber["max"] == pytest.approx(100 * 44 / 48)
-    late = _execution_window_block(90.5, NBA)
+    assert _execution_window_block(88.0, 1.95) == {
+        "min": 75.0, "max": 92.0, "min_price": 1.28,
+        "in_window": True, "reason": None}
+    cheap = _execution_window_block(88.0, 1.20)
+    assert cheap["in_window"] is False and cheap["reason"] == PRICE_FLOOR
+    late = _execution_window_block(93.0, 1.95)
     assert late["in_window"] is False and late["reason"] == AFTER
-    early = _execution_window_block(70.0, NBA)
+    early = _execution_window_block(70.0, 1.95)
     assert early["in_window"] is False and early["reason"] == BEFORE
 
 
@@ -279,4 +305,4 @@ def test_the_changed_asset_is_cache_busted():
     """dashboard.js is served from disk; a stale browser copy would keep the
     old badge, so the ?v= must have moved with the file."""
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert "/static/dashboard.js?v=6855974.6" in html
+    assert "/static/dashboard.js?v=6855974.7" in html
