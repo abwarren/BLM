@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""blm-agent — the BLM assistant from the command line.
+
+    blm-agent "why is it not betting?"
+    blm-agent                      # interactive session
+    blm-agent --status             # is it configured?
+
+It is READ-ONLY: it can read the BLM databases, the service logs and the live
+config, and explain what it finds.  It cannot change the unit price, toggle
+auto-betting, restart a service or place a bet.
+
+Replies come from the same agent the dashboard chat box uses, so both give the
+same answers and run the same read-only tools.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+BLM_ROOT = os.environ.get("BLM_ROOT", "/home/ubuntu/blm-fix-price-mapping")
+if BLM_ROOT not in sys.path:
+    sys.path.insert(0, BLM_ROOT)
+
+try:
+    from blm_v4.assistant import agent
+except Exception as e:                                    # pragma: no cover
+    print(f"blm-agent: cannot import the assistant from {BLM_ROOT}: "
+          f"{type(e).__name__}: {e}", file=sys.stderr)
+    raise SystemExit(2)
+
+BANNER = "BLM assistant (read-only). /clear resets, /exit quits."
+
+
+def _show(out: dict) -> None:
+    print(out.get("reply") or "(no reply)")
+    for t in out.get("tool_calls") or []:
+        args = t.get("input") or {}
+        shown = ", ".join(f"{k}={str(v)[:40]}" for k, v in args.items())
+        print(f"  · {t['tool']}({shown})", file=sys.stderr)
+    if out.get("usage"):
+        u = out["usage"]
+        print(f"  · tokens in={u.get('input_tokens')} out={u.get('output_tokens')}",
+              file=sys.stderr)
+
+
+def _status() -> int:
+    ok, why = agent.available()
+    creds = agent.credentials()
+    print(f"available : {ok}")
+    if not ok:
+        print(f"reason    : {why}")
+        return 1
+    print(f"model     : {creds['model']}")
+    print(f"endpoint  : {creds['base']}")
+    print("read-only : yes (mode=ro connections; writes refused by the database)")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if args and args[0] in ("--version",):
+        print("blm-agent 1.0")
+        return 0
+    if args and args[0] in ("--status",):
+        return _status()
+
+    ok, why = agent.available()
+    if not ok:
+        print(f"blm-agent: {why}", file=sys.stderr)
+        return 2
+
+    if args:
+        _show(agent.answer(" ".join(args)))
+        return 0
+
+    print(BANNER)
+    history: list[dict] = []
+    while True:
+        try:
+            line = input("blm> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            continue
+        if line in ("/exit", "/quit"):
+            return 0
+        if line == "/clear":
+            history = []
+            print("(history cleared)")
+            continue
+        try:
+            out = agent.answer(line, history=history)
+        except Exception as e:
+            print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        _show(out)
+        history = (out.get("messages") or [])[-12:]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

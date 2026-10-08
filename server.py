@@ -246,6 +246,13 @@ def main() -> None:
     configure_betting(betting_store, betting_cfg)
     app.include_router(betting_router)
 
+    # ── BLM ASSISTANT — read-only Q&A over the platform ───────────────
+    # Mounted under the same global auth middleware as everything else in
+    # /api/v4, so only signed-in dashboard users reach it.  The tools it
+    # exposes are read-only by construction (mode=ro SQLite connections).
+    from blm_v4.assistant.api import router as assistant_router
+    app.include_router(assistant_router)
+
 
     # ── Operator dashboard at the root ───────────────────────
     # http://<host>:2262/ is the live analytics terminal;
