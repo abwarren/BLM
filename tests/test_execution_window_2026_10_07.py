@@ -37,9 +37,9 @@ from blm_v4.betting.executor import evaluate
 from blm_v4.betting.store import BettingStore
 from blm_v4.trade_window import (AFTER, BEFORE, EXEC_MAX_PROGRESS_PCT,
                                  EXEC_MIN_PROGRESS_PCT, MIN_PRICE_BANDS,
-                                 PRICE_FLOOR, execution_window_reason,
-                                 in_execution_window, min_price_for,
-                                 price_reason)
+                                 MIN_SCORED_POINTS, PRICE_FLOOR, SCORE_FLOOR,
+                                 execution_window_reason, in_execution_window,
+                                 min_price_for, price_reason, score_reason)
 
 HERE = Path(__file__).resolve().parent
 EXECUTOR_PY = HERE.parent / "blm_v4" / "betting" / "executor.py"
@@ -48,6 +48,7 @@ DASH_JS = HERE.parent / "blm_v4" / "dashboard" / "static" / "dashboard.js"
 INDEX_HTML = HERE.parent / "blm_v4" / "dashboard" / "static" / "index.html"
 
 GOOD_PRICE = 1.95          # clears every band's break-even
+GOOD_POINTS = 150.0        # well clear of the scored-total floor
 
 
 def _cfg(tmp_path) -> BettingConfig:
@@ -58,9 +59,9 @@ def _cfg(tmp_path) -> BettingConfig:
         db_path=str(tmp_path / "blm_betting.db"))
 
 
-def _game(progress, game_id="WINDOW-1", price=GOOD_PRICE):
+def _game(progress, game_id="WINDOW-1", price=GOOD_PRICE, points=GOOD_POINTS):
     """A payload that satisfies every OTHER condition, so the only things that
-    can refuse it are the window and the price floor."""
+    can refuse it are the window, the score floor and the price floor."""
     cap = (datetime.now(timezone.utc)
            - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     return {
@@ -71,7 +72,8 @@ def _game(progress, game_id="WINDOW-1", price=GOOD_PRICE):
         "market": {"total_line": 193.5, "market_status": "LIVE",
                    "under_odds": price},
         "projector": {"progress_pct": progress, "required_pts_per_min": 5.0,
-                      "actual_pts_per_min": 4.0, "captured_at": cap},
+                      "actual_pts_per_min": 4.0, "captured_at": cap,
+                      "current_total_points": points},
         "under_alert_eligibility": {"eligible": True,
                                     "reason": "market_live"},
         "under_alert": {"active": True, "checkpoint": 75,
@@ -79,8 +81,8 @@ def _game(progress, game_id="WINDOW-1", price=GOOD_PRICE):
     }
 
 
-def _evaluate(tmp_path, progress, price=GOOD_PRICE, **over):
-    game = _game(progress, price=price)
+def _evaluate(tmp_path, progress, price=GOOD_PRICE, points=GOOD_POINTS, **over):
+    game = _game(progress, price=price, points=points)
     game.update(over)
     return evaluate(game, cfg=_cfg(tmp_path), store=BettingStore(
         str(tmp_path / "blm_betting.db")), enabled=True, unit_price=10.0,
@@ -191,6 +193,60 @@ def test_no_price_claim_outside_the_window():
         assert price_reason(1.0, pct) is None
 
 
+# ── the score floor (operator directive 2026-10-08) ─────────────────────
+
+def test_the_score_floor_is_the_operators_70():
+    assert MIN_SCORED_POINTS == 70.0
+
+
+@pytest.mark.parametrize("pts", [70.0, 71.0, 150.0, 300.0])
+def test_enough_points_scored_passes(pts):
+    assert score_reason(pts) is None
+
+
+@pytest.mark.parametrize("pts", [0, 0.0, 12.0, 69.0, 69.999])
+def test_too_few_points_is_refused(pts):
+    assert score_reason(pts) == SCORE_FLOOR
+
+
+@pytest.mark.parametrize("bad", ["", "abc", float("nan"), float("inf")])
+def test_an_unprovable_score_fails_closed(bad):
+    """A PRESENT value that cannot be shown to clear the floor is refused.
+    An absent score (None) is not gated here — see below."""
+    assert score_reason(bad) == SCORE_FLOOR
+
+
+def test_an_absent_score_is_not_gated_here():
+    """Symmetry with the price floor.  A projection with no score has no
+    required_pts_per_min either, so the executor's own market_missing gate has
+    already refused it upstream — gating absence would break every caller that
+    omits the field without making any trade safer."""
+    assert score_reason(None) is None
+
+
+def test_the_2026_10_08_phantom_cannot_trade(tmp_path):
+    """REGRESSION.  PokerBet reported a freshly-listed game as
+    "4th Quarter, 12:00, 0-0" for ~35 seconds (raw snapshots: quarter=4,
+    game_status live) before correcting to the 1st.  That state computes to
+    EXACTLY 75% progress and, with a real line against a zero score, reads as
+    a maximal under — the engine placed R200 sixteen seconds after the game
+    first appeared (execution bet-c4a887dc546863d4331b, game 31156683).
+    It must now be refused, and tradeable once it has really scored."""
+    got = _evaluate(tmp_path, 75.0, points=0)
+    assert got["decision"] == "NO_BET"
+    assert got["reason"] == SCORE_FLOOR
+    assert got["candidate"] is None
+    ok = _evaluate(tmp_path, 75.0, points=150.0)
+    assert ok["decision"] in ("EXECUTE", "WOULD_BET"), ok
+
+
+def test_a_missing_score_is_not_gated_by_this_rule(tmp_path):
+    """The upstream market_missing gate owns absence; this rule only refuses a
+    PRESENT impossible score."""
+    got = _evaluate(tmp_path, 80.0, points=None)
+    assert got["reason"] != SCORE_FLOOR
+
+
 # ── the executor gate (what is TRADED) ──────────────────────────────────
 
 @pytest.mark.parametrize("progress", [75.0, 78.0, 85.0, 90.0, 92.0])
@@ -259,10 +315,12 @@ def test_executor_has_no_second_copy_of_the_band():
     """The executor must CONSUME the shared definition, never re-declare the
     numbers — a second copy is the drift this guards."""
     src = EXECUTOR_PY.read_text(encoding="utf-8")
-    assert ("from blm_v4.trade_window import execution_window_reason, "
-            "price_reason") in src
+    assert "from blm_v4.trade_window import" in src
+    for fn in ("execution_window_reason", "price_reason", "score_reason"):
+        assert fn in src, fn
     for name in ("EXEC_MIN_PROGRESS_PCT =", "EXEC_MAX_PROGRESS_PCT =",
-                 "MIN_PRICE_BANDS =", "PRICE_FLOOR ="):
+                 "MIN_PRICE_BANDS =", "PRICE_FLOOR =", "SCORE_FLOOR =",
+                 "MIN_SCORED_POINTS ="):
         assert name not in src, name
 
 
@@ -279,15 +337,21 @@ def test_api_publishes_the_window_on_both_branches():
 
 def test_payload_block_shape():
     from blm_v4.api import _execution_window_block
-    assert _execution_window_block(88.0, 1.95) == {
-        "min": 75.0, "max": 92.0, "min_price": 1.28,
+    assert _execution_window_block(88.0, 1.95, 150.0) == {
+        "min": 75.0, "max": 92.0, "min_price": 1.28, "min_points": 70.0,
         "in_window": True, "reason": None}
-    cheap = _execution_window_block(88.0, 1.20)
+    cheap = _execution_window_block(88.0, 1.20, 150.0)
     assert cheap["in_window"] is False and cheap["reason"] == PRICE_FLOOR
-    late = _execution_window_block(93.0, 1.95)
+    weak = _execution_window_block(88.0, 1.95, 12.0)
+    assert weak["in_window"] is False and weak["reason"] == SCORE_FLOOR
+    late = _execution_window_block(93.0, 1.95, 150.0)
     assert late["in_window"] is False and late["reason"] == AFTER
-    early = _execution_window_block(70.0, 1.95)
+    early = _execution_window_block(70.0, 1.95, 150.0)
     assert early["in_window"] is False and early["reason"] == BEFORE
+    # a phantom state (the 2026-10-08 bug) must NOT read BETTABLE
+    phantom = _execution_window_block(75.0, 1.85, 0)
+    assert phantom["in_window"] is False
+    assert phantom["reason"] == SCORE_FLOOR
 
 
 def test_badge_requires_the_window():
@@ -305,4 +369,4 @@ def test_the_changed_asset_is_cache_busted():
     """dashboard.js is served from disk; a stale browser copy would keep the
     old badge, so the ?v= must have moved with the file."""
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert "/static/dashboard.js?v=6855974.7" in html
+    assert "/static/dashboard.js?v=6855974.8" in html

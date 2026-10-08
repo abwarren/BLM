@@ -1,8 +1,9 @@
-"""The UNDER trade EXECUTION WINDOW and PRICE FLOOR — the ONE definition.
+"""The UNDER trade EXECUTION WINDOW, PRICE FLOOR and SCORE FLOOR — ONE definition.
 
-The autonomous UNDER trade is placed only when BOTH hold:
+The autonomous UNDER trade is placed only when ALL hold:
 
-  * the game's progress sits inside the execution window, and
+  * the game's progress sits inside the execution window,
+  * enough points have actually been scored, and
   * the UNDER price clears the break-even for the progress band.
 
 WHY THE WINDOW.  PokerBet stops quoting the game total near the end — live
@@ -28,6 +29,24 @@ its band's break-even.  Bands above the ceiling are absent because the window
 refuses them first.  These are measurements, not round numbers, and they carry
 the usual model-drift risk: re-measure before trusting them again.
 
+WHY THE SCORE FLOOR.  A live basketball game cannot be deep into its schedule
+with almost nothing on the board, and the provider CAN publish such a state.
+Observed live 2026-10-08: PokerBet reported a freshly-listed game as
+"4th Quarter, 12:00, 0-0" for about 35 seconds — the raw snapshots show
+quarter=4 with game_status live — then corrected itself to "1st Quarter".  That
+phantom state computes to EXACTLY 75% progress and, with a real line against a
+zero score, a required pace far above the league average, so the alert read it
+as a maximal UNDER and the engine placed R200 sixteen seconds after the game
+first appeared (execution bet-c4a887dc546863d4331b, game 31156683).  Every
+other bet that day came 5-74 minutes after first sighting.  A floor on the
+scored total refuses that state AND any variant of it.  Measured over 380,249
+real states in the window: only 12 carry a total under 70, ten of them zero —
+this binds on nothing legitimate.  Like the price, an ABSENT score is NOT
+gated here: a projection with no score has no required_pts_per_min either, so
+the executor's own ``market_missing`` gate has already refused it upstream.
+What this gate adds is the case that slipped through — a score that is
+PRESENT and impossible.
+
 One definition, TWO consumers — the executor gate that decides what is TRADED
 and the live payload that marks an alert BETTABLE or NON-ACTIONABLE.  A second
 copy of these numbers is the failure this module exists to prevent.
@@ -47,6 +66,12 @@ EXEC_MAX_PROGRESS_PCT = 92.0
 BEFORE = "before_execution_window"
 AFTER = "after_execution_window"
 PRICE_FLOOR = "price_below_break_even"
+SCORE_FLOOR = "score_below_minimum"
+
+#: Minimum points that must ALREADY be on the board (operator directive
+#: 2026-10-08).  A guard against impossible provider states — see the module
+#: docstring.  Measured: binds on 12 of 380,249 real in-window states.
+MIN_SCORED_POINTS = 70.0
 
 #: (exclusive upper progress bound, break-even price) — first match wins.
 #: Measured on the rebuilt cohort (per game, first firing, settled finals):
@@ -132,3 +157,31 @@ def price_reason(price, progress_pct) -> Optional[str]:
     if not math.isfinite(p):
         return PRICE_FLOOR
     return None if p >= floor else PRICE_FLOOR
+
+
+def score_reason(points) -> Optional[str]:
+    """``None`` when enough points have been scored — else SCORE_FLOOR.
+
+    An ABSENT score (``None``) is deliberately NOT gated, exactly as for the
+    price: a projection with no score has no ``required_pts_per_min`` either,
+    so the executor's own ``market_missing`` gate has already refused it
+    upstream, and gating absence here would break every caller that omits the
+    field without making any trade safer.
+
+    What this gate exists for is a score that is PRESENT and impossible — the
+    2026-10-08 phantom: the provider reported a freshly-listed game as
+    "4th Quarter, 12:00, 0-0", which computes to exactly 75% progress and,
+    with a real line against a zero score, reads as a maximal UNDER.
+
+    A present-but-unprovable score (a non-finite number, an unparsable
+    string) IS refused — it cannot be shown to clear the floor.
+    """
+    if points is None:
+        return None
+    try:
+        pts = float(points)
+    except (TypeError, ValueError):
+        return SCORE_FLOOR
+    if not math.isfinite(pts):
+        return SCORE_FLOOR
+    return None if pts >= MIN_SCORED_POINTS else SCORE_FLOOR

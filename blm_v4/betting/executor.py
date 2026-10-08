@@ -34,7 +34,8 @@ from blm_v4.betting.account_guard import verify_account
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import stake as _stake
-from blm_v4.trade_window import execution_window_reason, price_reason
+from blm_v4.trade_window import (execution_window_reason, price_reason,
+                                 score_reason)
 
 # directive §5 — the execution-state vocabulary
 STATUS_PENDING = "PENDING"
@@ -129,16 +130,22 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if _finite(proj.get("required_pts_per_min")) is None \
             or _finite(proj.get("progress_pct")) is None:
         return _no("market_missing", ik)
-    # ── 5b. the EXECUTION WINDOW + PRICE FLOOR (operator directive) ───
-    # Placed only in the progress band [75%, 92%] — 75 is the alert's own
-    # floor, 92 is the top of the last fully-quoted band (the unfillable
-    # attempts were at 94-96%).  AND only at a price above the band's
-    # measured break-even: the operator's criterion is positive EV, so a
-    # hit rate alone never licenses a trade.  Both come from the ONE
-    # definition in blm_v4.trade_window, shared with the dashboard badge.
+    # ── 5b. the EXECUTION WINDOW, SCORE FLOOR + PRICE FLOOR ──────────
+    # placed only in the progress band [75%, 92%] — 75 is the alert's own
+    # floor, 92 the top of the last fully-quoted band (the observed
+    # unfillable attempts were at 94-96%); only once enough points are on
+    # the board (the provider phantoms a fresh game as "4th Quarter, 0-0",
+    # which lands exactly on the floor); and only at a price above the
+    # band's measured break-even, because the operator's criterion is
+    # positive EV and a hit rate alone never licenses a trade.  All three
+    # come from the ONE definition in blm_v4.trade_window, shared with the
+    # dashboard's BETTABLE badge.
     window_reason = execution_window_reason(proj.get("progress_pct"))
     if window_reason is not None:
         return _no(window_reason, ik)
+    low_score = score_reason(proj.get("current_total_points"))
+    if low_score is not None:
+        return _no(low_score, ik)
     below_break_even = price_reason(market.get("under_odds"),
                                     proj.get("progress_pct"))
     if below_break_even is not None:
