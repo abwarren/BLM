@@ -8,9 +8,11 @@ an execution arriving there is never filled.
 
 Two edges, two KINDS of rule:
 
-  * the FLOOR is a progress percent — 78% (operator directive 2026-10-07,
-    revised down from 85% to restore the volume the narrower floor discarded:
-    the measured edge is positive across the whole of Q4);
+  * the FLOOR is a progress percent — 75% (operator directives 2026-10-07/08,
+    revised 85 -> 78 -> 75).  75 is the ALERT's own floor (progress_pct >= 75),
+    so no alert is ever refused as "too early" — that refusal category is gone.
+    The 75-78 slice measured 65.44% UNDER over 2,208 first-fire games =
+    break-even price 1.528, i.e. +EV above ~1.53);
   * the CEILING is a GAME-CLOCK stop — no placement inside the FINAL FOUR
     MINUTES of the match (operator directive 2026-10-08).  Expressed per
     classification, never as a flat percent, because the same final minutes
@@ -92,8 +94,9 @@ def _evaluate(tmp_path, progress, classification=NBA, **over):
 
 # ── the definition ──────────────────────────────────────────────────────
 
-def test_the_floor_is_the_operators_78_percent():
-    assert EXEC_MIN_PROGRESS_PCT == 78.0
+def test_the_floor_is_the_operators_75_percent():
+    """75 == the ALERT's own floor, so no alert is ever refused as "too early"."""
+    assert EXEC_MIN_PROGRESS_PCT == 75.0
 
 
 def test_the_ceiling_is_the_final_four_minutes_of_the_game():
@@ -124,7 +127,7 @@ def test_the_band_edges_are_ordered_for_every_league():
         assert EXEC_MIN_PROGRESS_PCT < exec_max_progress_pct(cls)
 
 
-@pytest.mark.parametrize("pct", [78.0, 80.0, 85.0, 88.0, 89.9, 90.0])
+@pytest.mark.parametrize("pct", [75.0, 78.0, 80.0, 85.0, 88.0, 89.9, 90.0])
 def test_inside_the_window_has_no_refusal(pct):
     assert execution_window_reason(pct, NBA) is None
     assert in_execution_window(pct, NBA) is True
@@ -151,7 +154,7 @@ def test_the_same_percent_is_inside_for_cyber_and_outside_for_nba(pct):
     assert execution_window_reason(pct, CYBER) is None
 
 
-@pytest.mark.parametrize("pct", [0.0, 50.0, 74.9, 77.9, 77.999])
+@pytest.mark.parametrize("pct", [0.0, 50.0, 70.0, 74.9, 74.999])
 def test_before_the_window_is_refused(pct):
     assert execution_window_reason(pct, NBA) == BEFORE
 
@@ -165,7 +168,7 @@ def test_unprovable_progress_fails_closed(pct):
 
 # ── the executor gate (what is TRADED) ──────────────────────────────────
 
-@pytest.mark.parametrize("progress", [78.0, 85.0, 88.0, 89.5, 90.0])
+@pytest.mark.parametrize("progress", [75.0, 78.0, 85.0, 88.0, 89.5, 90.0])
 def test_inside_the_window_is_traded(tmp_path, progress):
     """Both edges inclusive: a qualifying game inside the band trades."""
     got = _evaluate(tmp_path, progress)
@@ -173,7 +176,7 @@ def test_inside_the_window_is_traded(tmp_path, progress):
     assert got["candidate"] is not None, got
 
 
-@pytest.mark.parametrize("progress", [0.0, 50.0, 74.9, 75.0, 77.5, 77.999])
+@pytest.mark.parametrize("progress", [0.0, 50.0, 70.0, 74.0, 74.9, 74.999])
 def test_before_the_window_is_refused_by_the_executor(tmp_path, progress):
     got = _evaluate(tmp_path, progress)
     assert got["decision"] == "NO_BET"
@@ -210,7 +213,7 @@ def test_the_92_regression_is_closed(tmp_path):
 def test_out_of_window_never_becomes_a_candidate(tmp_path):
     """No candidate ⇒ the worker never calls the provider: the point of the
     gate is that a doomed attempt is not spent at all."""
-    for progress in (75.0, 95.0):
+    for progress in (74.0, 95.0):
         assert _evaluate(tmp_path, progress)["candidate"] is None
 
 
@@ -251,7 +254,7 @@ def test_api_publishes_the_window_on_both_branches():
 def test_payload_block_shape():
     from blm_v4.api import _execution_window_block
     assert _execution_window_block(88.0, NBA) == {
-        "min": 78.0, "max": 90.0, "in_window": True, "reason": None}
+        "min": 75.0, "max": 90.0, "in_window": True, "reason": None}
     cyber = _execution_window_block(91.0, CYBER)
     assert cyber["in_window"] is True
     assert cyber["max"] == pytest.approx(100 * 44 / 48)
@@ -276,4 +279,4 @@ def test_the_changed_asset_is_cache_busted():
     """dashboard.js is served from disk; a stale browser copy would keep the
     old badge, so the ?v= must have moved with the file."""
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert "/static/dashboard.js?v=6855974.5" in html
+    assert "/static/dashboard.js?v=6855974.6" in html
