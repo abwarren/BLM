@@ -484,8 +484,70 @@ class ResolverBrowserBridge(BrowserBridge):
             # betting LINE and the DECIMAL ODDS (distinct; never line as odds)
             out["observed_line"] = obs.line
             out["observed_odds"] = obs.price
+
+            # 5. FEEDBACK (operator directive 2026-10-08): read the DOM
+            # IMMEDIATELY to learn whether the bookmaker took it, rather than
+            # assuming the click was enough.  On a DEFINITIVE non-acceptance the
+            # remedy is Remove-All + re-select — which is exactly what the TOP
+            # of this loop does — so we fall through and re-run it.
+            _st = str(out.get("status") or "").upper()
+            if _st in ("SUBMITTED", "ACCEPTED"):
+                _verdict = self._dom_accepted(out)
+                if _verdict is True:
+                    return out
+                if _verdict is False:
+                    last = dict(out)
+                    last["status"] = FAILED
+                    last["error_code"] = "DOM_NOT_ACCEPTED"
+                    last["error_message"] = (
+                        "submitted but the leg is still in the slip — not "
+                        "accepted; removing all and re-selecting the market")
+                    continue
+                # AMBIGUOUS: do NOT retry.  A second submit on a state we
+                # cannot read could place the bet TWICE.
+                return out
+            if _st == "REJECTED":
+                # the bookmaker refused it outright: clear the stale market and
+                # select again.
+                last = dict(out)
+                continue
             return out
         return last
+
+    def _dom_accepted(self, out: dict):
+        """Read the DOM straight away: did the bookmaker TAKEN our bet?
+
+        A click is never proof, so this reads the bookmaker's OWN evidence —
+        the receipt reference (``read_order_confirmation``).
+
+        It deliberately answers only what the DOM can PROVE:
+
+          * a receipt ⇒ ``True`` (accepted);
+          * no receipt ⇒ ``None`` (AMBIGUOUS).
+
+        ``None`` must NOT be retried.  A slow or absent receipt is
+        indistinguishable from a slow acceptance, so re-selecting on it could
+        place the bet TWICE — the operator's money.  The engine's existing
+        contract is the same one ``test_timeout_is_never_success`` pins:
+        an unconfirmed submission is UNKNOWN, never a retry.  Only an outright
+        REJECTED (handled in ``place``) is a provable non-acceptance.
+
+        Kept as a method so a future DOM rejection signal (an error banner the
+        adapter can read) can return ``False`` here without touching the loop.
+        """
+        try:
+            conf = self.adapter.read_order_confirmation()
+        except Exception:  # noqa: BLE001 — no receipt is not a claim
+            conf = None
+        if conf:
+            ref = conf.get("reference") if isinstance(conf, dict) else conf
+            if ref:
+                if not out.get("provider_ref"):
+                    out["provider_ref"] = str(ref)
+                return True
+        if out.get("provider_ref"):
+            return True
+        return None
 
     def confirm(self, provider_ref: Optional[str]) -> Optional[dict]:
         try:

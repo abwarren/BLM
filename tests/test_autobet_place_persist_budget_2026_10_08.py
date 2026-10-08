@@ -116,3 +116,87 @@ def test_a_verified_leg_is_still_placed_exactly_once(monkeypatch):
     assert out["status"] in ("ACCEPTED", "SUBMITTED"), out
     assert len(a.placements) == 1              # exactly one, never a second
     assert c.elapsed() == 0.0                  # and no burning of the budget
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# DOM FEEDBACK (operator directive 2026-10-08): read the DOM straight away to
+# learn whether the bet was accepted; on a provable non-acceptance, clear the
+# stale market and select it again.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_receipt_means_accepted_and_stops_immediately(monkeypatch):
+    """The bookmaker's OWN receipt is proof — accept it and stop."""
+    _install_clock(monkeypatch)
+    a = FakeBrowserAdapter()
+    a.set_market(EVENT, 193.5, 1.95, 1.90)
+    a.place_status = "SUBMITTED"
+    a.confirmation = {"reference": "PB-ABC123"}   # the receipt
+    b = B.ResolverBrowserBridge(a, place_budget_s=45.0, retry_delay_s=1.5)
+
+    out = b.place(command=CMD, stake_amount=10.0)
+
+    assert out["status"] == "SUBMITTED"
+    assert out["provider_ref"] == "PB-ABC123"    # the receipt is carried back
+    assert len(a.placements) == 1                # placed once, no retry
+
+
+def test_an_unconfirmed_submission_is_never_retried(monkeypatch):
+    """THE DOUBLE-STAKE GUARD.
+
+    A slow/absent receipt is indistinguishable from a slow acceptance, so the
+    engine must NOT re-select and re-submit on it — that could stake twice.
+    Exactly one placement, and the outcome stays UNKNOWN.
+    """
+    c = _install_clock(monkeypatch)
+    a = FakeBrowserAdapter()
+    a.set_market(EVENT, 193.5, 1.95, 1.90)
+    a.place_status = "SUBMITTED"
+    a.confirmation = None                        # no receipt at all
+    b = B.ResolverBrowserBridge(a, place_budget_s=45.0, retry_delay_s=1.5)
+
+    out = b.place(command=CMD, stake_amount=10.0)
+
+    assert len(a.placements) == 1, "a second submit could double the stake"
+    # the adapter's own status is carried back UNCHANGED and with NO receipt.
+    # Mapping an unconfirmed submission to UNKNOWN is the EXECUTOR's job (see
+    # test_timeout_is_never_success) — place() must not invent it.
+    assert out["status"] == "SUBMITTED"
+    assert out["provider_ref"] is None
+    assert c.elapsed() <= 1.5                    # and it did not churn
+
+
+def test_a_rejection_clears_the_slip_and_selects_the_market_again(monkeypatch):
+    """A provable non-acceptance ⇒ Remove-All + re-select, then it succeeds.
+
+    The bookmaker refusing outright is the case the DOM CAN prove, so the loop
+    must clear the stale market and select it again — visible here as a SECOND
+    resolve/click and a second placement, ending accepted.
+    """
+    _install_clock(monkeypatch)
+    a = FakeBrowserAdapter()
+    a.set_market(EVENT, 193.5, 1.95, 1.90)
+    a.place_status = "REJECTED"                  # refused on the first attempt
+    a.place_reject_reason = "market suspended"
+
+    seen = {"clicks": 0}
+
+    def _accept_on_retry():
+        seen["clicks"] += 1
+        if seen["clicks"] >= 2:
+            a.place_status = "ACCEPTED"          # takes it after the re-select
+
+    # the REAL adapter exposes clear_betslip — the Remove-All step the bridge
+    # calls before every attempt (dom.py).  This shared double does not, so the
+    # rejected leg would still be in the slip on the retry and read as a
+    # duplicate.  Supply it here so the test drives the contract the engine
+    # actually drives.
+    a.clear_betslip = lambda: (a.slip.clear() or 0)
+
+    a.on_before_click = _accept_on_retry
+    b = B.ResolverBrowserBridge(a, place_budget_s=45.0, retry_delay_s=1.5)
+
+    out = b.place(command=CMD, stake_amount=10.0)
+
+    assert out["status"] == "ACCEPTED"
+    assert len(a.clicks) == 2, "the market must be SELECTED AGAIN after clearing"
+    assert len(a.placements) == 2, "one refused submit, then the accepted one"
