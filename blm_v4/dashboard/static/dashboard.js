@@ -2446,9 +2446,9 @@ function blmAlertStateRowHTML(g) {
   // BETTABLE vs NON-ACTIONABLE — EXACTLY the Auto-Bet executor's gate: an
   // actionable opportunity is an ACTIVE under_alert on an ELIGIBLE game
   // (genuinely live + LIVE market) INSIDE the trade execution window
-  // (75% — the alert's own floor — up to 92%, only once 70+ points are on the
-  // board, AND at a price above the band's break-even).  Outside the window
-  // PokerBet has closed the total market and the
+  // (75% — the alert's own floor — up to 92%, armed at the relaxed execution
+  // pace bar, only once 70+ points are on the board, AND at a price above the
+  // band's break-even).  Outside the window PokerBet has closed the total market and the
   // engine does not attempt the bet.  Visible-but-non-actionable
   // alerts carry the reason on hover, so a shown alert is never mistaken
   // for a bet the engine will actually take.  The window verdict is served

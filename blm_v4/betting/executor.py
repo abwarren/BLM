@@ -34,7 +34,8 @@ from blm_v4.betting.account_guard import verify_account
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import stake as _stake
-from blm_v4.trade_window import (execution_window_reason, price_reason,
+from blm_v4.trade_window import (EXEC_MIN_PROGRESS_PCT,
+                                 execution_window_reason, price_reason,
                                  score_reason)
 
 # directive §5 — the execution-state vocabulary
@@ -90,17 +91,33 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
         return _no("auto_betting_off", ik)
     if not game_enabled:
         return _no("PER_GAME_AUTO_BET_OFF", ik)
-    # ── 2+3. the production alert verdict, consumed verbatim ──────────
+    # ── 2+3. the EXECUTION verdict ────────────────────────────────────
+    # The alert's own class bar is 1.04 and STAYS 1.04: it is the signal, the
+    # dashboard's on-screen alert, and what the frozen historical analysis
+    # replays.  What is TRADED is gated by the relaxed bar served as
+    # under_alert_exec_armed — the alert often only clears 1.04 once PokerBet
+    # has pulled the total, which is the whole reason to move earlier.
+    #
+    # An ABSENT verdict falls back to the strict alert, so a payload that does
+    # not carry the field can only ever be TIGHTER, never looser.
     ua = game.get("under_alert") or {}
-    if ua.get("active") is not True:
+    armed = game.get("under_alert_exec_armed")
+    if armed is None:
+        armed = ua.get("active") is True
+    if armed is not True:
         return _no("alert_not_active", ik)
     if (game.get("under_alert_eligibility") or {}).get("eligible") is not True:
         return _no("alert_not_eligible", ik)
     # ── identity: the alert must carry its checkpoint id ──────────────
-    alert_id = f"{game.get('game_id')}|{ua.get('checkpoint')}"
-    checkpoint = str(ua.get("checkpoint"))
+    # (armed at the relaxed bar the alert block itself may read inactive, so
+    # fall back to the ONE progress checkpoint the alert is defined on)
+    _ck = ua.get("checkpoint")
+    if _ck is None:
+        _ck = int(EXEC_MIN_PROGRESS_PCT)
+    alert_id = f"{game.get('game_id')}|{_ck}"
+    checkpoint = str(_ck)
     game_id = str(game.get("game_id") or "")
-    if not game_id or ua.get("checkpoint") is None:
+    if not game_id or _ck is None:
         return _no("alert_identity_missing", ik)
     ik = f"{game_id}|{checkpoint}|{alert_id}"
     # ── R4: ONE auto-bet per game (operator directive 2026-10-06) ─────

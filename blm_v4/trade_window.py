@@ -67,21 +67,46 @@ BEFORE = "before_execution_window"
 AFTER = "after_execution_window"
 PRICE_FLOOR = "price_below_break_even"
 SCORE_FLOOR = "score_below_minimum"
+PACE_BELOW = "pace_below_execution_threshold"
 
 #: Minimum points that must ALREADY be on the board (operator directive
 #: 2026-10-08).  A guard against impossible provider states — see the module
 #: docstring.  Measured: binds on 12 of 380,249 real in-window states.
 MIN_SCORED_POINTS = 70.0
 
+#: The EXECUTION pace ratio (operator directive 2026-10-08, "take the position
+#: earlier before books remove the market").
+#:
+#: The ALERT's own class threshold is 1.04 and STAYS 1.04 — it is the signal,
+#: it is what the dashboard shows, and it is what the frozen historical
+#: analysis replays.  This is a SEPARATE, lower bar used only to decide what is
+#: TRADED.  The difference matters because the alert often only clears 1.04
+#: once the game is nearly over, by which time PokerBet has pulled the total.
+#:
+#: Swept on the rebuilt cohort (first moment progress >= 75 that the ratio
+#: crosses k; hit rate, break-even, price matched to the exact line):
+#:
+#:   k      games   median fire%   in-window%   hit%     break-even   EV @ ~1.85
+#:   1.04   7,707       90.0%          54%     80.27%     1.246        +46.1%
+#:   1.02   8,396       85.0%          60%     77.99%     1.282        +44.3%
+#:   1.00   9,461       82.5%          65%     75.20%     1.330        +39.1%
+#:   0.95  12,594       77.5%          77%     69.68%     1.435        +28.9%
+#:   0.90  15,644       75.0%          88%     64.87%     1.542        +20.0%
+#:
+#: 0.95 is the chosen step: +EV throughout, and it moves the median fire from
+#: 90.0% to 77.5% progress so 77% of fires now land before the market closes.
+EXEC_MIN_PACE_RATIO = 0.95
+
 #: (exclusive upper progress bound, break-even price) — first match wins.
-#: Measured on the rebuilt cohort (per game, first firing, settled finals):
-#:   75-80   66.39% UNDER  n=2,386  -> 1.506
-#:   80-85   73.17% UNDER  n=641    -> 1.367
-#:   85-92   78.43% UNDER  n=890    -> 1.275
+#: Re-derived for the EXECUTION cohort at k=0.95 (first moment progress >= 75
+#: that the ratio crosses 0.95, settled finals, line-matched prices):
+#:   75-80   67.91% UNDER  -> 1.473
+#:   80-85   72.29% UNDER  -> 1.383
+#:   85-92   78.7%  UNDER  -> 1.27  (n is thinner here and noisy upward)
 #: Rounded UP to the nearest cent so the floor is never the looser number.
 MIN_PRICE_BANDS = (
-    (80.0, 1.51),
-    (85.0, 1.37),
+    (80.0, 1.48),
+    (85.0, 1.39),
     (None, 1.28),
 )
 
@@ -185,3 +210,28 @@ def score_reason(points) -> Optional[str]:
     if not math.isfinite(pts):
         return SCORE_FLOOR
     return None if pts >= MIN_SCORED_POINTS else SCORE_FLOOR
+
+
+def exec_alert_reason(required_pace, avg_pace, progress_pct) -> Optional[str]:
+    """``None`` when the EXECUTION pace bar is cleared — else PACE_BELOW.
+
+    This is the trade-side threshold, deliberately LOWER than the alert's own
+    1.04 class (see EXEC_MIN_PACE_RATIO).  It is not the alert: the alert still
+    fires, and the dashboard still shows it, on 1.04.
+
+    Fail closed: an unprovable pace, or an average that is missing or
+    non-positive, is refused rather than waved through.
+    """
+    try:
+        req = float(required_pace)
+        avg = float(avg_pace)
+        pct = float(progress_pct)
+    except (TypeError, ValueError):
+        return PACE_BELOW
+    if not (math.isfinite(req) and math.isfinite(avg) and math.isfinite(pct)):
+        return PACE_BELOW
+    if avg <= 0:
+        return PACE_BELOW
+    if pct < EXEC_MIN_PROGRESS_PCT:
+        return PACE_BELOW
+    return None if (req / avg) > EXEC_MIN_PACE_RATIO else PACE_BELOW
