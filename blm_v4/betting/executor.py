@@ -131,13 +131,17 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
         return _no("market_missing", ik)
     # ── 5b. the EXECUTION WINDOW (operator directive 2026-10-07) ──────
     # Placed only in the progress band where the market is still quoted
-    # and the signal's measured ROI is positive.  Fail closed on an
+    # and the signal's measured ROI is positive — and NEVER inside the
+    # final four minutes of the match (operator directive 2026-10-08; a
+    # game-clock rule, so the ceiling is derived per classification).
+    # Fail closed on an
     # unprovable progress: a trade outside the band cannot be filled and
     # a provider call spent there is a wasted attempt (observed live
     # 2026-10-07: every out-of-band attempt failed EVENT_NOT_FOUND or
     # SUBMIT_CONTROL_UNAVAILABLE).  The band itself is defined ONCE in
     # blm_v4.trade_window, shared with the dashboard's BETTABLE badge.
-    window_reason = execution_window_reason(proj.get("progress_pct"))
+    window_reason = execution_window_reason(proj.get("progress_pct"),
+                                            game.get("classification"))
     if window_reason is not None:
         return _no(window_reason, ik)
     # ── limits must be CONFIGURED before any stake math (§9): an
