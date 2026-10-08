@@ -661,18 +661,35 @@ def test_unconfigured_limits_block_betting(tmp_path):
 
 
 def test_partially_configured_limits_block_betting(tmp_path):
-    """Any single missing limit blocks betting — partial configuration
-    is not safe configuration."""
+    """A missing per-bet cap or daily bet count blocks betting — partial
+    configuration of the MANDATORY limits is not safe configuration.
+
+    The daily exposure ceiling is optional (operator directive 2026-10-08);
+    its absence is covered by the test below.
+    """
     store = make_store(tmp_path)
     for kwargs in ({"max_stake_per_bet": None},
-                   {"max_bets_per_day": None},
-                   {"max_daily_exposure": None}):
+                   {"max_bets_per_day": None}):
         cfg = make_cfg(tmp_path, **kwargs)
         res = evaluate(qualifying_game(), cfg=cfg, store=store,
                        enabled=True, unit_price=10.0,
                        stats={"verifiable": True, "bets": 0, "amount": 0.0})
         assert res["decision"] == "NO_BET"
         assert res["reason"] == "limits_not_configured"
+
+
+def test_an_unset_exposure_ceiling_removes_the_limit(tmp_path):
+    """Operator directive 2026-10-08: with no daily exposure ceiling the
+    engine must NOT block, even far past the old R10,000 ceiling — the
+    per-bet cap and the daily bet count are the remaining bounds."""
+    cfg = make_cfg(tmp_path, max_daily_exposure=None)
+    store = make_store(tmp_path)
+    res = evaluate(qualifying_game(), cfg=cfg, store=store,
+                   enabled=True, unit_price=10.0,
+                   stats={"verifiable": True, "bets": 0, "amount": 9000.0})
+    assert res["reason"] not in ("limits_not_configured",
+                                 "daily_exposure_reached")
+    assert res["decision"] in ("EXECUTE", "WOULD_BET")
 
 
 # ══════════════════════════════════════════════════════════════════════

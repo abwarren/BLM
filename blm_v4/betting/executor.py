@@ -170,10 +170,14 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     # ── limits must be CONFIGURED before any stake math (§9): an
     #    unconfigured limit cannot be enforced, so betting is blocked —
     #    exactly what the dashboard's "NOT CONFIGURED — betting blocked"
-    #    status line promises.  Set BETTING_MAX_STAKE_PER_BET,
-    #    BETTING_MAX_BETS_PER_DAY and BETTING_MAX_DAILY_EXPOSURE to arm.
-    if (cfg.max_stake_per_bet is None or cfg.max_bets_per_day is None
-            or cfg.max_daily_exposure is None):
+    #    status line promises.  Set BETTING_MAX_STAKE_PER_BET and
+    #    BETTING_MAX_BETS_PER_DAY to arm.
+    #
+    #    The DAILY EXPOSURE ceiling is OPTIONAL (operator directive
+    #    2026-10-08): leaving BETTING_MAX_DAILY_EXPOSURE unset REMOVES it.
+    #    The per-bet cap and the daily bet count remain mandatory and are the
+    #    binding risk bounds (200 bets x 1000.00 ZAR worst case per day).
+    if cfg.max_stake_per_bet is None or cfg.max_bets_per_day is None:
         return _no("limits_not_configured", ik)
     # ── 6. stake amount valid (unit-based staking) ────────────────────
     unit_price = _finite(unit_price)
