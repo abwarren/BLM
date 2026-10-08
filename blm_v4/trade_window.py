@@ -4,10 +4,11 @@ The autonomous UNDER trade is placed only while the game's progress sits
 inside this band.  Live probing (2026-10-07) shows PokerBet stops quoting
 the game total near the end: at 95-97.5% progress the event view renders
 with no market grid or redirects to another live game, so an execution
-arriving there can never be filled.  The lower edge is the operator's Q4
-four-minute mark, where the measured ROI of the production signal inside
-the band is +16.9% over 661 settled entries with the market still open
-throughout.
+arriving there can never be filled.  The band runs from the operator's 78%
+floor (2026-10-07, revised down from 85% to restore the volume the narrower
+floor discarded — the measured edge is positive across the whole of Q4) to
+the 92% ceiling, where the market is still open and the production signal's
+measured ROI is positive.
 
 One definition, TWO consumers — the executor gate that decides what is
 TRADED and the live payload that marks an alert BETTABLE or
@@ -19,8 +20,8 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-#: No trade before this progress (the Q4 four-minute mark).
-EXEC_MIN_PROGRESS_PCT = 85.0
+#: No trade before this progress (operator directive 2026-10-07: 78%).
+EXEC_MIN_PROGRESS_PCT = 78.0
 #: No trade after this progress (the market is gone by then).
 EXEC_MAX_PROGRESS_PCT = 92.0
 

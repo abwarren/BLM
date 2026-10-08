@@ -75,19 +75,19 @@ def _evaluate(tmp_path, progress, **over):
 # ── the definition ──────────────────────────────────────────────────────
 
 def test_window_constants_are_the_operator_directive():
-    """The band is the operator's Q4 four-minute mark through 92%."""
-    assert EXEC_MIN_PROGRESS_PCT == 85.0
+    """The band is the operator's 78% floor through the 92% ceiling."""
+    assert EXEC_MIN_PROGRESS_PCT == 78.0
     assert EXEC_MAX_PROGRESS_PCT == 92.0
     assert EXEC_MIN_PROGRESS_PCT < EXEC_MAX_PROGRESS_PCT
 
 
-@pytest.mark.parametrize("pct", [85.0, 88.0, 91.5, 92.0])
+@pytest.mark.parametrize("pct", [78.0, 85.0, 88.0, 91.5, 92.0])
 def test_inside_the_window_has_no_refusal(pct):
     assert execution_window_reason(pct) is None
     assert in_execution_window(pct) is True
 
 
-@pytest.mark.parametrize("pct", [0.0, 74.9, 80.0, 84.9, 84.999])
+@pytest.mark.parametrize("pct", [0.0, 50.0, 74.9, 77.9, 77.999])
 def test_before_the_window_is_refused(pct):
     assert execution_window_reason(pct) == BEFORE
 
@@ -106,7 +106,7 @@ def test_unprovable_progress_fails_closed(pct):
 
 # ── the executor gate (what is TRADED) ──────────────────────────────────
 
-@pytest.mark.parametrize("progress", [85.0, 88.0, 91.5, 92.0])
+@pytest.mark.parametrize("progress", [78.0, 85.0, 88.0, 91.5, 92.0])
 def test_inside_the_window_is_traded(tmp_path, progress):
     """Both edges inclusive: a qualifying game inside the band trades."""
     got = _evaluate(tmp_path, progress)
@@ -114,7 +114,7 @@ def test_inside_the_window_is_traded(tmp_path, progress):
     assert got["candidate"] is not None, got
 
 
-@pytest.mark.parametrize("progress", [0.0, 50.0, 74.9, 75.0, 80.0, 84.9])
+@pytest.mark.parametrize("progress", [0.0, 50.0, 74.9, 75.0, 77.5, 77.999])
 def test_before_the_window_is_refused_by_the_executor(tmp_path, progress):
     got = _evaluate(tmp_path, progress)
     assert got["decision"] == "NO_BET"
@@ -172,7 +172,7 @@ def test_api_publishes_the_window_on_both_branches():
 def test_payload_block_shape():
     from blm_v4.api import _execution_window_block
     assert _execution_window_block(88.0) == {
-        "min": 85.0, "max": 92.0, "in_window": True, "reason": None}
+        "min": 78.0, "max": 92.0, "in_window": True, "reason": None}
     late = _execution_window_block(97.5)
     assert late["in_window"] is False and late["reason"] == AFTER
     early = _execution_window_block(70.0)
@@ -194,4 +194,4 @@ def test_the_changed_asset_is_cache_busted():
     """dashboard.js is served from disk; a stale browser copy would keep the
     old badge, so the ?v= must have moved with the file."""
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert "/static/dashboard.js?v=6855974.3" in html
+    assert "/static/dashboard.js?v=6855974.4" in html
