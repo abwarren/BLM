@@ -2445,17 +2445,23 @@ function blmAlertStateRowHTML(g) {
   const sigTxt = alertOn ? "BLM ACTIVE" : "BLM —";
   // BETTABLE vs NON-ACTIONABLE — EXACTLY the Auto-Bet executor's gate: an
   // actionable opportunity is an ACTIVE under_alert on an ELIGIBLE game
-  // (genuinely live + LIVE market).  Visible-but-ineligible alerts are marked
-  // NON-ACTIONABLE with the reason on hover, so a shown alert is never
-  // mistaken for a bet the engine will actually take.
+  // (genuinely live + LIVE market) INSIDE the trade execution window
+  // (85-92% progress — outside it PokerBet has closed the total market and
+  // the engine does not attempt the bet).  Visible-but-non-actionable
+  // alerts carry the reason on hover, so a shown alert is never mistaken
+  // for a bet the engine will actually take.  The window verdict is served
+  // by the API from the ONE definition the executor gate also uses.
   const elig = g.under_alert_eligibility || {};
-  const bettable = !!(ua.active === true && elig.eligible === true);
+  const win = g.under_alert_execution_window || {};
+  const inWindow = win.in_window === true;
+  const bettable = !!(ua.active === true && elig.eligible === true && inWindow);
   const btTxt = bettable ? "BETTABLE" : "NON-ACTIONABLE";
   const btCls = bettable ? "blm-bt-yes" : "blm-bt-no";
   const btWhy = bettable
-    ? "under_alert.active AND eligible — Auto-Bet will take the UNDER"
+    ? "under_alert.active AND eligible AND inside the execution window — Auto-Bet will take the UNDER"
     : (ua.active !== true ? "alert not active (no UNDER trigger)"
-       : (elig.reason || "not eligible"));
+       : (!inWindow ? (win.reason || "outside the execution window")
+          : (elig.reason || "not eligible")));
   return `<div class="blm-signal-row">
     <span class="blm-sig-label">SIGNAL</span>
     <span class="${sigCls}">${sigTxt}</span>

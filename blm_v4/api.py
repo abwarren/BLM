@@ -53,6 +53,9 @@ from blm_v4.live_analytics.under_alert import (
     under_alert_eligibility,
     under_alert_state,
 )
+from blm_v4.trade_window import (EXEC_MAX_PROGRESS_PCT,
+                                 EXEC_MIN_PROGRESS_PCT,
+                                 execution_window_reason)
 
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
 
@@ -199,6 +202,24 @@ LIVE_STATUSES = ("live", "halftime", "in_progress", "in-play", "inplay")
 # inventing a second notion of freshness.
 ALERT_MAX_OBS_AGE_S = 300.0
 ALERT_MIN_REMAINING_MINUTES = ANALYTICAL_MIN_REMAINING_MINUTES  # 2.5, inclusive
+
+
+def _execution_window_block(progress_pct) -> dict:
+    """The UNDER trade execution window for one game — what the dashboard's
+    BETTABLE badge consumes.
+
+    The band and the verdict come from the ONE definition in
+    ``blm_v4.trade_window``, the same one the executor gate uses, so the
+    badge can never claim BETTABLE for a game the engine will refuse.
+    Fail closed: an unprovable progress reports ``in_window`` False.
+    """
+    reason = execution_window_reason(progress_pct)
+    return {
+        "min": EXEC_MIN_PROGRESS_PCT,
+        "max": EXEC_MAX_PROGRESS_PCT,
+        "in_window": reason is None,
+        "reason": reason,
+    }
 
 
 def _db_path() -> Path:
@@ -2281,6 +2302,8 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 eligibility = {"eligible": False,
                                "reason": "stale_state"}
             g["under_alert_eligibility"] = eligibility
+            g["under_alert_execution_window"] = _execution_window_block(
+                proj.get("progress_pct"))
             g["under_alert"] = under_alert_state(
                 proj.get("actual_pts_per_min"), proj.get("required_pts_per_min"),
                 entry.get("avg_pace"), proj.get("progress_pct"),
@@ -2340,6 +2363,9 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 None, False, None)
             g["under_alert"] = under_alert_state(
                 None, None, None, eligible=False)
+            # the execution window fails closed identically — the badge must
+            # never read BETTABLE from an absent block
+            g["under_alert_execution_window"] = _execution_window_block(None)
             # Q3 BREAK fails closed identically — an absent block is never
             # served, a present-but-inactive one is.
             g["under_alert_q3_break"] = q3_break_snapshot(

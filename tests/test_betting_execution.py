@@ -68,7 +68,7 @@ def qualifying_game(game_id="30990001", checkpoint=75, age_s=5.0):
         "live_reason": None,
         "market": {"total_line": 193.5, "market_status": "LIVE"},
         "projector": {
-            "progress_pct": 76.0,
+            "progress_pct": 88.0,
             "required_pts_per_min": 5.0,
             "actual_pts_per_min": 4.0,
             "captured_at": cap,

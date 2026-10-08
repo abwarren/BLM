@@ -34,6 +34,7 @@ from blm_v4.betting.account_guard import verify_account
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import stake as _stake
+from blm_v4.trade_window import execution_window_reason
 
 # directive §5 — the execution-state vocabulary
 STATUS_PENDING = "PENDING"
@@ -128,6 +129,17 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if _finite(proj.get("required_pts_per_min")) is None \
             or _finite(proj.get("progress_pct")) is None:
         return _no("market_missing", ik)
+    # ── 5b. the EXECUTION WINDOW (operator directive 2026-10-07) ──────
+    # Placed only in the progress band where the market is still quoted
+    # and the signal's measured ROI is positive.  Fail closed on an
+    # unprovable progress: a trade outside the band cannot be filled and
+    # a provider call spent there is a wasted attempt (observed live
+    # 2026-10-07: every out-of-band attempt failed EVENT_NOT_FOUND or
+    # SUBMIT_CONTROL_UNAVAILABLE).  The band itself is defined ONCE in
+    # blm_v4.trade_window, shared with the dashboard's BETTABLE badge.
+    window_reason = execution_window_reason(proj.get("progress_pct"))
+    if window_reason is not None:
+        return _no(window_reason, ik)
     # ── limits must be CONFIGURED before any stake math (§9): an
     #    unconfigured limit cannot be enforced, so betting is blocked —
     #    exactly what the dashboard's "NOT CONFIGURED — betting blocked"

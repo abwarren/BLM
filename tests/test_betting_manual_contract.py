@@ -25,7 +25,7 @@ def game():
         "market": {"total_line": 193.5, "market_status": "LIVE"},
         "projector": {"live_total_line": 193.5, "market_status": "LIVE",
                       "market_age_seconds": 1, "captured_at": captured,
-                      "required_pts_per_min": 5, "progress_pct": 76},
+                      "required_pts_per_min": 5, "progress_pct": 88},
         "under_alert_eligibility": {"eligible": True},
         "under_alert": {"active": True, "checkpoint": 75,
                          "trigger_line": 193.5},
