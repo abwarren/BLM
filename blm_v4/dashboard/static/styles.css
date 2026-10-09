@@ -1212,5 +1212,33 @@ td.ex-st-submitted { color: #3b82f6; }
   .ab-top-switch input[type="checkbox"] { width: 19px; height: 19px; }
   .ab-top-sep { display: none; }
   .ab-top-input input[type="number"] { width: 64px; }
-}
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+  OPERATOR BOARD BACKGROUND  (operator directive 2026-10-10)
+
+  The post-login board carries the operator's own backdrop image.
+
+  APPENDED AT EOF, scoped to `body`, so it overrides only the background
+  IMAGE of the `html, body` rule above (later wins at equal specificity) and
+  edits no existing rule — the static contract's lowest-risk tier.
+
+  Scoped to the BODY on purpose: `login.html` loads `login.css`, not this
+  file, so the login page is untouched and still shows the arena image.
+
+  The gradient layer is a legibility veil over the image — a photo behind a
+  dense board of cards costs contrast. TUNE ONLY ITS ALPHA:
+   0.72 = image clearly visible (current)
+   0.85 = image faint
+   1.00 = image hidden (a plain near-black board)
+  ═══════════════════════════════════════════════════════════════════════════ */
+  body {
+  background-image:
+  linear-gradient(rgba(4, 6, 10, 0.72), rgba(4, 6, 10, 0.72)),
+  url("/static/blmbackground.png");
+  background-size: cover, cover;
+  background-position: center center, center center;
+  background-attachment: fixed, fixed;
+  background-repeat: no-repeat, no-repeat;
+  }
 
