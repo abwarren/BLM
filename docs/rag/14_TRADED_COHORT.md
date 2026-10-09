@@ -76,3 +76,25 @@ trigger line is systematically the HARDER line for an UNDER. **Never settle a st
 rate or P/L at `triggered_line`** — it manufactures losses. Use the market line
 (`clean_market_observations.line_value` at or just before `submitted_at_utc`) and say
 plainly that it is a PROXY. Detail: `08_MARKET_LINE_SEMANTICS.md`.
+
+## 14.5 Data validity — a class change INVALIDATES every earlier comparison
+
+**A change to the execution class makes all prior data a DIFFERENT population.**
+Never pool, trend or compare across a class change, and never quote a rate from
+before it as if it described the current configuration.
+
+- The class is set by the gates in 14.1 — principally `EXEC_MIN_PACE_RATIO`, with the
+  window, the score floor and the price floors. Changing ANY of them re-defines who is
+  in the traded cohort, so rows either side of the change are not one population.
+- **Flag any dataset that spans a class change as UNRELIABLE for judging the current
+  class.** Say which side of the change a number comes from; a pooled figure is not
+  evidence about either.
+- **Measured example (2026-10-09).** While the relaxed 0.95 execution bar was live on
+  08 Oct the traded cohort ran **53.3 %**, against **75.9 / 83.8 / 73.8 %** on the
+  adjacent days. Pooling the window would have averaged that collapse away and hidden
+  precisely the finding that the relaxation was the problem.
+- **The valid baseline is the rows AFTER the change took effect.** For the 2026-10-09
+  02:43 SAST revert to 1.04, the usable baseline starts **09:00 SAST 2026-10-09**.
+- Whenever a rate is quoted, state the window, the class, and the time that class took
+  effect. "Last week" is not a window unless the class held for the whole of it.
+
