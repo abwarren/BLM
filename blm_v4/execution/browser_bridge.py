@@ -313,7 +313,7 @@ class ResolverBrowserBridge(BrowserBridge):
                  session_probe: Optional[Callable[[], bool]] = None,
                  verify_timeout_s: float = 20.0,
                  verify_poll_s: float = 0.5,
-                 place_attempts: int = 5,
+                 place_attempts: int = 3,
                  retry_delay_s: float = 1.5,
                  place_budget_s: float = 45.0):
         self.adapter = adapter
@@ -387,6 +387,10 @@ class ResolverBrowserBridge(BrowserBridge):
         # five attempts — so the engine's persistence was inconsistent and often
         # far shorter than intended.  ``place_attempts`` is retained as a
         # MINIMUM (never fewer tries than asked); the budget bounds it.
+        # Operator directive 2026-10-09: three attempts before aborting — enough
+        # for the clear/re-select cycle to recover a transient slip problem, few
+        # enough that a permanent fault (dead session, market shut) aborts fast
+        # instead of burning the whole window.
         started = _time.monotonic()
         _attempt = 0
         while True:
