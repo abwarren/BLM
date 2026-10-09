@@ -56,6 +56,7 @@ higher level, then correct the lower one.
 | `11_TESTING_CONTRACT.md` | What counts as proof |
 | `12_PRODUCTION_RUNBOOK.md` | Inspect / change / deploy / rollback |
 | `13_AUTOBET_RUNG.md` | The PokerBet RUNG rule (line-increment guard for Auto-Bet) |
+| `14_TRADED_COHORT.md` | What "the traded cohort" means — the games the system auto-bets, vs the alert population and vs "bettable" |
 | `DECISIONS/` | Architectural Decision Records (permanent) |
 | `EXAMPLES/` | Real positive / negative / edge-case cases |
 
