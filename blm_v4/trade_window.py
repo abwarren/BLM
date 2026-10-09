@@ -93,9 +93,20 @@ MIN_SCORED_POINTS = 70.0
 #:   0.95  12,594       77.5%          77%     69.68%     1.435        +28.9%
 #:   0.90  15,644       75.0%          88%     64.87%     1.542        +20.0%
 #:
-#: 0.95 is the chosen step: +EV throughout, and it moves the median fire from
-#: 90.0% to 77.5% progress so 77% of fires now land before the market closes.
-EXEC_MIN_PACE_RATIO = 0.95
+#: 0.95 was the chosen step for a time: +EV throughout, and it moved the median
+#: fire from 90.0% to 77.5% progress.  REVERTED to 1.04 by operator directive
+#: 2026-10-09 — auto-betting must fire ONLY on the strict alert cohort.
+#:
+#: Why: the model put 0.95 at 69.68% hit / +28.9% EV, but realised results over
+#: the following day ran ~52% against a 55.8% break-even.  The frozen study
+#: prices to the line on screen AT THE DECISION; placements take 8-59s and the
+#: live line moves in the meantime, so the relaxed cohort was paying execution
+#: slippage it had no margin to absorb.  At 1.04 the traded cohort IS the alert,
+#: so the armed flag and the alert agree by construction.
+#:
+#: Revisit only after placement latency is cut (event-driven dispatch) and the
+#: shadow log can measure the relaxed cohort against the line actually taken.
+EXEC_MIN_PACE_RATIO = 1.04
 
 #: (exclusive upper progress bound, break-even price) — first match wins.
 #: Re-derived for the EXECUTION cohort at k=0.95 (first moment progress >= 75

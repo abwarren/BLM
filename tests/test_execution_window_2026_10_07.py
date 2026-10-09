@@ -251,17 +251,18 @@ def test_a_missing_score_is_not_gated_by_this_rule(tmp_path):
 
 # ── the execution pace bar (operator directive 2026-10-08) ──────────────
 
-def test_the_execution_bar_is_lower_than_the_alert_class():
-    """The alert's own class stays 1.04 — it is the signal, the on-screen
-    alert and what the frozen history replays.  What is TRADED is 0.95."""
-    assert EXEC_MIN_PACE_RATIO == 0.95
-    assert EXEC_MIN_PACE_RATIO < 1.04
+def test_the_execution_bar_is_the_alert_class_itself():
+    """Reverted by operator directive 2026-10-09: the alert's class stays 1.04
+    AND that is now what is traded — auto-betting fires only on that cohort."""
+    assert EXEC_MIN_PACE_RATIO == 1.04
 
 
-def test_the_execution_bar_arms_below_the_alert_class():
-    assert exec_alert_reason(4.0, 4.0, 80.0) is None          # ratio 1.000
-    assert exec_alert_reason(3.9, 4.0, 80.0) is None          # ratio 0.975
-    assert exec_alert_reason(3.7, 4.0, 80.0) == PACE_BELOW    # ratio 0.925
+def test_the_execution_bar_arms_exactly_when_the_alert_class_does():
+    """At 1.04 the traded cohort IS the alert: the armed flag no longer fires
+    on anything the strict class would reject."""
+    assert exec_alert_reason(4.0, 4.0, 80.0) == PACE_BELOW    # ratio 1.000
+    assert exec_alert_reason(3.9, 4.0, 80.0) == PACE_BELOW    # ratio 0.975
+    assert exec_alert_reason(4.2, 4.0, 80.0) is None          # ratio 1.050
     assert exec_alert_reason(8.0, 4.0, 74.0) == PACE_BELOW    # below the floor
 
 
@@ -393,7 +394,7 @@ def test_payload_block_shape():
     from blm_v4.api import _execution_window_block
     assert _execution_window_block(88.0, 1.95, 150.0, True) == {
         "min": 75.0, "max": 92.0, "min_price": 1.28, "min_points": 70.0,
-        "min_pace_ratio": 0.95, "pace_armed": True,
+        "min_pace_ratio": 1.04, "pace_armed": True,
         "in_window": True, "reason": None}
     cheap = _execution_window_block(88.0, 1.20, 150.0, True)
     assert cheap["in_window"] is False and cheap["reason"] == PRICE_FLOOR

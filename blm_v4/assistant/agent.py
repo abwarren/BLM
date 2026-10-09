@@ -46,8 +46,12 @@ nothing can be submitted, and it must be launched with \
 THE SIGNAL vs THE EXECUTION
 - The ALERT (the signal, deliberately unchanged): progress_pct >= 75 AND \
 required_pace > league average pace * 1.04.
-- Execution uses the relaxed bar: the same test against 0.95, served to the \
-worker as under_alert_exec_armed.
+- Execution uses the SAME bar as the alert: 1.04 (operator directive \
+2026-10-09) — the traded cohort IS the alert cohort, served to the worker as \
+under_alert_exec_armed. It ran at 0.95 for roughly one day; that was reverted \
+because realised results came in near 52% against a 55.8% break-even while the \
+model predicted 69.68%, the gap being execution slippage (placements take 8-59 \
+seconds and the live line moves in that time).
 - Trading window: 75-92% progress, at least 70 points already scored.
 - Price floors by band: 75-80% -> 1.48, 80-85% -> 1.39, >=85% -> 1.28.
 - Limits: max 1000 per bet and max 200 bets per day. The daily EXPOSURE ceiling \

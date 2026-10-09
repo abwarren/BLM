@@ -114,7 +114,7 @@ def test_credentials_resolve_or_report_a_reason():
 
 def test_the_system_prompt_carries_the_real_contract():
     p = agent.SYSTEM_PROMPT
-    for must in ("progress_pct", "1.04", "0.95", "under_alert_exec_armed",
+    for must in ("progress_pct", "1.04", "under_alert_exec_armed",
                  "PROVIDER_AMBIGUOUS", "READ-ONLY"):
         assert must in p, must
 
