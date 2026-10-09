@@ -237,6 +237,48 @@ Source: `blm_v4/live_analytics/fingerprint_stats.py::compute_stats`.
 - **The pooled rate is not stable** (weekly 52–79 %); quote the series, not a
   single point estimate.
 
+### 1.12 The traded cohort
+
+**The traded cohort is ONLY the games the system auto-bets.** It is the subset of
+fired alerts that clear the execution gates — not the alert population, and not
+everything the board shows an alert for.
+
+Source: `blm_v4/betting/executor.py::evaluate` (the gate chain, in this order),
+values from `blm_v4/trade_window.py`.
+
+```
+traded  =  auto-betting enabled
+       AND  the strict alert is active         §1.6  (required > league_average * 1.04
+                                                      AND progress_pct >= 75.0)
+       AND  progress_pct <= 92.0               (EXEC_MAX_PROGRESS_PCT)
+       AND  points already scored >= 70.0      (MIN_SCORED_POINTS)
+       AND  under price >= the band floor      (75-80 -> 1.48, 80-85 -> 1.39,
+                                                >=85 -> 1.28)
+       AND  the alert is fresh                 (age <= 90 s)
+       AND  eligible §1.8, live, no bet already held on the game
+       AND  within the limits                  (<= 1000/bet, <= 200 bets/day)
+```
+
+- **At `EXEC_MIN_PACE_RATIO = 1.04` the traded cohort IS the alert cohort.** The
+  execution bar equals the alert's own bar, so the armed flag and the alert agree
+  by construction. They diverge only when the execution bar is set BELOW 1.04 —
+  which is what happened for one day and why the two were confused.
+- **NEVER call this "bettable".** In this codebase *bettable* is the alert
+  ledger's own, BROADER population: `signal IN ('UNDER_VALUE','OVER_VALUE') AND
+  checkpoint_pct < 100` in `checkpoint_market` — which includes OVER alerts
+  auto-bet never touches. Two populations, two names; conflating them is how a
+  non-traded rate gets quoted as the traded one.
+- **The traded cohort is a subset of the fired-alert cohort (§1.11), not a
+  synonym for it.** §1.11 measures what FIRED; this is what was TAKEN. A fired
+  alert outside the window, below the score floor, or under the price floor was
+  never traded.
+- **A traded game is spent by the ATTEMPT, not by the outcome.** One bet per game,
+  so a refused or failed attempt permanently loses that game's position — a
+  pre-submit failure is lost volume, never a loss.
+- **The engine's own verdict is the only authority.** Whether a game is in the
+  traded cohort is decided by `evaluate`; a view or report must consume that
+  verdict, never re-derive the gates beside it.
+
 ---
 
 ## 2. Mathematical definitions for every metric
