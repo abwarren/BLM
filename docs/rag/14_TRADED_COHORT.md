@@ -93,8 +93,11 @@ before it as if it described the current configuration.
   08 Oct the traded cohort ran **53.3 %**, against **75.9 / 83.8 / 73.8 %** on the
   adjacent days. Pooling the window would have averaged that collapse away and hidden
   precisely the finding that the relaxation was the problem.
-- **The valid baseline is the rows AFTER the change took effect.** For the 2026-10-09
-  02:43 SAST revert to 1.04, the usable baseline starts **09:00 SAST 2026-10-09**.
+- **The valid baseline is the rows AFTER the change took effect** — the moment the new
+  class went LIVE (the service restart that picked it up), never the commit time and
+  never the start of the next session. For the 2026-10-09 revert to 1.04 that is
+  **02:43 SAST 2026-10-09** (committed 02:42, server restarted 02:43:02). An
+  operator's recollection of the hour is not the cut — read it off the deploy.
 - Whenever a rate is quoted, state the window, the class, and the time that class took
   effect. "Last week" is not a window unless the class held for the whole of it.
 
