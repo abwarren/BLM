@@ -1,0 +1,13 @@
+{
+  "_note": "Saved raw swarm bulk-day reply (get_result_games, is_date_ts=1) trimmed to a few basketball game nodes. Real shape captured 2026-10-12 from wss://eu-swarm-newm.pokerbet.co.za/. Used by tests/test_result_verifier.py offline (no network).",
+  "data": {
+    "games": {
+      "game": [
+        {"game_id": "31205481", "scores": "96:76(28:22, 18:12, 24:21, 26:21)", "team1_name": "Bayern Munich Virtual", "team2_name": "Anadolu Efes SK Virtual", "team1_id": 1423916, "team2_id": 1423878, "date": 1790272199, "competition_name": "Betual Euroleague", "region_name": "Virtual Matches", "sport_id": "3", "sport_alias": "Basketball"},
+        {"game_id": "31205422", "scores": "86:73(22:18, 26:19, 22:15, 16:21)", "team1_name": "Seoul Samsung Thunders Virtual", "team2_name": "Mobis Phoebus Virtual", "team1_id": 1424001, "team2_id": 1424002, "date": 1790271733, "competition_name": "Betual KBL", "region_name": "Virtual Matches", "sport_id": "3", "sport_alias": "Basketball"},
+        {"game_id": "31205267", "scores": "103:87(28:20, 28:19, 20:31, 27:17)", "team1_name": "Esenler Erokspor Virtual", "team2_name": "Buyukcekmece Sk Virtual", "team1_id": 1424010, "team2_id": 1424011, "date": 1790270700, "competition_name": "Betual TBSL", "region_name": "Virtual Matches", "sport_id": "3", "sport_alias": "Basketball"},
+        {"game_id": "31205384", "scores": "88:93(27:27, 20:25, 17:18, 24:23)", "team1_name": "Liaoning Flying Leopards Virtual", "team2_name": "Qingdao Eagles Virtual", "team1_id": 1424020, "team2_id": 1424021, "date": 1790273900, "competition_name": "Betual CBA", "region_name": "Virtual Matches", "sport_id": "3", "sport_alias": "Basketball"}
+      ]
+    }
+  }
+}

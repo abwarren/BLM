@@ -1,0 +1,8 @@
+{
+  "_note": "Real rendered results-page rows captured 2026-10-12 from https://www.pokerbet.co.za/en/sports/results with Sport->Basketball selected, via the repo's ROW_EXTRACT_JS. The page carries NO game id, so identity is decided by select_matching_row (teams + fixture time). Used offline by tests/test_result_verifier.py.",
+  "rows": [
+    {"competition": "Betual CBA", "teams": [{"name": "Liaoning Flying Leopards Virtual", "score": "88"}, {"name": "Qingdao Eagles Virtual", "score": "93"}], "details": "88:93 (27:27, 20:25, 17:18, 24:23)", "date": "12.10.2026", "time": "18:18"},
+    {"competition": "Betual CBA", "teams": [{"name": "Zhejiang Lions Virtual", "score": "81"}, {"name": "Shanxi Loongs Virtual", "score": "77"}], "details": "81:77 (16:22, 20:19, 30:16, 15:20)", "date": "12.10.2026", "time": "18:18"},
+    {"competition": "ABA League (Europe)", "teams": [{"name": "KK Cibona", "score": "82"}, {"name": "BK Slovan Bratislava", "score": "90"}], "details": "82:90 (23:18, 24:22, 17:28, 18:22)", "date": "12.10.2026", "time": "19:00"}
+  ]
+}

@@ -116,6 +116,14 @@ PACE_REF_MAX_AGE_S = float(os.environ.get("BLM_PACE_REF_MAX_AGE_S", "900"))
 #: Set to 0 to fall back to the results-page DOM path.
 RESULT_RECONCILE_SWARM = os.environ.get(
     "BLM_RESULT_RECONCILE_SWARM", "1") not in ("0", "false", "no", "")
+#: SCHEDULED RESULTS VERIFICATION cadence (operator audit) — re-reads the
+#: finished games' finals from the PokerBet results page (its backing swarm
+#: feed) and REPORTS every recorded final that disagrees with the source.
+#: REPORT-ONLY by default; blm_v4.result_verifier reads the look-back window
+#: (RECONCILE_VERIFY_DAYS, default 3) and the correction flag
+#: (RECONCILE_VERIFY_APPLY, default OFF) itself.  0 disables the worker.
+RECONCILE_VERIFY_INTERVAL_S = float(
+    os.environ.get("RECONCILE_VERIFY_INTERVAL_S", "3600"))
 
 
 def main() -> None:
@@ -245,6 +253,13 @@ def main() -> None:
     betting_store = BettingStore(betting_cfg.db_path)
     configure_betting(betting_store, betting_cfg)
     app.include_router(betting_router)
+
+    # ── BLM ASSISTANT — read-only Q&A over the platform ───────────────
+    # Mounted under the same global auth middleware as everything else in
+    # /api/v4, so only signed-in dashboard users reach it.  The tools it
+    # exposes are read-only by construction (mode=ro SQLite connections).
+    from blm_v4.assistant.api import router as assistant_router
+    app.include_router(assistant_router)
 
 
     # ── Operator dashboard at the root ───────────────────────
@@ -488,6 +503,36 @@ def main() -> None:
                         batch=RESULT_RECONCILE_BATCH,
                         swarm=bool(swarm))
 
+        # ── SCHEDULED RESULTS VERIFICATION (operator audit) ─────────
+        # A SCHEDULED AUDIT of the finals the pipeline already recorded:
+        # re-reads the finished games' finals from the PokerBet results
+        # page (its backing swarm feed) and REPORTS every recorded final
+        # that disagrees — a drifted/premature final otherwise sits in the
+        # DB forever while every downstream reader trusts it.  REPORT-ONLY
+        # (RECONCILE_VERIFY_APPLY defaults OFF); it writes NO table unless
+        # the operator turns apply on, so the existing result_reconciler's
+        # authority/immutability contract is untouched.  Output is a report
+        # file under BLM_DATA_ROOT plus a log line.  It FAILS SOFT: an
+        # unreachable source is logged and retried next tick, the thread
+        # never dies, and startup is never blocked.  0 disables it.
+        if RECONCILE_VERIFY_INTERVAL_S > 0:
+            try:
+                from blm_v4.result_verifier import ResultVerifierWorker
+                result_verifier = ResultVerifierWorker(
+                    root / "blm_pokerbet.db",
+                    interval_s=RECONCILE_VERIFY_INTERVAL_S,
+                    data_root=root,
+                    log=logger)
+                result_verifier.start()
+                app.state._result_verifier = result_verifier
+                logger.info(
+                    "result_verifier_started",
+                    interval_s=RECONCILE_VERIFY_INTERVAL_S,
+                    window_days=result_verifier.verifier._window_days,
+                    apply=result_verifier.verifier._apply)
+            except Exception:
+                logger.exception("result_verifier_start_failed")
+
         # ── AUTO-BETTING WORKER (directive 2026-09-21) ─────────────
         # DRY_RUN by default; the persisted kill switch defaults OFF.
         # The worker evaluates the SAME /api/v4/live payload the dashboard
@@ -508,10 +553,22 @@ def main() -> None:
                 if now - _betting_payload_cache["at"] < 4.0:
                     return _betting_payload_cache["games"]
             from blm_v4.api import v4_live as _v4_live
+            _err = None
             try:
                 games = (_v4_live(classification=None).get("games") or [])
-            except Exception:
+            except Exception as _e:
+                _err = f"{type(_e).__name__}: {_e}"[:200]
                 games = []
+            if _err is not None or not games:
+                # VISIBILITY (2026-10-08): this list is the betting worker's
+                # ONLY input, so a swallowed error or an empty payload here is
+                # indistinguishable downstream from "no candidates" — that
+                # ambiguity hid a stale/empty feed for hours.  Throttled to
+                # once a minute so the 4-second cache cannot spam the journal.
+                if now - getattr(_live_games_for_betting, "_last_warn", 0.0) > 60.0:
+                    _live_games_for_betting._last_warn = now
+                    logger.warning("betting_payload_unusable",
+                                   games=len(games), error=_err)
             with _betting_payload_lock:
                 _betting_payload_cache.update(at=time.monotonic(), games=games)
             return games
@@ -565,6 +622,9 @@ def main() -> None:
                 result_reconciler.reconciler._fetcher.close()
             except Exception:
                 pass
+        result_verifier = getattr(app.state, "_result_verifier", None)
+        if result_verifier is not None:
+            result_verifier.stop(timeout=2)
         betting_worker = getattr(app.state, "_betting_worker", None)
         if betting_worker is not None:
             betting_worker.stop(timeout=2)
