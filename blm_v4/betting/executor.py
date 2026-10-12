@@ -35,8 +35,8 @@ from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import stake as _stake
 from blm_v4.trade_window import (EXEC_MIN_PROGRESS_PCT,
-                                 execution_window_reason, price_reason,
-                                 score_reason)
+                                 execution_window_reason, score_reason,
+                                 trade_price_reason)
 
 # directive §5 — the execution-state vocabulary
 STATUS_PENDING = "PENDING"
@@ -152,19 +152,20 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     # floor, 92 the top of the last fully-quoted band (the observed
     # unfillable attempts were at 94-96%); only once enough points are on
     # the board (the provider phantoms a fresh game as "4th Quarter, 0-0",
-    # which lands exactly on the floor); and only at a price above the
-    # band's measured break-even, because the operator's criterion is
-    # positive EV and a hit rate alone never licenses a trade.  All three
-    # come from the ONE definition in blm_v4.trade_window, shared with the
-    # dashboard's BETTABLE badge.
+    # which lands exactly on the floor); and only at a price at or above the
+    # FLAT TRADE floor (TRADE_MIN_UNDER_PRICE, 1.60), because the operator's
+    # criterion is positive EV and a hit rate alone never licenses a trade.
+    # All come from the ONE definition in blm_v4.trade_window, shared with the
+    # dashboard's BETTABLE badge.  The price leg reads the TRADE floor
+    # (trade_price_reason), NOT the per-band break-even min_price_for (1.85),
+    # which is retained for the frozen analysis.
     window_reason = execution_window_reason(proj.get("progress_pct"))
     if window_reason is not None:
         return _no(window_reason, ik)
     low_score = score_reason(proj.get("current_total_points"))
     if low_score is not None:
         return _no(low_score, ik)
-    below_break_even = price_reason(market.get("under_odds"),
-                                    proj.get("progress_pct"))
+    below_break_even = trade_price_reason(market.get("under_odds"))
     if below_break_even is not None:
         return _no(below_break_even, ik)
     # ── limits must be CONFIGURED before any stake math (§9): an

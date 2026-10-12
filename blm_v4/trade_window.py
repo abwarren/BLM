@@ -1,21 +1,25 @@
 """The UNDER trade EXECUTION WINDOW, PRICE FLOOR and SCORE FLOOR — ONE definition.
 
-LIVE TRADE COMBO (operator directive 2026-10-12, second revision —
-docs/rag/15_EDGE_FINDINGS.md §15.6).  The autonomous UNDER trade is placed
+LIVE TRADE COMBO (operator directive 2026-10-12, third revision —
+docs/rag/15_EDGE_FINDINGS.md §15.7).  The autonomous UNDER trade is placed
 only when ALL hold:
 
-  * progress sits inside the LIVE TRADE band [78%, 90%]
-    (TRADE_MIN/MAX_PROGRESS_PCT),
-  * at least TRADE_MIN_SCORED_POINTS (90) are already on the board,
-  * required_pts_per_min / league_avg_pace is STRICTLY above 1.12
+  * progress sits inside the LIVE TRADE band [75%, 92%]
+    (TRADE_MIN/MAX_PROGRESS_PCT) — the ALERT's own floor and the top of the
+    last fully-quoted band,
+  * at least TRADE_MIN_SCORED_POINTS (70) are already on the board,
+  * required_pts_per_min / league_avg_pace is STRICTLY above 1.04
     (TRADE_MIN_PACE_RATIO),
-  * required_pts_per_min - actual_pts_per_min is at least 0.25
-    (SHORTFALL_MARGIN), and
-  * the UNDER price clears the break-even for the progress band (>= 1.85).
+  * required_pts_per_min - actual_pts_per_min is at least 0.0
+    (SHORTFALL_MARGIN) — the game is at or below its required rate, and
+  * the UNDER price is at least TRADE_MIN_UNDER_PRICE (1.60) — a FLAT,
+    trade-only floor (see :func:`trade_price_reason`), NOT the per-band
+    break-even.
 
-Measured on the corrected cohort (40 days, in-sample): 782W/193L = 80.2%
-(n=975, 24.4 bets/day); the progress BAND narrowing 75-92 -> 78-90 is the
-dominant lever.  The TRADE_* constants below are TRADE-ONLY.
+Measured on the corrected cohort (40 days, in-sample): 72.9% win, n=2,476,
+61.9 bets/day.  The band, score floor and shortfall margin now coincide with
+the alert-era class; the pace bar (1.04, strict) and the flat 1.60 price floor
+are what pinch the volume.  The TRADE_* constants below are TRADE-ONLY.
 
 THE ALERT AND THE FROZEN ANALYSIS ARE SEPARATE AND UNCHANGED.  The alert's own
 class bar is ``under_alert.REQUIRED_MARGIN = 1.04`` and its floor
@@ -43,10 +47,16 @@ probing (2026-10-07) shows the event view renders with no market grid at
 WHY THE PRICE FLOOR.  The operator's criterion is positive EV, never volume:
 a hit rate alone decides nothing without the price.  MIN_PRICE_BANDS holds the
 break-even measured for each band on the rebuilt cohort — the construction that
-reproduces the platform's own served cohort — and a trade needs a price ABOVE
-its band's break-even.  Bands above the ceiling are absent because the window
+reproduces the platform's own served cohort — and a trade needs a price above
+that band's floor.  Bands above the ceiling are absent because the window
 refuses them first.  These are measurements, not round numbers, and they carry
 the usual model-drift risk: re-measure before trusting them again.
+
+On the THIRD revision (2026-10-12) the TRADE path moved to a FLAT floor,
+``TRADE_MIN_UNDER_PRICE = 1.60`` (:func:`trade_price_reason`), because the
+re-measured cohort is dominated by the pace bar and the flat price bound; the
+per-band break-evens (:func:`min_price_for`) are retained VERBATIM as the
+frozen-analysis / published floor and are no longer the trade's bar.
 
 WHY THE SCORE FLOOR.  A live basketball game cannot be deep into its schedule
 with almost nothing on the board, and the provider CAN publish such a state.
@@ -150,28 +160,36 @@ MIN_PRICE_BANDS = (
 #: out-of-time against the cohort's 65.2%.
 EXEC_MIN_UNDER_PRICE = 1.85
 
-# ── THE LIVE TRADE COMBO (operator directive 2026-10-12, second revision) ─
-# docs/rag/15_EDGE_FINDINGS.md §15.6.  STRICTER than the alert-era EXEC class
-# above.  Measured on the corrected cohort (40 days, in-sample): progress band
-# 78-90, pace ratio > 1.12, scored points >= 90, shortfall margin >= 0.25 and
-# under price >= 1.85 -> 782W/193L = 80.2% (n=975, 24.4 bets/day).  The band
-# narrowing 75-92 -> 78-90 is the dominant lever.  These are TRADE-ONLY: the
-# alert (under_alert.REQUIRED_MARGIN / ALERT_PROGRESS_PCT) and the frozen
-# historical analysis (live_analytics.fingerprint_stats, which reads the EXEC_*
-# constants above) do not read them — see the module docstring.
-#: TRADE-ONLY progress floor — the dominant lever of the combo.
-TRADE_MIN_PROGRESS_PCT = 78.0
-#: TRADE-ONLY progress ceiling.
-TRADE_MAX_PROGRESS_PCT = 90.0
-#: TRADE-ONLY scored-points floor.
-TRADE_MIN_SCORED_POINTS = 90.0
+# ── THE LIVE TRADE COMBO (operator directive 2026-10-12, third revision) ─
+# docs/rag/15_EDGE_FINDINGS.md §15.7.  Measured on the corrected cohort (40
+# days, in-sample): progress band 75-92, pace ratio > 1.04, scored points >= 70,
+# shortfall margin >= 0.0 and under price >= 1.60 -> 72.9% win (n=2,476, 61.9
+# bets/day).  The band, score floor and shortfall now COINCIDE with the
+# alert-era class; the pace bar (STRICT > 1.04) and the flat 1.60 price floor
+# are the active constraints.  These are TRADE-ONLY: the alert
+# (under_alert.REQUIRED_MARGIN / ALERT_PROGRESS_PCT) and the frozen historical
+# analysis (live_analytics.fingerprint_stats, which reads the EXEC_* constants
+# above) do not read them — see the module docstring.
+#: TRADE-ONLY progress floor — the ALERT's own floor (75).
+TRADE_MIN_PROGRESS_PCT = 75.0
+#: TRADE-ONLY progress ceiling — the top of the last fully-quoted band (92).
+TRADE_MAX_PROGRESS_PCT = 92.0
+#: TRADE-ONLY scored-points floor — the alert-era class floor (70).
+TRADE_MIN_SCORED_POINTS = 70.0
 #: TRADE-ONLY pace ratio (required_pts_per_min / competition avg_pace), STRICT:
-#: a ratio exactly at 1.12 is refused.
-TRADE_MIN_PACE_RATIO = 1.12
-#: TRADE-ONLY shortfall margin: the required rate must exceed the actual rate by
-#: AT LEAST this much (``required_pts_per_min - actual_pts_per_min >= 0.25``).
-#: The earlier leg only required the game at or below its required rate.
-SHORTFALL_MARGIN = 0.25
+#: a ratio exactly at 1.04 is refused.
+TRADE_MIN_PACE_RATIO = 1.04
+#: TRADE-ONLY shortfall margin: the required rate must be AT LEAST this far
+#: above the actual rate (``required_pts_per_min - actual_pts_per_min >= 0.0``),
+#: i.e. the game is at or below its required rate.
+SHORTFALL_MARGIN = 0.0
+#: TRADE-ONLY flat UNDER-price floor (operator directive 2026-10-12, third
+#: revision): ``under_price >= 1.60``.  A FLAT floor for the TRADE path ONLY —
+#: NOT the per-band break-even :func:`min_price_for` (retained VERBATIM for the
+#: frozen analysis and the published floor).  Consumed ONLY by the trade path
+#: (:func:`trade_price_reason`, the executor and the served BETTABLE verdict),
+#: never by the alert or the frozen ``EXEC_*`` class.
+TRADE_MIN_UNDER_PRICE = 1.60
 
 
 def execution_window_reason(progress_pct) -> Optional[str]:
@@ -250,6 +268,33 @@ def price_reason(price, progress_pct) -> Optional[str]:
     if not math.isfinite(p):
         return PRICE_FLOOR
     return None if p >= floor else PRICE_FLOOR
+
+
+def trade_price_reason(price) -> Optional[str]:
+    """``None`` when the price clears the FLAT trade floor — else PRICE_FLOOR.
+
+    The TRADE-ONLY price check (operator directive 2026-10-12, third revision):
+    ``under_price >= TRADE_MIN_UNDER_PRICE`` (1.60), a FLAT floor — NOT the
+    per-band break-even :func:`min_price_for`, which is retained VERBATIM for the
+    frozen analysis and the published floor.  This is the bar the executor and
+    the served BETTABLE verdict read.
+
+    Same absent-price contract as :func:`price_reason`: an ABSENT price (None)
+    is deliberately NOT gated — the payload's line and price come from the SAME
+    market row, so a present line with an absent price is already the executor's
+    ``market_missing`` concern, and gating absence here would refuse every caller
+    that omits the field without making any trade safer.  A present-but-
+    unprovable price (non-finite, unparsable) IS refused.
+    """
+    if price is None:
+        return None
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return PRICE_FLOOR
+    if not math.isfinite(p):
+        return PRICE_FLOOR
+    return None if p >= TRADE_MIN_UNDER_PRICE else PRICE_FLOOR
 
 
 def score_reason(points) -> Optional[str]:

@@ -151,3 +151,83 @@ ALERT-unchanged proof); `tests/test_execution_window_2026_10_07.py` and
 `tests/test_exec_shortfall_2026_10_12.py` updated deliberately for the new
 band / score / pace (the guarded population moved — see §15.3's contract-change
 note and `repo-change-invariants.md`).
+
+---
+
+## 15.7 The LIVE TRADE COMBO — third revision (operator directive 2026-10-12)
+
+**Supersedes §15.6 for the TRADE gate** (the alert gate is untouched — see below).
+The third revision re-measured the frontier on the corrected cohort (40 days,
+in-sample) and moved the gate to the footprint that keeps the widest defensible
+volume. The Auto-Bet gate now requires ALL of:
+
+| leg | value | constant |
+|---|---|---|
+| progress band | `75% <= progress <= 92%` (both inclusive) | `TRADE_MIN_PROGRESS_PCT` / `TRADE_MAX_PROGRESS_PCT` |
+| pace ratio | `required_pts_per_min / competition_avg_pace` **> 1.04** (STRICT) | `TRADE_MIN_PACE_RATIO` |
+| scored points | `current_total_points >= 70` | `TRADE_MIN_SCORED_POINTS` |
+| shortfall margin | `required_pts_per_min - actual_pts_per_min >= 0.0` | `SHORTFALL_MARGIN` |
+| under price | `under_price >= 1.60` (**FLAT**) | `TRADE_MIN_UNDER_PRICE` (via `trade_price_reason`) |
+
+The band, the score floor and the shortfall margin now COINCIDE with the
+alert-era class; the pace bar (strict, 1.04) and the flat 1.60 price floor are
+what pinch the volume.
+
+### The evidence (corrected cohort, 40 days, in-sample)
+
+| combo | win % | bets/day |
+|---|---|---|
+| **price>=1.60, pace>1.04, shortfall>=0, band 75-92** — the gate | **72.9%** | 61.9 |
+| price>=1.60, pace>1.00 | 71.2% | 70.7 |
+| no pace filter | 67.5% | 91.9 |
+| price>=1.60, pace>1.08 | 74.6% | 51.4 |
+| price>=1.90, pace>1.08, shortfall>=0.25, band 78-90 — the §15.6 gate | 78.1% | 27.8 |
+
+The gate is a deliberate trade-off on the frontier: it gives up ~5 pp of win rate
+versus the §15.6 gate to roughly double the number of bets (27.8 -> 61.9/day).
+The pace bar does the real filtering — adding it (price>=1.60, pace>1.04 vs
+pace>1.00) buys ~1.7 pp while cutting ~9 bets/day, and pace>1.08 buys another
+~3.4 pp while cutting ~10 more.  (n=2,476 for the gate.)
+
+**The FLAT 1.60 price floor is new in this revision.**  The trade path no longer
+reads the per-band break-evens or the flat 1.85 `EXEC_MIN_UNDER_PRICE`; it reads
+a flat, trade-only `TRADE_MIN_UNDER_PRICE = 1.60` via `trade_price_reason`.  The
+`min_price_for` / `price_reason` break-evens are retained VERBATIM as the
+published / frozen-analysis floor.
+
+### Caveats (carry these with the number)
+
+1. It is an **in-sample maximum over ~240 combos** — a real overfitting risk;
+   the ranking is stronger evidence than the exact rate.
+2. **Corrected finals** — the cohort's prerequisite (see §15.3).
+3. **Modelled entry prices, no slippage** — not P&L; and the EV depends on the
+   price ACTUALLY taken, not on the floor (see §15.5.2).
+4. Changing the gate is a **CLASS CHANGE** (`14_TRADED_COHORT.md` §14.5).
+
+### Implementation — the ONE definition, and what did NOT move
+
+- `blm_v4/trade_window.py` sets the `TRADE_*` constants (75 / 92 / 70 / 1.04 /
+  0.0) and adds the flat `TRADE_MIN_UNDER_PRICE = 1.60` plus the trade-only
+  `trade_price_reason`; the trade verdicts (`execution_window_reason`,
+  `score_reason`, `exec_alert_reason`, `exec_shortfall_reason`) enforce them.
+- `blm_v4/api.py` folds all FIVE legs — the pace bar, the shortfall, the band,
+  the score floor AND the under price — into the SERVED
+  `under_alert_exec_armed` (the side that holds the league reference, the
+  projector row and the market row) and reports the trade values — including the
+  flat `min_price` 1.60 — in `under_alert_execution_window`.  The executor
+  CONSUMES the served boolean.
+- `blm_v4/betting/executor.py`'s price gate uses the flat `trade_price_reason`
+  floor (1.60), NOT `min_price_for`'s 1.85.
+- **THE ALERT IS UNCHANGED.**  The alert's own class bar is
+  `under_alert.REQUIRED_MARGIN = 1.04` and its floor
+  `under_alert.ALERT_PROGRESS_PCT = 75.0` — byte-identical.  The `EXEC_*`
+  constants (75 / 92 / 70 / 1.04 / 1.85) and `min_price_for` / `price_reason`
+  are retained VERBATIM as the alert-era / frozen-analysis class;
+  `live_analytics.fingerprint_stats` (the frozen traded-cohort analysis) reads
+  them, never the `TRADE_*` ones.
+
+Tests: `tests/test_trade_combo_2026_10_12.py` (one named test per leg plus the
+ALERT-unchanged and frozen-constant proofs); `tests/test_execution_window_2026_10_07.py`
+and `tests/test_exec_shortfall_2026_10_12.py` updated deliberately for the new
+band / score / pace / shortfall / price (the guarded population moved — see
+§15.3's contract-change note and `repo-change-invariants.md`).

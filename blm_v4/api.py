@@ -57,10 +57,11 @@ from blm_v4.trade_window import (PACE_BELOW, TRADE_MAX_PROGRESS_PCT,
                                  TRADE_MIN_PACE_RATIO,
                                  TRADE_MIN_PROGRESS_PCT,
                                  TRADE_MIN_SCORED_POINTS,
+                                 TRADE_MIN_UNDER_PRICE,
                                  exec_alert_reason,
                                  exec_shortfall_reason,
                                  execution_window_reason,
-                                 min_price_for, price_reason, score_reason)
+                                 score_reason, trade_price_reason)
 
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
 
@@ -216,10 +217,10 @@ def _execution_window_block(progress_pct, price=None, points=None,
 
     All verdicts come from the ONE definition in ``blm_v4.trade_window``, the
     same one the executor gate uses, so the badge can never claim BETTABLE for
-    a game the engine will refuse.  ``min_price`` is the break-even for this
-    progress band, ``min_points`` the scored-total floor and ``min_pace_ratio``
-    the EXECUTION pace bar (0.95, deliberately lower than the alert's own 1.04
-    class — see that module).
+    a game the engine will refuse.  ``min_price`` is the FLAT trade price floor
+    (``TRADE_MIN_UNDER_PRICE``, 1.60), ``min_points`` the scored-total floor and
+    ``min_pace_ratio`` the trade pace bar (all from the TRADE combo — see that
+    module).
 
     ``pace_armed`` is the verdict for the relaxed bar, computed by the caller
     (it holds the league average pace).  Anything other than True fails the
@@ -232,11 +233,11 @@ def _execution_window_block(progress_pct, price=None, points=None,
     if reason is None:
         reason = score_reason(points)
     if reason is None:
-        reason = price_reason(price, progress_pct)
+        reason = trade_price_reason(price)
     return {
         "min": TRADE_MIN_PROGRESS_PCT,
         "max": TRADE_MAX_PROGRESS_PCT,
-        "min_price": min_price_for(progress_pct),
+        "min_price": TRADE_MIN_UNDER_PRICE,
         "min_points": TRADE_MIN_SCORED_POINTS,
         "min_pace_ratio": TRADE_MIN_PACE_RATIO,
         "pace_armed": pace_armed is True,
@@ -2328,14 +2329,14 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
             # the LIVE TRADE combo — computed HERE because the league average
             # pace is only available on this side; served so the executor and
             # the badge cannot disagree about it.
-            # FOUR legs, ONE served verdict (docs/rag/15_EDGE_FINDINGS.md
-            # §15.6, 2026-10-12): the TRADE pace bar (ratio > 1.12), the
-            # SHORTFALL (required - actual >= 0.25), the TRADE band (78-90) and
-            # the scored-points floor (>= 90).  All are computed on this side
-            # (the league average and the projector row live here), and the
-            # executor consumes the boolean so it CANNOT disagree with the
-            # engine about any leg.  The price leg (>= 1.85) is NOT folded in
-            # here — the executor and the badge check it separately.
+            # FIVE legs, ONE served verdict (docs/rag/15_EDGE_FINDINGS.md
+            # §15.7, 2026-10-12 third revision): the TRADE pace bar
+            # (ratio > 1.04), the SHORTFALL (required - actual >= 0.0), the
+            # TRADE band (75-92), the scored-points floor (>= 70) AND the under
+            # price (>= 1.60, the flat TRADE floor).  All five are computed on
+            # this side (the league average, the projector row and the market
+            # row live here), and the executor consumes the boolean so it CANNOT
+            # disagree with the engine about any leg.
             g["under_alert_exec_armed"] = (
                 exec_alert_reason(
                     proj.get("required_pts_per_min"), entry.get("avg_pace"),
@@ -2344,7 +2345,9 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                     proj.get("required_pts_per_min"),
                     proj.get("actual_pts_per_min")) is None
                 and execution_window_reason(proj.get("progress_pct")) is None
-                and score_reason(proj.get("current_total_points")) is None)
+                and score_reason(proj.get("current_total_points")) is None
+                and trade_price_reason(
+                    (g.get("market") or {}).get("under_odds")) is None)
             g["under_alert_execution_window"] = _execution_window_block(
                 proj.get("progress_pct"),
                 (g.get("market") or {}).get("under_odds"),

@@ -1,22 +1,25 @@
-"""THE LIVE TRADE COMBO (operator directive 2026-10-12, second revision).
+"""THE LIVE TRADE COMBO (operator directive 2026-10-12, third revision).
 
-One named test per requirement of the new Auto-Bet gate
-(docs/rag/15_EDGE_FINDINGS.md §15.6):
+One named test per requirement of the Auto-Bet gate
+(docs/rag/15_EDGE_FINDINGS.md §15.7):
 
-  * progress band 78-90            -> TRADE_MIN/MAX_PROGRESS_PCT
-  * pace ratio STRICTLY > 1.12     -> TRADE_MIN_PACE_RATIO
-  * scored points >= 90            -> TRADE_MIN_SCORED_POINTS
-  * shortfall margin >= 0.25       -> SHORTFALL_MARGIN
-  * under price >= 1.85            -> min_price_for / EXEC_MIN_UNDER_PRICE
+  * progress band 75-92            -> TRADE_MIN/MAX_PROGRESS_PCT
+  * pace ratio STRICTLY > 1.04     -> TRADE_MIN_PACE_RATIO
+  * scored points >= 70            -> TRADE_MIN_SCORED_POINTS
+  * shortfall margin >= 0.0        -> SHORTFALL_MARGIN
+  * under price >= 1.60 (flat)     -> TRADE_MIN_UNDER_PRICE / trade_price_reason
   * the ALERT is UNCHANGED         -> under_alert.REQUIRED_MARGIN 1.04 and
                                       under_alert.ALERT_PROGRESS_PCT 75, and
                                       the frozen analysis (fingerprint_stats)
                                       still reads the EXEC_* constants.
 
-Measured evidence (corrected cohort, 40 days, in-sample): 782W/193L = 80.2%
-(n=975, 24.4 bets/day).  Caveats: an in-sample maximum over ~4,500 combos
-(overfitting risk); 95% CI ~= 77.7-82.5% at n=975; modelled entry prices with no
-slippage.
+Measured evidence (corrected cohort, 40 days, in-sample): 72.9% win, n=2,476,
+61.9 bets/day.  Nearby rungs of the same frontier: 71.2% @ 70.7/day
+(price>=1.60, pace>1.00); 67.5% @ 91.9/day (no pace filter); 74.6% @ 51.4/day
+(pace>1.08); 78.1% @ 27.8/day (price>=1.90, pace>1.08, shortfall>=0.25, band
+78-90 — the previous revision).  Caveats: an in-sample maximum over ~240 combos
+(overfitting risk); corrected finals; modelled entry prices with no slippage;
+EV depends on the REALISED price, not the floor.
 """
 from datetime import datetime, timedelta, timezone
 import inspect
@@ -36,13 +39,16 @@ from blm_v4.trade_window import (AFTER, BEFORE, EXEC_MIN_UNDER_PRICE,
                                  TRADE_MAX_PROGRESS_PCT,
                                  TRADE_MIN_PACE_RATIO,
                                  TRADE_MIN_PROGRESS_PCT,
-                                 TRADE_MIN_SCORED_POINTS, exec_alert_reason,
-                                 exec_shortfall_reason,
+                                 TRADE_MIN_SCORED_POINTS, TRADE_MIN_UNDER_PRICE,
+                                 exec_alert_reason, exec_shortfall_reason,
                                  execution_window_reason, price_reason,
-                                 score_reason)
+                                 score_reason, trade_price_reason)
 
-GOOD_PRICE = 1.95          # clears the 1.85 floor
-GOOD_POINTS = 150.0        # well clear of the 90 scored-points floor
+# Clears the FLAT trade floor (1.60) but sits BELOW the frozen per-band
+# break-even (1.85) — so a passing trade at this price proves the trade floor
+# moved from 1.85 to the flat 1.60.
+GOOD_PRICE = 1.70
+GOOD_POINTS = 150.0        # well clear of the 70 scored-points floor
 
 
 def _cfg(tmp_path) -> BettingConfig:
@@ -84,49 +90,67 @@ def _evaluate(tmp_path, progress, price=GOOD_PRICE, points=GOOD_POINTS, **over):
         stats={"verifiable": True, "bets": 0, "amount": 0.0})
 
 
-# ── 1. the progress band 78-90 (the dominant lever) ─────────────────────
+# ── 1. the progress band 75-92 ──────────────────────────────────────────
 
-def test_band_floor_78_is_inclusive_and_77_999_is_refused():
-    assert TRADE_MIN_PROGRESS_PCT == 78.0
-    assert execution_window_reason(78.0) is None       # inclusive floor
-    assert execution_window_reason(77.999) == BEFORE
-
-
-def test_band_ceiling_90_is_inclusive_and_90_001_is_refused():
-    assert TRADE_MAX_PROGRESS_PCT == 90.0
-    assert execution_window_reason(90.0) is None       # inclusive ceiling
-    assert execution_window_reason(90.001) == AFTER
+def test_band_floor_75_is_inclusive_and_74_999_is_refused():
+    assert TRADE_MIN_PROGRESS_PCT == 75.0
+    assert execution_window_reason(75.0) is None       # inclusive floor
+    assert execution_window_reason(74.999) == BEFORE
 
 
-# ── 2. the pace ratio bar 1.12 (STRICT) ─────────────────────────────────
-
-def test_pace_ratio_1_12_boundary_is_strict():
-    assert TRADE_MIN_PACE_RATIO == 1.12
-    # exactly 1.12 -> refused (STRICT); a hair above -> armed
-    assert exec_alert_reason(4.48, 4.0, 80.0) == PACE_BELOW        # ratio 1.120
-    assert exec_alert_reason(4.4800001, 4.0, 80.0) is None         # ratio > 1.12
+def test_band_ceiling_92_is_inclusive_and_92_001_is_refused():
+    assert TRADE_MAX_PROGRESS_PCT == 92.0
+    assert execution_window_reason(92.0) is None       # inclusive ceiling
+    assert execution_window_reason(92.001) == AFTER
 
 
-# ── 3. the scored-points floor 90 ───────────────────────────────────────
+# ── 2. the pace ratio bar 1.04 (STRICT) ─────────────────────────────────
 
-def test_scored_points_90_boundary():
-    assert TRADE_MIN_SCORED_POINTS == 90.0
-    assert score_reason(90.0) is None
-    assert score_reason(89.999) == SCORE_FLOOR
-
-
-# ── 4. the shortfall margin 0.25 ────────────────────────────────────────
-
-def test_shortfall_margin_0_25_boundary():
-    assert SHORTFALL_MARGIN == 0.25
-    assert exec_shortfall_reason(5.0, 4.75) is None       # gap exactly 0.25
-    assert exec_shortfall_reason(5.0, 4.7501) == SHORTFALL  # gap 0.2499
+def test_pace_ratio_1_04_boundary_is_strict():
+    assert TRADE_MIN_PACE_RATIO == 1.04
+    # exactly 1.04 -> refused (STRICT); a hair above -> armed
+    assert exec_alert_reason(4.16, 4.0, 80.0) == PACE_BELOW          # ratio 1.040
+    assert exec_alert_reason(4.1600001, 4.0, 80.0) is None           # ratio > 1.04
 
 
-# ── 5. the under price floor 1.85 ───────────────────────────────────────
+# ── 3. the scored-points floor 70 ───────────────────────────────────────
 
-def test_under_price_1_85_boundary():
-    assert EXEC_MIN_UNDER_PRICE == 1.85
+def test_scored_points_70_boundary():
+    assert TRADE_MIN_SCORED_POINTS == 70.0
+    assert score_reason(70.0) is None
+    assert score_reason(69.999) == SCORE_FLOOR
+
+
+# ── 4. the shortfall margin 0.0 ─────────────────────────────────────────
+
+def test_shortfall_margin_zero_boundary():
+    assert SHORTFALL_MARGIN == 0.0
+    assert exec_shortfall_reason(5.0, 5.0) is None        # gap exactly 0.0
+    assert exec_shortfall_reason(5.0, 5.0001) == SHORTFALL  # gap -0.0001
+
+
+# ── 5. the flat trade under-price floor 1.60 ────────────────────────────
+
+def test_under_price_1_60_flat_floor():
+    assert TRADE_MIN_UNDER_PRICE == 1.60
+    assert trade_price_reason(1.60) is None
+    assert trade_price_reason(1.599999) == PRICE_FLOOR
+    assert trade_price_reason(1.70) is None          # above 1.60 (below 1.85)
+
+
+def test_the_trade_price_floor_is_flat_and_below_the_frozen_break_even():
+    """The trade reads the FLAT 1.60 floor (trade_price_reason); the frozen
+    per-band break-even (1.85) is retained for the analysis, NOT the trade."""
+    assert TRADE_MIN_UNDER_PRICE == 1.60
+    assert price_reason(1.70, 80.0) == PRICE_FLOOR   # the frozen 1.85 floor
+    assert trade_price_reason(1.70) is None          # the trade's 1.60 floor
+
+
+def test_the_frozen_per_band_price_function_is_unchanged():
+    """min_price_for / price_reason are the frozen operator-published floor —
+    untouched by the third revision."""
+    from blm_v4.trade_window import EXEC_MIN_UNDER_PRICE as FROZEN
+    assert FROZEN == 1.85
     assert price_reason(1.85, 80.0) is None
     assert price_reason(1.849999, 80.0) == PRICE_FLOOR
 
@@ -138,17 +162,19 @@ def test_the_alert_class_bar_is_still_1_04_and_its_floor_still_75():
     assert ALERT_PROGRESS_PCT == 75.0
 
 
-def test_the_alert_still_fires_on_its_own_1_04_class_not_the_trade_combo():
-    """The alert reads ITS OWN constants.  A game at 76% progress with a 1.05
+def test_the_alert_still_fires_on_its_own_class_not_the_trade_combo():
+    """The alert reads ITS OWN constants.  A game at 95% progress with a 1.05
     ratio is INSIDE the alert (progress >= 75, ratio > 1.04) but OUTSIDE the
-    live trade band — the alert fires exactly as before; only the trade moves."""
-    st = under_alert_state(4.0, 4.2, 4.0, 76.0, eligible=True)
+    trade band (progress > 92) — the alert fires exactly as before; only the
+    trade moves."""
+    st = under_alert_state(4.0, 4.2, 4.0, 95.0, eligible=True)
     assert st["active"] is True                        # alert fires, unchanged
-    assert execution_window_reason(76.0) == BEFORE     # trade refuses the band
-    # a ratio between the two bars: alert active (1.05 > 1.04), trade refused
-    st2 = under_alert_state(4.0, 4.2, 4.0, 80.0, eligible=True)
+    assert execution_window_reason(95.0) == AFTER      # trade refuses the band
+    # a game inside the trade band is inside the alert too — the band now
+    # starts at the alert's own floor.
+    st2 = under_alert_state(4.0, 4.2, 4.0, 76.0, eligible=True)
     assert st2["active"] is True
-    assert exec_alert_reason(4.2, 4.0, 80.0) == PACE_BELOW   # <= 1.12 trade bar
+    assert execution_window_reason(76.0) is None
 
 
 def test_the_alert_module_does_not_read_the_trade_or_exec_gate_constants():
@@ -159,12 +185,13 @@ def test_the_alert_module_does_not_read_the_trade_or_exec_gate_constants():
     src = inspect.getsource(ua)
     for forbidden in ("trade_window", "TRADE_MIN_PROGRESS_PCT",
                       "TRADE_MAX_PROGRESS_PCT", "TRADE_MIN_SCORED_POINTS",
-                      "TRADE_MIN_PACE_RATIO", "SHORTFALL_MARGIN",
-                      "EXEC_MIN_PROGRESS_PCT", "EXEC_MAX_PROGRESS_PCT",
-                      "MIN_SCORED_POINTS", "EXEC_MIN_PACE_RATIO",
+                      "TRADE_MIN_PACE_RATIO", "TRADE_MIN_UNDER_PRICE",
+                      "SHORTFALL_MARGIN", "EXEC_MIN_PROGRESS_PCT",
+                      "EXEC_MAX_PROGRESS_PCT", "MIN_SCORED_POINTS",
+                      "EXEC_MIN_PACE_RATIO", "EXEC_MIN_UNDER_PRICE",
                       "exec_alert_reason", "exec_shortfall_reason",
                       "execution_window_reason", "price_reason",
-                      "score_reason"):
+                      "trade_price_reason", "score_reason"):
         assert forbidden not in src, forbidden
 
 
@@ -177,6 +204,7 @@ def test_the_frozen_exec_constants_are_unchanged():
     assert EXEC_MAX_PROGRESS_PCT == 92.0
     assert MIN_SCORED_POINTS == 70.0
     assert EXEC_MIN_PACE_RATIO == 1.04
+    assert EXEC_MIN_UNDER_PRICE == 1.85
 
 
 def test_the_frozen_analysis_still_reads_the_exec_constants():
@@ -190,7 +218,7 @@ def test_the_frozen_analysis_still_reads_the_exec_constants():
         assert must in src, must
     for trade_only in ("TRADE_MIN_PROGRESS_PCT", "TRADE_MAX_PROGRESS_PCT",
                        "TRADE_MIN_SCORED_POINTS", "TRADE_MIN_PACE_RATIO",
-                       "SHORTFALL_MARGIN"):
+                       "TRADE_MIN_UNDER_PRICE", "SHORTFALL_MARGIN"):
         assert trade_only not in src, trade_only
 
 
@@ -205,33 +233,35 @@ def test_the_alert_source_literals_are_untouched():
 
 def test_the_served_armed_verdict_requires_every_trade_leg():
     """The api armed expression must fold in the pace bar, the shortfall, the
-    band AND the score floor — one served boolean the executor consumes."""
+    band, the score floor AND the under price — one served boolean the executor
+    consumes."""
     src = inspect.getsource(api)
     armed = src.split('g["under_alert_exec_armed"] =', 1)[1][:800]
     for leg in ("exec_alert_reason(", "exec_shortfall_reason(",
-                "execution_window_reason(", "score_reason("):
+                "execution_window_reason(", "score_reason(",
+                "trade_price_reason("):
         assert leg in armed, leg
 
 
 def test_the_execution_window_block_reports_the_trade_combo():
     from blm_v4.api import _execution_window_block
-    win = _execution_window_block(85.0, 1.95, 150.0, True)
+    win = _execution_window_block(85.0, 1.70, 150.0, True)
     assert win == {
-        "min": 78.0, "max": 90.0, "min_price": 1.85, "min_points": 90.0,
-        "min_pace_ratio": 1.12, "pace_armed": True,
+        "min": 75.0, "max": 92.0, "min_price": 1.60, "min_points": 70.0,
+        "min_pace_ratio": 1.04, "pace_armed": True,
         "in_window": True, "reason": None}
 
 
 # ── 8. the executor gate (what is TRADED) end-to-end ────────────────────
 
-@pytest.mark.parametrize("progress", [78.0, 80.0, 85.0, 90.0])
+@pytest.mark.parametrize("progress", [75.0, 80.0, 85.0, 92.0])
 def test_executor_trades_inside_the_band(tmp_path, progress):
     got = _evaluate(tmp_path, progress)
     assert got["decision"] in ("EXECUTE", "WOULD_BET"), got
     assert got["candidate"] is not None, got
 
 
-@pytest.mark.parametrize("progress,reason", [(77.9, BEFORE), (90.1, AFTER)])
+@pytest.mark.parametrize("progress,reason", [(74.9, BEFORE), (92.1, AFTER)])
 def test_executor_refuses_outside_the_band(tmp_path, progress, reason):
     got = _evaluate(tmp_path, progress)
     assert got["decision"] == "NO_BET"
@@ -239,16 +269,25 @@ def test_executor_refuses_outside_the_band(tmp_path, progress, reason):
     assert got["candidate"] is None
 
 
-def test_executor_refuses_below_90_points(tmp_path):
-    got = _evaluate(tmp_path, 80.0, points=89.0)
+def test_executor_refuses_below_70_points(tmp_path):
+    got = _evaluate(tmp_path, 80.0, points=69.0)
     assert got["decision"] == "NO_BET"
     assert got["reason"] == SCORE_FLOOR
 
 
-def test_executor_refuses_a_price_below_1_85(tmp_path):
-    got = _evaluate(tmp_path, 80.0, price=1.84)
+def test_executor_refuses_a_price_below_1_60(tmp_path):
+    got = _evaluate(tmp_path, 80.0, price=1.59)
     assert got["decision"] == "NO_BET"
     assert got["reason"] == PRICE_FLOOR
+
+
+def test_executor_trades_a_price_between_the_trade_floor_and_the_break_even(
+        tmp_path):
+    """The whole point of the third revision: a price in [1.60, 1.85) is
+    TRADED — the executor reads the flat 1.60 floor, not the frozen 1.85."""
+    got = _evaluate(tmp_path, 80.0, price=1.70)
+    assert got["decision"] in ("EXECUTE", "WOULD_BET"), got
+    assert got["candidate"] is not None, got
 
 
 def test_executor_refuses_an_unarmed_game(tmp_path):
