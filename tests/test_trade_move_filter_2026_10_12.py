@@ -5,7 +5,7 @@ docs/rag/15_EDGE_FINDINGS.md §15.8):
 
   * the boundary at EXACTLY 2.0% (in vs out)      -> test_move_boundary_*
   * fail CLOSED (missing open line / league avg)  -> test_missing_* / unprovable
-  * the toggle on/off, default ON                 -> test_*toggle*
+  * the toggle on/off, default OFF (2026-10-13)     -> test_*toggle*
   * the min-history variant EXCLUDED at 0         -> test_min_history_*
   * the FROZEN constants/functions + the alert
     are BYTE-UNCHANGED                            -> test_the_frozen_* / alert
@@ -22,8 +22,10 @@ in all six leagues and all price bands.
 from __future__ import annotations
 
 import inspect
+import os
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -47,6 +49,20 @@ from blm_v4.trade_window import (MOVE_UNPROVABLE, MOVE_VOLATILE,
                                  trade_move_reason)
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _move_leg_on(monkeypatch):
+    """Opt this module's behaviour tests INTO the leg being ACTIVE.
+
+    The CODE default is now OFF (operator directive 2026-10-13: the leg cut
+    the traded cohort to a third with no measured lift), so every test that
+    asserts the leg's RULE sets the toggle ON explicitly here rather than
+    relying on the default.  The tests that instead assert the DEFAULT
+    (test_the_leg_toggle_defaults_off) bypass this by reading a fresh
+    interpreter / the source literal.
+    """
+    monkeypatch.setattr(tw, "TRADE_MOVE_FILTER_ENABLED", True)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -94,15 +110,50 @@ def test_unprovable_inputs_fail_closed():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 3. THE TOGGLE — default ON, false disables
+# 3. THE TOGGLE — DEFAULT OFF (2026-10-13); =1 re-enables; =0 disables
 # ══════════════════════════════════════════════════════════════════════
 
-def test_the_leg_toggle_defaults_on(monkeypatch):
-    monkeypatch.delenv("TRADE_MOVE_FILTER_ENABLED", raising=False)
-    assert tw._env_flag("TRADE_MOVE_FILTER_ENABLED", True) is True
-    assert tw.TRADE_MOVE_FILTER_ENABLED is True
-    assert tw._env_flag("TRADE_MOVE_FILTER_ENABLED", True) is tw._env_flag(
-        "TRADE_MOVE_FILTER_ENABLED", True)
+def _fresh_default_flag(env_value):
+    """The module constant as a FRESH interpreter reads it, with
+    TRADE_MOVE_FILTER_ENABLED either UNSET (env_value is None) or set to
+    ``env_value``.  A fresh process is the honest test of the CODE default —
+    the in-process constant is baked at import time."""
+    env = {k: v for k, v in os.environ.items()
+           if k != "TRADE_MOVE_FILTER_ENABLED"}
+    if env_value is not None:
+        env["TRADE_MOVE_FILTER_ENABLED"] = env_value
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import blm_v4.trade_window as t;"
+         " print(t.TRADE_MOVE_FILTER_ENABLED)"],
+        cwd=REPO, capture_output=True, text=True, env=env, timeout=120)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+def test_the_leg_toggle_defaults_off():
+    """DEFAULT OFF (operator directive 2026-10-13): with NO
+    TRADE_MOVE_FILTER_ENABLED in the environment the leg is DISABLED, so a
+    restart on a machine lacking the systemd drop-in no longer re-enables
+    it (the leg had cut the traded cohort to a third, 36 settled vs 117,
+    with no measured lift: 64% vs 65.8%)."""
+    src = inspect.getsource(tw)
+    assert '_env_flag("TRADE_MOVE_FILTER_ENABLED", False)' in src
+    assert '_env_flag("TRADE_MOVE_FILTER_ENABLED", True)' not in src
+    # a fresh interpreter with the var UNSET reads the default: False
+    assert _fresh_default_flag(None) == "False"
+
+
+def test_the_toggle_env_one_reenables_the_leg():
+    """TRADE_MOVE_FILTER_ENABLED=1 RE-ENABLES the leg (it is fully
+    functional and re-enableable): a fresh interpreter then reads True, and
+    with the toggle ON a volatile move is refused / an unprovable move
+    fails closed."""
+    assert _fresh_default_flag("1") == "True"
+    # the autouse fixture has the leg ON, i.e. what =1 produces
+    assert trade_move_reason(150.0, 100.0, 100.0) == MOVE_VOLATILE
+    assert trade_move_reason(100.0, 100.0, 100.0) is None
+    assert trade_move_reason(None, None, None) == MOVE_UNPROVABLE
 
 
 def test_toggle_off_disables_the_leg(monkeypatch):
@@ -161,9 +212,9 @@ def test_min_history_variant_stricter_when_enabled(monkeypatch):
 # 5. THE FROZEN BLOCK + THE ALERT ARE BYTE-UNCHANGED
 # ══════════════════════════════════════════════════════════════════════
 
-def _git_show(path):
+def _git_show(path, rev="HEAD"):
     try:
-        out = subprocess.run(["git", "show", f"HEAD:{path}"], cwd=REPO,
+        out = subprocess.run(["git", "show", f"{rev}:{path}"], cwd=REPO,
                              capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -171,16 +222,26 @@ def _git_show(path):
 
 
 def test_the_frozen_trade_window_prefix_is_byte_unchanged():
-    """The new leg is APPENDED: the file must still begin with HEAD's bytes,
-    so every frozen line (EXEC_*, MIN_PRICE_BANDS, min_price_for,
-    price_reason, the trade verdicts) is byte-identical."""
-    head = _git_show("blm_v4/trade_window.py")
-    if head is None:
+    """The leg was APPENDED to trade_window.py, so the file must still BEGIN
+    with the byte-exact FROZEN prefix — the parent revision HEAD~1 (the
+    commit BEFORE the leg was introduced).  Every frozen line (EXEC_*,
+    MIN_PRICE_BANDS, min_price_for, price_reason, the trade verdicts) is
+    byte-identical and nothing above the append moved; the leg (including
+    its toggle) lives only in the tail AFTER that prefix.
+
+    (Historically this compared against HEAD and asserted ``len(cur) >
+    len(head)`` because the append was UNCOMMITTED; once the leg landed in
+    HEAD the file equalled HEAD and that 'longer' assertion could not hold.
+    Anchoring on HEAD~1 proves the SAME intent — the frozen region is
+    byte-unchanged and the leg is a pure append — without depending on a
+    pending append.)"""
+    frozen = _git_show("blm_v4/trade_window.py", rev="HEAD~1")
+    if frozen is None:
         pytest.skip("git unavailable")
     cur = (REPO / "blm_v4" / "trade_window.py").read_text()
-    assert cur.startswith(head), "the frozen trade_window content changed"
-    # the addition is exactly the appended tail, nothing above moved
-    assert len(cur) > len(head)
+    assert cur.startswith(frozen), "the frozen trade_window prefix changed"
+    # the leg is exactly the appended tail on top of the frozen prefix
+    assert len(cur) > len(frozen)
 
 
 def test_the_alert_file_is_byte_unchanged():

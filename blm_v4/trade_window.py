@@ -454,10 +454,14 @@ def _env_float(name, default):
         return default
 
 
-#: The line-movement leg's TOGGLE — DEFAULT ON (operator-approved).  Set
-#: ``TRADE_MOVE_FILTER_ENABLED=0`` (or false/no/off) to disable the leg
-#: entirely; when disabled :func:`trade_move_reason` imposes NO requirement.
-TRADE_MOVE_FILTER_ENABLED = _env_flag("TRADE_MOVE_FILTER_ENABLED", True)
+#: The line-movement leg's TOGGLE — DEFAULT OFF (operator directive
+#: 2026-10-13).  The leg was wired and deployed ON, then DISABLED: over the
+#: same window it CUT the traded cohort to a THIRD (36 settled vs 117) with
+#: NO measured lift in the hit rate (64% vs 65.8%).  Set
+#: ``TRADE_MOVE_FILTER_ENABLED=1`` (or true/yes/on) to RE-ENABLE it — the
+#: leg is fully functional and re-enableable.  When disabled,
+#: :func:`trade_move_reason` imposes NO requirement.
+TRADE_MOVE_FILTER_ENABLED = _env_flag("TRADE_MOVE_FILTER_ENABLED", False)
 
 #: The STRICTER history variant's minimum captured history, in seconds.
 #: DEFAULT 0.0 = the exact configuration the study validated (the variant
@@ -484,9 +488,10 @@ def trade_move_reason(entry_line, open_line, league_avg_line,
     trade is REFUSED (MOVE_UNPROVABLE): an unprovable move must not license
     a trade.  A present-but-unparsable line is refused the same way.
 
-    The TOGGLE ``TRADE_MOVE_FILTER_ENABLED`` (env, DEFAULT ON) short-
-    circuits FIRST: when it is false the leg imposes no requirement and
-    ``None`` is returned for every input.
+    The TOGGLE ``TRADE_MOVE_FILTER_ENABLED`` (env, DEFAULT OFF since the
+    operator directive of 2026-10-13; set TRADE_MOVE_FILTER_ENABLED=1 to
+    re-enable) short-circuits FIRST: when it is false the leg imposes no
+    requirement and ``None`` is returned for every input.
 
     ``history_s`` is the game's captured history (seconds between the first
     captured observation and the entry observation).  It is read ONLY when
