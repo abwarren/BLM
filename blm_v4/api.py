@@ -53,6 +53,14 @@ from blm_v4.live_analytics.under_alert import (
     under_alert_eligibility,
     under_alert_state,
 )
+from blm_v4.trade_window import (PACE_BELOW, TRADE_MAX_PROGRESS_PCT,
+                                 TRADE_MIN_PACE_RATIO,
+                                 TRADE_MIN_PROGRESS_PCT,
+                                 TRADE_MIN_SCORED_POINTS,
+                                 exec_alert_reason,
+                                 exec_shortfall_reason,
+                                 execution_window_reason,
+                                 min_price_for, price_reason, score_reason)
 
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
 
@@ -199,6 +207,42 @@ LIVE_STATUSES = ("live", "halftime", "in_progress", "in-play", "inplay")
 # inventing a second notion of freshness.
 ALERT_MAX_OBS_AGE_S = 300.0
 ALERT_MIN_REMAINING_MINUTES = ANALYTICAL_MIN_REMAINING_MINUTES  # 2.5, inclusive
+
+
+def _execution_window_block(progress_pct, price=None, points=None,
+                            pace_armed=None) -> dict:
+    """The UNDER trade execution window, pace bar, score floor and price floor
+    for one game — what the dashboard's BETTABLE badge consumes.
+
+    All verdicts come from the ONE definition in ``blm_v4.trade_window``, the
+    same one the executor gate uses, so the badge can never claim BETTABLE for
+    a game the engine will refuse.  ``min_price`` is the break-even for this
+    progress band, ``min_points`` the scored-total floor and ``min_pace_ratio``
+    the EXECUTION pace bar (0.95, deliberately lower than the alert's own 1.04
+    class — see that module).
+
+    ``pace_armed`` is the verdict for the relaxed bar, computed by the caller
+    (it holds the league average pace).  Anything other than True fails the
+    trade, so an absent verdict can never read BETTABLE.
+    Fail closed: an unprovable progress reports ``in_window`` False.
+    """
+    reason = execution_window_reason(progress_pct)
+    if reason is None and pace_armed is not True:
+        reason = PACE_BELOW
+    if reason is None:
+        reason = score_reason(points)
+    if reason is None:
+        reason = price_reason(price, progress_pct)
+    return {
+        "min": TRADE_MIN_PROGRESS_PCT,
+        "max": TRADE_MAX_PROGRESS_PCT,
+        "min_price": min_price_for(progress_pct),
+        "min_points": TRADE_MIN_SCORED_POINTS,
+        "min_pace_ratio": TRADE_MIN_PACE_RATIO,
+        "pace_armed": pace_armed is True,
+        "in_window": reason is None,
+        "reason": reason,
+    }
 
 
 def _db_path() -> Path:
@@ -2281,6 +2325,31 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 eligibility = {"eligible": False,
                                "reason": "stale_state"}
             g["under_alert_eligibility"] = eligibility
+            # the LIVE TRADE combo — computed HERE because the league average
+            # pace is only available on this side; served so the executor and
+            # the badge cannot disagree about it.
+            # FOUR legs, ONE served verdict (docs/rag/15_EDGE_FINDINGS.md
+            # §15.6, 2026-10-12): the TRADE pace bar (ratio > 1.12), the
+            # SHORTFALL (required - actual >= 0.25), the TRADE band (78-90) and
+            # the scored-points floor (>= 90).  All are computed on this side
+            # (the league average and the projector row live here), and the
+            # executor consumes the boolean so it CANNOT disagree with the
+            # engine about any leg.  The price leg (>= 1.85) is NOT folded in
+            # here — the executor and the badge check it separately.
+            g["under_alert_exec_armed"] = (
+                exec_alert_reason(
+                    proj.get("required_pts_per_min"), entry.get("avg_pace"),
+                    proj.get("progress_pct")) is None
+                and exec_shortfall_reason(
+                    proj.get("required_pts_per_min"),
+                    proj.get("actual_pts_per_min")) is None
+                and execution_window_reason(proj.get("progress_pct")) is None
+                and score_reason(proj.get("current_total_points")) is None)
+            g["under_alert_execution_window"] = _execution_window_block(
+                proj.get("progress_pct"),
+                (g.get("market") or {}).get("under_odds"),
+                proj.get("current_total_points"),
+                g["under_alert_exec_armed"])
             g["under_alert"] = under_alert_state(
                 proj.get("actual_pts_per_min"), proj.get("required_pts_per_min"),
                 entry.get("avg_pace"), proj.get("progress_pct"),
@@ -2340,6 +2409,11 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 None, False, None)
             g["under_alert"] = under_alert_state(
                 None, None, None, eligible=False)
+            # the execution window fails closed identically — the badge must
+            # never read BETTABLE from an absent block
+            g["under_alert_execution_window"] = _execution_window_block(
+                None, None, None, None)
+            g["under_alert_exec_armed"] = False
             # Q3 BREAK fails closed identically — an absent block is never
             # served, a present-but-inactive one is.
             g["under_alert_q3_break"] = q3_break_snapshot(

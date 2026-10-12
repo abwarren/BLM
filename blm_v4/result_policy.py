@@ -61,6 +61,16 @@ The guards implemented here:
         (scores never decrease within a fixture).  This is the guard that
         rejects the 739 impossible finals.
 
+  RESULT TERMINALITY (directive 2026-10-12) — ``game_is_terminal``: a
+    result may only be accepted once the game's OWN observation stream has
+    gone QUIET (or carries an explicit terminal marker).  Guards (a)-(d)
+    are TIME-BLIND — a LIVE mid-game frame satisfies (d) by construction
+    (the live score IS the running maximum) — so without this guard a game
+    still playing was settled with a final BELOW a total it later reached
+    (measured: 1,856 of 15,577 OK finals, 11.9%, over 21 days).  The
+    reconciler enforces it at BOTH decision points and at candidate
+    selection.
+
 Nothing in this module touches the database.  It is pure policy so all
 three writers share exactly one definition, and it is unit-testable
 without a fixture.
@@ -68,6 +78,7 @@ without a fixture.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional, Sequence
 
 #: provenance vocabulary (mirrors result_reconciler.SRC_*
@@ -182,6 +193,85 @@ def history_disagrees(rows: Iterable[Any],
         return False
     hh, aa = int(home), int(away)
     return any(p != (hh, aa) for p in history_pairs(rows))
+
+
+# ── the terminal (quiet) predicate — premature-settlement guard ──────
+#
+# Directive 2026-10-12 (premature settlement).  The score guards above
+# decide whether a rendered SCORE is believable for THIS fixture; none of
+# them asks "has this fixture FINISHED".  A live mid-game frame satisfies
+# ``history_consistent`` by construction (the live score IS the running
+# maximum), so a game still playing could be settled with a final BELOW a
+# total it later reached — measured: 1,856 of 15,577 OK finals (11.9%)
+# over 21 days (game 31202604 settled 69:108=177 at 13:45:06Z while its
+# own snapshots kept arriving to 80:121=201 at 13:49:50Z).
+#
+# Fix: a result may only be accepted once the game's own observation
+# stream has gone QUIET (or carries an explicit terminal marker).  ONE
+# predicate, defined here, enforced at BOTH reconciler decision points so
+# a race cannot bypass it.
+
+#: Quiescence grace (seconds).  A game is NOT terminal while its newest
+#: observation is younger than this.  The observed live cadence is 3-15 s
+#: and a finished game's stream is silent, so 90 s is an order of
+#: magnitude above the live cadence and far below the reconciler's pass
+#: interval — a legitimate settlement is delayed by at most the grace.
+DEFAULT_TERMINAL_GRACE_S = 90.0
+
+
+def _parse_iso_ts(value: Any) -> Optional[datetime]:
+    """Tolerant ISO-8601 parse (accepts a ``datetime``, an ISO string with
+    or without a ``Z``/offset suffix); None when absent or unparseable.
+    A naive stamp is read as UTC (every stamp in this pipeline is UTC)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def game_is_terminal(last_snapshot_at: Any,
+                     now: Any,
+                     grace_s: float = DEFAULT_TERMINAL_GRACE_S,
+                     *,
+                     terminal_marker: bool = False) -> bool:
+    """True when the game's own observation stream PROVES it has finished.
+
+    Pure and unit-testable (no DB, no clock of its own).  Terminal iff:
+
+      * ``terminal_marker`` is truthy — the game's latest snapshot carries
+        an explicit end state.  The CALLER queries this from the
+        ``snapshots`` row (``game_status`` in the ended vocabulary, or
+        ``quarter >= 4 AND clock in ('00:00','0:00')``) and passes it in,
+        so this predicate stays a pure function of its arguments; OR
+      * the stream has gone QUIET — ``now - last_snapshot_at >= grace_s``.
+
+    FAIL CLOSED on what cannot be proven: an ABSENT or UNPARSEABLE
+    ``last_snapshot_at`` with no explicit marker returns False — the guard
+    must never ASSUME a game finished on missing evidence.
+
+    The never-observed case is deliberately NOT this predicate's business.
+    A game the collector has NO snapshot stream for at all (NULL
+    ``last_snapshot_at``) is the directive's never-captured game, which
+    the reconciler ADMITS (there is no live stream to have settled
+    prematurely against; see ``result_reconciler``).  That distinction is
+    made by the caller — this predicate only answers "is a stream that
+    EXISTS finished?", and answers False rather than guess when it cannot
+    tell.
+    """
+    if terminal_marker:
+        return True
+    last = _parse_iso_ts(last_snapshot_at)
+    if last is None:
+        return False
+    n = _parse_iso_ts(now)
+    if n is None:
+        return False
+    return (n - last).total_seconds() >= float(grace_s)
 
 
 # ── page-result validation (the directive's "validate score") ────────

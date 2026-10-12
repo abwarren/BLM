@@ -34,6 +34,9 @@ from blm_v4.betting.account_guard import verify_account
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import stake as _stake
+from blm_v4.trade_window import (EXEC_MIN_PROGRESS_PCT,
+                                 execution_window_reason, price_reason,
+                                 score_reason)
 
 # directive §5 — the execution-state vocabulary
 STATUS_PENDING = "PENDING"
@@ -88,17 +91,33 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
         return _no("auto_betting_off", ik)
     if not game_enabled:
         return _no("PER_GAME_AUTO_BET_OFF", ik)
-    # ── 2+3. the production alert verdict, consumed verbatim ──────────
+    # ── 2+3. the EXECUTION verdict ────────────────────────────────────
+    # The alert's own class bar is 1.04 and STAYS 1.04: it is the signal, the
+    # dashboard's on-screen alert, and what the frozen historical analysis
+    # replays.  What is TRADED is gated by the relaxed bar served as
+    # under_alert_exec_armed — the alert often only clears 1.04 once PokerBet
+    # has pulled the total, which is the whole reason to move earlier.
+    #
+    # An ABSENT verdict falls back to the strict alert, so a payload that does
+    # not carry the field can only ever be TIGHTER, never looser.
     ua = game.get("under_alert") or {}
-    if ua.get("active") is not True:
+    armed = game.get("under_alert_exec_armed")
+    if armed is None:
+        armed = ua.get("active") is True
+    if armed is not True:
         return _no("alert_not_active", ik)
     if (game.get("under_alert_eligibility") or {}).get("eligible") is not True:
         return _no("alert_not_eligible", ik)
     # ── identity: the alert must carry its checkpoint id ──────────────
-    alert_id = f"{game.get('game_id')}|{ua.get('checkpoint')}"
-    checkpoint = str(ua.get("checkpoint"))
+    # (armed at the relaxed bar the alert block itself may read inactive, so
+    # fall back to the ONE progress checkpoint the alert is defined on)
+    _ck = ua.get("checkpoint")
+    if _ck is None:
+        _ck = int(EXEC_MIN_PROGRESS_PCT)
+    alert_id = f"{game.get('game_id')}|{_ck}"
+    checkpoint = str(_ck)
     game_id = str(game.get("game_id") or "")
-    if not game_id or ua.get("checkpoint") is None:
+    if not game_id or _ck is None:
         return _no("alert_identity_missing", ik)
     ik = f"{game_id}|{checkpoint}|{alert_id}"
     # ── R4: ONE auto-bet per game (operator directive 2026-10-06) ─────
@@ -128,13 +147,37 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if _finite(proj.get("required_pts_per_min")) is None \
             or _finite(proj.get("progress_pct")) is None:
         return _no("market_missing", ik)
+    # ── 5b. the EXECUTION WINDOW, SCORE FLOOR + PRICE FLOOR ──────────
+    # placed only in the progress band [75%, 92%] — 75 is the alert's own
+    # floor, 92 the top of the last fully-quoted band (the observed
+    # unfillable attempts were at 94-96%); only once enough points are on
+    # the board (the provider phantoms a fresh game as "4th Quarter, 0-0",
+    # which lands exactly on the floor); and only at a price above the
+    # band's measured break-even, because the operator's criterion is
+    # positive EV and a hit rate alone never licenses a trade.  All three
+    # come from the ONE definition in blm_v4.trade_window, shared with the
+    # dashboard's BETTABLE badge.
+    window_reason = execution_window_reason(proj.get("progress_pct"))
+    if window_reason is not None:
+        return _no(window_reason, ik)
+    low_score = score_reason(proj.get("current_total_points"))
+    if low_score is not None:
+        return _no(low_score, ik)
+    below_break_even = price_reason(market.get("under_odds"),
+                                    proj.get("progress_pct"))
+    if below_break_even is not None:
+        return _no(below_break_even, ik)
     # ── limits must be CONFIGURED before any stake math (§9): an
     #    unconfigured limit cannot be enforced, so betting is blocked —
     #    exactly what the dashboard's "NOT CONFIGURED — betting blocked"
-    #    status line promises.  Set BETTING_MAX_STAKE_PER_BET,
-    #    BETTING_MAX_BETS_PER_DAY and BETTING_MAX_DAILY_EXPOSURE to arm.
-    if (cfg.max_stake_per_bet is None or cfg.max_bets_per_day is None
-            or cfg.max_daily_exposure is None):
+    #    status line promises.  Set BETTING_MAX_STAKE_PER_BET and
+    #    BETTING_MAX_BETS_PER_DAY to arm.
+    #
+    #    The DAILY EXPOSURE ceiling is OPTIONAL (operator directive
+    #    2026-10-08): leaving BETTING_MAX_DAILY_EXPOSURE unset REMOVES it.
+    #    The per-bet cap and the daily bet count remain mandatory and are the
+    #    binding risk bounds (200 bets x 1000.00 ZAR worst case per day).
+    if cfg.max_stake_per_bet is None or cfg.max_bets_per_day is None:
         return _no("limits_not_configured", ik)
     # ── 6. stake amount valid (unit-based staking) ────────────────────
     unit_price = _finite(unit_price)
@@ -336,26 +379,11 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                             error_message=f"unmapped status {status!r}")
         return {"status": STATUS_UNKNOWN,
                 "error_code": "PROVIDER_RESPONSE_INVALID"}
-    # Accepted-odds reconciliation (operator directive 2026-10-08): the
-    # bookmaker may re-price the selection after the click ("accept odds
-    # changes and resubmit").  Persist the odds the book ACTUALLY took, so
-    # bet_executions.price matches the settled slip instead of the stale
-    # pre-click quote.  Prefer the adapter's explicit odds_accepted entry;
-    # fall back to the odds observed at execution time.
-    accepted_odds = None
-    for entry in (result.get("odds_accepted") or []):
-        if isinstance(entry, dict):
-            v = _finite(entry.get("accepted"))
-            if v is not None:
-                accepted_odds = v
-    if accepted_odds is None:
-        accepted_odds = _finite(result.get("observed_odds"))
     store.update_status(execution_id, status,
                         provider_ref=result.get("provider_ref"),
                         error_code=result.get("error_code"),
                         error_message=result.get("error_message"),
                         accepted_amount=result.get("accepted_amount"),
-                        price=accepted_odds,
                         simulated_amount=(candidate.get("stake_amount")
                                           if cfg.dry_run and status == STATUS_ACCEPTED
                                           else None),

@@ -72,6 +72,7 @@ from blm_v4.projection import duration_for
 from blm_v4.result_policy import (
     CONFLICTS_SCHEMA,
     flag_conflict,
+    game_is_terminal,
     history_endpoint_total,
     validate_page_result,
 )
@@ -302,6 +303,14 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    """Column access for the guard that works for dict and sqlite3.Row."""
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return default
+
+
 def select_matching_row(rows: list[dict], game: dict) -> dict[str, Any]:
     """Pick the page ROW that is this game, from the page's row list.
 
@@ -477,7 +486,11 @@ class ResultReconciler:
             forbids, produced by the reconciliation layer itself).
         VERIFIED-with-OK and TEMPLATE_FAILED games are never re-attempted
         (the first is final, the second is exhausted).  A game holding a
-        verified OK row is never a candidate (its result is final).
+        verified OK row is never a candidate (its result is final).  A
+        game whose snapshot stream is still FRESH is never a candidate
+        either (directive 2026-10-12): its result is not yet knowable —
+        the game may still be scoring — and it must not burn an attempt
+        while live (see the terminal gate below).
         """
         rows = conn.execute(
             """
@@ -525,7 +538,23 @@ class ResultReconciler:
             """,
             (self._max_attempts, self._batch_limit),
         ).fetchall()
-        return [dict(r) for r in rows]
+        # PREMATURE-SETTLEMENT GATE (directive 2026-10-12).  A game whose
+        # snapshot stream is still FRESH is not even returned, so it is not
+        # fetched and burns NO per-game attempt while it is live.  The SAME
+        # predicate the two apply paths enforce (result_policy
+        # .game_is_terminal) decides terminality here.  A game the collector
+        # never observed (last_snap_at is None) has no live stream to
+        # settle prematurely against and stays admissible (never-captured
+        # case); only an existing-but-unproven stream is refused.
+        now = _utcnow()
+        out: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            if d.get("last_snap_at") is None or game_is_terminal(
+                    d["last_snap_at"], now,
+                    terminal_marker=bool(d.get("_terminal_marker"))):
+                out.append(d)
+        return out
 
     # ── the captured-history bound (directive 2026-09-24) ──────────
     def _attach_history_bounds(self, conn: sqlite3.Connection,
@@ -560,6 +589,46 @@ class ResultReconciler:
             b = bounds.get(c["source_game_id"])
             c["_history"] = ([{"home_score": b[0], "away_score": b[1]}]
                              if b else None)
+
+    # ── premature-settlement guard (directive 2026-10-12) ─────────────
+    def _premature_settlement_guard(self, game: dict,
+                                    now: str) -> tuple[bool, dict]:
+        """The SHARED terminal guard: may this game's result be settled?
+
+        A verified final is only believable once the game's OWN
+        observation stream has gone QUIET (or carries an explicit terminal
+        marker).  The score guards in ``verify_parsed`` are time-blind: a
+        LIVE mid-game frame satisfies "final >= observed max" BY
+        CONSTRUCTION (the live score IS the running max), so without this
+        guard the reconciler settles a game that is still playing — its
+        stored final then sits below a total the game later reached
+        (measured: 11.9% of OK finals over 21 days).
+
+        ONE predicate, ``result_policy.game_is_terminal``, is called from
+        BOTH decision points (the swarm path and the page path) so a race
+        cannot bypass it.  The game's ``last_snap_at`` comes from the
+        candidate scan (``candidate_games``); the explicit terminal marker
+        is read from the attached ``_terminal_marker`` when a caller
+        supplies one.
+
+        The never-observed case is the caller's to admit: a game with NO
+        snapshot stream at all (``last_snap_at`` is None) has no live
+        stream that could have settled prematurely, so it is allowed
+        through — the directive's never-captured game is reconcilable.
+        The predicate itself still FAILS CLOSED (an existing-but-
+        unprovable stream is refused).  Returns ``(allowed, checks)``.
+        """
+        last_snap = _row_get(game, "last_snap_at")
+        marker = bool(_row_get(game, "_terminal_marker"))
+        if last_snap is None:
+            return True, {"terminal_guard": "no_snapshot_stream"}
+        terminal = game_is_terminal(last_snap, now, terminal_marker=marker)
+        checks = {
+            "terminal_guard": "terminal" if terminal else "game_not_terminal",
+            "last_snapshot_at": last_snap,
+            "terminal_marker": marker,
+        }
+        return terminal, checks
 
     # ── verification (directive §6 + 2026-09-24 result-integrity) ─────
     def verify_parsed(self, parsed: dict, game: dict,
@@ -745,8 +814,25 @@ class ResultReconciler:
         """
         gid = game["source_game_id"]
         now = _utcnow()
+        # PREMATURE-SETTLEMENT GATE (directive 2026-10-12): refuse while the
+        # game's own stream is still live — the feed answers live too, so a
+        # mid-game frame would otherwise be accepted as a final.  Same
+        # predicate as the page path and the candidate scan.
+        allowed, guard = self._premature_settlement_guard(game, now)
+        if not allowed:
+            rec = {"outcome": "REJECTED", "checks": {"source": "swarm_feed",
+                                                     **guard},
+                   "fetched_at": now,
+                   "rendered_home": res.get("home_team"),
+                   "rendered_away": res.get("away_team"),
+                   "final_home": res.get("home_score"),
+                   "final_away": res.get("away_score"),
+                   "final_total": res.get("final_total")}
+            self._stamp_unresolved(game, rec)
+            return self._record(game, rec)
         checks: dict[str, Any] = {
             "source": "swarm_feed",
+            **guard,
             "game_id_match": str(res.get("game_id") or "") == str(gid),
             "feed_home_team": res.get("home_team"),
             "feed_away_team": res.get("away_team"),
@@ -797,6 +883,21 @@ class ResultReconciler:
     def _reconcile_one(self, fetcher: ResultsFetcher,
                        game: dict) -> str:
         gid = game["source_game_id"]
+        now = _utcnow()
+
+        # ── PREMATURE-SETTLEMENT GATE (directive 2026-10-12) ──────────
+        # A game that is STILL LIVE must not be settled from ANY path: the
+        # page (like the feed) renders the CURRENT scoreboard, so a live
+        # frame passes every score check by construction.  Enforced here —
+        # the page path — and again in _apply_swarm_result — the feed path
+        # — through the SAME predicate, so a race cannot bypass it.  A
+        # refusal is retryable (stamped unresolved, never a new terminal
+        # state).
+        allowed, guard = self._premature_settlement_guard(game, now)
+        if not allowed:
+            rec = {"outcome": "REJECTED", "checks": guard, "fetched_at": now}
+            self._stamp_unresolved(game, rec)
+            return self._record(game, rec)
 
         # ── AUTHORITATIVE: the swarm feed (2026-09-24) ────────────────
         # The results page is a rendering of this feed; reading it directly
@@ -806,8 +907,6 @@ class ResultReconciler:
         swarm_res = game.get("_swarm_result")
         if swarm_res is not None:
             return self._apply_swarm_result(game, swarm_res)
-
-        now = _utcnow()
 
         # ── ROW-BASED observation (2026-09-24) ────────────────────────
         # The page renders a LIST of games and carries no game id, so the
@@ -835,6 +934,7 @@ class ResultReconciler:
                 game)
             checks = {
                 "row_based": True,
+                **guard,
                 "page_rows": match.get("total_rows"),
                 "matching_rows": match.get("candidate_rows"),
                 "row_match": match.get("matched"),
@@ -894,7 +994,7 @@ class ResultReconciler:
         # verify_parsed re-orients a swapped rendering inside its own
         # copy — the oriented parse is the authoritative one to persist.
         parsed = verdict.get("parsed") or parsed
-        checks = dict(verdict["checks"])
+        checks = {**dict(verdict["checks"]), **guard}
         checks["parse_quality"] = parsed.get("parse_quality")
         rec = {
             "outcome": verdict["result"],

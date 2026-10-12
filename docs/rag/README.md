@@ -56,6 +56,8 @@ higher level, then correct the lower one.
 | `11_TESTING_CONTRACT.md` | What counts as proof |
 | `12_PRODUCTION_RUNBOOK.md` | Inspect / change / deploy / rollback |
 | `13_AUTOBET_RUNG.md` | The PokerBet RUNG rule (line-increment guard for Auto-Bet) |
+| `14_TRADED_COHORT.md` | What "the traded cohort" means — the games the system auto-bets, vs the alert population and vs "bettable" — **and** the `tradeable` cohort pull (the rule-triggered set, settled + PENDING) with its mandated delivery format |
+| `15_EDGE_FINDINGS.md` | Edge/gate optimisation (2026-10-12): corrected-final prerequisite, the candidates measured (C2, req_ratio, pacegap), the SHORTFALL leg + the 1.85 price floor, and the **SECOND revision — the LIVE TRADE COMBO** (band 78-90, pace>1.12, pts>=90, shortfall>=0.25, price>=1.85; 80.2%, n=975) with the ALERT kept at 1.04 — plus the retired logic not to resurrect |
 | `DECISIONS/` | Architectural Decision Records (permanent) |
 | `EXAMPLES/` | Real positive / negative / edge-case cases |
 
