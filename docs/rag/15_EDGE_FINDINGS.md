@@ -231,3 +231,108 @@ ALERT-unchanged and frozen-constant proofs); `tests/test_execution_window_2026_1
 and `tests/test_exec_shortfall_2026_10_12.py` updated deliberately for the new
 band / score / pace / shortfall / price (the guarded population moved — see
 §15.3's contract-change note and `repo-change-invariants.md`).
+
+---
+
+## 15.8 The LINE-MOVEMENT VOLATILITY filter — a new trade leg
+## (operator-approved, 2026-10-12)
+
+**ADDITIVE to §15.7** — the alert gate is untouched (see below). The Auto-Bet
+gate gains ONE more leg: a game trades only when its TOTAL line is provably
+**FLAT** relative to where it was FIRST CAPTURED. A line that has drifted is a
+market-disagreement signal that materially lowers the UNDER win rate.
+
+### The rule
+
+| leg | value | constant |
+|---|---|---|
+| line movement | `|entry_line - open_line| / league_avg_line` **< 2%** (STRICT) | `TRADE_MOVE_MAX = 0.02` |
+
+* `open_line` — the FIRST non-null `live_total_line` **captured** for the game
+  (from `clean_observations`). This is the first **CAPTURED** line, **NOT** the
+  true market open (`market.opening_line` from the snapshot stream is a
+  different quantity); the distinction is deliberate and the study used the
+  captured definition.
+* `league_avg_line` — the mean of the per-game first-captured lines across the
+  game's `competition_slug` (study population: NBA 226.6 · EuroLeague 172.7 ·
+  TBSL 167.7 · CBA 178.2 · KBL 156.9 · cyber 218.5).
+* The gate **FAILS CLOSED**: if the open line OR the league average is unknown /
+  unprovable, the trade is **REFUSED** (`MOVE_UNPROVABLE`). For this leg an
+  unprovable move must not license a trade — the safe direction is refusal.
+
+### The evidence (out-of-sample walk-forward)
+
+38 clean days, **entry-date attribution** (the game is scored in the bucket its
+ENTRY fell in), corrected finals:
+
+| cohort | UNDER | 95% CI | n | EV |
+|---|---|---|---|---|
+| **flat** `|move| < 2%` | **78.8%** | [76.5, 80.9] | 1,363 | **+0.672** |
+| **moved** `|move| >= 2%` | **64.7%** | [61.6, 67.7] | 949 | +0.228 |
+
+**Gap +14.1 pp, p ≈ 6e-14.** Both cohorts are large and the separation is not a
+small-sample artefact.
+
+* **Half-split.** The 38-day OOS window split in halves reproduces the gap in
+  BOTH halves (direction and magnitude consistent) — reported by the study; not
+  re-derived in this write-up.
+* **Threshold plateau.** The separation is FLAT across a 1–4% cut, so 2% is a
+  centre, not a knife-edge — carving the cohort anywhere in that plateau yields
+  the same split.
+* **League / price-band breakdown.** The gap HOLDS in all six leagues (NBA,
+  EuroLeague, TBSL, CBA, KBL, cyber) and in every price band — it is not one
+  league or one price regime carrying the result.
+
+### The stricter history variant (NOT enabled)
+
+`TRADE_MOVE_MIN_HISTORY_S` (env, default **0.0**) — 0 is the exact
+configuration the study validated (the variant is EXCLUDED). Setting it (e.g.
+`900` for ≥ 15 minutes of captured history) enables a stricter variant WITHOUT a
+code change: its flat bucket is ~38% the size of the 0-second bucket but carries
+a **+12.3 pp** gap (smaller sample, same direction). It is documented here so a
+later operator can turn it on knowingly; it is OFF today.
+
+### The toggle
+
+`TRADE_MOVE_FILTER_ENABLED` (env, **default ON** — the operator approved the
+leg). `false` / `0` / `no` / `off` disables it entirely: the leg then imposes NO
+requirement and a volatile move no longer disarms a trade.
+
+### Caveats (carry these with the number)
+
+1. `open_line` is the first **CAPTURED** line, not the market's own open; a game
+   whose first captured tick already lags the market contributes to noisier
+   `move_norm`.
+2. **Short-capture-window confound.** "Flat" partly measures how briefly the
+   game was under capture: a game captured for only a few minutes has few
+   chances to move. The min-history variant exists precisely to test this,
+   which is why it is shipped OFF but wired.
+3. **Regime change is untestable** from the same window — the flat cohort's edge
+   is measured under one price/pace regime and could decay.
+4. Modelled entry prices, no slippage — not P&L (§15.5.2).
+5. Changing the gate is a **CLASS CHANGE** (`14_TRADED_COHORT.md` §14.5).
+
+### Implementation — the ONE definition, and what did NOT move
+
+- `blm_v4/trade_window.py` gains `TRADE_MOVE_MAX = 0.02`, the reason vocabulary
+  (`MOVE_VOLATILE` / `MOVE_UNPROVABLE`), the toggle + min-history env constants,
+  and `trade_move_reason(entry_line, open_line, league_avg_line, history_s=None)`.
+  They are **APPENDED**: every frozen line above the new block (the `EXEC_*`
+  class, `MIN_PRICE_BANDS`, `min_price_for`, `price_reason`, the trade verdicts)
+  is **byte-identical** — `tests/test_trade_move_filter_2026_10_12.py` asserts
+  the file still BEGINS with `git show HEAD:blm_v4/trade_window.py`.
+- `blm_v4/live_analytics/line_reference.py` (+ `line_reference_worker.py`) — the
+  ONE definition of `open_line` and `league_avg_line`; the worker precomputes
+  them off the request path (mirroring `pace_reference_worker`).
+- `blm_v4/api.py` folds the leg into the SERVED `under_alert_exec_armed` (the
+  side that holds the league reference / projector / market rows) and carries
+  `entry_line` / `open_line` / `league_avg_line` / `move_norm` / `reason` in the
+  new `under_alert_line_move` block. The executor CONSUMES the served boolean.
+- **THE ALERT IS UNCHANGED.** `under_alert.REQUIRED_MARGIN = 1.04` and
+  `ALERT_PROGRESS_PCT = 75.0` are byte-identical (asserted against HEAD), and the
+  `EXEC_*` frozen class is unchanged. The new leg reads neither.
+
+Tests: `tests/test_trade_move_filter_2026_10_12.py` (boundary at exactly 2.0%,
+fail-closed, toggle on/off, min-history excluded at 0, the FROZEN/alert
+byte-unchanged proofs, and an end-to-end proof the SERVED boolean disarms a
+volatile move so the executor refuses it).

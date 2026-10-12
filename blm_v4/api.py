@@ -61,7 +61,8 @@ from blm_v4.trade_window import (PACE_BELOW, TRADE_MAX_PROGRESS_PCT,
                                  exec_alert_reason,
                                  exec_shortfall_reason,
                                  execution_window_reason,
-                                 score_reason, trade_price_reason)
+                                 score_reason, trade_move_reason,
+                                 trade_price_reason)
 
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
 
@@ -105,6 +106,85 @@ def pace_reference_status() -> dict:
             "worker": snap,
             "pace_available": latest["pace"] is not None,
             "q3_available": latest["q3"] is not None}
+
+
+# ── PRECOMPUTED LEAGUE AVERAGE LINE + per-game first line (new trade leg,
+# docs/rag/15_EDGE_FINDINGS.md §15.8, diagnostic-2026-09-25 pattern) ──
+# The LINE-MOVEMENT VOLATILITY trade leg needs, per served game, the game's
+# FIRST-captured live total line (open_line) and its competition's average of
+# those (league_avg_line).  The average is a whole-table scan of
+# clean_observations (blm_metrics_clean.db, ≈4 GB), so it is precomputed off
+# the request path by a LineReferenceWorker (server.py, the composition root)
+# that publishes here; v4_live reads the last completed payload and never
+# computes one.  The wrapper below is the single seam tests stub (monkeypatch
+# v4api._line_reference); with NO worker wired — a bare router in tests — it
+# falls back to the inline scan so nothing that stubs it can break.
+_LINE_REF_WORKER = None
+_LINE_REF_LATEST = {"avg": None, "open": None}
+_LINE_REF_LOCK = threading.Lock()
+
+
+def _publish_line_reference(avg: dict, open_map: dict) -> None:
+    """LineReferenceWorker's consumer: store the last completed payload."""
+    with _LINE_REF_LOCK:
+        _LINE_REF_LATEST["avg"] = avg
+        _LINE_REF_LATEST["open"] = open_map
+
+
+def configure_line_reference_worker(worker) -> None:
+    """Wire the process's LineReferenceWorker in (composition root)."""
+    global _LINE_REF_WORKER
+    _LINE_REF_WORKER = worker
+
+
+def line_reference_status() -> dict:
+    """Diagnostics for the line-reference worker (status route / tests)."""
+    with _LINE_REF_LOCK:
+        latest = dict(_LINE_REF_LATEST)
+    snap = _LINE_REF_WORKER.snapshot() if _LINE_REF_WORKER else None
+    return {"worker_configured": _LINE_REF_WORKER is not None,
+            "worker": snap,
+            "avg_available": latest["avg"] is not None,
+            "open_available": latest["open"] is not None}
+
+
+def _line_reference(conn: Optional[sqlite3.Connection] = None) -> dict:
+    """League average line + per-game first lines for the WHOLE payload.
+
+    Served from the background LineReferenceWorker's last completed scan when
+    one is wired (the production path — the scan never runs on the request
+    path).  Falls back to the inline scan ONLY when no worker is configured
+    (bare router in tests, BLM_LINE_REF_WORKER=0).  Failure-isolated: an
+    unreadable population yields ``{"avg": {}, "open": {}}`` and the trade leg
+    fails CLOSED (no reference ⇒ no flat proof ⇒ no trade)."""
+    if _LINE_REF_WORKER is not None:
+        with _LINE_REF_LOCK:
+            avg = _LINE_REF_LATEST.get("avg")
+            open_map = _LINE_REF_LATEST.get("open")
+        if avg is not None and open_map is not None:
+            return {"avg": avg, "open": open_map}
+        return {"avg": {}, "open": {}}     # warming up: fail closed
+    try:
+        from blm_v4.live_analytics.line_reference import (build_reference,
+                                                          game_slug_map)
+        own = None
+        gconn = conn
+        if gconn is None:
+            own = _connect()
+            gconn = own
+        try:
+            mconn = sqlite3.connect(
+                f"file:{_db_path().parent / 'blm_metrics_clean.db'}?mode=ro",
+                uri=True, timeout=30)
+            try:
+                return build_reference(mconn, game_slug_map(gconn))
+            finally:
+                mconn.close()
+        finally:
+            if own is not None:
+                own.close()
+    except Exception:
+        return {"avg": {}, "open": {}}
 from blm_v4.live_analytics.under_fingerprints import evaluate_fingerprints
 from blm_v4.live_analytics.under_outcome import (outcome_status,
                                                  score_at_observation,
@@ -2249,6 +2329,7 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
         # layer produces nothing rather than borrowing a number.
         pace_reference = _pace_reference(conn)
         q3_reference = _q3_pace_reference(conn)
+        line_reference = _line_reference(conn)
     finally:
         if own_conn:
             conn.close()
@@ -2337,6 +2418,46 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
             # this side (the league average, the projector row and the market
             # row live here), and the executor consumes the boolean so it CANNOT
             # disagree with the engine about any leg.
+            # ── LINE-MOVEMENT VOLATILITY leg (new trade leg, operator-
+            # approved; docs/rag/15_EDGE_FINDINGS.md §15.8).  A game trades
+            # only when its line is provably FLAT: |entry_line - open_line|
+            # / league_avg_line < TRADE_MOVE_MAX.  ``open_line`` is the FIRST
+            # CAPTURED live line for the game (clean_observations), NOT the
+            # true market open (market.opening_line); ``league_avg_line`` is
+            # the precomputed per-competition mean (LineReferenceWorker).
+            # FAILS CLOSED: an unprovable open line or league average
+            # REFUSES — an unprovable move must not license a trade.
+            _lineref = line_reference or {}
+            _lmavg = (_lineref.get("avg") or {}).get(
+                g.get("competition_slug")) or {}
+            league_avg_line = _lmavg.get("avg_line")
+            _lopen = (_lineref.get("open") or {}).get(g.get("game_id")) or {}
+            open_line = _lopen.get("line")
+            entry_line = (g.get("market") or {}).get("total_line")
+            _entry_at = (g.get("market") or {}).get("total_line_at")
+            _open_at = _lopen.get("at")
+            history_s = None
+            _a, _b = _parse_ts(_open_at), _parse_ts(_entry_at)
+            if _a is not None and _b is not None:
+                history_s = (_b - _a).total_seconds()
+            _move_norm = None
+            try:
+                if (entry_line is not None and open_line is not None
+                        and league_avg_line):
+                    _move_norm = round(
+                        abs(float(entry_line) - float(open_line))
+                        / float(league_avg_line), 6)
+            except (TypeError, ValueError):
+                _move_norm = None
+            g["under_alert_line_move"] = {
+                "entry_line": entry_line,
+                "open_line": open_line,
+                "league_avg_line": league_avg_line,
+                "move_norm": _move_norm,
+                "reason": trade_move_reason(
+                    entry_line, open_line, league_avg_line,
+                    history_s=history_s),
+            }
             g["under_alert_exec_armed"] = (
                 exec_alert_reason(
                     proj.get("required_pts_per_min"), entry.get("avg_pace"),
@@ -2347,7 +2468,10 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 and execution_window_reason(proj.get("progress_pct")) is None
                 and score_reason(proj.get("current_total_points")) is None
                 and trade_price_reason(
-                    (g.get("market") or {}).get("under_odds")) is None)
+                    (g.get("market") or {}).get("under_odds")) is None
+                and trade_move_reason(
+                    entry_line, open_line, league_avg_line,
+                    history_s=history_s) is None)
             g["under_alert_execution_window"] = _execution_window_block(
                 proj.get("progress_pct"),
                 (g.get("market") or {}).get("under_odds"),
@@ -2417,6 +2541,12 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
             g["under_alert_execution_window"] = _execution_window_block(
                 None, None, None, None)
             g["under_alert_exec_armed"] = False
+            # the line-movement leg fails closed identically — an absent
+            # block must never read as a FLAT (provable) move
+            g["under_alert_line_move"] = {
+                "entry_line": None, "open_line": None,
+                "league_avg_line": None, "move_norm": None,
+                "reason": trade_move_reason(None, None, None)}
             # Q3 BREAK fails closed identically — an absent block is never
             # served, a present-but-inactive one is.
             g["under_alert_q3_break"] = q3_break_snapshot(

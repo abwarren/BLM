@@ -379,3 +379,140 @@ def exec_shortfall_reason(required_pace, actual_pace) -> Optional[str]:
     if not (math.isfinite(req) and math.isfinite(act)):
         return SHORTFALL
     return None if (req - act) >= SHORTFALL_MARGIN else SHORTFALL
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# LINE-MOVEMENT VOLATILITY FILTER — a NEW trade leg (operator-approved).
+# docs/rag/15_EDGE_FINDINGS.md §15.8.  APPENDED to the module: every line
+# ABOVE this block is the frozen trade/alert definition and is
+# byte-unchanged (tests/test_trade_move_filter_2026_10_12.py asserts this
+# file still BEGINS with ``git show HEAD:blm_v4/trade_window.py``).  This
+# block adds a gate the trade ANDs into the SERVED
+# ``under_alert_exec_armed`` the executor consumes; it touches neither the
+# alert nor the FROZEN ``EXEC_*`` class.
+# ═══════════════════════════════════════════════════════════════════════
+#
+# A game's TOTAL line drifting away from where it was FIRST CAPTURED is a
+# market-disagreement signal that materially lowers the UNDER win rate.
+# Out-of-sample walk-forward over 38 clean days (entry-date attribution,
+# corrected finals):
+#
+#   flat   |entry_line - open_line| / league_avg_line <  2%  -> 78.8% UNDER
+#          [76.5, 80.9]  n=1363   EV +0.672
+#   moved  |entry_line - open_line| / league_avg_line >= 2%  -> 64.7% UNDER
+#          [61.6, 67.7]  n=949    EV +0.228
+#
+# gap +14.1 pp, p ~ 6e-14; the threshold PLATEAUS across 1-4% and holds in
+# all six leagues and all price bands.  The rule TRADES ONLY the flat
+# cohort: the leg is satisfied (``None``) iff the normalised move is
+# STRICTLY below TRADE_MOVE_MAX.
+#
+# DEFINITIONS (must match the study):
+#   * open_line        the FIRST non-null live_total_line CAPTURED for the
+#                      game (from clean_observations) — the first CAPTURED
+#                      line, NOT the true market open;
+#   * league_avg_line  the mean of the per-game first-captured lines across
+#                      the game's competition_slug (study population: NBA
+#                      226.6, EuroLeague 172.7, TBSL 167.7, CBA 178.2, KBL
+#                      156.9, cyber 218.5);
+#   * move_norm        |entry_line - open_line| / league_avg_line.
+#
+# FAIL CLOSED: if the open line OR the league average is unknown /
+# unprovable the trade is REFUSED — for THIS leg an unprovable move must
+# not license a trade.  MOVE_UNPROVABLE is distinct from MOVE_VOLATILE so
+# the two refusals are never conflated in the served diagnostics.
+import os  # placed here so the frozen block above stays byte-stable
+
+#: TRADE-ONLY maximum NORMALISED line move; a game trades only when its
+#: move is STRICTLY below this.  Fixed by the study (the 1-4% plateau).
+TRADE_MOVE_MAX = 0.02
+
+#: The trade refuses when the line moved by at least TRADE_MOVE_MAX of the
+#: league average (the "moved" cohort).
+MOVE_VOLATILE = "line_move_too_volatile"
+#: The trade refuses when the move cannot be PROVEN (absent/unprovable open
+#: line or league average) — fail closed.
+MOVE_UNPROVABLE = "line_move_unprovable"
+
+
+def _env_flag(name, default):
+    """A boolean env var; any of 0/false/no/off/'' disables; unset → default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _env_float(name, default):
+    """A float env var; unset OR unparsable → default (never raises)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+#: The line-movement leg's TOGGLE — DEFAULT ON (operator-approved).  Set
+#: ``TRADE_MOVE_FILTER_ENABLED=0`` (or false/no/off) to disable the leg
+#: entirely; when disabled :func:`trade_move_reason` imposes NO requirement.
+TRADE_MOVE_FILTER_ENABLED = _env_flag("TRADE_MOVE_FILTER_ENABLED", True)
+
+#: The STRICTER history variant's minimum captured history, in seconds.
+#: DEFAULT 0.0 = the exact configuration the study validated (the variant
+#: is EXCLUDED).  Setting it (e.g. 900 for >= 15 minutes) enables the
+#: stricter variant WITHOUT a code change — the study's flat bucket at
+#: >= 15 min of history is ~38% the size of the 0-second bucket but carries
+#: a +12.3 pp gap (smaller sample, same direction).
+TRADE_MOVE_MIN_HISTORY_S = _env_float("TRADE_MOVE_MIN_HISTORY_S", 0.0)
+
+
+def trade_move_reason(entry_line, open_line, league_avg_line,
+                      history_s=None):
+    """``None`` when the line is provably FLAT — else the refusal reason.
+
+    The LINE-MOVEMENT VOLATILITY leg (docs/rag/15_EDGE_FINDINGS.md §15.8):
+    the trade proceeds only when
+    ``|entry_line - open_line| / league_avg_line < TRADE_MOVE_MAX`` (2%).
+
+    FAILS CLOSED.  ``open_line`` is the FIRST CAPTURED live line for the
+    game (from ``clean_observations``) — the first CAPTURED line, NOT the
+    true market open (``market.opening_line``).  ``league_avg_line`` is the
+    precomputed per-competition mean of those first-captured lines.  If
+    EITHER is absent or unprovable, OR the average is non-positive, the
+    trade is REFUSED (MOVE_UNPROVABLE): an unprovable move must not license
+    a trade.  A present-but-unparsable line is refused the same way.
+
+    The TOGGLE ``TRADE_MOVE_FILTER_ENABLED`` (env, DEFAULT ON) short-
+    circuits FIRST: when it is false the leg imposes no requirement and
+    ``None`` is returned for every input.
+
+    ``history_s`` is the game's captured history (seconds between the first
+    captured observation and the entry observation).  It is read ONLY when
+    ``TRADE_MOVE_MIN_HISTORY_S`` (env, default 0.0) is positive — the
+    stricter, future variant; at the default 0 the argument is ignored (the
+    exact configuration the study validated).
+    """
+    if not TRADE_MOVE_FILTER_ENABLED:
+        return None
+    try:
+        e = None if entry_line is None else float(entry_line)
+        o = None if open_line is None else float(open_line)
+        avg = None if league_avg_line is None else float(league_avg_line)
+    except (TypeError, ValueError):
+        return MOVE_UNPROVABLE
+    if e is None or o is None or avg is None:
+        return MOVE_UNPROVABLE
+    if not (math.isfinite(e) and math.isfinite(o) and math.isfinite(avg)):
+        return MOVE_UNPROVABLE
+    if avg <= 0:
+        return MOVE_UNPROVABLE
+    if TRADE_MOVE_MIN_HISTORY_S > 0:
+        try:
+            h = None if history_s is None else float(history_s)
+        except (TypeError, ValueError):
+            h = None
+        if h is None or not math.isfinite(h) or h < TRADE_MOVE_MIN_HISTORY_S:
+            return MOVE_UNPROVABLE
+    return None if abs(e - o) / avg < TRADE_MOVE_MAX else MOVE_VOLATILE
