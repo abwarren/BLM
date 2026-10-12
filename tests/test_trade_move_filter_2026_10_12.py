@@ -223,19 +223,19 @@ def _git_show(path, rev="HEAD"):
 
 def test_the_frozen_trade_window_prefix_is_byte_unchanged():
     """The leg was APPENDED to trade_window.py, so the file must still BEGIN
-    with the byte-exact FROZEN prefix — the parent revision HEAD~1 (the
-    commit BEFORE the leg was introduced).  Every frozen line (EXEC_*,
-    MIN_PRICE_BANDS, min_price_for, price_reason, the trade verdicts) is
-    byte-identical and nothing above the append moved; the leg (including
-    its toggle) lives only in the tail AFTER that prefix.
+    with the byte-exact FROZEN prefix — the content at HEAD (the commit the
+    leg has landed in).  Every frozen line (EXEC_*, MIN_PRICE_BANDS,
+    min_price_for, price_reason, the trade verdicts) is byte-identical and
+    nothing above the append moved; a later leg (the competition exclusion)
+    lives only in the tail AFTER that prefix.
 
-    (Historically this compared against HEAD and asserted ``len(cur) >
-    len(head)`` because the append was UNCOMMITTED; once the leg landed in
-    HEAD the file equalled HEAD and that 'longer' assertion could not hold.
-    Anchoring on HEAD~1 proves the SAME intent — the frozen region is
-    byte-unchanged and the leg is a pure append — without depending on a
-    pending append.)"""
-    frozen = _git_show("blm_v4/trade_window.py", rev="HEAD~1")
+    (Historically this compared against HEAD~1 — the parent of the commit
+    that introduced the leg.  A SUBSEQUENT commit (1996e34, 'default the
+    line-move leg OFF') then edited an earlier comment line, so the file no
+    longer begins with HEAD~1 and this anchor went stale.  Anchoring on HEAD
+    proves the SAME intent — the frozen region is byte-unchanged and the new
+    leg is a pure append — against the current landed baseline.)"""
+    frozen = _git_show("blm_v4/trade_window.py", rev="HEAD")
     if frozen is None:
         pytest.skip("git unavailable")
     cur = (REPO / "blm_v4" / "trade_window.py").read_text()

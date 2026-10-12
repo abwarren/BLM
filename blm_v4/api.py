@@ -61,8 +61,8 @@ from blm_v4.trade_window import (PACE_BELOW, TRADE_MAX_PROGRESS_PCT,
                                  exec_alert_reason,
                                  exec_shortfall_reason,
                                  execution_window_reason,
-                                 score_reason, trade_move_reason,
-                                 trade_price_reason)
+                                 score_reason, trade_competition_reason,
+                                 trade_move_reason, trade_price_reason)
 
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
 
@@ -2458,8 +2458,27 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                     entry_line, open_line, league_avg_line,
                     history_s=history_s),
             }
+            # ── COMPETITION-EXCLUSION leg (new trade leg, operator-approved;
+            # docs/rag/15_EDGE_FINDINGS.md §15.9).  A game whose
+            # competition_slug is in TRADE_EXCLUDED_COMPETITIONS (DEFAULT
+            # 'cyber-basketball-2k26-matches' — the NBA 2K26 SIMULATED feed)
+            # is REFUSED.  The slug is ALREADY SERVED in this payload — the
+            # game dict's ``competition_slug``, set from the games-table row
+            # by the detail builder and the SAME value the pace/line
+            # references key by — so no new per-game query is issued here.
+            # NOT fail-closed: an absent slug is NOT excluded (it would
+            # silently kill all trading if the field ever vanished); it is
+            # surfaced in ``under_alert_competition`` (known: False) instead.
+            g["under_alert_competition"] = {
+                "slug": g.get("competition_slug"),
+                "known": bool(g.get("competition_slug")),
+                "reason": trade_competition_reason(
+                    g.get("competition_slug")),
+            }
             g["under_alert_exec_armed"] = (
-                exec_alert_reason(
+                trade_competition_reason(
+                    g.get("competition_slug")) is None
+                and exec_alert_reason(
                     proj.get("required_pts_per_min"), entry.get("avg_pace"),
                     proj.get("progress_pct")) is None
                 and exec_shortfall_reason(
@@ -2541,6 +2560,10 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
             g["under_alert_execution_window"] = _execution_window_block(
                 None, None, None, None)
             g["under_alert_exec_armed"] = False
+            # the competition-exclusion leg's served block, present-but-safe
+            # on the exception path (armed is already False, so no trade)
+            g["under_alert_competition"] = {
+                "slug": None, "known": False, "reason": None}
             # the line-movement leg fails closed identically — an absent
             # block must never read as a FLAT (provable) move
             g["under_alert_line_move"] = {

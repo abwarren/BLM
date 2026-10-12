@@ -336,3 +336,85 @@ Tests: `tests/test_trade_move_filter_2026_10_12.py` (boundary at exactly 2.0%,
 fail-closed, toggle on/off, min-history excluded at 0, the FROZEN/alert
 byte-unchanged proofs, and an end-to-end proof the SERVED boolean disarms a
 volatile move so the executor refuses it).
+
+## 15.9 The COMPETITION EXCLUSION leg — excluding the NBA 2K26 simulated feed
+## (operator-approved, 2026-10-13)
+
+**ADDITIVE to §15.7 / §15.8** — the alert gate is untouched. The Auto-Bet gate
+gains ONE more leg: a game whose `competition_slug` is in the TRADE-ONLY
+exclusion list is **REFUSED**, regardless of every other leg.
+
+### The rule
+
+| leg | value | constant |
+|---|---|---|
+| competition exclusion | `competition_slug ∈ TRADE_EXCLUDED_COMPETITIONS` **refuses** | `TRADE_EXCLUDED_COMPETITIONS` (env) |
+
+* `TRADE_EXCLUDED_COMPETITIONS` — a **comma-separated** list of slugs, read
+  from the environment at import time (a restart re-reads it). Whitespace is
+  trimmed and blanks dropped.
+* **DEFAULT** (var unset): `cyber-basketball-2k26-matches` — the NBA 2K26
+  **SIMULATED** feed (a simulated instrument that shares the BetConstruct
+  interface, which is why it reached the gate at all; its teams are named
+  `... Virtual`). An **EMPTY** value (`TRADE_EXCLUDED_COMPETITIONS=""`) excludes
+  nothing (an explicit opt-out); multiple slugs (`a,b,c`) each exclude.
+* `competition_slug` is already **served** on every game (the game dict's
+  `competition_slug`, from the `games` table) and is the SAME field the pace
+  and line references key by — the leg issues **no new query**.
+
+### The evidence (the live 5-leg cohort, 38 clean days, in-sample)
+
+| population | bets | UNDER |
+|---|---|---|
+| **including** the 2K26 feed | 2,638 | **72.8%** |
+| **excluding** it | 1,742 | **78.4%** |
+| the excluded 2K26 block itself | 896 | **60.6%** |
+
+Last **96h**: 151 bets at **67.5%** including vs 51 at **76.3%** excluding.
+
+### Caveats (carry these with the decision)
+
+1. **A DILUTION decision, NOT a broken-class fix.** The 2K26 block is still
+   *marginally* +EV at ~60.6% — the exclusion is about the *blended* realised
+   rate, not a losing cohort. If the block's own edge improves it stays excluded
+   by slug until the list is changed.
+2. **The 96h volume drops 151 → 51** because the recent slate is cyber-heavy;
+   the excluded leg is a large share of recent flow, so absolute traded volume
+   falls more than the 38-day average implies.
+3. **In-sample.** The split is measured on one window; a regime change in either
+   population is untestable from the same data.
+4. Modelled entry prices, no slippage (§15.5.2).
+5. Changing an EXCLUSION list is a **CLASS CHANGE** (`14_TRADED_COHORT.md` §14.5).
+
+### Implementation — the ONE definition, and what did NOT move
+
+* `blm_v4/trade_window.py` gains `TRADE_EXCLUDED_COMPETITIONS` (env, via
+  `_env_list`), `TRADE_EXCLUDED_COMPETITIONS_DEFAULT`, the reason vocabulary
+  (`COMPETITION_EXCLUDED` / `COMPETITION_UNKNOWN`) and
+  `trade_competition_reason(competition_slug)`. They are **APPENDED**: every
+  frozen line above (the `EXEC_*` class, `MIN_PRICE_BANDS`, `min_price_for`,
+  `price_reason`, the trade verdicts, and the §15.8 line-movement leg) is
+  **byte-identical** — `tests/test_trade_competition_exclusion_2026_10_13.py`
+  asserts the file still BEGINS with `git show HEAD:blm_v4/trade_window.py`.
+* `blm_v4/api.py` folds the leg into the SERVED `under_alert_exec_armed` (the
+  SAME boolean the executor consumes) and carries the new
+  `under_alert_competition` block (`slug` / `known` / `reason`).
+* **FAIL DIRECTION — deliberately NOT fail-closed on an absent slug.** The other
+  legs (§15.7 pace/shortfall/band/score/price, §15.8 line-move) are REQUIREMENTS
+  and fail closed on an unprovable input. This leg is an EXCLUSION: an absent /
+  unknown `competition_slug` is NOT evidence the game is excluded, and refusing
+  it would silently stop ALL trading if the payload ever lost the field. So it
+  refuses ONLY on POSITIVE evidence (a known slug in the list); an absent slug is
+  surfaced (`known: False`) and does **not** disarm. The leg can only NARROW the
+  gate, never widen it.
+* **THE ALERT IS UNCHANGED.** `under_alert.REQUIRED_MARGIN = 1.04` and
+  `ALERT_PROGRESS_PCT = 75.0` are byte-identical (asserted against HEAD), and the
+  `EXEC_*` frozen class is unchanged. The new leg reads neither.
+
+Tests: `tests/test_trade_competition_exclusion_2026_10_13.py` (the excluded slug
+refuses; another competition is allowed; exact-match / whitespace-trim; the env
+list parses — comma-separated, multiple slugs, empty = exclude nothing; the
+default excludes exactly the 2K26 slug; an absent slug is NOT excluded and does
+not disarm; the FROZEN/alert byte-unchanged proofs; and an end-to-end proof the
+SERVED boolean disarms the 2K26 game so the executor refuses it, while an
+identical NBA game arms).

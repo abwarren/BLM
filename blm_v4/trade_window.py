@@ -521,3 +521,107 @@ def trade_move_reason(entry_line, open_line, league_avg_line,
         if h is None or not math.isfinite(h) or h < TRADE_MOVE_MIN_HISTORY_S:
             return MOVE_UNPROVABLE
     return None if abs(e - o) / avg < TRADE_MOVE_MAX else MOVE_VOLATILE
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# COMPETITION EXCLUSION — a NEW trade leg (operator-approved).
+# docs/rag/15_EDGE_FINDINGS.md §15.9.  APPENDED to the module: every line
+# ABOVE this block is the frozen trade/alert definition and is
+# byte-unchanged (tests/test_trade_competition_exclusion_2026_10_13.py
+# asserts this file still BEGINS with ``git show HEAD:blm_v4/trade_window.py``).
+# This block adds a gate the trade ANDs into the SERVED
+# ``under_alert_exec_armed`` the executor consumes; it touches neither the
+# alert nor the FROZEN ``EXEC_*`` class.
+# ═══════════════════════════════════════════════════════════════════════
+#
+# A competition can be EXCLUDED from trading by its ``competition_slug``.
+# The live 5-leg cohort, over 38 clean days: INCLUDING the
+# 'cyber-basketball-2k26-matches' feed (the NBA 2K26 SIMULATED instrument
+# that shares the BetConstruct interface — its teams are named
+# '... Virtual') 2,638 bets at 72.8%; EXCLUDING it 1,742 bets at 78.4%;
+# the excluded block itself 896 bets at 60.6%.  Over the last 96h: 151 at
+# 67.5% including vs 51 at 76.3% excluding.  This is a DILUTION decision,
+# NOT a broken-class fix: the 2K26 block is still marginally +EV
+# (~60.6%), but mixing it into the traded cohort drags the realised rate.
+#
+# The list is TRADE-ONLY and env-configurable: ``TRADE_EXCLUDED_COMPETITIONS``
+# (comma-separated slugs).  An EMPTY string excludes nothing.  The DEFAULT is
+# the one slug the evidence names.
+#
+# FAIL DIRECTION — NOT fail-closed on an absent slug.  Every OTHER trade leg
+# fails closed, but those legs are REQUIREMENTS (an unprovable input must not
+# license a trade).  This leg is an EXCLUSION, so the rule is inverted: the
+# trade refuses ONLY when the slug is POSITIVELY known AND in the list.  An
+# absent / unresolvable slug is NOT excluded (it is surfaced via the served
+# ``under_alert_competition`` block), because refusing every unknown slug
+# would silently kill ALL trading the moment the payload lost the
+# ``competition_slug`` field — a feed or schema regression the operator would
+# see as "no bets ever" with no clue.  The leg can therefore only ever NARROW
+# the gate when it holds positive evidence, never widen it.  This mirrors the
+# module's existing absent-input contract for the price and score legs
+# (absence is another gate's concern; here it is not a trade blocker).
+#
+# The set is built at import time from the env (a restart re-reads it), the
+# same pattern as TRADE_MOVE_FILTER_ENABLED / TRADE_MOVE_MIN_HISTORY_S above.
+TRADE_EXCLUDED_COMPETITIONS_DEFAULT = "cyber-basketball-2k26-matches"
+
+
+def _env_list(name, default):
+    """A comma-separated env var -> a frozenset of stripped, non-empty items.
+
+    UNSET -> the parsed ``default``.  An EMPTY string -> the EMPTY set: an
+    explicit "exclude nothing" opt-out, distinct from leaving the var unset.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = default
+    return frozenset(
+        part.strip() for part in raw.split(",") if part.strip())
+
+
+#: TRADE-ONLY competition exclusion set, parsed from
+#: ``TRADE_EXCLUDED_COMPETITIONS`` (comma-separated slugs).  DEFAULT excludes
+#: the NBA 2K26 simulated feed; an EMPTY value excludes nothing.
+TRADE_EXCLUDED_COMPETITIONS = _env_list(
+    "TRADE_EXCLUDED_COMPETITIONS", TRADE_EXCLUDED_COMPETITIONS_DEFAULT)
+
+#: The trade refuses when the game's competition slug is in the set.
+COMPETITION_EXCLUDED = "competition_excluded"
+#: The slug was absent / unresolvable — NOT a refusal (see the fail-direction
+#: note above); surfaced so the operator can see the payload lost the field.
+COMPETITION_UNKNOWN = "competition_unknown"
+
+
+def trade_competition_reason(competition_slug) -> Optional[str]:
+    """``None`` when the game's competition is NOT excluded — else the refusal.
+
+    The COMPETITION-EXCLUSION leg (docs/rag/15_EDGE_FINDINGS.md §15.9): the
+    trade proceeds unless the game's ``competition_slug`` is in
+    ``TRADE_EXCLUDED_COMPETITIONS``.
+
+    FAIL DIRECTION — deliberately NOT fail-closed on an ABSENT slug (the
+    opposite of the line-movement, pace and shortfall legs).  Those legs are
+    REQUIREMENTS, so an unprovable input must not license a trade and they
+    fail closed.  This leg is an EXCLUSION: an unknown / absent slug is not
+    evidence that the game is excluded, and refusing it would silently stop
+    ALL trading the moment the payload lost the ``competition_slug`` field.
+    So this leg refuses ONLY when the slug is POSITIVELY known AND in the
+    list; an absent / empty / non-string slug returns ``None`` (NOT excluded)
+    and callers surface the gap through the served ``under_alert_competition``
+    block (``known: False``).  The leg can only ever NARROW the gate when it
+    has positive evidence, never widen it.
+
+    An empty exclusion set (``TRADE_EXCLUDED_COMPETITIONS=""``) excludes
+    nothing: every slug — including an unknown one — returns ``None``.
+    """
+    if not TRADE_EXCLUDED_COMPETITIONS:
+        return None
+    if competition_slug is None:
+        return None
+    try:
+        slug = str(competition_slug).strip()
+    except (TypeError, ValueError):
+        return None
+    if not slug:
+        return None
+    return COMPETITION_EXCLUDED if slug in TRADE_EXCLUDED_COMPETITIONS else None
