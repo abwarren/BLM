@@ -10,8 +10,8 @@ only when ALL hold:
   * at least TRADE_MIN_SCORED_POINTS (70) are already on the board,
   * required_pts_per_min / league_avg_pace is STRICTLY above 1.04
     (TRADE_MIN_PACE_RATIO),
-  * required_pts_per_min - actual_pts_per_min is at least 0.0
-    (SHORTFALL_MARGIN) — the game is at or below its required rate, and
+  * required_pts_per_min - actual_pts_per_min is at least SHORTFALL_MARGIN
+    (-0.5) — the game is within 0.5 pts/min of its required rate, and
   * the UNDER price is at least TRADE_MIN_UNDER_PRICE (1.60) — a FLAT,
     trade-only floor (see :func:`trade_price_reason`), NOT the per-band
     break-even.
@@ -182,10 +182,13 @@ TRADE_MIN_SCORED_POINTS = 70.0
 #: ~57% break-even (+EV), so trading it adds ~7 bets/day.  TRADE gate ONLY —
 #: the ALERT's class bar stays 1.04.
 TRADE_MIN_PACE_RATIO = 1.00
-#: TRADE-ONLY shortfall margin: the required rate must be AT LEAST this far
-#: above the actual rate (``required_pts_per_min - actual_pts_per_min >= 0.0``),
-#: i.e. the game is at or below its required rate.
-SHORTFALL_MARGIN = 0.0
+#: TRADE-ONLY shortfall margin: the required rate must be at least this far
+#: above the actual rate, i.e. ``required_pts_per_min - actual_pts_per_min >=
+#: SHORTFALL_MARGIN``.  Relaxed 0.0 -> -0.5 by operator directive 2026-10-13
+#: (the "combo 3" volume variant): the marginal cohort still settles ~64.9%
+#: against a ~55% break-even, so trading it adds volume at a lower per-trade
+#: edge.  TRADE gate ONLY — the alert and the frozen analysis do not read it.
+SHORTFALL_MARGIN = -0.5
 #: TRADE-ONLY flat UNDER-price floor (operator directive 2026-10-12, third
 #: revision): ``under_price >= 1.60``.  A FLAT floor for the TRADE path ONLY —
 #: NOT the per-band break-even :func:`min_price_for` (retained VERBATIM for the
