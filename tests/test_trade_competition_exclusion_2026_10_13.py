@@ -218,7 +218,7 @@ def test_the_frozen_exec_constants_and_functions_are_unchanged():
     assert tw.TRADE_MIN_PROGRESS_PCT == 75.0
     assert tw.TRADE_MAX_PROGRESS_PCT == 92.0
     assert tw.TRADE_MIN_SCORED_POINTS == 70.0
-    assert tw.TRADE_MIN_PACE_RATIO == 1.04
+    assert tw.TRADE_MIN_PACE_RATIO == 1.00
     assert tw.SHORTFALL_MARGIN == 0.0
     assert tw.TRADE_MIN_UNDER_PRICE == 1.60
     # the frozen floors behave exactly as before

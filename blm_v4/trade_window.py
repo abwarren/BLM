@@ -177,8 +177,11 @@ TRADE_MAX_PROGRESS_PCT = 92.0
 #: TRADE-ONLY scored-points floor — the alert-era class floor (70).
 TRADE_MIN_SCORED_POINTS = 70.0
 #: TRADE-ONLY pace ratio (required_pts_per_min / competition avg_pace), STRICT:
-#: a ratio exactly at 1.04 is refused.
-TRADE_MIN_PACE_RATIO = 1.04
+#: a ratio exactly at 1.00 is refused.  Relaxed from 1.04 by operator directive
+#: 2026-10-13: the marginal 1.00-1.04 cohort still settles ~63.1% against a
+#: ~57% break-even (+EV), so trading it adds ~7 bets/day.  TRADE gate ONLY —
+#: the ALERT's class bar stays 1.04.
+TRADE_MIN_PACE_RATIO = 1.00
 #: TRADE-ONLY shortfall margin: the required rate must be AT LEAST this far
 #: above the actual rate (``required_pts_per_min - actual_pts_per_min >= 0.0``),
 #: i.e. the game is at or below its required rate.

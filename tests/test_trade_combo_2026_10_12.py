@@ -4,7 +4,7 @@ One named test per requirement of the Auto-Bet gate
 (docs/rag/15_EDGE_FINDINGS.md §15.7):
 
   * progress band 75-92            -> TRADE_MIN/MAX_PROGRESS_PCT
-  * pace ratio STRICTLY > 1.04     -> TRADE_MIN_PACE_RATIO
+  * pace ratio STRICTLY > 1.00     -> TRADE_MIN_PACE_RATIO
   * scored points >= 70            -> TRADE_MIN_SCORED_POINTS
   * shortfall margin >= 0.0        -> SHORTFALL_MARGIN
   * under price >= 1.60 (flat)     -> TRADE_MIN_UNDER_PRICE / trade_price_reason
@@ -104,13 +104,13 @@ def test_band_ceiling_92_is_inclusive_and_92_001_is_refused():
     assert execution_window_reason(92.001) == AFTER
 
 
-# ── 2. the pace ratio bar 1.04 (STRICT) ─────────────────────────────────
+# ── 2. the pace ratio bar 1.00 (STRICT) ─────────────────────────────────
 
-def test_pace_ratio_1_04_boundary_is_strict():
-    assert TRADE_MIN_PACE_RATIO == 1.04
-    # exactly 1.04 -> refused (STRICT); a hair above -> armed
-    assert exec_alert_reason(4.16, 4.0, 80.0) == PACE_BELOW          # ratio 1.040
-    assert exec_alert_reason(4.1600001, 4.0, 80.0) is None           # ratio > 1.04
+def test_pace_ratio_1_00_boundary_is_strict():
+    assert TRADE_MIN_PACE_RATIO == 1.00
+    # exactly 1.00 -> refused (STRICT); a hair above -> armed
+    assert exec_alert_reason(4.0, 4.0, 80.0) == PACE_BELOW           # ratio 1.000
+    assert exec_alert_reason(4.0000001, 4.0, 80.0) is None           # ratio > 1.00
 
 
 # ── 3. the scored-points floor 70 ───────────────────────────────────────
@@ -248,7 +248,7 @@ def test_the_execution_window_block_reports_the_trade_combo():
     win = _execution_window_block(85.0, 1.70, 150.0, True)
     assert win == {
         "min": 75.0, "max": 92.0, "min_price": 1.60, "min_points": 70.0,
-        "min_pace_ratio": 1.04, "pace_armed": True,
+        "min_pace_ratio": 1.00, "pace_armed": True,
         "in_window": True, "reason": None}
 
 

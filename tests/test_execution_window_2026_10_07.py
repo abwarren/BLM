@@ -3,7 +3,7 @@
 The autonomous UNDER trade is placed only when ALL hold:
   * progress sits inside the LIVE TRADE band [75%, 92%],
   * at least 70 points are on the board,
-  * the required/league pace ratio is STRICTLY above 1.04,
+  * the required/league pace ratio is STRICTLY above 1.00,
   * required - actual pace is at least 0.0, and
   * the UNDER price is at or above the FLAT trade floor (1.60).
 
@@ -13,8 +13,13 @@ and the shortfall margin 0.25 -> 0.0, and the price floor moved from the
 per-band break-even / flat 1.85 to a FLAT trade-only 1.60
 (``TRADE_MIN_UNDER_PRICE``).  The band, score floor and shortfall now COINCIDE
 with the alert-era class; the pace bar (strict) and the flat 1.60 floor are the
-active constraints.  The ALERT's own floor stays 75% and its class bar stays
-1.04 — those are the signal and the frozen analysis, NOT the trade gate.
+active constraints.
+
+2026-10-13 (FOURTH revision): the LIVE trade pace bar relaxed 1.04 -> 1.00.  The
+1.00-1.04 marginal cohort still settles ~63.1% against a ~57% break-even, so
+trading it adds ~7 bets/day at positive EV.  This is the TRADE gate ONLY — the
+ALERT's own floor stays 75% and its class bar (REQUIRED_MARGIN) stays 1.04, and
+the frozen analysis class (EXEC_MIN_PACE_RATIO) stays 1.04.
 
 The FROZEN analysis class is 75% floor / 92% ceiling / 70 score / 1.04 pace /
 1.85 price, retained as EXEC_MIN/MAX_PROGRESS_PCT, MIN_SCORED_POINTS,
@@ -299,17 +304,20 @@ def test_a_missing_score_is_not_gated_by_this_rule(tmp_path):
 
 # ── the execution pace bar (operator directive 2026-10-08) ──────────────
 
-def test_the_live_trade_bar_is_1_04_matching_the_frozen_bar():
-    """Third revision (2026-10-12): the LIVE trade pace bar is STRICTLY above
-    1.04 — the alert's own class (EXEC_MIN_PACE_RATIO, also 1.04)."""
-    assert TRADE_MIN_PACE_RATIO == 1.04
+def test_the_live_trade_bar_is_1_00_below_the_frozen_bar():
+    """Fourth revision (2026-10-13): the LIVE trade pace bar is STRICTLY above
+    1.00 — relaxed from the alert's own class (EXEC_MIN_PACE_RATIO, still 1.04).
+    The marginal 1.00-1.04 cohort still settles +EV.  The ALERT class bar and the
+    frozen analysis stay 1.04 — they are the signal, NOT the trade gate."""
+    assert TRADE_MIN_PACE_RATIO == 1.00
     assert EXEC_MIN_PACE_RATIO == 1.04
 
 
-def test_the_live_trade_bar_arms_only_above_1_04():
-    """STRICT: exactly 1.04 does not arm; anything above does."""
-    assert exec_alert_reason(4.0, 4.0, 80.0) == PACE_BELOW     # ratio 1.000
-    assert exec_alert_reason(4.16, 4.0, 80.0) == PACE_BELOW    # ratio 1.040 exact
+def test_the_live_trade_bar_arms_only_above_1_00():
+    """STRICT: exactly 1.00 does not arm; anything above does."""
+    assert exec_alert_reason(4.0, 4.0, 80.0) == PACE_BELOW     # ratio 1.000 exact
+    assert exec_alert_reason(4.0000001, 4.0, 80.0) is None     # ratio > 1.00 (hair)
+    assert exec_alert_reason(4.16, 4.0, 80.0) is None          # ratio 1.040 (now armed)
     assert exec_alert_reason(4.20, 4.0, 80.0) is None          # ratio 1.050
     assert exec_alert_reason(8.0, 4.0, 74.0) == PACE_BELOW     # below the 75 floor
 
@@ -440,7 +448,7 @@ def test_payload_block_shape():
     from blm_v4.api import _execution_window_block
     assert _execution_window_block(88.0, 1.95, 150.0, True) == {
         "min": 75.0, "max": 92.0, "min_price": 1.60, "min_points": 70.0,
-        "min_pace_ratio": 1.04, "pace_armed": True,
+        "min_pace_ratio": 1.00, "pace_armed": True,
         "in_window": True, "reason": None}
     # a price in [1.60, 1.85) is now inside the window
     mid = _execution_window_block(88.0, 1.70, 150.0, True)
