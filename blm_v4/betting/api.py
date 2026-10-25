@@ -339,16 +339,54 @@ def manual_bet(payload: dict) -> dict:
             raise HTTPException(status_code=409,
                                 detail="idempotency key reused for a different wager")
         return {"execution": _public_execution(existing), "duplicate": True}
-    if not store.is_enabled():
-        store.update_status(execution_id, "BLOCKED",
-                            error_code="GLOBAL_KILL_SWITCH",
-                            error_message="global betting kill switch is OFF",
-                            rejection_reason="GLOBAL_KILL_SWITCH")
-        blocked = store.get_execution(execution_id)
-        return {"execution": _public_execution(blocked), "duplicate": False}
+    # ── one-shot manual authorization (REAL_MONEY_TEST; global OFF only) ──
+    # With the global AUTO-BET switch OFF, ONE manual request may execute by
+    # presenting a server-issued, single-use token bound to this exact
+    # game/market/direction/stake/currency.  The token is consumed HERE — on
+    # the valid execution request, BEFORE the provider — so max_attempts=1 /
+    # retries=0 hold even if the downstream bookmaker submission later fails.
+    # Without a token the OFF behaviour is unchanged (BLOCKED/GLOBAL_KILL_SWITCH).
+    # With the global switch ON the token is not consulted at all.
+    global_enabled = store.is_enabled()
+    authorization = None
+    if not global_enabled:
+        raw_token = payload.get("authorization")
+        if not (isinstance(raw_token, str) and raw_token.strip()):
+            store.update_status(execution_id, "BLOCKED",
+                                error_code="GLOBAL_KILL_SWITCH",
+                                error_message="global betting kill switch is OFF",
+                                rejection_reason="GLOBAL_KILL_SWITCH")
+            return {"execution": _public_execution(
+                        store.get_execution(execution_id)), "duplicate": False}
+        if not store.consume_manual_authorization(
+                raw_token, execution_id=execution_id, game_id=game_id,
+                market=market, direction=direction, stake=stake,
+                currency="ZAR"):
+            store.update_status(execution_id, "BLOCKED",
+                                error_code="MANUAL_AUTHORIZATION_INVALID",
+                                error_message=(
+                                    "manual authorization token is invalid, "
+                                    "expired, already used, or does not match "
+                                    "this wager"),
+                                rejection_reason="MANUAL_AUTHORIZATION_INVALID")
+            store.audit("manual_authorization_rejected",
+                        execution_id=execution_id,
+                        reason="invalid_or_binding_mismatch",
+                        details={"game_id": game_id, "market": market,
+                                 "direction": direction, "stake": stake,
+                                 "currency": "ZAR"})
+            return {"execution": _public_execution(
+                        store.get_execution(execution_id)), "duplicate": False}
+        authorization = raw_token
+        store.audit("manual_authorization_consumed",
+                    execution_id=execution_id, reason="manual_one_shot",
+                    details={"game_id": game_id, "market": market,
+                             "direction": direction, "stake": stake,
+                             "currency": "ZAR"})
     candidate = {**rec, "idempotency_key": idem}
     outcome = execute(candidate, cfg=cfg, store=store,
-                      provider=provider_from_config(cfg))
+                      provider=provider_from_config(cfg),
+                      authorization=authorization)
     return {"execution": _public_execution(store.get_execution(execution_id)),
             "duplicate": False, "result": outcome}
 

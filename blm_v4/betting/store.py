@@ -83,6 +83,30 @@ CREATE TABLE IF NOT EXISTS bet_audit (
 
 CREATE INDEX IF NOT EXISTS idx_bet_audit_key
     ON bet_audit(idempotency_key);
+
+-- REAL_MONEY_TEST one-shot manual authorizations.  A server-issued,
+-- single-use bearer token that authorises ONE manual request while the
+-- global AUTO-BET switch is OFF.  It NEVER authorises the autonomous path
+-- (that path presents no token).  Only sha256(raw token) is stored; the raw
+-- token is printed once by the issuing CLI and never persisted in plaintext.
+CREATE TABLE IF NOT EXISTS bet_manual_authorizations (
+    token_sha256          TEXT PRIMARY KEY,
+    mode                  TEXT NOT NULL,
+    stake                 REAL NOT NULL,
+    currency              TEXT NOT NULL,
+    market                TEXT NOT NULL,
+    direction             TEXT NOT NULL,
+    game_id               TEXT NOT NULL,
+    status                TEXT NOT NULL CHECK (status IN ('ISSUED','CONSUMED')),
+    authorized_by         TEXT NOT NULL,
+    issued_at_utc         TEXT NOT NULL,
+    expires_at_utc        TEXT NOT NULL,
+    consumed_at_utc       TEXT,
+    consumed_execution_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bet_manual_auth_live
+    ON bet_manual_authorizations(status, expires_at_utc);
 """
 
 # Kill-switch keys (betting_config).  Anything absent/corrupt reads OFF.
@@ -213,6 +237,145 @@ class BettingStore:
             rows = c.execute(
                 "SELECT game_id, enabled FROM betting_game_controls").fetchall()
         return {r["game_id"]: bool(r["enabled"]) for r in rows}
+
+    # ── REAL_MONEY_TEST one-shot manual authorization ──────────────────
+    # A server-issued, single-use bearer token that lets ONE manual request
+    # execute while the global AUTO-BET switch is OFF.  It NEVER authorises
+    # the autonomous path (that path presents no token).  Raw tokens are
+    # never stored — only their sha256 — and never enter the ledger.
+    _MANUAL_AUTH_MODE = "REAL_MONEY_TEST"
+
+    @staticmethod
+    def _token_sha(token: str) -> str:
+        import hashlib
+        return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+    def issue_manual_authorization(self, *, mode: str, stake: float,
+                                   currency: str, market: str, direction: str,
+                                   game_id: str, ttl_s: float,
+                                   authorized_by: str) -> str:
+        """Issue ONE manual REAL_MONEY_TEST token (server-side only).
+
+        Fail-closed: refuses unless the exact test invariants hold (mode
+        REAL_MONEY_TEST, exactly R2.00 ZAR, TOTAL/UNDER, a concrete game_id,
+        a positive TTL and a named operator).  Returns the RAW token ONCE —
+        only its sha256 is persisted.  Issuance is CLI-only; no HTTP route
+        exposes it.
+        """
+        import secrets
+        from datetime import datetime, timezone, timedelta
+        from blm_v4.betting import stake as _stake
+
+        if mode != _stake.REAL_MONEY_TEST:
+            raise ValueError("mode must be REAL_MONEY_TEST")
+        if not _stake.is_authorized_test_stake(stake, currency):
+            raise ValueError("stake must be exactly R2.00 ZAR")
+        if str(market).upper() != "TOTAL" or str(direction).upper() != "UNDER":
+            raise ValueError("binding must be TOTAL / UNDER")
+        gid = str(game_id or "").strip()
+        if not gid:
+            raise ValueError("game_id binding is required")
+        actor = str(authorized_by or "").strip()
+        if not actor:
+            raise ValueError("authorized_by (operator) is required")
+        ttl = float(ttl_s)
+        if not (ttl > 0):
+            raise ValueError("ttl_s must be positive")
+
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(seconds=ttl)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        with self._lock, self._conn() as c:
+            c.execute(
+                """INSERT INTO bet_manual_authorizations
+                   (token_sha256, mode, stake, currency, market, direction,
+                    game_id, status, authorized_by, issued_at_utc,
+                    expires_at_utc, consumed_at_utc, consumed_execution_id)
+                   VALUES (?,?,?,?,?,?,?, 'ISSUED', ?, ?, ?, NULL, NULL)""",
+                (self._token_sha(token), _stake.REAL_MONEY_TEST, float(stake),
+                 str(currency).upper(), "TOTAL", "UNDER", gid, actor,
+                 _now(), expires))
+            c.commit()
+        return token
+
+    def consume_manual_authorization(self, token, *, execution_id: str,
+                                     game_id: str, market: str, direction: str,
+                                     stake: float, currency: str) -> bool:
+        """Atomically consume ONE manual token for a request that matches its
+        binding exactly.
+
+        Returns True ONLY on a fresh, unexpired, exact match — and marks the
+        row CONSUMED inside the same transaction (single-use, replay-proof).
+        Anything else (unknown / expired / already used / any binding
+        mismatch) returns False WITHOUT consuming, so a mistake never burns
+        the token.  Fail-closed on any store error.
+        """
+        from datetime import datetime, timezone
+        from blm_v4.betting import stake as _stake
+
+        if not isinstance(token, str) or not token.strip():
+            return False
+        if not _stake.is_authorized_test_stake(stake, currency):
+            return False
+        if str(market).upper() != "TOTAL" or str(direction).upper() != "UNDER":
+            return False
+        gid = str(game_id or "").strip()
+        try:
+            token_sha = self._token_sha(token)
+            with self._lock, self._conn() as c:
+                c.execute("BEGIN IMMEDIATE")
+                row = c.execute(
+                    "SELECT * FROM bet_manual_authorizations "
+                    "WHERE token_sha256=?", (token_sha,)).fetchone()
+                if row is None or row["status"] != "ISSUED":
+                    c.commit()
+                    return False
+                try:
+                    exp_t = datetime.strptime(
+                        row["expires_at_utc"], "%Y-%m-%dT%H:%M:%S.%fZ"
+                    ).replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    c.commit()
+                    return False
+                if datetime.now(timezone.utc) >= exp_t:
+                    c.commit()
+                    return False
+                if (row["mode"] != self._MANUAL_AUTH_MODE
+                        or row["game_id"] != gid
+                        or abs(float(row["stake"]) - 2.00) > 1e-9
+                        or str(row["currency"]).upper() != "ZAR"
+                        or str(row["market"]).upper() != "TOTAL"
+                        or str(row["direction"]).upper() != "UNDER"):
+                    c.commit()
+                    return False
+                cur = c.execute(
+                    """UPDATE bet_manual_authorizations
+                       SET status='CONSUMED', consumed_at_utc=?,
+                           consumed_execution_id=?
+                       WHERE token_sha256=? AND status='ISSUED'""",
+                    (_now(), str(execution_id), token_sha))
+                c.commit()
+                return cur.rowcount == 1
+        except sqlite3.Error:
+            return False
+
+    def manual_authorization_is_consumed(self, token, execution_id: str) -> bool:
+        """True only when the token row is CONSUMED and bound to this
+        ``execution_id`` (the executor's defence-in-depth re-check at the
+        submission boundary).  Fail-closed on any store error."""
+        if not isinstance(token, str) or not token.strip():
+            return False
+        try:
+            with self._conn() as c:
+                row = c.execute(
+                    "SELECT status, consumed_execution_id FROM "
+                    "bet_manual_authorizations WHERE token_sha256=?",
+                    (self._token_sha(token),)).fetchone()
+            return bool(row and row["status"] == "CONSUMED"
+                        and row["consumed_execution_id"] == str(execution_id))
+        except sqlite3.Error:
+            return False
 
     # ── idempotent claim ───────────────────────────────────────────────
     def claim(self, rec: dict) -> tuple[bool, Optional[dict]]:
