@@ -64,6 +64,11 @@ from blm_v4.trade_window import (PACE_BELOW, TRADE_MAX_PROGRESS_PCT,
                                  score_reason, trade_competition_reason,
                                  trade_move_reason, trade_price_reason)
 
+# ── NAMED TRADE COHORTS (TC-*), operator directive 2026-10-23: an alert must
+# carry the NAME of the cohort it belongs to.  Thin resolver over the same
+# constants; never a second gate (see blm_v4/trade_cohorts.py).
+from blm_v4.trade_cohorts import resolve_cohort
+
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
 
 # ── PRECOMPUTED LEAGUE REFERENCES (empty-live-data diagnostic 2026-09-25) ──
@@ -2491,6 +2496,20 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 and trade_move_reason(
                     entry_line, open_line, league_avg_line,
                     history_s=history_s) is None)
+            # ── THE NAMED COHORT (operator directive 2026-10-23): an alert must
+            # say WHICH cohort it belongs to.  Same inputs as the gate above, so
+            # the name can never disagree with the verdict: `code` is the
+            # TIGHTEST cohort whose legs all hold (TC-X ⊂ TC-E ⊂ TC-S ⊂ TC-C ⊂
+            # TC-W), `codes` lists every one of them, tightest first.
+            # ADDITIVE — it reads the verdict, it never re-decides it.
+            g["trade_cohort"] = resolve_cohort(
+                progress_pct=proj.get("progress_pct"),
+                total_points=proj.get("current_total_points"),
+                required_pace=proj.get("required_pts_per_min"),
+                avg_pace=entry.get("avg_pace"),
+                actual_pace=proj.get("actual_pts_per_min"),
+                under_price=(g.get("market") or {}).get("under_odds"),
+                competition_slug=g.get("competition_slug"))
             g["under_alert_execution_window"] = _execution_window_block(
                 proj.get("progress_pct"),
                 (g.get("market") or {}).get("under_odds"),
