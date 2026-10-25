@@ -93,6 +93,9 @@ from blm_v4.live_analytics.under_alert import (  # noqa: E402
 from blm_v4.live_analytics.under_fingerprints import (  # noqa: E402
     FINGERPRINT_KEYS, FINGERPRINT_LABELS, evaluate_fingerprints)
 from blm_v4.projection import duration_for  # noqa: E402
+from blm_v4.trade_window import (  # noqa: E402
+    EXEC_MIN_PROGRESS_PCT, EXEC_MAX_PROGRESS_PCT, MIN_SCORED_POINTS,
+    EXEC_MIN_PACE_RATIO, min_price_for)
 
 #: The observation window the historical sweep used.  The single observation
 #: per game is the one CLOSEST to ALERT_PROGRESS_PCT inside it.  Kept at
@@ -130,8 +133,15 @@ LEAGUE_LABELS = {
     "kbl-cup": "KBL Cup",
 }
 
-_COHORT_MODEL = ("fired-alert-cohort/2 (progress>=75 AND required>league_avg*1.04, "
-                 "closest-to-75 obs, settled OK; window reported in game-clock)")
+#: EXCLUSION CUT (operator directive 2026-10-10): the stats tab reports the
+#: TRADED cohort only from the moment the current execution class went live.
+#: Older data is EXCLUDED from the computation — never deleted; the databases
+#: keep the full history so any earlier window can still be recomputed.
+COHORT_SINCE_UTC = "2026-10-09T00:43:02"   # 02:43:02 SAST 2026-10-09
+
+_COHORT_MODEL = ("traded-cohort (75<=progress<=92 AND pts>=70 AND "
+                 "required>league_avg*1.04 AND under price>=band floor), "
+                 "settled OK; from COHORT_SINCE_UTC only")
 
 
 def window_minutes(classification: Optional[str]) -> tuple[float, float, float]:
@@ -240,7 +250,8 @@ def _q3_map(conn_c: sqlite3.Connection) -> dict[str, float]:
                  FROM clean_snapshots
                 WHERE TRIM(COALESCE(period_label,'')) IN
                       ('2nd Quarter','3rd Quarter')
-                GROUP BY base""").fetchall()
+                  AND captured_at >= ?
+                GROUP BY base""", (COHORT_SINCE_UTC,)).fetchall()
     except sqlite3.Error:
         return out
     for r in rows:
@@ -289,8 +300,9 @@ def _first_firing_scan(conn_c: sqlite3.Connection,
             "   AND current_total_points IS NOT NULL "
             "   AND remaining_game_minutes > 0 "
             "   AND live_total_line IS NOT NULL "
+            "   AND captured_at >= ? "
             " ORDER BY source_game_id, captured_at",
-            (FIRING_SCAN_LO,))
+            (FIRING_SCAN_LO, COHORT_SINCE_UTC))
         for r in cursor:
             gid = str(r[0]).split("#")[0]
             if gid != cur_gid:
@@ -359,6 +371,43 @@ def _dirty_key(prod_path: Path) -> tuple:
         conn.close()
 
 
+def _under_price_ok(conn_c: sqlite3.Connection, gid: str, cap: Optional[str],
+                    prog: Optional[float]) -> bool:
+    """The traded class's PRICE FLOOR: the UNDER price at the cohort observation
+    must be >= ``trade_window.min_price_for(progress)`` (1.48 / 1.39 / 1.28 by
+    band).  A missing price FAILS CLOSED — the game is excluded, never assumed.
+
+    Read from ``clean_observations`` (indexed on game+captured_at), the same
+    per-observation series the pipeline settles from.  The base id is tried
+    first, then the ``#iN`` instance form, because a fixture's rows can sit
+    under either.
+    """
+    if cap is None or prog is None:
+        return False
+    try:
+        floor = float(min_price_for(prog))
+    except (TypeError, ValueError):
+        return False
+    for pat in (gid, gid + "#%"):
+        try:
+            if pat.endswith("%"):
+                row = conn_c.execute(
+                    "SELECT under_price FROM clean_observations "
+                    " WHERE source_game_id LIKE ? AND captured_at = ? "
+                    " ORDER BY id LIMIT 1", (pat, cap)).fetchone()
+            else:
+                row = conn_c.execute(
+                    "SELECT under_price FROM clean_observations "
+                    " WHERE source_game_id = ? AND captured_at = ? LIMIT 1",
+                    (pat, cap)).fetchone()
+        except sqlite3.Error:
+            return False
+        up = _fin(row[0]) if row else None
+        if up is not None:
+            return up >= floor
+    return False
+
+
 def compute_stats(prod_path: Path, clean_path: Path) -> dict:
     """Build the whole stats payload.  Read-only; no gate is touched.
 
@@ -389,11 +438,13 @@ def compute_stats(prod_path: Path, clean_path: Path) -> dict:
         avg_by_slug = {s: _fin(v.get("avg_pace")) for s, v in ref.items()}
         ref_games = {s: int(v.get("games") or 0) for s, v in ref.items()}
 
-        # ── 3. one observation per game: closest to 75% in the window ───
+        # ── 3. one observation per game: the FIRST moment it clears the
+        #       EXECUTION gates (window + score + pace + price floor) ─────
         best: dict[str, tuple] = {}
         n_window_rows = 0
         for r in conn_c.execute(
                 "SELECT source_game_id AS gid, progress_pct AS prog, "
+                "       captured_at AS cap, "
                 "       elapsed_game_minutes AS el, "
                 "       current_total_points AS tot, "
                 "       remaining_game_minutes AS rem, "
@@ -403,29 +454,48 @@ def compute_stats(prod_path: Path, clean_path: Path) -> dict:
                 "  FROM clean_projections "
                 " WHERE progress_pct >= ? AND progress_pct <= ? "
                 "   AND progress_pct < 100 "
+                "   AND current_total_points >= ? "
                 "   AND (terminal IS NULL OR terminal = 0) "
                 "   AND current_total_points IS NOT NULL "
                 "   AND remaining_game_minutes > 0 "
-                "   AND live_total_line IS NOT NULL",
-                (WINDOW_LO, WINDOW_HI)):
+                "   AND live_total_line IS NOT NULL "
+                "   AND captured_at >= ? "
+                " ORDER BY source_game_id, captured_at",
+                (EXEC_MIN_PROGRESS_PCT, EXEC_MAX_PROGRESS_PCT,
+                 MIN_SCORED_POINTS, COHORT_SINCE_UTC)):
             n_window_rows += 1
             gid = r["gid"].split("#")[0]
+            if gid in best:
+                continue            # first qualifying moment already found
+            meta = settled.get(gid)
+            if meta is None:
+                continue            # unsettled -> cannot be scored
+            avg = avg_by_slug.get(meta[1])
+            if avg is None or avg <= 0:
+                continue            # no reference -> nothing claimed
             tot, rem, line = _fin(r["tot"]), _fin(r["rem"]), _fin(r["line"])
             prog = _fin(r["prog"])
             if tot is None or rem is None or line is None or rem <= 0 \
                     or prog is None:
                 continue
-            d = abs(prog - ALERT_PROGRESS_PCT)
-            prev = best.get(gid)
-            if prev is None or d < prev[0]:
-                best[gid] = (d, prog, _fin(r["el"]), tot, rem, line,
-                             _fin(r["r3"]), _fin(r["act"]),
-                             (r["mkt"] or ""), _fin(r["age"]))
+            # The FIRST moment EVERY execution gate passes — the ENGINE's own
+            # rule: it re-reads each tick and takes the game the moment the
+            # window, the score, the pace AND the price floor all hold.  The
+            # old closest-to-75 pick gated ONE row and DROPPED the game when
+            # that row's price was short, under-reporting the traded cohort.
+            if not ((line - tot) / rem > avg * EXEC_MIN_PACE_RATIO):
+                continue
+            if not _under_price_ok(conn_c, gid, r["cap"], prog):
+                continue
+            best[gid] = (abs(prog - ALERT_PROGRESS_PCT), prog,
+                         _fin(r["el"]), tot, rem, line,
+                         _fin(r["r3"]), _fin(r["act"]),
+                         (r["mkt"] or ""), _fin(r["age"]), r["cap"])
 
         # ── 4. the cohort: fired AND settled ────────────────────────────
         universe: dict[str, dict] = {}
         cohort: list[dict] = []
-        for gid, (d, prog, el, tot, rem, line, r3, act, mkt, age) in best.items():
+        for gid, (d, prog, el, tot, rem, line, r3, act, mkt, age, cap) in best.items():
             meta = settled.get(gid)
             if meta is None:
                 continue                 # unsettled -> cannot be scored
@@ -458,7 +528,10 @@ def compute_stats(prod_path: Path, clean_path: Path) -> dict:
             # the population the audited parity artifact measured, so the
             # headline rate ties back to it.  The actionable (LIVE-market)
             # subset is reported separately in `actionable`.
-            if prog >= ALERT_PROGRESS_PCT and req > avg * REQUIRED_MARGIN:
+            if (prog >= EXEC_MIN_PROGRESS_PCT and prog <= EXEC_MAX_PROGRESS_PCT
+                    and tot >= MIN_SCORED_POINTS
+                    and req > avg * EXEC_MIN_PACE_RATIO
+                    and _under_price_ok(conn_c, gid, cap, prog)):
                 cohort.append(rec)
 
         # ── 5. outcome + fingerprints for every cohort member ───────────
