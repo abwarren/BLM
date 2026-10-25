@@ -28,6 +28,24 @@ def legs(**over):
 
 
 # ── one test per cohort: the legs are what the name claims ──────────────
+def test_the_classification_is_the_MAXIMUM_not_the_pace_ladder():
+    """Operator directive 2026-10-25: of the cohorts a game clears, the name it
+    reports must be the one demanding the MOST, not merely the first pace rung.
+    A price-route game used to come back as TC-C because TC-C+ sat below it in a
+    hand-written order."""
+    r = legs(required_pace=2.10, actual_pace=1.85, under_price=1.85)   # 1.05 pace
+    assert set(r["codes"]) >= {"TC-C+", "TC-C"}
+    assert r["code"] == "TC-C+"
+
+
+def test_the_classification_is_the_MAXIMUM_the_shortfall_route_wins():
+    """Same rule on the shortfall route: a game 1.02 pts/min under its required
+    rate is DEEP (TC-D), even though it also clears the wide pace gate."""
+    r = legs(required_pace=2.02, actual_pace=1.00, under_price=1.70)   # 1.01 pace
+    assert set(r["codes"]) >= {"TC-D", "TC-W"}
+    assert r["code"] == "TC-D"
+
+
 def test_tc_w_wide_is_the_live_gate():
     assert tc.COHORTS["TC-W"]["pace"] == 1.00
     assert tc.COHORTS["TC-W"]["shortfall"] == -0.50
@@ -146,7 +164,9 @@ def test_tc_d_can_hold_without_any_pace_lead():
     # shortfall route: ratio 1.01 (TC-W only on pace) but req-act = 1.0 -> TC-D too
     r = legs(required_pace=2.02, actual_pace=1.02)
     assert "TC-D" in r["codes"]
-    assert r["code"] == "TC-W"          # tighter-by-order pace cohort first
+    # MAXIMUM first (2026-10-25): TC-D demands a 0.50 shortfall where TC-W demands
+    # -0.50, so the game is DEEP — the pace rung must not override it.
+    assert r["code"] == "TC-D"
 
 
 def test_label_helper():

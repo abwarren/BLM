@@ -6,9 +6,10 @@ thin, dependency-free layer over the same constants.  Every consumer (the served
 payload, the dashboard badge, the cohort pulls, the tests) resolves a game's cohort
 through :func:`resolve_cohort`, so a name can never drift from the legs it claims.
 
-A game belongs to EVERY cohort whose legs hold; the ladder is nested
-(TC-X ⊂ TC-E ⊂ TC-S ⊂ TC-C ⊂ TC-W), so ``code`` reports the TIGHTEST one and
-``codes`` reports all of them, tightest first.
+A game belongs to EVERY cohort whose legs hold.  ``code`` reports the ONE it is
+classified as — the MAXIMUM first: of the cohorts it clears, the one demanding
+the highest thresholds (pace, then shortfall, then price) wins.  ``codes`` lists
+all of them in that same order, strictest first.
 """
 from __future__ import annotations
 
@@ -18,11 +19,13 @@ from typing import Any, Mapping, Optional
 from .trade_window import (TRADE_EXCLUDED_COMPETITIONS, TRADE_MAX_PROGRESS_PCT,
                            TRADE_MIN_PROGRESS_PCT, TRADE_MIN_SCORED_POINTS)
 
-#: Ordered TIGHTEST -> LOOSEST.  ``pace`` is the required/league-average ratio
-#: (strict >), ``shortfall`` is required - actual pts/min (>=), ``price`` is the
-#: UNDER price floor (>=).  The band and the points floor are shared by all.
-COHORT_ORDER = ("TC-X", "TC-E", "TC-S", "TC-C", "TC-W", "TC-D", "TC-C+")
-
+#: Ordered by STRICTNESS, derived from the legs themselves — never hand-written.
+#: ``code`` = the first cohort here whose legs all hold, i.e. the MAXIMUM: the
+#: cohort demanding the highest pace, then the biggest shortfall, then the
+#: highest price.  TC-D and TC-C+ are side routes (shortfall / price) rather than
+#: rungs on the pace ladder, so a hand-written order ranked them below cohorts
+#: they are strictly stricter than (a price-1.85, shortfall-0.30 game came back
+#: as TC-C instead of TC-C+).
 COHORTS: dict[str, dict[str, Any]] = {
     "TC-W": dict(name="WIDE", pace=1.00, shortfall=-0.50, price=1.60,
                  blurb="the live gate — every game the engine will take"),
@@ -39,6 +42,14 @@ COHORTS: dict[str, dict[str, Any]] = {
     "TC-C+": dict(name="CORE+", pace=1.04, shortfall=0.25, price=1.80,
                   blurb="CORE pace plus shortfall plus a price floor"),
 }
+
+#: The CLASSIFICATION order: strictest first, derived from the legs so it can
+#: never drift from them.  ``code`` = first entry whose legs all hold = MAXIMUM.
+COHORT_ORDER = tuple(sorted(
+    COHORTS,
+    key=lambda c: (-COHORTS[c]["pace"], -COHORTS[c]["shortfall"],
+                   -COHORTS[c]["price"]),
+))
 
 
 def _num(v) -> Optional[float]:
