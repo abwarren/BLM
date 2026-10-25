@@ -160,7 +160,8 @@ class PokerBetBrowserProvider(BetProvider):
     def __init__(self, *, adapter=None, bridge=None,
                  cdp_url: str = "http://127.0.0.1:9222",
                  db_path: Optional[str] = None, live: bool = False,
-                 hydrate_timeout_ms: int = 15000, event_resolver=None):
+                 hydrate_timeout_ms: int = 15000, event_resolver=None,
+                 place_budget_s: Optional[float] = None):
         self._adapter = adapter
         self._bridge = bridge
         self._cdp_url = cdp_url
@@ -168,6 +169,8 @@ class PokerBetBrowserProvider(BetProvider):
         self._live = bool(live)
         self._hydrate = hydrate_timeout_ms
         self._event_resolver = event_resolver
+        # None ⇒ the bridge's own default (45 s) applies
+        self._place_budget_s = place_budget_s
 
     # ── game_id → the event label the browser resolves ───────────────
     def _event_label(self, game_id: str) -> str:
@@ -194,6 +197,57 @@ class PokerBetBrowserProvider(BetProvider):
                 pass
         return str(game_id)
 
+    # ── canonical game record for event registration (fail-closed) ───
+    def _game_record(self, game_id: str):
+        """Read the canonical ``games`` row needed to register the event.
+
+        Returns a tuple ``(source_game_id, home_team, away_team,
+        classification, source_url)`` or None when the DB is unreadable or
+        the game is unknown.  The caller fails closed on None — the adapter
+        registry stays empty and ``find_event()`` returns EVENT_NOT_FOUND.
+        """
+        if not self._db_path:
+            return None
+        try:
+            import sqlite3
+            con = sqlite3.connect(f"file:{self._db_path}?mode=ro",
+                                  uri=True)
+            try:
+                return con.execute(
+                    "SELECT source_game_id, home_team, away_team, "
+                    "classification, source_url "
+                    "FROM games WHERE source_game_id=? "
+                    "ORDER BY last_seen_at DESC LIMIT 1",
+                    (str(game_id),)).fetchone()
+            finally:
+                con.close()
+        except Exception:
+            return None
+
+    def _register_game(self, game_id: str) -> None:
+        """Register the candidate game so the DOM adapter can resolve it.
+
+        The registration key is the SAME ``_event_label`` used in the
+        command, so the adapter lookup can never drift from the event the
+        bridge asks to resolve.  A missing row or unreadable DB leaves the
+        registry empty, preserving the existing EVENT_NOT_FOUND fail-closed
+        behaviour.
+        """
+        if self._adapter is None:
+            return
+        event = self._event_label(str(game_id))
+        row = self._game_record(str(game_id))
+        if row is None:
+            return
+        self._adapter.register_game(
+            event,
+            game_id=str(row[0]),
+            home_team=str(row[1] or ""),
+            away_team=str(row[2] or ""),
+            classification=str(row[3] or ""),
+            source_url=str(row[4] or ""),
+        )
+
     # ── lazy wiring (the real CDP browser + PokerBet adapter) ─────────
     def _wire(self) -> None:
         if self._bridge is not None:
@@ -208,7 +262,10 @@ class PokerBetBrowserProvider(BetProvider):
                 self._adapter._page = b.page()
             except Exception:
                 pass
-        self._bridge = ResolverBrowserBridge(self._adapter)
+        _kw = {}
+        if self._place_budget_s is not None:
+            _kw["place_budget_s"] = float(self._place_budget_s)
+        self._bridge = ResolverBrowserBridge(self._adapter, **_kw)
 
     def account_balance(self) -> Optional[float]:
         """The signed-in PokerBet account balance (decimal), or None when it
@@ -282,6 +339,10 @@ class PokerBetBrowserProvider(BetProvider):
         except Exception as e:
             # an unreachable browser is DEFINITIVE — no bet exists
             raise ProviderUnavailable(f"browser transport unavailable: {e}")
+        try:
+            self._register_game(str(game_id))
+        except Exception:
+            raise ProviderUnavailable("event registration failed")
         command = {"game_id": str(game_id), "alert_id": alert_id,
                    "event": self._event_label(str(game_id)),
                    "market": market, "selection": selection,
@@ -350,4 +411,5 @@ def provider_from_config(cfg) -> BetProvider:
     return PokerBetBrowserProvider(
         cdp_url=os.environ.get("BETTING_CDP_URL", "http://127.0.0.1:9222"),
         db_path=os.environ.get("BLM_POKERBET_DB") or None,
+        place_budget_s=getattr(cfg, "place_budget_s", None),
         live=True)
