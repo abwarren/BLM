@@ -33,7 +33,38 @@
     timer: null,
     inflight: false,
     lastRows: null,
+    cohort: "",       // "" = every cohort; otherwise a TC-* code
+    windowMin: 0,     // 0 = no timeframe; otherwise minutes back from now
+    fromMs: null,     // FROM box: overrides windowMin when set
   };
+
+  /* The dataset's own time column — the field a timeframe is applied to.
+     A dataset with no time field simply cannot be time-filtered, and the
+     control is disabled rather than silently ignored. */
+  const TIME_FIELD = {
+    games: "last_seen_at",
+    checkpoints: "captured_at",
+    executions: "requested_at_utc",
+  };
+
+  const cohortCode = (g) => {
+    const c = g && g.trade_cohort;
+    if (!c) return null;
+    if (typeof c === "string") return c;
+    return c.code || null;      // {code, name, codes, excluded}
+  };
+
+  const stampMs = (v) => {
+    if (v == null || v === "") return null;
+    const ms = Date.parse(String(v));
+    return Number.isFinite(ms) ? ms : null;
+  };
+
+  function cutoffMs() {
+    if (S.fromMs) return S.fromMs;
+    if (S.windowMin > 0) return Date.now() - S.windowMin * 60000;
+    return null;
+  }
 
   /* ── dataset → display rows (transparent projections only) ── */
   function rowsFor(dataset, body) {
@@ -42,6 +73,7 @@
         game_id: g.game_id, classification: g.classification,
         competition: g.competition, home_team: g.home_team,
         away_team: g.away_team, status: g.status,
+        cohort: cohortCode(g),
         score: (g.home_score != null || g.away_score != null)
           ? `${g.home_score ?? "–"}–${g.away_score ?? "–"}` : null,
         data_quality: g.data_quality,
@@ -85,7 +117,7 @@
     if (!table) return;
     const cols = {
       games: ["game_id", "classification", "competition", "home_team",
-        "away_team", "score", "status", "data_quality",
+        "away_team", "score", "status", "cohort", "data_quality",
         "snapshot_count", "last_seen_at"],
       checkpoints: ["game_id", "game", "checkpoint_pct", "market_line",
         "blm_fair_value", "diff", "direction", "market_status",
@@ -113,6 +145,24 @@
     }
     const needle = ($("exQuery").value || "").trim().toLowerCase();
     let rows = rowsFor(dataset, body) || [];
+    const loaded = rows.length;
+    // ── cohort: exact code, applied to the TIGHTEST served cohort name ──
+    let cohortApplied = false;
+    if (dataset === "games" && S.cohort) {
+      cohortApplied = true;
+      rows = rows.filter((r) => r.cohort === S.cohort);
+    }
+    // ── timeframe: the dataset's own time column, never invented ──
+    const field = TIME_FIELD[dataset];
+    const cut = cutoffMs();
+    let timeApplied = false;
+    if (field && cut != null) {
+      timeApplied = true;
+      rows = rows.filter((r) => {
+        const ms = stampMs(r[field]);
+        return ms != null && ms >= cut;
+      });
+    }
     if (needle) {
       rows = rows.filter((r) => cols.some((c) =>
         r[c] != null && String(r[c]).toLowerCase().includes(needle)));
@@ -133,8 +183,16 @@
       + `</tbody>`;
     const meta = $("exMeta");
     if (meta) {
-      meta.textContent = needle
-        ? `${rows.length} of ${(rowsFor(dataset, body) || []).length} rows match "${needle}"`
+      const bits = [];
+      if (cohortApplied) bits.push(`cohort ${S.cohort}`);
+      if (timeApplied) {
+        const mins = S.fromMs ? null : S.windowMin;
+        bits.push(mins ? `last ${mins >= 1440 ? `${Math.round(mins / 1440)}d` : mins >= 60 ? `${Math.round(mins / 60)}h` : `${mins}m`}`
+                       : `from ${new Date(S.fromMs).toISOString().slice(0, 16).replace("T", " ")}Z`);
+      }
+      if (needle) bits.push(`search "${needle}"`);
+      meta.textContent = bits.length
+        ? `${rows.length} of ${loaded} rows · ${bits.join(" · ")}`
         : `${rows.length} rows`;
     }
   }
@@ -216,6 +274,30 @@
     pull();
   }
 
+  /* A filter the current dataset cannot honour is DISABLED, never silently
+     ignored: the cohort names only exist on the games payload, and a dataset
+     with no time column cannot be time-filtered. */
+  function syncFilterControls() {
+    const cohortEl = $("exCohort");
+    const hasCohort = S.dataset === "games";
+    if (cohortEl) {
+      cohortEl.disabled = !hasCohort;
+      if (!hasCohort) { cohortEl.value = ""; S.cohort = ""; }
+      cohortEl.title = hasCohort
+        ? "the tightest named cohort the served verdict carries"
+        : "only the GAMES dataset carries cohort names";
+    }
+    const hasTime = Boolean(TIME_FIELD[S.dataset]);
+    for (const id of ["exWindow", "exFrom"]) {
+      const el = $(id);
+      if (el) {
+        el.disabled = !hasTime;
+        if (!hasTime) el.value = "";
+      }
+    }
+    if (!hasTime) { S.windowMin = 0; S.fromMs = null; }
+  }
+
   function startPolling() {
     if (S.timer) return;
     S.timer = setInterval(pull, POLL_MS);
@@ -261,8 +343,37 @@
         if (btn && btn.dataset.view) show(btn.dataset.view);
       });
     }
-    $("exDataset").addEventListener("change", (ev) => setDataset(ev.target.value));
+    $("exDataset").addEventListener("change", (ev) => {
+      setDataset(ev.target.value);
+      syncFilterControls();
+    });
     $("exReload").addEventListener("click", pull);
+
+    const rerender = () => {
+      if (S.lastRows
+        && (S.dataset === "games" || S.dataset === "checkpoints" || S.dataset === "executions")) {
+        renderTable(S.dataset, S.lastRows);        // client-side over loaded rows
+      } else if (S.lastRows) {
+        renderFlat(S.dataset, S.lastRows);
+      }
+    };
+
+    // ── cohort + timeframe: applied to the ALREADY-LOADED rows, same
+    //    contract as SEARCH — the explorer never re-queries for a filter,
+    //    so what you see is a slice of what the API served. ──
+    $("exCohort").addEventListener("change", (ev) => { S.cohort = ev.target.value; rerender(); });
+    $("exWindow").addEventListener("change", (ev) => {
+      S.windowMin = Number(ev.target.value) || 0;
+      if (S.windowMin) { S.fromMs = null; $("exFrom").value = ""; }
+      rerender();
+    });
+    $("exFrom").addEventListener("change", (ev) => {
+      const ms = ev.target.value ? Date.parse(ev.target.value) : NaN;
+      S.fromMs = Number.isFinite(ms) ? ms : null;
+      if (S.fromMs) { S.windowMin = 0; $("exWindow").value = ""; }
+      rerender();
+    });
+
     let t = null;
     $("exQuery").addEventListener("input", () => {
       if (t) clearTimeout(t);
@@ -274,6 +385,7 @@
       }, 150);
     });
     show("live");
+    syncFilterControls();
   }
 
   if (document.readyState === "loading") {

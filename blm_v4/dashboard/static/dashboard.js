@@ -2444,18 +2444,40 @@ function blmAlertStateRowHTML(g) {
   const sigCls = alertOn ? "blm-sig-active" : "blm-sig-inactive";
   const sigTxt = alertOn ? "BLM ACTIVE" : "BLM —";
   // BETTABLE vs NON-ACTIONABLE — EXACTLY the Auto-Bet executor's gate: an
-  // actionable opportunity is an ACTIVE under_alert on an ELIGIBLE game
-  // (genuinely live + LIVE market).  Visible-but-ineligible alerts are marked
-  // NON-ACTIONABLE with the reason on hover, so a shown alert is never
-  // mistaken for a bet the engine will actually take.
+  // actionable opportunity is an ELIGIBLE game (genuinely live + LIVE
+  // market) INSIDE the trade execution window
+  // (75% — the alert's own floor — up to 92%, armed at the relaxed execution
+  // pace bar, only once 70+ points are on the board, AND at a price above the
+  // band's break-even).  Outside the window PokerBet has closed the total market and the
+  // engine does not attempt the bet.  Visible-but-non-actionable
+  // alerts carry the reason on hover, so a shown alert is never mistaken
+  // for a bet the engine will actually take.  The window verdict is served
+  // by the API from the ONE definition the executor gate also uses.
   const elig = g.under_alert_eligibility || {};
-  const bettable = !!(ua.active === true && elig.eligible === true);
+  const win = g.under_alert_execution_window || {};
+  const inWindow = win.in_window === true;
+  // The engine trades on the RELAXED execution bar, NOT on the on-screen
+  // alert (which stays at the alert's own 1.04 class).  This badge mirrors
+  // the ENGINE, so it keys on eligibility + the served window verdict —
+  // and that verdict already folds in the armed pace bar, the score floor
+  // and the price floor, so the two cannot disagree.
+  const bettable = !!(elig.eligible === true && inWindow);
   const btTxt = bettable ? "BETTABLE" : "NON-ACTIONABLE";
   const btCls = bettable ? "blm-bt-yes" : "blm-bt-no";
   const btWhy = bettable
-    ? "under_alert.active AND eligible — Auto-Bet will take the UNDER"
-    : (ua.active !== true ? "alert not active (no UNDER trigger)"
+    ? "eligible AND inside the execution window (pace armed at the relaxed bar) — Auto-Bet will take the UNDER"
+    : (!inWindow ? (win.reason || "outside the execution window")
        : (elig.reason || "not eligible"));
+  // ── NAMED COHORT (operator directive 2026-10-23): every alert says WHICH
+  // cohort it belongs to.  Served by the API (blm_v4/trade_cohorts.py) so the
+  // label can never disagree with the gate: `code` is the tightest cohort whose
+  // legs all hold, `codes` lists every one of them, tightest first.
+  const coh = g.trade_cohort || {};
+  const cohTxt = coh.code ? (coh.name ? `${coh.code} · ${coh.name}` : coh.code) : "—";
+  const cohWhy = coh.code
+    ? `cohort ${coh.code} (${coh.name}) — holds: ${(coh.codes || [coh.code]).join(" ⊃ ")}; `
+      + `pace ${coh.pace || ""} · shortfall ${coh.shortfall || ""} · price ≥ ${coh.price || ""}`
+    : "no named cohort: outside TC-W or an unprovable input (pace/score/price)";
   return `<div class="blm-signal-row">
     <span class="blm-sig-label">SIGNAL</span>
     <span class="${sigCls}">${sigTxt}</span>
@@ -2466,6 +2488,7 @@ function blmAlertStateRowHTML(g) {
     <span class="blm-sig-label">LINE</span>
     <span class="blm-sig-line">${esc(trigLine)}</span>
     <span class="blm-sig-trap ${trapCls}">${trapTxt}</span>
+    <span class="blm-sig-cohort ${coh.code ? "blm-cohort-on" : "blm-cohort-off"}" title="${esc(cohWhy)}">${esc(cohTxt)}</span>
     <span class="blm-sig-bettable ${btCls}" title="${esc(btWhy)}">${btTxt}</span>
   </div>`;
 }

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BLM Command Center — PokerBet Live Analytics</title>
-  <link rel="stylesheet" href="/static/styles.css?v=6855974.2">
+  <link rel="stylesheet" href="/static/styles.css?v=6855974.3">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -252,6 +252,28 @@
         </label>
         <label>SEARCH <input type="search" id="exQuery" placeholder="substring across row values" spellcheck="false"></label>
         <label>LIMIT <input type="number" id="exLimit" min="10" max="1000" step="10" value="200"></label>
+        <label>COHORT
+          <select id="exCohort" title="the tightest named cohort the served verdict carries (games dataset only)">
+            <option value="">ALL</option>
+            <option value="TC-X">TC-X · ELITE</option>
+            <option value="TC-E">TC-E · EDGE</option>
+            <option value="TC-S">TC-S · SHARP</option>
+            <option value="TC-C">TC-C · CORE</option>
+            <option value="TC-W">TC-W · WIDE</option>
+            <option value="TC-D">TC-D · DEEP</option>
+            <option value="TC-C+">TC-C+ · CORE+</option>
+          </select>
+        </label>
+        <label>TIMEFRAME
+          <select id="exWindow" title="applied to the dataset's own time column">
+            <option value="">ALL LOADED</option>
+            <option value="60">LAST 1H</option>
+            <option value="360">LAST 6H</option>
+            <option value="1440">LAST 24H</option>
+            <option value="10080">LAST 7D</option>
+          </select>
+        </label>
+        <label>FROM <input type="datetime-local" id="exFrom" title="overrides TIMEFRAME"></label>
         <button id="exReload" type="button">RELOAD</button>
         <span class="muted" id="exMeta"></span>
       </div>
@@ -365,9 +387,49 @@
     </div>
   </div>
 
-  <script src="/static/dashboard.js?v=6855974.2"></script>
+  <!-- ═══════════ FOOTNOTE: NAMED TRADE COHORTS (TC-*) ═══════════
+       Operator directive 2026-10-23: every alert carries its cohort name, and
+       the names are defined here so the dashboard is self-explanatory.
+       Legs are the served constants (blm_v4/trade_cohorts.py) — do not retype
+       a threshold here without changing that module. -->
+  <footer class="cohort-footnote" id="cohortFootnote">
+    <div class="cohort-inline">
+      <strong>Named trade cohorts (TC-*)</strong> — every alert carries the code of the tightest cohort
+      it satisfies. Legs: <em>pace</em> = required pts/min ÷ league-average pace (strict &gt;) ·
+      <em>shortfall</em> = required − actual pts/min (≥) · <em>price</em> = UNDER price floor (≥).
+    </div>
+    <details open>
+      <summary><strong>Cohort key</strong> — names, parameters and what each one means</summary>
+      <table class="cohort-table">
+        <thead>
+          <tr><th>Code</th><th>Name</th><th>Pace</th><th>Shortfall</th><th>Price</th><th>Meaning</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>TC-X</td><td>ELITE</td><td>&gt;1.16</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>16 % over league pace — tightest pace rung, ~8 bets/day</td></tr>
+          <tr><td>TC-E</td><td>EDGE</td><td>&gt;1.12</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>12 % over league pace, ~13/day</td></tr>
+          <tr><td>TC-S</td><td>SHARP</td><td>&gt;1.08</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>8 % over league pace, ~25/day</td></tr>
+          <tr><td>TC-C</td><td>CORE</td><td>&gt;1.04</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>the old alert-era pace bar, ~50/day</td></tr>
+          <tr><td>TC-W</td><td>WIDE</td><td>&gt;1.00</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>the live gate — everything the engine will take, ~88/day</td></tr>
+          <tr><td>TC-D</td><td>DEEP</td><td>&gt;1.00</td><td>&ge;0.50</td><td>&ge;1.60</td><td>shortfall route: half a point/min under the required rate</td></tr>
+          <tr><td>TC-C+</td><td>CORE+</td><td>&gt;1.04</td><td>&ge;0.25</td><td>&ge;1.80</td><td>CORE pace + shortfall + a price floor</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">
+        Every cohort also requires progress 75&ndash;92 %, scored points &ge; 70, and excludes the
+        Cyber 2K26 simulated feed (the line-move leg is OFF).
+        <strong>pace</strong> = required pts/min &divide; league-average pace (strict &gt;) &middot;
+        <strong>shortfall</strong> = required &minus; actual pts/min (&ge;) &middot;
+        <strong>price</strong> = UNDER price floor (&ge;).
+        The cohorts nest (TC-X &sub; TC-E &sub; TC-S &sub; TC-C &sub; TC-W), so a game is tagged with the
+        tightest one it satisfies and the tooltip lists every cohort that holds.
+      </p>
+    </details>
+  </footer>
+
+  <script src="/static/dashboard.js?v=6855974.10"></script>
   <script src="/static/stats.js?v=6855974.1"></script>
-  <script src="/static/explorer.js?v=6855974.2"></script>
+  <script src="/static/explorer.js?v=6855974.3"></script>
+  <script src="/static/assistant.js?v=6855974.1"></script>
 </body>
 </html>
 

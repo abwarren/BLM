@@ -1212,5 +1212,108 @@ td.ex-st-submitted { color: #3b82f6; }
   .ab-top-switch input[type="checkbox"] { width: 19px; height: 19px; }
   .ab-top-sep { display: none; }
   .ab-top-input input[type="number"] { width: 64px; }
-}
+  }
 
+  /* ═══════════════════════════════════════════════════════════════════════════
+  OPERATOR BOARD BACKGROUND  (operator directive 2026-10-10)
+
+  The post-login board carries the operator's own backdrop image.
+
+  APPENDED AT EOF, scoped to `body`, so it overrides only the background
+  IMAGE of the `html, body` rule above (later wins at equal specificity) and
+  edits no existing rule — the static contract's lowest-risk tier.
+
+  Scoped to the BODY on purpose: `login.html` loads `login.css`, not this
+  file, so the login page is untouched and still shows the arena image.
+
+  The gradient layer is a legibility veil over the image — a photo behind a
+  dense board of cards costs contrast. TUNE ONLY ITS ALPHA:
+   0.72 = image clearly visible (current)
+   0.85 = image faint
+   1.00 = image hidden (a plain near-black board)
+  ═══════════════════════════════════════════════════════════════════════════ */
+  body {
+  background-image:
+  linear-gradient(rgba(4, 6, 10, 0.72), rgba(4, 6, 10, 0.72)),
+  url("/static/blmbackground.png");
+  background-size: cover, cover;
+  background-position: center center, center center;
+  background-attachment: fixed, fixed;
+  background-repeat: no-repeat, no-repeat;
+  }
+
+
+/* ═══════════════════════════════════════════════════════════════
+   NAMED TRADE COHORTS (TC-*) — operator directive 2026-10-23.
+   The chip sits in the signal row next to BETTABLE; the footnote at
+   the bottom of the page defines every code.  Additive block: it
+   styles only .blm-sig-cohort / .cohort-* and touches nothing else.
+   ═══════════════════════════════════════════════════════════════ */
+.blm-sig-cohort {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border2);
+  white-space: nowrap;
+  cursor: help;
+}
+.blm-sig-cohort.blm-cohort-on {
+  color: var(--cyan);
+  border-color: var(--cyan);
+  background: rgba(34, 211, 238, .08);
+}
+.blm-sig-cohort.blm-cohort-off { color: var(--dim); }
+
+.cohort-footnote {
+  margin: 28px 8px 18px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+.cohort-footnote summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 11.5px;
+  padding: 2px 0;
+}
+.cohort-footnote summary::marker { color: var(--cyan); }
+.cohort-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.cohort-table th {
+  text-align: left;
+  color: var(--dim);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 4px 8px 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cohort-table td {
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid var(--panel2);
+  color: var(--text);
+}
+.cohort-table td:nth-child(5),
+.cohort-table td:nth-child(6) { color: var(--muted); }
+.cohort-footnote .muted { color: var(--dim); line-height: 1.55; margin: 6px 0 0; }
+
+/* Always-visible one-liner above the cohort table (definitions on the page,
+   not hidden behind a collapsed disclosure). */
+.cohort-inline {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--panel2);
+}
+.cohort-inline strong { color: var(--cyan); }
+.cohort-inline em { color: var(--text); font-style: normal; }
