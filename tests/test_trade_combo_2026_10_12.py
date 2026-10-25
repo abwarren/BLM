@@ -6,7 +6,7 @@ One named test per requirement of the Auto-Bet gate
   * progress band 75-92            -> TRADE_MIN/MAX_PROGRESS_PCT
   * pace ratio STRICTLY > 1.00     -> TRADE_MIN_PACE_RATIO
   * scored points >= 70            -> TRADE_MIN_SCORED_POINTS
-  * shortfall margin >= 0.0        -> SHORTFALL_MARGIN
+  * shortfall margin >= -0.5       -> SHORTFALL_MARGIN
   * under price >= 1.60 (flat)     -> TRADE_MIN_UNDER_PRICE / trade_price_reason
   * the ALERT is UNCHANGED         -> under_alert.REQUIRED_MARGIN 1.04 and
                                       under_alert.ALERT_PROGRESS_PCT 75, and
@@ -121,12 +121,13 @@ def test_scored_points_70_boundary():
     assert score_reason(69.999) == SCORE_FLOOR
 
 
-# ── 4. the shortfall margin 0.0 ─────────────────────────────────────────
+# ── 4. the shortfall margin -0.5 (combo 3, operator directive 2026-10-13) ─
 
-def test_shortfall_margin_zero_boundary():
-    assert SHORTFALL_MARGIN == 0.0
-    assert exec_shortfall_reason(5.0, 5.0) is None        # gap exactly 0.0
-    assert exec_shortfall_reason(5.0, 5.0001) == SHORTFALL  # gap -0.0001
+def test_shortfall_margin_boundary():
+    assert SHORTFALL_MARGIN == -0.5
+    assert exec_shortfall_reason(5.0, 5.5) is None          # gap exactly -0.5
+    assert exec_shortfall_reason(5.0, 5.5001) == SHORTFALL  # gap -0.5001
+    assert exec_shortfall_reason(5.0, 5.0) is None           # gap 0.0 still passes
 
 
 # ── 5. the flat trade under-price floor 1.60 ────────────────────────────
