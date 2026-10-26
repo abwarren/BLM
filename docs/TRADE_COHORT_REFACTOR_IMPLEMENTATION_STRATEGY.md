@@ -329,6 +329,20 @@ Do not hide, waive, or casually fix unrelated failures without documenting them.
 
 **Gate 5:** frontend and end-to-end test checks pass.
 
+### Reviewer follow-up actions — required before test acceptance
+
+The following code-review actions are part of the authorized test-environment work. Complete them on this dedicated branch and validate in isolation:
+
+1. **Validate scored points as an integer.** Reject Boolean, fractional, negative, malformed, NaN and infinite values as invalid/UNKNOWN rather than silently truncating a numeric value such as 10.9. Add focused evaluator boundary tests.
+2. **Make the prior-only league reference strictly prior.** A settled result with `result_at == observed_at` must not influence that observation's league reference unless a trustworthy causal ordering proves the result was already available. Prefer strict-before semantics and add an exact-timestamp regression test.
+3. **Align market-coverage denominators.** Do not present checkpoint-inclusive coverage as though it were measured on the first-firing-per-game outcome cohort. Either calculate coverage on the same population or clearly label the distinct observation-level and firing-level denominators in the API and UI; test the chosen contract.
+4. **Rebase in test only.** Rebase/port the refactor onto the current live-server code line (`fix/price-mapping-2026-10-06`, or verify and use its current successor) in the isolated EC2 test checkout. Resolve conflicts there, preserve the existing `:2262`/`:80` mirror, and do not merge or deploy to production.
+5. **Re-run validation after the fixes and rebase.** Run focused cohort tests, the full relevant suite, lint/type/build checks where available, API/UI checks, isolation checks, and source-DB immutability/reconciliation checks. Record the existing 54 baseline failures separately; investigate any new failures rather than assuming they are pre-existing.
+6. **Rebuild the derived read model on a broader test-only historical snapshot.** Keep source data read-only and isolated. Compare `prior_only` with `full_sample` as clearly separated sensitivity analyses; use `prior_only` for causal/predictive evaluation unless an explicit, documented parity question requires the alternative. Do not describe this retrospective sample as prospective confirmation.
+7. **Deploy and validate only the parallel test instance.** After the above checks and test-environment identity/isolation preflight pass, deployment to `127.0.0.1:2263` is authorized. Capture the exact commit SHA, service changes, health checks, API/UI results, rollback command/procedure, and confirmation that production and Auto-Bet remain untouched.
+
+**Stop conditions:** if rebase conflicts cannot be resolved safely, environment isolation is uncertain, source DB metadata changes, the deployment would replace `:2262`/`:80`, or any step requires production access or Auto-Bet changes, stop and report the blocker instead of improvising.
+
 ### Phase 6 — Full test and review package
 - Run the complete relevant test suite, lint/build, reconciliation and manual UI checks in EC2 test.
 - Produce screenshots or captured UI evidence without secrets, plus exact commands/results.
