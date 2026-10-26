@@ -89,6 +89,10 @@ def main() -> None:
     from blm_v4.api import router as v4_router
     app.include_router(v4_router)
 
+    # Trade Cohorts (TC-*) — read-only analytics router (test-first refactor)
+    from blm_v4.cohorts.api import router as cohort_router
+    app.include_router(cohort_router)
+
     # ── Operator dashboard at the root ───────────────────────
     # http://<host>:2262/ is the live analytics terminal;
     # /api/v2/live and /api/v4/* remain the API/debug endpoints.

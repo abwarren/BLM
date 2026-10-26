@@ -1627,3 +1627,144 @@ document.addEventListener("keydown", (ev) => {
 
 refresh();
 setInterval(refresh, POLL_MS);
+
+/* ── Trade Cohorts panel (TC-*) — renders API output only, no business logic ── */
+(function () {
+  const API = "/api/v4/cohorts";
+  const state = { spec: null, summary: null, cohort: null, source: "reconstructed_firing", loaded: false };
+
+  const $ = (id) => document.getElementById(id);
+  const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
+  const pct = (v) => (v === null || v === undefined ? "–" : (100 * v).toFixed(1) + "%");
+
+  async function getJSON(url) {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) throw new Error(url + " -> " + res.status);
+    return res.json();
+  }
+
+  function tab(code, name) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.role = "tab";
+    b.className = "cohort-tab" + (state.cohort === code ? " active" : "");
+    b.dataset.code = code;
+    b.textContent = code + " " + name;
+    b.addEventListener("click", () => { state.cohort = code; renderTabs(); renderScorecard(); renderLedger(); });
+    return b;
+  }
+
+  function renderTabs() {
+    const wrap = $("cohortTabs");
+    if (!wrap || !state.spec) return;
+    wrap.innerHTML = "";
+    for (const c of state.spec.cohorts) wrap.appendChild(tab(c.code, c.name));
+  }
+
+  function scorecardCard(c) {
+    const lo = c.wilson95 ? c.wilson95[0] : null, hi = c.wilson95 ? c.wilson95[1] : null;
+    const div = document.createElement("div");
+    div.className = "cohort-card" + (c.code === state.cohort ? " active" : "");
+    div.innerHTML = `
+      <div class="cohort-card-head"><strong>${c.code}</strong> ${c.name}</div>
+      <div class="cohort-card-grid">
+        <div><span class="k">games</span><span class="v">${c.unique_games}</span></div>
+        <div><span class="k">UNDER</span><span class="v">${c.under}</span></div>
+        <div><span class="k">OVER</span><span class="v">${c.over}</span></div>
+        <div><span class="k">PUSH</span><span class="v">${c.push}</span></div>
+        <div><span class="k">pending</span><span class="v">${c.pending}</span></div>
+        <div><span class="k">UNDER rate</span><span class="v">${pct(c.under_rate)}</span></div>
+        <div><span class="k">Wilson 95%</span><span class="v">${lo === null ? "–" : pct(lo) + "–" + pct(hi)}</span></div>
+        <div><span class="k">mkt cover</span><span class="v">${pct(c.market_coverage)}</span></div>
+        <div><span class="k">avg price</span><span class="v">${fmt(c.avg_trigger_price)}</span></div>
+        <div><span class="k">break-even</span><span class="v">${pct(c.break_even_rate_at_avg_price)}</span></div>
+      </div>
+      <div class="cohort-card-rule">pace &gt; ${c.rule.pace_ratio_gt} · shortfall ≥ ${c.rule.shortfall_gte} · price ≥ ${c.rule.min_under_price_gte}</div>`;
+    div.addEventListener("click", () => { state.cohort = c.code; renderTabs(); renderScorecard(); renderLedger(); });
+    return div;
+  }
+
+  function renderScorecard() {
+    if (!state.summary) return;
+    const wrap = $("cohortScorecard");
+    wrap.innerHTML = "";
+    const cards = state.summary.cohorts;
+    for (const c of cards) wrap.appendChild(scorecardCard(c));
+    const m = state.summary.read_model || {};
+    $("cohortRuleVersion").textContent = "rule " + state.summary.rule_version;
+    $("cohortWindow").textContent = "window " + (m.window_start || "–").slice(0, 10) + " → " + (m.window_end || "–").slice(0, 10);
+    $("cohortLeague").textContent = "league ref " + (m.league_reference || "–");
+    const rec = m.reconciliation || {};
+    $("cohortsSub").textContent = `${state.summary.totals.firings} firings · ${state.summary.totals.checkpoints} checkpoints · ${state.summary.totals.unknown} unknown · ${rec.games || 0} games scanned`;
+  }
+
+  async function renderLedger() {
+    const tbody = $("cohortLedger").querySelector("tbody");
+    tbody.innerHTML = '<tr><td colspan="17" class="empty">loading…</td></tr>';
+    const params = new URLSearchParams({ source_type: state.source, limit: "25" });
+    if (state.cohort) params.set("cohort", state.cohort);
+    try {
+      const data = await getJSON(API + "/ledger?" + params.toString());
+      $("cohortLedgerCount").textContent = `${data.total} rows · showing ${data.rows.length}`;
+      if (!data.rows.length) {
+        tbody.innerHTML = '<tr><td colspan="17" class="empty">no rows for this filter</td></tr>';
+        return;
+      }
+      tbody.innerHTML = "";
+      for (const r of data.rows) {
+        const tr = document.createElement("tr");
+        tr.className = "cohort-row st-" + r.status.toLowerCase() + " src-" + r.source_type;
+        tr.innerHTML = `
+          <td>${(r.observed_at || "").slice(0, 16).replace("T", " ")}</td>
+          <td>${r.competition_slug || "–"}</td>
+          <td>${r.source_game_id}</td>
+          <td><strong>${r.tightest_cohort || "–"}</strong></td>
+          <td>${(r.qualifying_cohorts || []).join(", ") || "–"}</td>
+          <td>${fmt(r.progress_pct, 1)}</td>
+          <td>${r.scored_points ?? "–"}</td>
+          <td>${fmt(r.required_ppm)}</td>
+          <td>${fmt(r.actual_ppm)}</td>
+          <td>${fmt(r.league_ppm)}</td>
+          <td>${fmt(r.pace_ratio, 3)}</td>
+          <td>${fmt(r.shortfall)}</td>
+          <td>${fmt(r.under_price)}</td>
+          <td>${fmt(r.trigger_line, 1)}</td>
+          <td>${r.outcome || "–"}${r.final_total != null ? " (" + r.final_total + ")" : ""}</td>
+          <td><span class="badge ${r.status.toLowerCase()}">${r.status}</span>${(r.reason_codes || []).length ? " <span class=muted>" + r.reason_codes.join(",") + "</span>" : ""}</td>
+          <td>${r.source_type === "reconstructed_firing" ? "firing" : "checkpoint"}</td>`;
+        tbody.appendChild(tr);
+      }
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="17" class="empty">error: ${String(err.message || err)}</td></tr>`;
+    }
+  }
+
+  async function load(force) {
+    if (state.loaded && !force) return;
+    try {
+      state.spec = await getJSON(API + "/spec");
+      state.summary = await getJSON(API + "/summary");
+      if (!state.cohort) state.cohort = state.spec.cohorts[0].code;
+      state.loaded = true;
+      renderTabs(); renderScorecard(); renderLedger();
+    } catch (err) {
+      $("cohortScorecard").innerHTML = `<div class="empty">cohort read-model unavailable: ${String(err.message || err)}</div>`;
+    }
+  }
+
+  const toggle = $("cohortsToggle");
+  if (toggle) {
+    toggle.addEventListener("click", () => {
+      const body = $("cohortsBody");
+      const open = body.hidden;
+      body.hidden = !open;
+      toggle.setAttribute("aria-expanded", String(open));
+      if (open) load(false);
+    });
+  }
+  const sel = $("cohortSource");
+  if (sel) sel.addEventListener("change", () => { state.source = sel.value; renderLedger(); });
+  const rbtn = $("cohortRefresh");
+  if (rbtn) rbtn.addEventListener("click", () => load(true));
+  window.__tcCohorts = { load, state };
+})();

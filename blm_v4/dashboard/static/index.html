@@ -40,6 +40,65 @@
     <div class="sum-card"><div class="sum-label">LAST SNAPSHOT</div><div class="sum-value" id="sumAge">–</div><div class="sum-sub" id="sumAgeSub">–</div></div>
   </section>
 
+  <!-- ═══════════ TRADE COHORTS (TC-*) — analytics only ═══════════ -->
+  <section class="scorecard cohorts" id="cohortsSection">
+    <button class="scorecard-toggle" id="cohortsToggle" aria-expanded="false" aria-controls="cohortsBody">
+      <span class="scorecard-title">TRADE COHORTS</span>
+      <span class="scorecard-sub" id="cohortsSub">TC-X … TC-C+ · actual firings vs checkpoints</span>
+      <span class="scorecard-chev">▾</span>
+    </button>
+    <div class="scorecard-body" id="cohortsBody" hidden>
+      <div class="cohort-meta" id="cohortMeta">
+        <span class="cohort-pill" id="cohortRuleVersion">rule –</span>
+        <span class="cohort-pill" id="cohortWindow">window –</span>
+        <span class="cohort-pill" id="cohortLeague">league ref –</span>
+        <span class="cohort-pill warn" id="cohortCaveat">firings are reconstructed from observations</span>
+      </div>
+      <div class="cohort-toolbar">
+        <div class="cohort-tabs" id="cohortTabs" role="tablist" aria-label="Cohort"></div>
+        <label class="cohort-filter">
+          source
+          <select id="cohortSource">
+            <option value="reconstructed_firing">actual firings</option>
+            <option value="checkpoint">checkpoint only</option>
+          </select>
+        </label>
+        <button class="cohort-refresh" id="cohortRefresh" type="button">refresh</button>
+      </div>
+      <div class="cohort-scorecard" id="cohortScorecard" aria-live="polite">
+        <div class="empty">Open the panel to load cohort scorecards…</div>
+      </div>
+      <h4 class="cohort-h">Fired-alert ledger <span class="muted" id="cohortLedgerCount"></span></h4>
+      <div class="cohort-ledger-wrap">
+        <table class="cohort-ledger" id="cohortLedger">
+          <thead>
+            <tr>
+              <th>fired (UTC)</th><th>competition</th><th>game</th><th>cohort</th>
+              <th>all matches</th><th>prog%</th><th>pts</th><th>req</th><th>act</th>
+              <th>league</th><th>ratio</th><th>shortfall</th><th>price</th>
+              <th>trigger line</th><th>result</th><th>status</th><th>source</th>
+            </tr>
+          </thead>
+          <tbody><tr><td colspan="17" class="empty">–</td></tr></tbody>
+        </table>
+      </div>
+      <p class="cohort-note">
+        Firing-time inputs only. Untested/no-market rows show <strong>UNKNOWN</strong> with a
+        reason code and are never counted as passes. PUSH/VOID are excluded from the
+        UNDER-vs-OVER denominator. Historical rescore is descriptive, not prospective proof.
+      </p>
+      <details class="legacy-diag" id="legacyDiagnostics">
+        <summary>Legacy diagnostics (C1/C2/C3/C5/R2 fingerprints — legacy rules, not TC-*)</summary>
+        <p class="muted">
+          The fingerprint tables below this panel are LEGACY-rule output. They are preserved
+          for comparison and are <strong>not</strong> renamed or relabelled as TC cohorts; no
+          legacy data has been deleted. Use the panels above (Model scorecard / Trends /
+          Event dataset) for the underlying research tables.
+        </p>
+      </details>
+    </div>
+  </section>
+
   <!-- ═══════════ MODEL SCORECARD (projection accuracy) ═══════════ -->
   <section class="scorecard" id="scorecardSection">
     <button class="scorecard-toggle" id="scorecardToggle" aria-expanded="false">
