@@ -32,11 +32,12 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import math
 import os
 import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -144,9 +145,58 @@ def _settlements(con: sqlite3.Connection) -> dict:
     }
 
 
-def _series(con: sqlite3.Connection) -> dict:
+_TS_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})[T ](?P<time>\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<frac>\d{1,9}))?(?P<tz>Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def parse_utc_epoch(value) -> Optional[float]:
+    """Parse a stored timestamp into UTC epoch seconds, or None if unparseable.
+
+    Accepted forms (documented contract, pinned by tests):
+      * epoch seconds as int/float (finite)
+      * ``YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM|±HHMM]``
+      * the same with a SPACE separator instead of ``T``
+      * a naive timestamp (no offset) is assumed UTC
+    Anything else returns None — callers treat that as "unavailable", never as
+    "now", and never fall back to a lexical string comparison.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(float(value)) else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    m = _TS_RE.match(text)
+    try:
+        if m:
+            dt = datetime.fromisoformat(
+                f"{m.group('date')}T{m.group('time')}"
+                + (f".{m.group('frac')}" if m.group("frac") else ""))
+            tz = m.group("tz")
+            if tz in (None, "Z"):
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                sign = 1 if tz[0] == "+" else -1
+                hh, mm = tz[1:].replace(":", "")[:2], tz[1:].replace(":", "")[2:]
+                dt = dt.replace(tzinfo=timezone(sign * timedelta(hours=int(hh), minutes=int(mm))))
+            return dt.timestamp()
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _series(con: sqlite3.Connection) -> tuple[dict, int]:
     """{slug: sorted [(result_at, pace)]} from settled games (for prior-only lookups)."""
-    out: dict[str, list[tuple[str, float]]] = {}
+    out: dict[str, list[tuple[float, float]]] = {}
+    skipped = 0
     for r in con.execute(
         "SELECT g.competition_slug AS slug, g.classification AS cls,"
         "       gr.result_at AS at, gr.final_total AS total "
@@ -157,17 +207,30 @@ def _series(con: sqlite3.Connection) -> dict:
         _q, full = duration_for(r["cls"])
         if not full or not r["total"]:
             continue
-        out.setdefault(r["slug"], []).append((r["at"], float(r["total"]) / full))
+        at_epoch = parse_utc_epoch(r["at"])
+        if at_epoch is None:
+            skipped += 1          # unparseable result time: never guessed, never used
+            continue
+        out.setdefault(r["slug"], []).append((at_epoch, float(r["total"]) / full))
     for slug in out:
         out[slug].sort()
-    return out
+    return out, skipped
 
 
-def _prior_mean(series: dict, slug: str, at: str) -> Optional[float]:
+def _prior_mean(series: dict, slug: str, observed_at_epoch: Optional[float]) -> Optional[float]:
+    """Mean pace of results settled STRICTLY BEFORE the observation.
+
+    Equal timestamps are excluded: a result stamped at exactly the observation
+    time cannot be proved to have been available when the alert was evaluated,
+    so it must not enter the reference (reviewer follow-up, 2026-10-27).
+    """
+    if observed_at_epoch is None:
+        return None
     pts = series.get(slug) or []
     if not pts:
         return None
-    i = bisect.bisect_right([p[0] for p in pts], at)      # strictly <= at
+    times = [p[0] for p in pts]
+    i = bisect.bisect_left(times, observed_at_epoch)      # strictly < observation
     if i == 0:
         return None
     return sum(p[1] for p in pts[:i]) / i
@@ -188,7 +251,7 @@ def _full_sample(con: sqlite3.Connection) -> dict[str, float]:
 
 
 def evaluate_game(game, rows: Iterable, *, series: dict, full_avg: dict,
-                  league_mode: str) -> list[dict]:
+                  league_mode: str, stats: Optional[dict] = None) -> list[dict]:
     """Evaluate one game chronologically; never sees settlement or later rows."""
     slug = game["competition_slug"]
     cls = game["classification"]
@@ -206,7 +269,10 @@ def evaluate_game(game, rows: Iterable, *, series: dict, full_avg: dict,
                     if (line is not None and remaining is not None and remaining > 0) else None)
         actual = (score / elapsed) if (elapsed and elapsed > 0) else None
         if league_mode == "prior":
-            league, league_source = _prior_mean(series, slug, r["captured_at"]), "prior_only"
+            obs_epoch = parse_utc_epoch(r["captured_at"])
+            if obs_epoch is None and stats is not None:
+                stats["observations_unparseable_ts"] = stats.get("observations_unparseable_ts", 0) + 1
+            league, league_source = _prior_mean(series, slug, obs_epoch), "prior_only"
         else:
             league, league_source = full_avg.get(slug), "full_sample"
 
@@ -274,7 +340,7 @@ def run(pokerbet_db: str, out_db: str, *, league_mode: str = "prior",
     dst.executescript(LEDGER_DDL)
 
     full_avg = _full_sample(src) if league_mode != "prior" else {}
-    series = _series(src)
+    series, results_unparseable = _series(src)
     settled = _settlements(src)
 
     games = src.execute(
@@ -285,7 +351,8 @@ def run(pokerbet_db: str, out_db: str, *, league_mode: str = "prior",
     rec = dict(observations=0, qualified=0, unknown=0, fired=0, checkpoints=0,
                not_qualified=0, stored=0, qualified_by_cohort={}, games=0,
                settled_firings=0, under=0, over=0, push=0, pending=0,
-               excluded_cyber=0, unique_qualified_games=0, earliest=None, latest=None)
+               excluded_cyber=0, unique_qualified_games=0, earliest=None, latest=None,
+               results_unparseable_ts=0, observations_unparseable_ts=0)
     qgames: set[str] = set()
 
     for g in games:
@@ -299,7 +366,7 @@ def run(pokerbet_db: str, out_db: str, *, league_mode: str = "prior",
             continue
         rec["games"] += 1
         for e in evaluate_game(g, rows, series=series, full_avg=full_avg,
-                               league_mode=league_mode):
+                               league_mode=league_mode, stats=rec):
             rec["observations"] += 1
             rec["earliest"] = min(filter(None, [rec["earliest"], e["observed_at"]]))
             rec["latest"] = max(filter(None, [rec["latest"], e["observed_at"]]))
@@ -338,6 +405,7 @@ def run(pokerbet_db: str, out_db: str, *, league_mode: str = "prior",
                         f" VALUES ({placeholders})", [e[k] for k in COLUMNS])
 
     rec["unique_qualified_games"] = len({g.split("|")[0] for g in qgames})
+    rec["results_unparseable_ts"] = results_unparseable
     dst.execute("INSERT OR REPLACE INTO rescore_runs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                  spec.RULE_VERSION, rec["earliest"], rec["latest"], league_mode,

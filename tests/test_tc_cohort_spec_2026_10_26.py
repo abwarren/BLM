@@ -278,3 +278,48 @@ def test_metrics_are_full_precision_not_rounded():
     e = ev.evaluate(inputs(league_avg_pts_per_min=3.0, required_pts_per_min=4.123456789))
     assert e.pace_ratio == pytest.approx(4.123456789 / 3.0, rel=0, abs=0)
     assert math.isclose(e.pace_ratio, 1.3744855963, rel_tol=1e-9)
+
+
+# ── scored points: strict integer contract (reviewer follow-up 2026-10-27) ──
+
+@pytest.mark.parametrize("value,expected", [
+    (0, 0), (70, 70), (150, 150), (150.0, 150), ("150", 150), (" 70 ", 70),
+])
+def test_scored_points_accepts_only_integer_forms(value, expected):
+    e = ev.evaluate(inputs(scored_points=value))
+    assert e.scored_points == expected
+    # 0 is a legal integer score, but it fails the >= 70 gate (NOT_QUALIFIED, never UNKNOWN)
+    if expected >= 70:
+        assert e.status == ev.STATUS_QUALIFIED
+    else:
+        assert e.status == ev.STATUS_NOT_QUALIFIED
+        assert ev.R_POINTS_BELOW_MIN in e.reason_codes
+
+
+@pytest.mark.parametrize("value,code", [
+    (150.5, ev.R_FRACTIONAL_POINTS),
+    (10.9, ev.R_FRACTIONAL_POINTS),
+    (-1, ev.R_NEGATIVE_POINTS),
+    (-5.0, ev.R_NEGATIVE_POINTS),
+    (True, ev.R_INVALID_POINTS),
+    (False, ev.R_INVALID_POINTS),
+    ("150.5", ev.R_INVALID_POINTS),
+    ("1.5e3", ev.R_INVALID_POINTS),
+    ("abc", ev.R_INVALID_POINTS),
+    ("", ev.R_INVALID_POINTS),
+    (float("nan"), ev.R_INVALID_POINTS),
+    (float("inf"), ev.R_INVALID_POINTS),
+    (float("-inf"), ev.R_INVALID_POINTS),
+    ({}, ev.R_INVALID_POINTS),
+])
+def test_scored_points_rejects_invalid_without_silent_truncation(value, code):
+    e = ev.evaluate(inputs(scored_points=value))
+    assert e.status == ev.STATUS_UNKNOWN
+    assert e.reason_codes == (code,)
+    assert e.qualifying_cohorts == () and e.tightest_cohort is None
+
+
+def test_fractional_points_are_not_truncated_into_a_pass():
+    # 150.9 must never become 150 and slip through the >= 70 gate
+    e = ev.evaluate(inputs(scored_points=150.9))
+    assert e.status == ev.STATUS_UNKNOWN and e.scored_points is None

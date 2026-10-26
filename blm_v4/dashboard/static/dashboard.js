@@ -4587,7 +4587,8 @@ traceTimer = setInterval(() => {
         <div><span class="k">pending</span><span class="v">${c.pending}</span></div>
         <div><span class="k">UNDER rate</span><span class="v">${pct(c.under_rate)}</span></div>
         <div><span class="k">Wilson 95%</span><span class="v">${lo === null ? "–" : pct(lo) + "–" + pct(hi)}</span></div>
-        <div><span class="k">mkt cover</span><span class="v">${pct(c.market_coverage)}</span></div>
+        <div title="share of FIRST FIRINGS per game that carry a trigger price and frozen line — the SAME population as the outcome rate"><span class="k">firing cover</span><span class="v">${pct(c.firing_coverage && c.firing_coverage.pct != null ? c.firing_coverage.pct / 100 : null)}</span></div>
+        <div title="share of ALL ledger rows for this cohort that carry market data (data-quality measure, NOT the outcome denominator)"><span class="k">obs cover</span><span class="v">${pct(c.observation_coverage && c.observation_coverage.pct != null ? c.observation_coverage.pct / 100 : null)}</span></div>
         <div><span class="k">avg price</span><span class="v">${fmt(c.avg_trigger_price)}</span></div>
         <div><span class="k">break-even</span><span class="v">${pct(c.break_even_rate_at_avg_price)}</span></div>
       </div>

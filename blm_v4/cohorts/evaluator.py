@@ -15,6 +15,7 @@ No database, network, filesystem, clock or environment access lives here.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
@@ -31,6 +32,8 @@ R_INVALID_PROGRESS = "invalid_progress"
 R_PROGRESS_OUT_OF_BAND = "progress_out_of_band"
 R_MISSING_POINTS = "missing_points"
 R_INVALID_POINTS = "invalid_points"
+R_FRACTIONAL_POINTS = "fractional_points"
+R_NEGATIVE_POINTS = "negative_points"
 R_POINTS_BELOW_MIN = "points_below_min"
 R_MISSING_COMPETITION = "missing_competition"
 R_EXCLUDED_COMPETITION = "excluded_competition"
@@ -55,6 +58,46 @@ def _finite(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return f if math.isfinite(f) else None
+
+
+_RE_INT_TEXT = re.compile(r"^[+-]?\d+$")
+
+
+def scored_points(value: Any) -> tuple[Optional[int], Optional[str]]:
+    """Validate a scored-points input.  Returns ``(value, reason_code)``.
+
+    Contract (deliberately strict, documented and pinned by tests):
+
+      * ``int >= 0``            -> (value, None)
+      * ``int < 0``             -> (None, ``negative_points``)
+      * ``float``               -> INTEGER-VALUED only: 150.0 -> (150, None);
+                                   150.5 -> (None, ``fractional_points``)
+                                   (never silently truncated to 150)
+      * ``str``                 -> canonical decimal integer text only:
+                                   "150", " 70 " OK; "150.0", "1.5e3", "" invalid
+      * ``bool``                -> (None, ``invalid_points``) — a boolean is not a score
+      * ``None``                -> (None, ``missing_points``)
+      * NaN / +-inf / any other -> (None, ``invalid_points``)
+    """
+    if value is None:
+        return None, R_MISSING_POINTS
+    if isinstance(value, bool):
+        return None, R_INVALID_POINTS
+    if isinstance(value, int):
+        return (value, None) if value >= 0 else (None, R_NEGATIVE_POINTS)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None, R_INVALID_POINTS
+        if value != int(value):
+            return None, R_FRACTIONAL_POINTS
+        return (int(value), None) if value >= 0 else (None, R_NEGATIVE_POINTS)
+    if isinstance(value, str):
+        text = value.strip()
+        if not _RE_INT_TEXT.match(text):
+            return None, R_INVALID_POINTS
+        parsed = int(text)
+        return (parsed, None) if parsed >= 0 else (None, R_NEGATIVE_POINTS)
+    return None, R_INVALID_POINTS
 
 
 def normalize_progress(value: Any, units: str = "pct") -> Optional[float]:
@@ -148,8 +191,7 @@ def evaluate(inputs: Mapping[str, Any], *, rule_version: str = spec.RULE_VERSION
 
     progress = inputs.get("progress_pct", inputs.get("progress"))
     progress = normalize_progress(progress, progress_units)
-    points_raw = inputs.get("scored_points")
-    points = _finite(points_raw)
+    points, points_reason = scored_points(inputs.get("scored_points"))
     slug = inputs.get("competition_slug")
     req = _finite(inputs.get("required_pts_per_min"))
     act = _finite(inputs.get("actual_pts_per_min"))
@@ -159,7 +201,7 @@ def evaluate(inputs: Mapping[str, Any], *, rule_version: str = spec.RULE_VERSION
 
     echo = dict(
         progress_pct=progress,
-        scored_points=int(points) if points is not None else None,
+        scored_points=points,
         required_pts_per_min=req,
         actual_pts_per_min=act,
         league_avg_pts_per_min=league,
@@ -173,7 +215,7 @@ def evaluate(inputs: Mapping[str, Any], *, rule_version: str = spec.RULE_VERSION
         return _unknown(R_MISSING_PROGRESS if inputs.get("progress_pct") is None
                         and inputs.get("progress") is None else R_INVALID_PROGRESS, **echo)
     if points is None:
-        return _unknown(R_MISSING_POINTS if points_raw is None else R_INVALID_POINTS, **echo)
+        return _unknown(points_reason or R_INVALID_POINTS, **echo)
     if not isinstance(slug, str) or not slug.strip():
         return _unknown(R_MISSING_COMPETITION, **echo)
     slug_l = slug.strip().lower()

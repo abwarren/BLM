@@ -89,25 +89,28 @@ def _cohort_stats(rows: list[dict]) -> list[dict]:
       * market coverage = rows carrying BOTH price and frozen line / rows for that cohort.
     """
     first_by_game: dict[tuple[str, str], dict] = {}
-    coverage = defaultdict(lambda: [0, 0])   # code -> [with market, total]
+    # TWO explicit coverage populations (reviewer follow-up 2026-10-27): the outcome
+    # rate is measured on FIRST-FIRING-PER-GAME, so its coverage must be too; the
+    # observation-level coverage is reported separately and never blended with it.
+    firing_cov: dict[str, list[int]] = defaultdict(lambda: [0, 0])   # [with market, total]
+    obs_cov: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     unknown = Counter()
 
     for r in rows:
         if r["status"] == "UNKNOWN":
             for code in r["reason_codes"]:
                 unknown[code] += 1
+        has_market = r["under_price"] is not None and r["trigger_line"] is not None
+        for code in r["qualifying_cohorts"]:
+            obs_cov[code][1] += 1
+            if has_market:
+                obs_cov[code][0] += 1
         if r["source_type"] != "reconstructed_firing":
-            for code in r["qualifying_cohorts"]:
-                tot = coverage[code]
-                tot[1] += 1
-                if r["under_price"] is not None and r["trigger_line"] is not None:
-                    tot[0] += 1
             continue
         for code in r["qualifying_cohorts"]:
-            tot = coverage[code]
-            tot[1] += 1
-            if r["under_price"] is not None and r["trigger_line"] is not None:
-                tot[0] += 1
+            firing_cov[code][1] += 1
+            if has_market:
+                firing_cov[code][0] += 1
             key = (r["source_game_id"], code)
             cur = first_by_game.get(key)
             if cur is None or r["observed_at"] < cur["observed_at"]:
@@ -119,7 +122,8 @@ def _cohort_stats(rows: list[dict]) -> list[dict]:
         games = [r for (gid, c), r in first_by_game.items() if c == code]
         outcomes = [(r["outcome"] or "UNKNOWN") for r in games]
         counts = metrics.outcome_counts(outcomes)
-        cov_with, cov_total = coverage.get(code, [0, 0])
+        fc_with, fc_total = firing_cov.get(code, [0, 0])
+        oc_with, oc_total = obs_cov.get(code, [0, 0])
         prices = [r["under_price"] for r in games
                   if r["outcome"] in ("UNDER", "OVER") and r["under_price"]]
         out.append({
@@ -137,8 +141,17 @@ def _cohort_stats(rows: list[dict]) -> list[dict]:
             "settled": counts["settled"],
             "under_rate": counts["under_rate"],
             "wilson95": counts["wilson95"],
-            "market_coverage": (cov_with / cov_total) if cov_total else None,
-            "market_coverage_pct": round(100.0 * cov_with / cov_total, 1) if cov_total else None,
+            #: firing-level coverage — SAME population as under_rate (first firing per game)
+            "firing_coverage": {
+                "rows_with_market": fc_with, "rows_total": fc_total,
+                "pct": round(100.0 * fc_with / fc_total, 2) if fc_total else None,
+            },
+            #: observation-level coverage — every ledger row for the cohort (firings +
+            #: checkpoints). A data-quality measure; NEVER the outcome denominator.
+            "observation_coverage": {
+                "rows_with_market": oc_with, "rows_total": oc_total,
+                "pct": round(100.0 * oc_with / oc_total, 2) if oc_total else None,
+            },
             "avg_trigger_price": (sum(prices) / len(prices)) if prices else None,
             "break_even_rate_at_avg_price": (metrics.break_even_rate(
                 sum(prices) / len(prices)) if prices else None),

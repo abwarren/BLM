@@ -54,7 +54,9 @@ def test_summary_reports_denominators_rate_and_wilson(client):
     assert x["under_rate"] == 1.0
     lo, hi = x["wilson95"]
     assert 0.0 <= lo <= hi <= 1.0
-    assert x["market_coverage"] == 1.0
+    assert x["firing_coverage"]["rows_total"] == x["unique_games"]
+    assert x["firing_coverage"]["pct"] == 100.0
+    assert x["observation_coverage"]["rows_total"] >= x["firing_coverage"]["rows_total"]
     assert body["read_model"]["run"] == "2026-10-26T00:00:00Z"
 
 
@@ -124,3 +126,24 @@ def test_missing_read_model_fails_soft(tmp_path, monkeypatch):
     app = FastAPI(); app.include_router(api_mod.router)
     r = TestClient(app).get("/api/v4/cohorts/summary")
     assert r.status_code == 503
+
+
+def test_coverage_populations_are_explicit_and_never_blended(client):
+    """firing coverage tracks the outcome population; observation coverage is
+    separate and must react to a checkpoint that lacks market data."""
+    db = os.environ["BLM_COHORT_DB"]
+    body = client.get("/api/v4/cohorts/summary").json()
+    x = next(c for c in body["cohorts"] if c["code"] == "TC-X")
+    assert x["firing_coverage"]["rows_total"] == x["unique_games"]
+    assert x["firing_coverage"]["pct"] == 100.0
+
+    con = sqlite3.connect(db)
+    con.execute("UPDATE cohort_ledger SET trigger_line=NULL WHERE source_type='checkpoint'")
+    con.commit()
+    con.close()
+
+    body = client.get("/api/v4/cohorts/summary").json()
+    x = next(c for c in body["cohorts"] if c["code"] == "TC-X")
+    assert x["firing_coverage"]["pct"] == 100.0            # outcome cohort untouched
+    assert x["observation_coverage"]["pct"] < 100.0        # data quality reflects it
+    assert x["observation_coverage"]["rows_with_market"] < x["observation_coverage"]["rows_total"]
