@@ -173,7 +173,7 @@ def test_unknown_inputs_are_stored_with_reason_codes_not_as_passes(tmp_path):
     for ts in ("2026-10-22T12:05:00Z", "2026-10-22T12:06:00Z"):
         assert rows[ts]["status"] == "UNKNOWN"
         assert "missing_price" in rows[ts]["reason_codes"]
-    assert rec["evaluable"] == 0
+    assert rec["qualified"] == 0
     # the alert can still reconstruct later, once a price exists — and that firing
     # legitimately sits OUTSIDE the cohort band (92.5 %), so it must be recorded as
     # a firing with status NOT_QUALIFIED (progress_out_of_band), not as a candidate.
