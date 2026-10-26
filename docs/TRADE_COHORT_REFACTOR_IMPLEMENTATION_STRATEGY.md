@@ -1,11 +1,11 @@
 # Trade Cohort Refactor — Full Implementation Strategy
 
-**Status:** Implementation plan only. This document authorizes work in the isolated EC2 test environment only; it does not authorize production changes, live betting, deployment, or changes to Auto-Bet configuration.
+**Status:** Test-environment deployment authorized by Warren on 2026-10-27. This authorizes deployment and validation of this refactor only in the verified isolated EC2 test environment. It does NOT authorize production deployment/promotion, live betting, real submissions, Auto-Bet changes, or any production data/service changes.
 
 **Repository:** `abwarren/BLM`  
 **Plan owner/reviewer:** Warren / designated operator  
 **Production:** the existing host serving `https://blm.haaats.xyz/`  
-**Test entry point:** `http://13.247.58.81/login?next=/` (claimed EC2 test entry point; identity and isolation are NOT yet verified)
+**Test environment:** EC2 `blm-stage-cpt`, instance `i-0d6c4d01114f52bf4`, account `243047261878`; refactor parallel instance `127.0.0.1:2263` (access by SSH tunnel). Treat the recorded isolation report as the baseline and re-verify identity/isolation before each deployment.
 
 Related documents:
 - [Environment boundaries](ENVIRONMENT_BOUNDARIES.md)
@@ -58,7 +58,7 @@ Until Warren gives separate, explicit production-promotion approval:
 - No changes to Auto-Bet enabled state, selected cohort, unit/stake size, daily caps, kill switch, dry-run, browser submission authorization, credentials, or bet execution.
 - No live betting, real submissions, automatic retries, or browser relaunch for betting.
 - Do not enable CI/CD auto-deploy for this work.
-- A merge to the repository is not permission to deploy. Keep the implementation on a dedicated branch and use a separate release approval gate.
+- A merge to the repository is not permission to deploy to production. Test deployment is explicitly authorized only within the isolated EC2 test environment identified in `docs/TC_REFACTOR_TEST_ENV_REPORT.md`. Keep the implementation on its dedicated branch. Do not replace the existing `:2262`/`:80` staging mirror; use the parallel `127.0.0.1:2263` instance unless the operator explicitly approves a different test-only target.
 
 ## 3. Cohort specification
 
@@ -334,10 +334,10 @@ Do not hide, waive, or casually fix unrelated failures without documenting them.
 - Produce screenshots or captured UI evidence without secrets, plus exact commands/results.
 - Review diff for hidden production writes, schema changes, secret exposure, deployment hooks, Auto-Bet changes, and research-freeze violations.
 
-**Gate 6:** provide a detailed report and request review. Do not deploy.
+**Gate 6:** once the test identity/isolation preflight passes, deploy the branch to the isolated parallel test instance (`127.0.0.1:2263`) and validate it there. This test-only deployment is authorized. Preserve the existing `:2262`/`:80` staging mirror and all production boundaries. Report exact commit SHA, commands, service/unit changes, health checks, API/UI validation, rollback procedure, and test results.
 
 ### Phase 7 — Separate production decision
-Only after Warren reviews the test evidence and explicitly authorizes production promotion in a separate instruction may a release plan be prepared. That approval must specify scope, approved commit SHA, migration/backfill policy, backup/rollback, maintenance window, validation, and stop/rollback criteria. Approval to implement or test does not imply production approval.
+Production promotion remains NOT AUTHORIZED. Only after Warren reviews the test evidence and explicitly authorizes production promotion in a separate instruction may a production release plan be prepared. That approval must specify scope, approved commit SHA, migration/backfill policy, backup/rollback, maintenance window, validation, and stop/rollback criteria. This authorization covers the isolated EC2 test deployment only and must never be interpreted as production approval.
 
 ## 10. Research freeze and prospective confirmation
 
@@ -365,4 +365,4 @@ At completion in test, report:
 9. Confirmation that production was untouched and Auto-Bet configuration/execution was unchanged.
 10. Outstanding risks, blockers, and a proposed production promotion checklist (not executed).
 
-**Definition of done:** test-only implementation demonstrably satisfies the spec, historical lineage is auditable, all required tests and reconciliation are reported, research/Auto-Bet/production boundaries remain intact, and Warren has a reviewable diff. No production deployment is part of this task.
+**Definition of done:** test-only implementation demonstrably satisfies the spec, historical lineage is auditable, all required tests and reconciliation are reported, the authorized isolated EC2 test deployment is validated and rollback is documented, research/Auto-Bet/production boundaries remain intact, and Warren has a reviewable diff. No production deployment is part of this task.
