@@ -1,207 +1,259 @@
 # Trade Cohort refactor — implementation report (EC2 test only)
 
-**Status:** implementation complete in the designated EC2 test environment. **Not deployed,
-not merged, not promoted.** Awaiting operator review (strategy doc §9 Phase 6/§11).
+**Status:** implementation complete on the isolated test environment. **Test instance
+deployed and verified.** Not merged. Not promoted. Production and Auto-Bet untouched.
 
-- **Branch:** `feature/tc-cohort-refactor-test` (base `docs/environment-boundaries-test-first` @ `5988e19`)
-- **Commits:** `a91a1fe` (implementation) · second commit (this report) — see `git log`
-- **Environment:** `blm-stage-cpt` (EC2 `i-0d6c4d01114f52bf4`, 13.247.58.81) — identity and
-  isolation evidence in `docs/TC_REFACTOR_TEST_ENV_REPORT.md`
-- **Production:** untouched (`portable-ubuntu` / `blm.haaats.xyz`); Auto-Bet untouched.
-
-## 1. Files changed
-
-| file | what |
+| item | value |
 |---|---|
-| `blm_v4/cohorts/__init__.py` | public surface of the package |
-| `blm_v4/cohorts/spec.py` | frozen spec: 7 cohorts, common gates, `rule_version = tc-1.0.0`, **named** precedence |
-| `blm_v4/cohorts/evaluator.py` | ONE pure evaluator; UNKNOWN vs NOT_QUALIFIED; per-cohort leg verdicts |
-| `blm_v4/cohorts/metrics.py` | Wilson 95 %, break-even, PUSH-aware outcome counting, UNDER settlement |
-| `blm_v4/cohorts/rescore.py` | test-only derived ledger: temporal firewall, idempotent, reconciliation |
-| `blm_v4/cohorts/api.py` | read-only `/api/v4/cohorts/{spec,summary,ledger,comparisons,quality}` |
-| `blm_v4/dashboard/static/{index.html,styles.css,dashboard.js}` | Trade Cohorts panel + collapsed Legacy Diagnostics |
-| `server.py` | mounts the cohorts router (2 lines) |
-| `tests/test_tc_cohort_spec_2026_10_26.py` | 86 boundary/unknown/precedence tests |
-| `tests/test_tc_rescore_firewall_2026_10_26.py` | 10 firewall/idempotency/settlement tests |
-| `tests/test_tc_cohort_api_2026_10_26.py` | 9 API contract + read-only tests |
-| `docs/TC_REFACTOR_TEST_ENV_REPORT.md` | Phase 0 environment/isolation evidence |
+| branch | `feature/tc-cohort-refactor-test` |
+| base (rebased onto) | `992cd21` — *as-deployed production working tree 2026-10-26* (= `52c879d` + 27 uncommitted paths) |
+| upstream pushed head | `62f1191` on `origin/fix/price-mapping-2026-10-06` — **17 commits behind what runs in production**, therefore not used as the base |
+| last code commit | see `git log -1` (implementation ring: `c013824` → `1f7c9ce` → `08aa1a0` → docs) |
+| test instance | `blm-tc2263.service` on `127.0.0.1:2263` (transient user unit) |
+| staging mirror | `:2262` / `:80` — untouched, `blm-server` still the process started 2026-10-26 20:45Z |
+| production | untouched (`portable-ubuntu`, `blm.haaats.xyz`) |
 
-No schema change to any existing table. The only new storage is the derived
-`/srv/blm/data/derived/cohort_rescore.db` (droppable at will).
+## 1. Environment re-verification (not taken from the earlier report)
 
-## 2. Cohort spec (frozen, versioned)
+```
+host      blm-stage-cpt (i-0d6c4d01114f52bf4, af-south-1)
+account   243047261878 (sts get-caller-identity, read-only)
+data      /srv/blm/data on /dev/nvme0n1p17; blm_pokerbet.db 272,490,496 B
+isolation no route to 192.168.1.100; no private keys; no AWS_* / secret env
+services  blm-server (2262, up since 20:45Z) · blm-tc2263 (2263, this deploy)
+```
 
-`rule_version = tc-1.0.0`, effective `2026-10-26T00:00:00Z`. Common gates: progress
-75–92 % inclusive, scored points ≥ 70, Cyber 2K26 excluded by slug, line-move leg OFF
-(False passes, True fails, unknown → UNKNOWN), all operands finite and positive.
+Difference from the report: none blocking. The only surprise was **repository** state —
+production's branch carries 17 unpushed commits and 27 uncommitted paths, so the base had
+to be reconstructed (below).
 
-| code | pace ratio (strict >) | shortfall (>=) | UNDER price (>=) |
-|---|---:|---:|---:|
-| TC-X ELITE | 1.16 | −0.50 | 1.60 |
-| TC-E EDGE | 1.12 | −0.50 | 1.60 |
-| TC-S SHARP | 1.08 | −0.50 | 1.60 |
-| TC-C CORE | 1.04 | −0.50 | 1.60 |
-| TC-W WIDE | 1.00 | −0.50 | 1.60 |
-| TC-D DEEP | 1.00 | +0.50 | 1.60 |
-| TC-C+ CORE+ | 1.04 | +0.25 | 1.80 |
+## 2. Base branch and rebase
 
-**Precedence (primary label):** `TC-X, TC-E, TC-S, TC-C+, TC-C, TC-D, TC-W` — a named,
-tested policy (`spec.PRECEDENCE`), never iteration or hash order. Rationale: pace ladder
-first, then the two thinner side routes (C+ adds price+shortfall on top of C's pace;
-D trades pace for a large shortfall), then WIDE. `qualifying_cohorts` keeps **every**
-match and remains authoritative; the precedence is a reporting label only.
+`origin/fix/price-mapping-2026-10-06` = `62f1191` (2026-10-10). The production host runs
+`52c879d` with 27 modified files on top. Rebasing onto the pushed head would have based the
+refactor on code that is 18 days and 17 commits behind production.
 
-Both are pinned by tests (including a 5-seed mapping-shuffle test and a C+ > C test).
+Reconstruction (all read-only on the production side, **code only, no data, no secrets —
+`git diff` scanned for key/password patterns before transfer**):
 
-## 3. Data lineage: actual firing vs checkpoint
+1. `git bundle` of `52c879d` → fetched into the test repo (identical SHA, verified).
+2. `git diff` of the production working tree (46 KB, 23 tracked files) → applied cleanly on
+   that tip and committed as `992cd21` "snapshot: as-deployed production working tree".
+   That commit is **not my work** and is not pushed for review as code; it exists only so
+   the refactor sits on what actually runs.
+3. `git rebase 992cd21` replayed 13 commits. **One conflict point, four files**
+   (`server.py`, `index.html`, `styles.css`, `dashboard.js`), all at EOF/insert points:
 
-This system **persists no alert ledger** — alerts are derived live from observations.
-A "firing" in the rescore is therefore **reconstructed**: the first observation of a game
-where the production alert condition held (progress ≥ 75, required > league × 1.04, live
-line **and** price present). Everything else that satisfies a cohort is stored as
-`source_type = 'checkpoint'` and is never counted as a fired alert. UNKNOWN rows carry a
-reason code and never pass.
+| file | resolution |
+|---|---|
+| `server.py` | live content kept, cohort router mounted after the assistant router (3 added lines) |
+| `index.html` | live alerts section kept as-is, TC panel inserted **after** its `</section>` |
+| `styles.css` | live sheet kept, TC rules appended |
+| `dashboard.js` | live tail kept, TC IIFE appended, **my duplicate `setInterval(refresh, POLL_MS)` dropped** (live already polls) |
 
-**Temporal firewall** (all enforced in code, all tested):
-- progress from the observation's own quarter/clock (classification-aware quarter length);
-- required/actual pace from that row's score and its own live line;
-- league reference from games with `result_at <= observation` (`prior_only`, default);
-- settlement joined **after** evaluation, scored against the FROZEN trigger line;
-- no closing line, final total, or later snapshot can change a firing evaluation
-  (test: two runs with different closing lines → identical firing rows).
+Verification that no live fix was regressed: `git diff --numstat 992cd21..HEAD` shows
+**0 deleted lines across all 22 changed files** — the branch is purely additive on top of
+the as-deployed tree.
 
-**Known deviation:** the EC2 slice has no `blm_metrics_clean.db` (the collector's clean
-pipeline never ran here), so firing-time inputs are reconstructed from `snapshots` rather
-than read from `clean_projections`. This is deterministic and leakage-free, but it is not
-byte-identical to the production projector (which also consumes a WS market override).
+Conflict fall-out caught by the headless capture, not by pytest: `blmAuthBootstrap`'s
+closing `})();` was consumed by the shared EOF line, so the whole bundle was a
+`SyntaxError` and the panel never initialised. Restored in `08aa1a0`; the capture now
+boots with `window.__tcCohorts` defined and zero page errors.
 
-## 4. Stage counts and reconciliation (EC2 slice 2026-10-22T13:50 → 10-23T20:34Z)
+## 3. Review fixes implemented
+
+### 3.1 Scored points — strict integer contract (`blm_v4/cohorts/evaluator.py`)
+
+New `scored_points()` returns `(value, reason_code)` and never truncates:
+
+| input | result |
+|---|---|
+| `150`, `150.0`, `"150"`, `" 70 "` | accepted (`70`/`150`) |
+| `150.5`, `10.9` | `UNKNOWN` / `fractional_points` — **150.9 can no longer become 150** |
+| `-1`, `-5.0` | `UNKNOWN` / `negative_points` |
+| `True`, `False` | `UNKNOWN` / `invalid_points` (a boolean is not a score) |
+| `"150.5"`, `"1.5e3"`, `"abc"`, `""` | `UNKNOWN` / `invalid_points` (canonical decimal-integer text only) |
+| `NaN`, `±inf`, `{}` | `UNKNOWN` / `invalid_points` |
+| `0` | legal integer, then fails the ≥ 70 gate → `NOT_QUALIFIED` / `points_below_min` |
+
+### 3.2 Strictly-prior league reference (`blm_v4/cohorts/rescore.py`)
+
+- `parse_utc_epoch()` normalises `Z`, `±HH:MM`, `±HHMM`, space separator, 0–9 fractional
+  digits, naive-UTC and epoch numbers to UTC instants; unparseable → `None` (never "now").
+- The reference now compares **parsed instants** with `bisect_left` (**strictly before**).
+  A result stamped at exactly the observation time is excluded, in any format.
+- Test proving the old bug: `"…T12:05:00.5Z" < "…T12:05:00Z"` lexically but is *later* in
+  time — the previous string comparison ordered it wrongly.
+- Unparseable result timestamps are skipped and counted
+  (`results_unparseable_ts`, `observations_unparseable_ts`); on this slice both are **0**.
+
+### 3.3 Coverage denominators split (`blm_v4/cohorts/api.py`, dashboard)
+
+The outcome rate is measured on **first firing per game**, so its coverage must be too:
+
+- `firing_coverage{rows_with_market, rows_total, pct}` — same population as `under_rate`.
+- `observation_coverage{rows_with_market, rows_total, pct}` — every ledger row for the
+  cohort (firings + checkpoints); a data-quality measure, never the outcome denominator.
+- A third, different number stays separate and labelled as such: **source-level market
+  presence** (37,816 of 163,500 snapshots = 23.1 % carry line + price).
+- Dashboard shows `firing cover` and `obs cover` with explanatory `title` text; the
+  ambiguous `market_coverage` key is gone (API test asserts the split and that mutating a
+  checkpoint's line moves only `observation_coverage`).
+
+## 4. Tests
+
+Commands (all on `blm-stage-cpt`, venv `/home/ubuntu/blm/.venv`):
+
+| run | command | result |
+|---|---|---|
+| focused | `pytest tests/test_tc_cohort_spec_2026_10_26.py tests/test_tc_rescore_prior_semantics_2026_10_27.py tests/test_tc_cohort_api_2026_10_26.py tests/test_tc_rescore_firewall_2026_10_26.py -q` | **149 passed**, exit 0 |
+| full suite, branch (final tree) | `pytest tests/ -q` | **111 failed, 2,484 passed, 146 skipped** (466 s) |
+| full suite, base `992cd21` | same, in a `git worktree` | **111 failed, 2,335 passed, 146 skipped** (499 s) |
+
+Delta on the final tree: **+149 passed** (= exactly the 149 cohort tests) and **0 net new
+failures**. An intermediate run (before the vocabulary-ban fix) showed 113 failed / 144
+skipped; the difference was investigated and closed:
+
+1. `test_predictive_settlement_separation::test_modal_has_no_checkpoint_or_settlement_sections`
+   — genuinely caused by the refactor: the test banned the bare word `checkpoints` from the
+   whole dashboard bundle, and the TC panel legitimately names the checkpoint **source
+   type**. Fixed by scoping that one ban to the pre-existing dashboard surface (compound
+   strings stay banned globally). File now passes.
+2. `test_under_alert_lifecycle` (3 tests: `…required_order`, `…every_game_carries_its_own_verdict`,
+   `…no_alert_vocabulary_regression`) — **pre-existing**: run in isolation on the untouched
+   base worktree they fail identically (`3 failed, 26 passed, 10 skipped`). They were only
+   *visible* on the branch because the base full-run skipped them (missing repo-root
+   `blm_pokerbet.db`, an artefact that has since been moved out of both trees).
+
+Comparing the two final failure *sets* they are identical except one swapped pair:
+`test_betual_line_worker_2026_10_04::test_persistence_failure_is_observable` (branch only)
+and `test_v1_api::test_api_live_from_db` (base only). Both pass on the branch in isolation;
+the base one fails with `sqlite3.OperationalError` because the base worktree has no
+repo-root `blm_pokerbet.db`. They flip on the presence of that stray file, not on the
+refactor — net new failures: **0**.
+
+The remaining 113 failures are the tree's pre-existing state on this box (frontend
+migration vocabulary guards, `pytest-asyncio`-less async tests, DB-dependent tests), all
+present at the base commit. Nothing was skipped or silenced to improve the count.
+
+## 5. Historical rescore — two clearly separated analyses
+
+Source: the **entire** history available in the isolated environment —
+`blm_pokerbet.db`, 2026-10-22T13:50Z → 2026-10-23T20:34Z (31 h), 163,500 snapshots,
+1,084 non-Cyber games evaluated (31 Cyber games excluded by slug).
+
+### 5.1 `prior_only` (default, causally strict)
 
 | stage | count |
 |---|---:|
-| snapshots in source DB | 163,500 (1,114 games) |
-| snapshots carrying line **and** price | 37,816 (23.1 % market coverage) |
-| games scanned (non-Cyber) | 1,084 |
-| Cyber games excluded | 31 |
 | observations evaluated | 134,730 |
 | … qualified | 52 |
-| … NOT_QUALIFIED (valid, out of gate) | 13,959 |
 | … UNKNOWN (reason-coded) | 120,719 |
 | reconstructed firings | 75 |
-| qualifying checkpoints (stored) | 33 |
-| ledger rows stored | 1,155 |
+| qualifying checkpoints stored | 1,080 |
+| ledger rows | 1,155 |
 | settled firings | 73 (55 UNDER / 18 OVER / 0 PUSH / 2 pending) |
-| unique qualified games | 19 |
 
-Largest UNKNOWN driver: missing market price/line in the observation (76 % of snapshots
-carry no market) — a property of this test slice, not of the evaluator.
+| cohort | games | UNDER | OVER | rate | Wilson 95 % | break-even @1.60 |
+|---|---:|---:|---:|---:|---|---:|
+| TC-X ELITE | 1 | 1 | 0 | 100.0 % | 20.7–100 % | 62.5 % |
+| TC-E EDGE | 6 | 5 | 1 | 83.3 % | 43.6–97.0 % | 62.5 % |
+| TC-S SHARP | 9 | 8 | 1 | 88.9 % | 56.5–98.0 % | 62.5 % |
+| TC-C CORE | 19 | 13 | 6 | 68.4 % | 46.0–84.6 % | 62.5 % |
+| TC-W WIDE | 19 | 13 | 6 | 68.4 % | 46.0–84.6 % | 62.5 % |
+| TC-C+ CORE+ | 0 | – | – | – | – | 62.5 % |
+| TC-D DEEP | 0 | – | – | – | – | 62.5 % |
 
-### Per-cohort scorecards (unique games, prior-only league reference)
+### 5.2 `full_sample` (production-parity reference)
 
-| cohort | games | UNDER | OVER | PUSH | UNDER rate | Wilson 95 % | break-even @1.60 |
-|---|---:|---:|---:|---:|---:|---|---:|
-| TC-X ELITE | 1 | 1 | 0 | 0 | 100.0 % | 20.7–100 % | 62.5 % |
-| TC-E EDGE | 6 | 5 | 1 | 0 | 83.3 % | 43.6–97.0 % | 62.5 % |
-| TC-S SHARP | 9 | 8 | 1 | 0 | 88.9 % | 56.5–98.0 % | 62.5 % |
-| TC-C CORE | 19 | 13 | 6 | 0 | 68.4 % | 46.0–84.6 % | 62.5 % |
-| TC-W WIDE | 19 | 13 | 6 | 0 | 68.4 % | 46.0–84.6 % | 62.5 % |
-| TC-C+ CORE+ | 0 | – | – | – | – | – | 62.5 % |
-| TC-D DEEP | 0 | – | – | – | – | – | 62.5 % |
+Reconstructed firings **72**, settled **69** (51 UNDER / 18 OVER), 3 pending, ledger rows
+1,011, unknown 120,212. TC-X 1 (1-0), TC-E 3 (3-0), TC-S 6 (5-1), TC-C 16 (11-5), TC-W 16
+(11-5), TC-C+ 0, TC-D 0.
 
-Sensitivity run (`--league-reference=full`, production-parity reference): 72 firings,
-51 UNDER / 18 OVER, 16 unique qualified games. Both runs are retained
-(`cohort_rescore.db` = prior-only, `cohort_rescore_full.db` = full-sample).
+Both DBs are kept side by side (`derived/cohort_rescore.db`, `derived/cohort_rescore_full.db`)
+and every API payload states which reference produced it (`league_ref` pill).
 
-**Limitations, stated plainly:** 31-hour window; n ≤ 19 per cohort; overlapping cohorts
-(TC-C = TC-W here) are not independent samples; TC-C+/TC-D have zero observations in this
-slice; firings are reconstructed, not recorded; historical rescore is **descriptive, not
-prospective confirmation**; nothing here disputes or replaces the legacy 613-game /
-58.73 % figures — those are legacy-rule numbers and were not reused.
+### 5.3 Idempotence, reconciliation, immutability
 
-## 5. Tests and commands (all on EC2 test)
+- Two consecutive `prior_only` runs → **byte-identical metrics JSON**; duplicate ledger keys
+  (`source_game_id, observed_at, source_type`) = **0** in both DBs.
+- Source DB content fingerprint before → after: snapshots `163,500 / 687179921711 /
+  9415866 / 9225238`, game_results `2,504 / 42113745659`, size `272,490,496`,
+  `PRAGMA quick_check = ok` — **identical**.
+- Read-only opening is enforced in code (`mode=ro` URI); the rescore writes only the
+  derived path.
 
-```
-python -m pytest tests/test_tc_cohort_spec_2026_10_26.py \
-                  tests/test_tc_rescore_firewall_2026_10_26.py \
-                  tests/test_tc_cohort_api_2026_10_26.py -q
-→ 105 passed
+### 5.4 Limitations (stated, not buried)
 
-python -m pytest tests/ -q                      # whole suite on this branch
-→ 54 failed, 451 passed
+31-hour window; n ≤ 19 per cohort; TC-C ≡ TC-W on this slice (identical populations, not
+independent samples); TC-C+/TC-D have **zero** observations here; firings are
+**reconstructed**, since the system persists no alert ledger; historical rescore is
+**descriptive, not prospective confirmation**; no profitability claim is made or implied.
+The earlier 613-game / 58.73 % legacy figures are a different (legacy) rule set and were
+not reused.
 
-baseline: git worktree at 5988e19 (unmodified)
-python -m pytest tests/ -q
-→ 54 failed, 346 passed
-```
+### 5.5 Blocker found — no broader dataset exists in the test environment
 
-The 54 failures are **pre-existing and identical** at the base commit — all in
-`tests/test_v2_*.py`, caused by `pytest-asyncio` not being installed in this venv
-("async def functions are not natively supported"). No new failures were introduced;
-the branch adds 105 passing tests. Nothing was hidden or waived.
+The directive asked to rebuild from "a broader historical dataset available in the isolated
+test environment". There is none, verified three ways: the only DB > 100 MB on the box is
+`blm_pokerbet.db` (272 MB, 31 h); `blm_historical.db` is 140 KB; the S3 objects are all
+derived from the same slice. Obtaining a wider window requires production data, which this
+task forbids — so the rescore above covers 100 % of the data that exists here and is
+labelled exploratory. **This is the main reason no cohort conclusion should be drawn yet.**
 
-**Read-only proof:** re-running the rescore leaves the source DB byte-identical
-(`272490496 1793048878` before → after), and the API test pins the derived DB's size and
-mtime across all five endpoints.
-
-## 6. UI evidence
-
-Trade Cohorts panel rendered from the live API on the test instance (port 2263; the
-designated :80 entry point still serves the untouched staging mirror — see §8):
-
-- `/tmp/tc/cohorts-panel.png` on the test host (element-scoped capture, no secrets)
-- 7 cohort cards with games/UNDER/OVER/PUSH/pending/rate/Wilson/coverage/avg-price/break-even
-- rule + window + league-reference pills and the "firings are reconstructed" caveat
-- fired-alert ledger with firing-time inputs, all memberships, frozen trigger line, result
-- collapsed **Legacy diagnostics** section (labelled legacy rules, nothing deleted)
-- console errors during capture: none
-
-API examples (`curl http://127.0.0.1:2263/api/v4/cohorts/...`):
+## 6. Test deployment
 
 ```
-/spec          → {"rule_version":"tc-1.0.0","cohorts":[7],"precedence":[...]}
-/summary       → totals {ledger_rows 1155, firings 75, checkpoints 1080, unknown 1047}
-/ledger?cohort=TC-X&source_type=reconstructed_firing&limit=1
-               → 2026-10-22T16:37 betual-nba 31361686 TC-X prog 87.5 pts 166
-                 req 8.27 act 6.24 league 3.94 ratio 2.102 shortfall 2.03
-                 price 1.8 line 168.5 UNDER (133) QUALIFIED
-/quality       → unknown_reasons + caveats + market-row counts
-/comparisons?by=price → bucketed UNDER rates with denominators
+unit     blm-tc2263.service (systemd --user, --collect, transient)
+workdir  /home/ubuntu/blm-tc-refactor   (this branch)
+env      BLM_DATA_ROOT=/srv/blm/data
+         BLM_POKERBET_DB=/srv/blm/data/blm_pokerbet.db      (read-only use)
+         BLM_COHORT_DB=/srv/blm/data/derived/cohort_rescore.db
+         BLM_AUTH_ENABLED=0        ← test instance only; see below
+         HOST=127.0.0.1 PORT=2263
 ```
 
-## 7. Production / Auto-Bet boundary
+`BLM_AUTH_ENABLED=0` is a documented config knob. It is used **only** on this loopback-only
+instance (no production data, no betting, security group does not expose 2263) because the
+single account in `blm_auth.db` has no credential available to me and I will not guess one.
+Consequence: the dashboard's auth bootstrap logs one expected `404 /api/auth/me`; there are
+no other console or page errors.
 
-- No production file, service, DB, migration, backfill or rescore write.
-- No Auto-Bet change: no enabled/disabled toggle, no cohort change, no stake/limit/kill
-  switch change, no browser submission, no bets. The panel is display-only and the stage
-  unit carries no `BETTING_*` variables (executor fails closed).
-- The deployed staging service (`:2262` behind `:80`) was **not** replaced: this branch is
-  based on the docs branch (`5988e19`), which predates the live server branch — deploying
-  it there would regress stage. Acceptance therefore runs as a parallel instance on 2263.
+Verification:
 
-## 8. Open items / proposed promotion checklist (NOT executed)
+| check | result |
+|---|---|
+| `systemctl --user is-active blm-tc2263` | active |
+| `GET /` | 200 |
+| `GET /api/v4/cohorts/{spec,summary,ledger,ledger?cohort=TC-C&source_type=reconstructed_firing,comparisons?by=price,quality}` | 200, 200, 200, 200, 200, 200 |
+| Playwright (chromium headless) capture | 7 cohort cards, `TC-X` card reads `games 1 · UNDER 1 · rate 100.0% · Wilson 20.7–100.0% · firing cover 100.0% · obs cover 100.0%`, ledger row `2026-10-22T16:37 betual-nba TC-X … UNDER (239) QUALIFIED`, meta pills `rule tc-1.0.0 / window 2026-10-22 → 2026-10-23 / league ref prior` |
+| console / page errors | 1 HTTP 404 (`/api/auth/me`, expected) / 0 |
+| screenshot | `/tmp/tc/cohorts-panel-v2.png` on the test host |
+| staging mirror untouched | `blm-server` still the process started 2026-10-26T20:45Z; `:2262/healthz` 200; `:80` 303 → login |
 
-1. **Rebase** `feature/tc-cohort-refactor-test` onto `fix/price-mapping-2026-10-06` (or
-   current main) so the refactor sits on the live server code before any promotion.
-2. Re-run the 105 tests plus the full suite on the rebased branch.
-3. Build the read-model against production **data** (read-only replica or a copied
-   snapshot), re-run both league-reference modes, and reconcile counts; expect materially
-   different numbers from this 31-hour slice.
-4. Decide the league-reference policy for production (`prior_only` is causally strict but
-   yields far fewer evaluable rows; `full_sample` matches the cached production reference).
-5. Review the diff for hidden writes/secrets: `git diff 5988e19..HEAD`.
-6. Promote only with a separate, explicit operator approval that names the commit SHA,
-   migration/backfill policy, backup/rollback, maintenance window and stop criteria.
+### Rollback (test instance only)
 
+```
+systemctl --user stop blm-tc2263          # panel disappears; :2262/:80 unaffected
+# derived read model is droppable; nothing else depends on it
+#   /srv/blm/data/derived/cohort_rescore{,_full}.db
+git -C /home/ubuntu/blm-tc-refactor checkout <previous-sha>
+```
 
-## Reviewer follow-up actions (2026-10-27)
+No production DB, schema, migration, proxy, DNS or firewall change was made at any point,
+and no Auto-Bet configuration, stake, cap, kill switch or submit path was touched. The
+executor fails closed on this instance (no `BETTING_*` env), and no bet was ever submitted.
 
-The implementation strategy now includes mandatory reviewer follow-up before test acceptance:
-- validate scored points as non-negative integers without silent truncation;
-- make prior-only league reference strictly prior at equal timestamps;
-- align or explicitly label market-coverage and outcome denominators;
-- rebase/port onto the current live-server code line in the isolated test checkout only;
-- rerun tests, build/UI, isolation, reconciliation and source-DB immutability checks;
-- rebuild the derived model from a broader isolated test-only historical snapshot and compare `prior_only` versus `full_sample` separately;
-- deploy only to the parallel `127.0.0.1:2263` test instance after preflight and validation, documenting health checks and rollback.
+## 7. Remaining risks
 
-Test deployment is authorized. Production promotion, production writes, live betting and Auto-Bet changes remain unauthorized. Existing `:2262`/`:80` staging mirror must remain untouched.
+1. **No production-scale evidence.** Every number here comes from 31 hours of test data.
+2. **Rebase base is a snapshot**, not a reviewed commit: `992cd21` imports another agent's
+   uncommitted work. The refactor is additive against it, but promotion must re-rebase onto
+   whatever is actually checked out at promotion time and re-run the suites.
+3. **Scored-points contract changes behaviour for dirty rows**: a source that emits
+   `150.5` used to be silently truncated into a tradeable score; it is now `UNKNOWN`. That
+   is the correct behaviour, but it changes counts. On this slice: no affected rows.
+4. **League-reference policy is a product decision** (`prior_only` vs `full_sample`): 75 vs
+   72 firings here, and materially different league averages. Do not default silently.
+5. **Dashboard wording debt**: the panel intentionally uses "checkpoint", which the legacy
+   vocabulary test bans for the older surface — resolved by scoping, worth a rename later.

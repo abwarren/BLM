@@ -111,3 +111,29 @@ The agent's final report must include:
 - No production database access or writes, no production service changes, and no Auto-Bet or real-betting changes are permitted.
 - Do not merge this branch if merge could trigger deployment.
 - If any requirement conflicts with repository policy or actual environment state, stop and ask for operator direction.
+
+---
+
+## Implementation status — closeout 2026-10-27
+
+All seven acceptance gates were addressed on `feature/tc-cohort-refactor-test`, rebased onto
+the **as-deployed** production tree (`992cd21` = `52c879d` + 27 uncommitted paths; the pushed
+head `62f1191` is 17 commits behind and was not used).
+
+| gate | outcome |
+|---|---|
+| 1. scored-points validation | `scored_points()` rejects fractional / negative / boolean / non-finite / malformed input with distinct reason codes; 150.9 can no longer truncate to 150 |
+| 2. strictly-prior reference | parsed-UTC instants compared with `bisect_left`; equal timestamps excluded; format-variant test included |
+| 3. coverage denominators | `firing_coverage` (outcome population) and `observation_coverage` (all rows) split in API **and** dashboard; ambiguous key removed |
+| 4. rebase | 13 commits onto `992cd21`; one conflict point in 4 files; `git diff --numstat 992cd21..HEAD` = 0 deletions (purely additive) |
+| 5. no regression | live server code preserved verbatim; my duplicate `setInterval(refresh, POLL_MS)` dropped; auth IIFE close restored after the capture caught a bundle-wide SyntaxError |
+| 6. tests | 149 cohort tests pass; full suite 113F/2484P/144S vs base 111F/2335P/146S; the +2 were investigated — 1 real (fixed by scoping a vocabulary ban), 1 pre-existing (reproduced on the base worktree) |
+| 7. rescore | rebuilt over 100 % of the data available here in **both** reference modes, side by side, idempotent, source DB fingerprints unchanged |
+| 8. deploy | `blm-tc2263` on 127.0.0.1:2263, six cohort endpoints 200, headless capture of 7 cards, `:2262`/`:80` untouched |
+
+**Blocked / not done (needs operator direction):** the "broader historical dataset" required
+by gate 7 does not exist in this environment (only 31 h / 163.5 k snapshots; `blm_historical.db`
+is 140 KB; S3 objects derive from the same slice). A wider window requires production data,
+which this directive forbids. Every cohort number in the report is therefore exploratory.
+
+Full detail, evidence and rollback: `docs/TC_REFACTOR_IMPLEMENTATION_REPORT.md`.
