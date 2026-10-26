@@ -191,3 +191,17 @@ API examples (`curl http://127.0.0.1:2263/api/v4/cohorts/...`):
 5. Review the diff for hidden writes/secrets: `git diff 5988e19..HEAD`.
 6. Promote only with a separate, explicit operator approval that names the commit SHA,
    migration/backfill policy, backup/rollback, maintenance window and stop criteria.
+
+
+## Reviewer follow-up actions (2026-10-27)
+
+The implementation strategy now includes mandatory reviewer follow-up before test acceptance:
+- validate scored points as non-negative integers without silent truncation;
+- make prior-only league reference strictly prior at equal timestamps;
+- align or explicitly label market-coverage and outcome denominators;
+- rebase/port onto the current live-server code line in the isolated test checkout only;
+- rerun tests, build/UI, isolation, reconciliation and source-DB immutability checks;
+- rebuild the derived model from a broader isolated test-only historical snapshot and compare `prior_only` versus `full_sample` separately;
+- deploy only to the parallel `127.0.0.1:2263` test instance after preflight and validation, documenting health checks and rollback.
+
+Test deployment is authorized. Production promotion, production writes, live betting and Auto-Bet changes remain unauthorized. Existing `:2262`/`:80` staging mirror must remain untouched.
