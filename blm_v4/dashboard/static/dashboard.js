@@ -4539,6 +4539,7 @@ traceTimer = setInterval(() => {
       BLM_AUTH.logout();
     });
   }
+})();
 
 /* ── Trade Cohorts panel (TC-*) — renders API output only, no business logic ── */
 (function () {

@@ -227,7 +227,14 @@ def test_modal_has_no_checkpoint_or_settlement_sections(client, sc):
     assert "SETTLEMENT / TERMINAL" not in js
     assert "TERMINAL — SETTLEMENT ONLY" not in js
     assert "checkpoints_settlement" not in js
-    assert "checkpoints" not in js
+    # The single word is banned from the DASHBOARD surface, which is what
+    # this test has always meant. The Trade Cohorts panel (TC-*, 2026-10-27)
+    # legitimately names the "checkpoint" SOURCE TYPE as a population
+    # distinct from reconstructed firings, so the ban is scoped to everything
+    # that existed before that panel.
+    _panel = js.find("Trade Cohorts panel (TC-*)")
+    _surface = js[:_panel] if _panel != -1 else js
+    assert "checkpoints" not in _surface
     # the descriptive replacement surface is present
     assert "PACE Z-SCORE DEVIATION" in js
     assert "SCORE vs LIVE LINE — MARKET MOVEMENT" in js
