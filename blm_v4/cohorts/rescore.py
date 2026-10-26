@@ -103,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_ledger_cohort ON cohort_ledger(tightest_cohort, s
 CREATE INDEX IF NOT EXISTS idx_ledger_time ON cohort_ledger(observed_at);
 CREATE TABLE IF NOT EXISTS rescore_runs (
     run_at TEXT PRIMARY KEY, rule_version TEXT, window_start TEXT, window_end TEXT,
-    league_reference TEXT, observations INTEGER, evaluable INTEGER,
+    league_reference TEXT, observations INTEGER, qualified INTEGER,
     unknown INTEGER, fired INTEGER, checkpoints INTEGER, reconciliation TEXT
 );
 """
@@ -282,7 +282,7 @@ def run(pokerbet_db: str, out_db: str, *, league_mode: str = "prior",
         "WHERE competition_slug IS NOT NULL AND competition_slug <> '' "
         "ORDER BY first_seen_at").fetchall()
 
-    rec = dict(observations=0, evaluable=0, unknown=0, fired=0, checkpoints=0,
+    rec = dict(observations=0, qualified=0, unknown=0, fired=0, checkpoints=0,
                not_qualified=0, stored=0, qualified_by_cohort={}, games=0,
                settled_firings=0, under=0, over=0, push=0, pending=0,
                excluded_cyber=0, unique_qualified_games=0, earliest=None, latest=None)
@@ -308,7 +308,7 @@ def run(pokerbet_db: str, out_db: str, *, league_mode: str = "prior",
             elif e["status"] == "NOT_QUALIFIED":
                 rec["not_qualified"] += 1
             else:
-                rec["evaluable"] += 1
+                rec["qualified"] += 1
             if e["source_type"] == "reconstructed_firing":
                 rec["fired"] += 1
                 fin = settled.get(e["source_game_id"])          # AFTER evaluation
@@ -341,7 +341,7 @@ def run(pokerbet_db: str, out_db: str, *, league_mode: str = "prior",
     dst.execute("INSERT OR REPLACE INTO rescore_runs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (run_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                  spec.RULE_VERSION, rec["earliest"], rec["latest"], league_mode,
-                 rec["observations"], rec["evaluable"], rec["unknown"], rec["fired"],
+                 rec["observations"], rec["qualified"], rec["unknown"], rec["fired"],
                  rec["checkpoints"], json.dumps(rec, sort_keys=True)))
     dst.commit()
     dst.close()
