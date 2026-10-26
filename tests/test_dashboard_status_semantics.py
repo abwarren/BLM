@@ -95,6 +95,23 @@ def test_only_a_verified_heartbeat_read_can_render_offline(js):
     assert "return;" in body[offline:offline + 400]
 
 
+def test_idle_state_is_not_painted_as_stalled(js):
+    """An empty board upstream (cycle COMPLETED, nothing to collect) must
+    paint IDLE and must NOT raise the STALLED alarm."""
+    body = _function_body(js, "paintCollectorStatus")
+    idle = body.index('"collector: IDLE"')
+    stalled = body.index('"collector: STALLED"')
+    running = body.index('"collector: RUNNING"')
+    assert running < idle < stalled, (
+        "the IDLE branch must sit between RUNNING and STALLED")
+    branch = body[idle - 400:idle + 400]
+    assert 'col.status === "idle"' in branch or "col.status === \"idle\"" in body[:idle]
+    assert "setCollectorBanner(null)" in body[idle - 200:idle + 400], (
+        "IDLE must clear the banner — it is not an alarm")
+    assert "return;" in body[idle:idle + 400], (
+        "the IDLE branch must return so it cannot fall through to STALLED")
+
+
 def test_unverified_state_never_says_offline(js):
     """When /status cannot be reached the collector is UNVERIFIED."""
     body = _function_body(js, "paintCollectorStatus")

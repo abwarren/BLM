@@ -21,6 +21,7 @@ from __future__ import annotations
 import threading
 import time
 import traceback
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,9 @@ from blm_v4.betting.config import BettingConfig
 from blm_v4.betting.executor import evaluate, execute
 from blm_v4.betting.provider import provider_from_config
 from blm_v4.betting.store import BettingStore
+from blm_v2.telemetry.logging import get_logger
+
+logger = get_logger("betting_worker")
 
 
 class BettingWorker:
@@ -51,6 +55,8 @@ class BettingWorker:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.last_error: Optional[str] = None
+        self._last_pass_log = 0.0
+        self._no_bet_reasons: Counter = Counter()
 
     def start(self) -> None:
         target = (self._run_trigger_driven if self.trigger_feed is not None
@@ -82,13 +88,46 @@ class BettingWorker:
         summary = {"enabled": enabled, "candidates": 0, "executed": 0,
                    "would_bet": 0, "no_bet": 0}
         if not enabled:
+            self._log_pass(summary, games=0, balance=None)
             return summary
         games = self._live_payload_fn() or []
         stats = self.store.today_stats()
         balance = self._balance()
+        self._no_bet_reasons = Counter()      # per-pass, so the log is a census
         for g in games:
             stats = self._dispatch_game(g, summary, stats, unit_price, balance)
+        self._log_pass(summary, games=len(games), balance=balance)
         return summary
+
+    def _log_pass(self, summary: dict, games: int = 0, balance=None) -> None:
+        """Throttled visibility into the decision pass.
+
+        The worker is otherwise silent by design, which hid a stale/empty
+        payload, a switched-off engine and a whole pass of rejected games for
+        hours.  A pass that produced a candidate logs immediately; every other
+        pass logs at most once a minute.  ``games``/``balance``/``no_bet_top``
+        ride on the LOG rather than the returned summary, whose exact shape is
+        an existing contract.
+        """
+        now = time.monotonic()
+        interesting = bool(summary.get("candidates") or summary.get("would_bet")
+                           or summary.get("executed"))
+        if not interesting and (now - self._last_pass_log) < 60.0:
+            return
+        self._last_pass_log = now
+        # WHICH gate rejected them: the executor already returns a reason for
+        # every NO_BET; without this the count said nothing about why.
+        reasons = getattr(self, "_no_bet_reasons", None)
+        top = ", ".join(f"{r}={n}" for r, n in reasons.most_common(5)) if reasons else None
+        logger.info("betting_pass",
+                    enabled=summary.get("enabled"),
+                    games=games,
+                    candidates=summary.get("candidates", 0),
+                    would_bet=summary.get("would_bet", 0),
+                    executed=summary.get("executed", 0),
+                    no_bet=summary.get("no_bet", 0),
+                    balance=balance,
+                    no_bet_top=top or None)
 
     def _balance(self):
         """R5: the signed-in account balance, or None when unprovable."""
@@ -118,6 +157,17 @@ class BettingWorker:
                            g.get("game_id")))
         if res["decision"] == "NO_BET":
             summary["no_bet"] += 1
+            # keep WHY: the executor names the failing gate, and the count
+            # alone cannot tell "nothing in band" from "all below the floor"
+            reason = str(res.get("reason") or "unspecified")
+            if reason == "alert_not_eligible":
+                # the eligibility dict carries its own, more specific reason
+                # (stale_state, market_missing, not-live, ...).  Read it from
+                # the game rather than widening the executor's return shape.
+                sub = (g.get("under_alert_eligibility") or {}).get("reason")
+                if sub:
+                    reason = f"{reason}:{sub}"
+            self._no_bet_reasons[reason] += 1
             return stats
         summary["candidates"] += 1
         cand = res["candidate"]

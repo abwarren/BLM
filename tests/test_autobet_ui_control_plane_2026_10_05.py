@@ -46,7 +46,7 @@ def _game(game_id: str = "UI-GATE-9001", age_s: float = 1.0) -> dict:
                         "trigger_line": 180.5},
         "under_alert_eligibility": {"eligible": True, "reason": "market_live"},
         "market": {"total_line": 180.5, "market_status": "LIVE"},
-        "projector": {"required_pts_per_min": 5.0, "progress_pct": 80.0,
+        "projector": {"required_pts_per_min": 5.0, "progress_pct": 88.0,
                       "actual_pts_per_min": 4.0,
                       "captured_at": _iso(datetime.now(timezone.utc)
                                           - timedelta(seconds=age_s)),

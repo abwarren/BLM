@@ -631,3 +631,16 @@ def trade_competition_reason(competition_slug) -> Optional[str]:
     if not slug:
         return None
     return COMPETITION_EXCLUDED if slug in TRADE_EXCLUDED_COMPETITIONS else None
+
+
+# ── OPERATOR-SET PACE RUNG (appended 2026-10-25; tail-only by contract) ────
+#: The TRADE pace RUNG is deployment config, not a code decision:
+#:   TC-W 1.00 (every game the live gate takes) · TC-C 1.04 · TC-S 1.08 ·
+#:   TC-E 1.12 · TC-X 1.16 (ELITE)
+#: Operator directive 2026-10-25: auto-bet executes STRICTLY on TC-X, so the
+#: service runs with ``TRADE_MIN_PACE_RATIO=1.16`` (systemd drop-in
+#: 97-trade-pace-tcx.conf).  The module DEFAULT stays 1.00 so the code contract
+#: — and the suites that pin it — are unchanged; the rung moves without editing
+#: this file, and clearing the env var returns the engine to TC-W.
+#: APPENDED, never inserted: this file's prefix is frozen byte-exact at HEAD.
+TRADE_MIN_PACE_RATIO = _env_float("TRADE_MIN_PACE_RATIO", TRADE_MIN_PACE_RATIO)

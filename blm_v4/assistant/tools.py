@@ -24,6 +24,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+from blm_v4.trade_cohorts import COHORTS
+
 # ── the data root (same default the service uses) ─────────────────────────
 DATA_ROOT = Path(os.environ.get("BLM_DATA_ROOT", "/home/ubuntu/BLM"))
 
@@ -45,6 +47,16 @@ SAFE_ENV_DENY = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CRED", re.I)
 ROW_CAP = 200
 SQL_TIMEOUT_S = 10.0
 LOG_LINES_CAP = 400
+
+#: The operator's named-cohort puller — the SAME executable behind `tc-x`,
+#: `tc-e`, ... in the shell.  The assistant must NOT re-implement the cohort
+#: rule in SQL (league pace is a function, the divisor is duration_for(), and
+#: `query` cannot join across databases), so it shells this one.
+COHORT_BIN = "/home/ubuntu/.local/bin/tc"
+COHORT_TIMEOUT_S = 90
+#: Codes come from the registry itself, so the tool's enum cannot drift from
+#: the rows the puller accepts.
+COHORT_CODES = tuple(COHORTS)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -138,6 +150,34 @@ def tool_query(database: str, sql: str, limit: int = ROW_CAP) -> str:
             rows = c.execute(q if has_limit else q + f" LIMIT {cap + 1}").fetchall()
     truncated = len(rows) > cap
     return _rows_to_text(rows[:cap], truncated)
+
+
+def tool_cohort(code: str = "TC-X", days: int = 7) -> str:
+    """The named-cohort pull — the SAME puller the `tc-x` shell command runs.
+
+    Read-only by construction on two counts: the puller opens both databases
+    ``mode=ro``, and this function passes an argument LIST (never a shell
+    string) with the cohort code validated against the registry and the day
+    count range-clamped, so no model-supplied text can become a command.
+    """
+    c = str(code or "").strip().upper()
+    if c not in COHORTS:
+        raise ValueError(f"unknown cohort '{code}'. known: {sorted(COHORTS)}")
+    n = max(1, min(int(days or 7), 90))
+    if not os.path.exists(COHORT_BIN):
+        raise ValueError(f"{COHORT_BIN} not found — the cohort puller is not installed")
+    try:
+        p = subprocess.run([COHORT_BIN, c, str(n)],
+                           capture_output=True, text=True, timeout=COHORT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return (f"cohort pull timed out after {COHORT_TIMEOUT_S}s ({c}, {n} days). "
+                f"Narrow it: days=1.")
+    out = (p.stdout or "").strip()
+    err = (p.stderr or "").strip()
+    if p.returncode != 0:
+        return (f"cohort pull FAILED rc={p.returncode} ({c}, {n} days)\n"
+                f"{err[:800]}\n\n{out[-4000:]}")
+    return (out or "(no output)")[-14000:]
 
 
 def tool_logs(unit: str = "blm-server", minutes: int = 20,
@@ -254,6 +294,25 @@ TOOLS = {
                        "sql": {"type": "string", "description": "a single SELECT / WITH statement"},
                        "limit": {"type": "integer", "description": f"max rows (cap {ROW_CAP})"}},
                        "required": ["database", "sql"]}},
+    },
+    "cohort": {
+        "fn": tool_cohort,
+        "schema": {"name": "cohort",
+                   "description": (
+                       "The named-cohort pull (the operator's `tc-x` / `tc-e` ... "
+                       "command): every game LABELLED that cohort over the last N "
+                       "days, with PTS at the trigger, pace ratio, UNDER line, final "
+                       "score, DIFF and WON/LOST/PUSH/PENDING plus the summary. This "
+                       "is the ONLY correct way to answer a cohort question — do not "
+                       "re-derive the cohort in SQL."),
+                   "input_schema": {"type": "object", "properties": {
+                       "code": {"type": "string", "enum": list(COHORT_CODES),
+                                "description": "TC-X = ELITE (pace>1.16), TC-E = EDGE, "
+                                               "TC-S = SHARP, TC-C = CORE, TC-W = WIDE "
+                                               "(the live gate), TC-D, TC-C+"},
+                       "days": {"type": "integer",
+                                "description": "lookback in days (default 7, max 90)"}},
+                       "required": ["code"]}},
     },
     "logs": {
         "fn": tool_logs,

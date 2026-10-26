@@ -2279,11 +2279,11 @@ class PokerBetCollector:
             logger.error("relaunch failed:\n%s", traceback.format_exc())
             raise
 
-    def _write_state(self, *, success: bool) -> None:
+    def _write_state(self, *, success: bool, idle: bool = False) -> None:
         with PERFORMANCE.measure("collector.write_state"):
-            return self._write_state_impl(success=success)
+            return self._write_state_impl(success=success, idle=idle)
 
-    def _write_state_impl(self, *, success: bool) -> None:
+    def _write_state_impl(self, *, success: bool, idle: bool = False) -> None:
         """Heartbeat file the dashboard API reads for collector status."""
         now_iso = utcnow_iso()
         if success:
@@ -2292,7 +2292,13 @@ class PokerBetCollector:
             betual_metrics = self.store.betual_collection_metrics()
         state = {
             "tick": self.stats["ticks"],
-            "status": "running" if success else "stalled",
+            # THREE states, because "no fixtures upstream" and "the cycle would
+            # not complete" are different facts: `idle` means the tick ran to
+            # completion and simply found nothing to collect (the board is
+            # empty), `stalled` means a cycle failed to complete.  Collapsing
+            # them made a quiet slate look like a broken collector.
+            "status": ("running" if success else
+                       ("idle" if idle else "stalled")),
             "started_at": self._started_at_iso,
             "last_tick_at": now_iso,
             "last_success_at": self._last_success_iso,
@@ -3412,7 +3418,7 @@ class PokerBetCollector:
             # storm; the state file's consecutive_empty_ticks +
             # status=stalled are the observability signal for emptiness.
             self._tick_completed_fully = True
-            self._write_state(success=False)
+            self._write_state(success=False, idle=True)
             logger.warning(
                 "still no relevant competitions on page "
                 "(consecutive empties: %d)",

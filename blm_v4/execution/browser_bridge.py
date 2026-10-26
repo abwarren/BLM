@@ -288,6 +288,11 @@ class BrowserBridge(ABC):
         return None
 
 
+# Spin guard for the placement loop.  The WALL-CLOCK budget bounds it (see
+# ``place``); this only stops a pathological zero-cost retry loop.
+_PLACE_ATTEMPT_CAP = 60
+
+
 class ResolverBrowserBridge(BrowserBridge):
     """Reference bridge over the existing ``SelectionResolver`` browser contract.
 
@@ -308,8 +313,9 @@ class ResolverBrowserBridge(BrowserBridge):
                  session_probe: Optional[Callable[[], bool]] = None,
                  verify_timeout_s: float = 20.0,
                  verify_poll_s: float = 0.5,
-                 place_attempts: int = 5,
-                 retry_delay_s: float = 1.5):
+                 place_attempts: int = 3,
+                 retry_delay_s: float = 1.5,
+                 place_budget_s: float = 45.0):
         self.adapter = adapter
         self._event = event_resolver or _default_event
         self._session_probe = session_probe
@@ -320,6 +326,8 @@ class ResolverBrowserBridge(BrowserBridge):
         self._verify_poll_s = float(verify_poll_s)
         self._place_attempts = max(1, int(place_attempts))
         self._retry_delay_s = float(retry_delay_s)
+        # EXECUTION_PLACE_BUDGET_S — how long to keep trying (wall clock)
+        self._place_budget_s = max(0.0, float(place_budget_s))
 
     def is_available(self) -> bool:
         """Optional capability probe.  A ``SelectionResolver`` has no cheap
@@ -373,7 +381,24 @@ class ResolverBrowserBridge(BrowserBridge):
         last: dict = {"status": FAILED, "provider_ref": None,
                       "error_code": "NOT_ATTEMPTED",
                       "error_message": "no placement attempt ran"}
-        for _attempt in range(self._place_attempts):
+        # The give-up point is WALL CLOCK, not an attempt count.  A fixed count
+        # made persistence depend on how slow each attempt happened to be —
+        # measured live at 16 s in one case and 141 s in another for the same
+        # five attempts — so the engine's persistence was inconsistent and often
+        # far shorter than intended.  ``place_attempts`` is retained as a
+        # MINIMUM (never fewer tries than asked); the budget bounds it.
+        # Operator directive 2026-10-09: three attempts before aborting — enough
+        # for the clear/re-select cycle to recover a transient slip problem, few
+        # enough that a permanent fault (dead session, market shut) aborts fast
+        # instead of burning the whole window.
+        started = _time.monotonic()
+        _attempt = 0
+        while True:
+            _over = (_time.monotonic() - started) >= self._place_budget_s
+            if _attempt >= _PLACE_ATTEMPT_CAP or (
+                    _over and _attempt >= self._place_attempts):
+                break
+            _attempt += 1
             # 0. CLEAR stale UNSUBMITTED legs (ALWAYS, before every attempt)
             clear = getattr(self.adapter, "clear_betslip", None)
             if callable(clear):
@@ -422,9 +447,14 @@ class ResolverBrowserBridge(BrowserBridge):
                 _time.sleep(self._retry_delay_s)
                 continue
 
-            # 3. VERIFY — poll this attempt (identity; line-movement tolerant)
+            # 3. VERIFY — poll this attempt (identity; line-movement tolerant).
+            # The poll is clamped to what is LEFT of the placement budget so a
+            # single slow attempt can never overshoot the persistence window.
             check = None
-            deadline = _time.monotonic() + self._verify_timeout_s
+            _vd = _time.monotonic() + self._verify_timeout_s
+            if self._place_budget_s > 0:
+                _vd = min(_vd, started + self._place_budget_s)
+            deadline = _vd
             while True:
                 try:
                     check = verify_leg_in_betslip(self.adapter, sel, obs.line,
@@ -458,8 +488,75 @@ class ResolverBrowserBridge(BrowserBridge):
             # betting LINE and the DECIMAL ODDS (distinct; never line as odds)
             out["observed_line"] = obs.line
             out["observed_odds"] = obs.price
+
+            # 5. FEEDBACK (operator directive 2026-10-08): read the DOM
+            # IMMEDIATELY to learn whether the bookmaker took it, rather than
+            # assuming the click was enough.  On a DEFINITIVE non-acceptance the
+            # remedy is Remove-All + re-select — which is exactly what the TOP
+            # of this loop does — so we fall through and re-run it.
+            _st = str(out.get("status") or "").upper()
+            if _st in ("SUBMITTED", "ACCEPTED"):
+                _verdict = self._dom_accepted(out)
+                if _verdict is True:
+                    return out
+                if _verdict is False:
+                    last = dict(out)
+                    last["status"] = FAILED
+                    last["error_code"] = "DOM_NOT_ACCEPTED"
+                    last["error_message"] = (
+                        "submitted but the leg is still in the slip — not "
+                        "accepted; removing all and re-selecting the market")
+                    continue
+                # AMBIGUOUS: do NOT retry.  A second submit on a state we
+                # cannot read could place the bet TWICE.
+                return out
+            if _st in ("REJECTED", "FAILED"):
+                # NOTHING WAS PLACED in either case.  The adapter returns
+                # FAILED only for a PRE-SUBMIT problem (submit control absent,
+                # stake mismatch, slip unreadable, game mismatch…) and REJECTED
+                # only when the bookmaker refused — in both, no money is at
+                # stake.  So the remedy is the operator's: clear the stale
+                # market (Remove-All) and select the market again.  These ARE
+                # the transport misses that were burning games.
+                last = dict(out)
+                continue
             return out
         return last
+
+    def _dom_accepted(self, out: dict):
+        """Read the DOM straight away: did the bookmaker TAKEN our bet?
+
+        A click is never proof, so this reads the bookmaker's OWN evidence —
+        the receipt reference (``read_order_confirmation``).
+
+        It deliberately answers only what the DOM can PROVE:
+
+          * a receipt ⇒ ``True`` (accepted);
+          * no receipt ⇒ ``None`` (AMBIGUOUS).
+
+        ``None`` must NOT be retried.  A slow or absent receipt is
+        indistinguishable from a slow acceptance, so re-selecting on it could
+        place the bet TWICE — the operator's money.  The engine's existing
+        contract is the same one ``test_timeout_is_never_success`` pins:
+        an unconfirmed submission is UNKNOWN, never a retry.  Only an outright
+        REJECTED (handled in ``place``) is a provable non-acceptance.
+
+        Kept as a method so a future DOM rejection signal (an error banner the
+        adapter can read) can return ``False`` here without touching the loop.
+        """
+        try:
+            conf = self.adapter.read_order_confirmation()
+        except Exception:  # noqa: BLE001 — no receipt is not a claim
+            conf = None
+        if conf:
+            ref = conf.get("reference") if isinstance(conf, dict) else conf
+            if ref:
+                if not out.get("provider_ref"):
+                    out["provider_ref"] = str(ref)
+                return True
+        if out.get("provider_ref"):
+            return True
+        return None
 
     def confirm(self, provider_ref: Optional[str]) -> Optional[dict]:
         try:

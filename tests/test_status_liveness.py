@@ -729,6 +729,19 @@ def test_empty_panel_is_a_complete_cycle(monkeypatch):
     assert "self._tick_completed_fully = True" in window, (
         "the empty-panel early-return must count as a COMPLETE cycle")
     assert window.find("self._tick_completed_fully = True") < \
-        window.find("_write_state(success=False)"), (
-        "the flag must be set before the stalled-state write so the "
+        window.find("_write_state(success=False, idle=True)"), (
+        "the flag must be set before the empty-state write so the "
         "watchdog thread never observes a stale marker")
+    assert "idle=True" in window, (
+        "an empty panel must record the IDLE state, not STALLED: 'no fixtures "
+        "upstream' and 'a cycle that did not complete' are different facts")
+
+
+def test_state_mapping_has_three_distinct_values():
+    """running / idle / stalled are three facts, not two: a completed cycle
+    with an empty board is IDLE, and only an incomplete cycle is STALLED."""
+    import inspect
+    body = inspect.getsource(PokerBetCollector._write_state_impl)
+    assert '"running" if success' in body
+    assert '"idle" if idle' in body
+    assert '"stalled"' in body
