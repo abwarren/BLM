@@ -30,12 +30,28 @@ persisted.  This module contains no credential values.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 from blm_v4.betting.config import credentials_present
+
+logger = None
+
+
+def _log():
+    """The betting logger, resolved lazily so importing this module never
+    depends on the telemetry stack (tests import the provider directly)."""
+    global logger
+    if logger is None:
+        try:
+            from blm_v2.telemetry.logging import get_logger
+            logger = get_logger("betting_provider")
+        except Exception:
+            logger = False
+    return logger or None
 
 
 class ProviderUnavailable(Exception):
@@ -171,6 +187,14 @@ class PokerBetBrowserProvider(BetProvider):
         self._event_resolver = event_resolver
         # None ⇒ the bridge's own default (45 s) applies
         self._place_budget_s = place_budget_s
+        # The cached bridge is valid ONLY while its browser and page are
+        # alive: a browser relaunch leaves a dead page handle behind and
+        # nothing else resets it.  Remember whether we own the adapter (an
+        # injected one belongs to the caller) and which thread built the
+        # Playwright objects (they are thread-affine).
+        self._owns_adapter = adapter is None
+        self._wire_thread: Optional[int] = None
+        self._rewires = 0
 
     # ── game_id → the event label the browser resolves ───────────────
     def _event_label(self, game_id: str) -> str:
@@ -251,7 +275,9 @@ class PokerBetBrowserProvider(BetProvider):
     # ── lazy wiring (the real CDP browser + PokerBet adapter) ─────────
     def _wire(self) -> None:
         if self._bridge is not None:
-            return
+            if self._transport_usable():
+                return
+            self._drop_transport()
         from blm_v4.execution.pokerbet.browser import CdpBrowser
         from blm_v4.execution.pokerbet.dom import PokerBetDomAdapter
         from blm_v4.execution.browser_bridge import ResolverBrowserBridge
@@ -266,6 +292,66 @@ class PokerBetBrowserProvider(BetProvider):
         if self._place_budget_s is not None:
             _kw["place_budget_s"] = float(self._place_budget_s)
         self._bridge = ResolverBrowserBridge(self._adapter, **_kw)
+        self._wire_thread = threading.get_ident()
+
+    def _transport_usable(self) -> bool:
+        """True only while the cached bridge's browser AND page are alive.
+
+        The provider holds ONE Playwright connection for the process's life.
+        When the browser is relaunched underneath it (crash, snap refresh,
+        operator restart) the page handle is dead for good: the balance reads
+        None and every submission fails at the transport, so the engine only
+        recovers on a server restart.  Probing liveness here lets ``_wire``
+        rebuild the connection on the next pass instead.
+
+        Playwright's sync objects are thread-affine — probing them from a
+        thread that did not create them raises — so an off-thread caller
+        keeps the previous reuse-only behaviour.  Absence of evidence is not
+        death: an adapter whose page was never attached is left alone (the
+        pre-existing fail-closed path already handles it).
+        """
+        if self._bridge is None:
+            return False
+        if self._wire_thread is not None and \
+                self._wire_thread != threading.get_ident():
+            return True
+        browser = getattr(self._adapter, "_browser", None)
+        page = getattr(self._adapter, "_page", None)
+        try:
+            if browser is not None and not browser.connected:
+                return False
+        except Exception:
+            return False
+        if page is None:
+            return True
+        try:
+            return not page.is_closed()
+        except Exception:
+            return False
+
+    def _drop_transport(self) -> None:
+        """Forget a dead bridge (and the browser we attached) so ``_wire``
+        re-attaches to whatever process is on the CDP port now."""
+        if self._owns_adapter:
+            browser = getattr(self._adapter, "_browser", None)
+            drop = getattr(browser, "disconnect", None)
+            if callable(drop):
+                try:
+                    drop()
+                except Exception:
+                    pass
+        self._bridge = None
+        if self._owns_adapter:
+            self._adapter = None
+        self._rewires += 1
+        try:
+            log = _log()
+            if log is not None:
+                log.warning("provider_transport_rewired",
+                            reason="cached browser/page is dead",
+                            rewires=self._rewires)
+        except Exception:
+            pass
 
     def account_balance(self) -> Optional[float]:
         """The signed-in PokerBet account balance (decimal), or None when it
