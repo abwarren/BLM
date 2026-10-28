@@ -635,6 +635,42 @@ def main() -> None:
                     dry_run=betting_cfg.dry_run,
                     enabled=betting_store.is_enabled())
 
+        # ── FAST LANE (2026-10-28): the trade gate decided on FRESH rows ───
+        # The poll worker above decides on the /api/v4/live payload, which is
+        # 90-190 s old by construction (a build takes ~100 s; the unit sets a
+        # 90 s cache TTL).  A TC-X moment lasts a MEDIAN of one captured row,
+        # so that payload samples almost none of them: 1 candidate in 4,246
+        # passes since 2026-10-15, against ~100 qualifying runs the same rows
+        # show offline.  This lane reads the freshest captured rows every few
+        # seconds and runs the SAME executor against the SAME store — it
+        # changes WHEN the decision is taken, never WHAT is decided (every
+        # executor gate, limit and the one-bet-per-game rule still run).
+        # It builds its OWN provider on its own thread (Playwright sync
+        # objects are thread-affine; sharing the worker's provider raised
+        # greenlet.error on every balance read).  Disable with
+        # FAST_LANE_ENABLED=0.
+        if str(os.environ.get("FAST_LANE_ENABLED", "1")).strip().lower() \
+                not in ("0", "false", "no", "off", ""):
+            try:
+                from blm_v4.betting.fast_lane import FastLaneWorker
+                fast_lane = FastLaneWorker(
+                    prod_db_path=root / "blm_pokerbet.db",
+                    clean_db_path=root / "blm_metrics_clean.db",
+                    cfg=betting_cfg, store=betting_store,
+                    interval_s=float(
+                        os.environ.get("FAST_LANE_INTERVAL_S", "3")),
+                    lookback_s=float(
+                        os.environ.get("FAST_LANE_LOOKBACK_S", "120")),
+                    log=logger.info)
+                fast_lane.start()
+                app.state._fast_lane = fast_lane
+                logger.info("fast_lane_started",
+                            interval_s=fast_lane.interval_s,
+                            lookback_s=fast_lane.lookback_s,
+                            dry_run=betting_cfg.dry_run)
+            except Exception:
+                logger.exception("fast_lane_start_failed")
+
         # ── LIVE ALERT STATS worker ───────────────────────────────────
         # Started LAST of the workers: it is read-only and its first scan is
         # a ~10 s full-history read, so it must never delay the pipeline
@@ -676,6 +712,9 @@ def main() -> None:
         betting_worker = getattr(app.state, "_betting_worker", None)
         if betting_worker is not None:
             betting_worker.stop(timeout=2)
+        fast_lane = getattr(app.state, "_fast_lane", None)
+        if fast_lane is not None:
+            fast_lane.stop(timeout=2)
         stats_worker_obj = getattr(app.state, "_stats_worker", None)
         if stats_worker_obj is not None:
             stats_worker_obj.stop(timeout=2)
