@@ -284,10 +284,41 @@ class PokerBetBrowserProvider(BetProvider):
         if self._adapter is None:
             b = CdpBrowser(self._cdp_url).connect()
             self._adapter = PokerBetDomAdapter(b, hydrate_timeout_ms=self._hydrate)
-            try:
-                self._adapter._page = b.page()
-            except Exception:
-                pass
+            page = b.page()
+            self._adapter._page = page
+            # A relaunched browser restores its tabs in an ARBITRARY order and
+            # some of them never render the signed-in header (no
+            # .balanceAmount) — observed live: the first pokerbet tab was a
+            # stale event page with no header while a later tab showed the
+            # balance.  Attaching to "the first pokerbet tab" therefore pins the
+            # balance to None for the life of the bridge.  Prefer a tab whose
+            # balance actually READS; if none does, navigate the attached tab to
+            # the live page so it becomes a usable one.
+            if self._adapter.read_balance() is None:
+                picked = False
+                try:
+                    pages = list(b.context.pages)
+                except Exception:
+                    pages = []
+                for cand in pages:
+                    try:
+                        if "pokerbet.co.za" not in (cand.url or ""):
+                            continue
+                        self._adapter._page = cand
+                        if self._adapter.read_balance() is not None:
+                            picked = True
+                            break
+                    except Exception:
+                        continue
+                if not picked:
+                    self._adapter._page = page
+                    try:
+                        page.goto("https://www.pokerbet.co.za/en/sports/live",
+                                  wait_until="domcontentloaded",
+                                  timeout=self._hydrate)
+                        page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
         _kw = {}
         if self._place_budget_s is not None:
             _kw["place_budget_s"] = float(self._place_budget_s)
@@ -324,6 +355,13 @@ class PokerBetBrowserProvider(BetProvider):
             return False
         if page is None:
             return True
+        try:
+            # a blank / non-pokerbet page can never read a balance or resolve an
+            # event: treat it as a dead attach so the next pass rebuilds
+            if "pokerbet.co.za" not in (page.url or ""):
+                return False
+        except Exception:
+            return False
         try:
             return not page.is_closed()
         except Exception:
