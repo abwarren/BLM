@@ -782,6 +782,13 @@ def main() -> None:
         host=HOST,
         port=PORT,
         reload=RELOAD,
+        # uvicorn closes its sockets, then WAITS for in-flight connections with
+        # no default bound, and only THEN fires the app's shutdown handlers.
+        # A single hung sync request (measured: /api/v4/live at 45 s) therefore
+        # prevented every shutdown step from running and the unit was SIGKILLed
+        # at its stop timeout - 90 s of 502s per restart.  Bounding the wait
+        # lets the (bounded, logged) shutdown actually run.
+        timeout_graceful_shutdown=5,
         log_level="info" if ENVIRONMENT == "development" else "warning",
         access_log=False,
     )

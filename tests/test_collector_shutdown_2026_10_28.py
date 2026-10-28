@@ -244,3 +244,14 @@ def test_every_shutdown_step_is_bounded_and_logged():
     assert "shutdown_step step=%s ok=%s seconds=" in src, (
         "a wedged step must name itself in the journal instead of costing the "
         "unit's whole stop timeout")
+
+
+def test_the_server_bounds_its_graceful_wait_so_shutdown_can_run():
+    """uvicorn fires the app's shutdown handlers only after every connection
+    closes; one hung request used to make every step unreachable."""
+    src = SERVER_PY.read_text(encoding="utf-8")
+    i = src.index("uvicorn.run(")
+    call = src[i:i + 600]
+    assert "timeout_graceful_shutdown=" in call, (
+        "without it, a hung request prevents the shutdown handler from running "
+        "and the unit is SIGKILLed at its stop timeout")
