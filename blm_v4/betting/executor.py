@@ -295,15 +295,24 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
 
 
 def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
-            provider) -> dict:
+            provider, authorization: Optional[str] = None) -> dict:
     """Submit one claimed candidate to the provider and record the HONEST
     outcome.  In DRY_RUN the DryRunProvider answers ACCEPTED with a
-    dry-run reference; no network call, no credentials (§11)."""
+    dry-run reference; no network call, no credentials (§11).
+
+    ``authorization`` is the ONE-SHOT manual token that the manual endpoint has
+    already bound, validated and CONSUMED against this exact wager.  With the
+    global AUTO-BET switch OFF it lets that single wager reach the provider,
+    which is the whole point of REAL_MONEY_TEST mode: one manual bet without
+    re-arming the autonomous engine.  Every autonomous caller passes nothing,
+    so the kill switch still blocks them exactly as before — the token can only
+    ever authorise the ONE wager it was consumed for, never a path or a retry.
+    """
     execution_id = candidate["execution_id"]
     ik = candidate["idempotency_key"]
     # The kill switch is re-read at the submission boundary; a worker's
     # earlier polling check cannot authorize a later provider call.
-    if not store.is_enabled():
+    if not store.is_enabled() and not authorization:
         store.update_status(execution_id, "BLOCKED",
                             error_code="GLOBAL_KILL_SWITCH",
                             error_message="global betting kill switch is OFF",
