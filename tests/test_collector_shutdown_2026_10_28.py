@@ -215,8 +215,32 @@ def test_the_shutdown_handler_stops_the_browser_owner_first():
     alive until SIGKILL."""
     src = SERVER_PY.read_text(encoding="utf-8")
     body = src[src.index("async def stop_pipeline"):]
-    body = body[:body.index('logger.info("pipeline_stopped")')]
-    assert "collector.stop(timeout=" in body, (
+    body = body[:body.index("pipeline_stopped")]
+    marker = '_step("collector", collector.stop'
+    assert marker in body, (
         "the shutdown handler must stop the collector with a bounded join")
-    assert body.index("collector.stop(timeout=") < body.index("await scheduler.stop()"), (
+    assert body.index(marker) < body.index("await scheduler.stop()"), (
         "the collector must be stopped BEFORE the scheduler and workers")
+
+
+def test_network_producers_are_stopped_before_the_scheduler():
+    """The reconciler kept fetching for the WHOLE 90 s stop because its stop()
+    sat behind a 25 s scheduler join.  Everything that touches the network or
+    the browser must stop first."""
+    src = SERVER_PY.read_text(encoding="utf-8")
+    body = src[src.index("async def stop_pipeline"):
+               src.index("pipeline_stopped")]
+    sched = body.index("await scheduler.stop()")
+    for token in ('_step("collector"', '_step("result_reconciler"',
+                  '_step("fast_lane"', '_step("betting_worker"',
+                  '_step("result_verifier"'):
+        assert token in body, token + " must be stopped by the shutdown handler"
+        assert body.index(token) < sched, token + " must stop BEFORE the scheduler"
+
+
+def test_every_shutdown_step_is_bounded_and_logged():
+    src = SERVER_PY.read_text(encoding="utf-8")
+    assert "def _step(name, fn, timeout)" in src
+    assert "shutdown_step step=%s ok=%s seconds=" in src, (
+        "a wedged step must name itself in the journal instead of costing the "
+        "unit's whole stop timeout")

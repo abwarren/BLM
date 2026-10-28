@@ -687,63 +687,80 @@ def main() -> None:
 
     @app.on_event("shutdown")
     async def stop_pipeline():
-        # The collector owns the Playwright browser and a daemon loop that
-        # retries its page.  systemd stops the whole cgroup
-        # (KillMode=control-group), so chromium dies the moment SIGTERM lands;
-        # stopping the collector FIRST and joining it turns a 30-90 s stop
-        # (ending in SIGKILL) into a tick's worth of work, and stops the 1 Hz
-        # "Tick error" storm that filled the journal on every restart.
-        try:
-            if not collector.stop(timeout=15):
-                logger.warning("collector_thread_still_alive_after_stop")
-        except Exception:
-            logger.exception("collector_stop_failed")
-        await scheduler.stop()
-        thread = getattr(app.state, "_scheduler_thread", None)
-        if thread and thread.is_alive():
-            thread.join(timeout=25)
-        # the reconciler is daemon=True and its loop sleeps — the join is a
-        # formality that keeps shutdown ordering explicit
-        recthread = getattr(app.state, "_reconciler_thread", None)
-        if recthread and recthread.is_alive():
-            recthread.join(timeout=2)
-        settle_worker = getattr(app.state, "_settle_worker", None)
-        if settle_worker is not None:
-            settle_worker.stop(timeout=2)
-        wal_hygiene_worker = getattr(app.state, "_wal_hygiene_worker", None)
-        if wal_hygiene_worker is not None:
-            wal_hygiene_worker.stop(timeout=2)
+        """Bounded, ordered shutdown — producers first.
+
+        systemd stops the whole cgroup (KillMode=control-group), so chromium and
+        every outbound fetch die the instant SIGTERM lands.  Measured
+        2026-10-28: a stop took 90 s and ended in SIGKILL while the result
+        reconciler kept issuing fetches (one FAILED_ATTEMPT per second) for the
+        WHOLE window, because its stop() sat behind a 25 s scheduler join.
+        Every second of that window is a 502 on /api/v4/status, which the board
+        paints as "API/DATA UNAVAILABLE".
+
+        Order: the things that touch the NETWORK/BROWSER stop first, then the
+        scheduler that drives them, then the passive DB workers.  Each step is
+        bounded and logged with its duration, so a future wedge names itself
+        instead of costing the unit's whole stop timeout.
+        """
+        t0 = time.monotonic()
+
+        def _step(name, fn, timeout):
+            s0 = time.monotonic()
+            ok = None
+            try:
+                ok = fn(timeout)
+            except Exception:
+                logger.exception("shutdown_step_failed step=%s", name)
+            logger.info("shutdown_step step=%s ok=%s seconds=%.2f", name, ok,
+                        time.monotonic() - s0)
+            return ok
+
+        # ── 1. producers: browser owners and outbound fetchers ──────────
+        _step("collector", collector.stop, 15)
         result_reconciler = getattr(app.state, "_result_reconciler", None)
         if result_reconciler is not None:
-            result_reconciler.stop(timeout=2)
+            _step("result_reconciler", result_reconciler.stop, 5)
             try:
                 result_reconciler.reconciler._fetcher.close()
             except Exception:
                 pass
-        result_verifier = getattr(app.state, "_result_verifier", None)
-        if result_verifier is not None:
-            result_verifier.stop(timeout=2)
-        betting_worker = getattr(app.state, "_betting_worker", None)
-        if betting_worker is not None:
-            betting_worker.stop(timeout=2)
         fast_lane = getattr(app.state, "_fast_lane", None)
         if fast_lane is not None:
-            fast_lane.stop(timeout=2)
-        stats_worker_obj = getattr(app.state, "_stats_worker", None)
-        if stats_worker_obj is not None:
-            stats_worker_obj.stop(timeout=2)
-        pace_ref_worker = getattr(app.state, "_pace_ref_worker", None)
-        if pace_ref_worker is not None:
-            pace_ref_worker.stop(timeout=2)
-        line_ref_worker = getattr(app.state, "_line_ref_worker", None)
-        if line_ref_worker is not None:
-            line_ref_worker.stop(timeout=2)
+            _step("fast_lane", fast_lane.stop, 5)
+        betting_worker = getattr(app.state, "_betting_worker", None)
+        if betting_worker is not None:
+            _step("betting_worker", betting_worker.stop, 5)
+        result_verifier = getattr(app.state, "_result_verifier", None)
+        if result_verifier is not None:
+            _step("result_verifier", result_verifier.stop, 5)
+
+        # ── 2. the scheduler that drives them, then its thread ──────────
+        await scheduler.stop()
+        thread = getattr(app.state, "_scheduler_thread", None)
+        if thread and thread.is_alive():
+            thread.join(timeout=10)
+        recthread = getattr(app.state, "_reconciler_thread", None)
+        if recthread and recthread.is_alive():
+            recthread.join(timeout=2)
+
+        # ── 3. passive DB workers ───────────────────────────────────────
+        for name, attr in (("settle_worker", "_settle_worker"),
+                           ("wal_hygiene_worker", "_wal_hygiene_worker"),
+                           ("stats_worker", "_stats_worker"),
+                           ("pace_ref_worker", "_pace_ref_worker"),
+                           ("line_ref_worker", "_line_ref_worker")):
+            worker = getattr(app.state, attr, None)
+            if worker is not None:
+                _step(name, worker.stop, 2)
+
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
             sct.cancel()
-            try: await sct
-            except asyncio.CancelledError: pass
-        logger.info("pipeline_stopped")
+            try:
+                await sct
+            except asyncio.CancelledError:
+                pass
+        logger.info("pipeline_stopped seconds=%.2f", time.monotonic() - t0)
 
     # ── Start uvicorn ────────────────────────────────────────
     import uvicorn
