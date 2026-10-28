@@ -703,6 +703,7 @@ def main() -> None:
         instead of costing the unit's whole stop timeout.
         """
         t0 = time.monotonic()
+        deadline = t0 + 8.0   # hard cap on the whole handler
 
         def _note(msg):
             # stderr as well as the logger: uvicorn may tear logging down
@@ -718,6 +719,11 @@ def main() -> None:
                 pass
 
         def _step(name, fn, timeout):
+            now = time.monotonic()
+            if now >= deadline:
+                _note("shutdown_step_skipped step=%s budget=0" % name)
+                return None
+            timeout = min(timeout, max(0.1, deadline - now))
             s0 = time.monotonic()
             ok = None
             try:
@@ -751,10 +757,10 @@ def main() -> None:
         await scheduler.stop()
         thread = getattr(app.state, "_scheduler_thread", None)
         if thread and thread.is_alive():
-            thread.join(timeout=3)
+            thread.join(timeout=1)
         recthread = getattr(app.state, "_reconciler_thread", None)
         if recthread and recthread.is_alive():
-            recthread.join(timeout=2)
+            recthread.join(timeout=1)
 
         # ── 3. passive DB workers ───────────────────────────────────────
         for name, attr in (("settle_worker", "_settle_worker"),
@@ -764,7 +770,7 @@ def main() -> None:
                            ("line_ref_worker", "_line_ref_worker")):
             worker = getattr(app.state, attr, None)
             if worker is not None:
-                _step(name, worker.stop, 1)
+                _step(name, worker.stop, 0.5)
 
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
@@ -788,7 +794,7 @@ def main() -> None:
         # prevented every shutdown step from running and the unit was SIGKILLed
         # at its stop timeout - 90 s of 502s per restart.  Bounding the wait
         # lets the (bounded, logged) shutdown actually run.
-        timeout_graceful_shutdown=5,
+        timeout_graceful_shutdown=2,
         log_level="info" if ENVIRONMENT == "development" else "warning",
         access_log=False,
     )

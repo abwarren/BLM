@@ -255,3 +255,12 @@ def test_the_server_bounds_its_graceful_wait_so_shutdown_can_run():
     assert "timeout_graceful_shutdown=" in call, (
         "without it, a hung request prevents the shutdown handler from running "
         "and the unit is SIGKILLed at its stop timeout")
+
+
+def test_the_whole_shutdown_has_a_hard_budget():
+    """Per-step timeouts are not enough: implementations join with their own
+    defaults, so the handler needs a global cap."""
+    src = SERVER_PY.read_text(encoding="utf-8")
+    assert "deadline = t0 + 8.0" in src
+    assert "shutdown_step_skipped" in src
+    assert "timeout = min(timeout, max(0.1, deadline - now))" in src
