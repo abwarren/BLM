@@ -322,14 +322,37 @@ class PokerBetDomAdapter(SelectionResolver):
         return False
 
     def _page_game_id(self) -> Optional[str]:
-        """The game id the CURRENT page is actually showing — parsed from
-        the event-view URL's trailing ``<event_id>/<name>`` segment.  A
-        stale/contaminated tab's URL is its own claim about which game is
-        rendered.  (Both the competition id and the event id are 6+ digits,
-        so the regex anchors on the FINAL id segment, not the first.)"""
+        """The game id the CURRENT page is actually showing — parsed from the
+        event-view URL's FINAL path segment.
+
+        A stale/contaminated tab's URL is its own claim about which game is
+        rendered, so the id is read from the URL and THEN compared to the
+        registered game (``find_event`` requires both the id and the teams).
+
+        TWO shapes are served, and both must resolve:
+
+        * ``…/<comp_id>/<event_id>/<name>``          — the event id is a
+          segment of its own (what the fixture in the tests still uses);
+        * ``…/<comp_id>-<comp>/<event_id>-<name>``   — LIVE-observed
+          2026-10-28: the id is a PREFIX of the final segment, with the slug
+          hyphenated onto it.  A regex demanding a bare ``/<event_id>/``
+          segment can never match this, so ``find_event`` returned False on
+          healthy, market-open events and every submission failed
+          ``EVENT_NOT_FOUND``.
+
+        Query/fragment are stripped first: the operator's tab carries
+        ``?profile=open&account=…`` and the SPA appends its own params.
+        """
         try:
-            url = str(self._page.url or "").rstrip("/")
-            m = re.search(r"/(\d{6,})/[^/]+$", url)
+            url = str(self._page.url or "")
+            path = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+            last = path.rsplit("/", 1)[-1]
+            # live shape: "<event_id>-<slug>" (id prefix of the final segment)
+            m = re.match(r"(\d{6,})(?:-|$)", last)
+            if m:
+                return m.group(1)
+            # legacy shape: "<event_id>" as its own final-but-one segment
+            m = re.search(r"/(\d{6,})/[^/]+$", path)
             return m.group(1) if m else None
         except Exception:
             return None

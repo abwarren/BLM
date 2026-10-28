@@ -394,6 +394,36 @@ def test_game_resolves_by_id_and_teams():
     assert adapter._page_game_id() == GID_A
 
 
+def test_game_resolves_when_the_event_id_is_a_slug_prefix():
+    """LIVE URL shape (observed 2026-10-28): the event id is a PREFIX of the
+    final segment — ``…/18296901-betual-euroleague/31383010-bc-dubai-…`` — not
+    a ``/<event_id>/`` segment of its own.  The shipped regex demanded the
+    bare segment, so ``_page_game_id()`` returned None, ``find_event()`` failed
+    closed on a healthy market-open event, and every submission ended
+    EVENT_NOT_FOUND.  The query string some tabs carry must not defeat it.
+    """
+    live_url = ("https://www.pokerbet.co.za/en/sports/live/event-view/"
+                "Basketball/Virtual%20Matches/18296901-betual-euroleague/"
+                + GID_A + "-team-a-virtual-team-b-virtual")
+    page = FakePage(url=live_url)
+    adapter = make_attached_adapter(page)
+    adapter.register_game(GAME_A, game_id=GID_A, home_team="Team A",
+                          away_team="Team B", classification="BETUAL_NBA",
+                          source_url=live_url)
+    assert adapter._page_game_id() == GID_A
+    assert adapter.find_event(GAME_A) is True
+
+    # the operator's tab carries SPA params; the id must still resolve
+    page.url = live_url + "?profile=open&account=messages&page=inbox"
+    assert adapter._page_game_id() == GID_A
+
+
+def test_game_id_absent_from_url_yields_none():
+    """No id in the path ⇒ None, so the identity leg can only refuse."""
+    page = FakePage(url="https://www.pokerbet.co.za/en/sports/live")
+    assert make_attached_adapter(page)._page_game_id() is None
+
+
 def test_unregistered_event_fails_closed():
     adapter = make_adapter()
     assert adapter.find_event("Some Other Game vs Someone") is False
