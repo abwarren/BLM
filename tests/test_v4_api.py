@@ -225,7 +225,7 @@ def test_status_endpoint(client):
     resp = client.get("/api/v4/status")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] in ("running", "stalled", "offline")
+    assert body["status"] in ("running", "idle", "stalled", "offline")
     assert body["db"] is not None
     assert body["db"]["total_games"] == 3
     per = body["db"]["per_class"]

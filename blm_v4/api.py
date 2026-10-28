@@ -1868,13 +1868,17 @@ def v4_status() -> dict:
         db["game_state_freshness"] = _freshest_game_state(conn, now)
     finally:
         conn.close()
-    # collector status: running (heartbeat fresh), stalled, offline
+    # collector status: running (heartbeat fresh, capture working), idle
+    # (heartbeat fresh, cycle completed, board EMPTY upstream — nothing to
+    # collect), stalled (heartbeat fresh but a cycle did not complete),
+    # offline (heartbeat age > 90 s)
     if state is None:
         col_status = "offline"
     else:
         last_tick_age = _age_s(state.get("last_tick_at"), now)
         if last_tick_age is not None and last_tick_age <= 90:
-            col_status = "running" if state.get("status") == "running" else "stalled"
+            raw = state.get("status")
+            col_status = raw if raw in ("running", "idle") else "stalled"
         else:
             col_status = "offline"
     # TWO distinct freshness surfaces (audit 2026-09-16 §8):

@@ -3743,8 +3743,13 @@ async function refresh() {
 
      GREEN   collector: RUNNING     verified from a live /status read:
                                     heartbeat fresh, process says "running".
+     GREY    collector: IDLE        verified: heartbeat fresh, the cycle
+                                    COMPLETED, and the board is empty
+                                    upstream — nothing to collect.  Not an
+                                    alarm; the banner stays down.
      ORANGE  collector: STALLED     verified: heartbeat fresh, but the
-                                    process state is not "running".
+                                    process state is "stalled" — a cycle did
+                                    NOT complete (capture/wedge fault).
      RED     collector: OFFLINE     verified: heartbeat age exceeds
                                     COLLECTOR_STALE_AFTER_S.  ONLY a
                                     heartbeat read can ever produce this.
@@ -3828,6 +3833,15 @@ function paintCollectorStatus(st, verified) {
     }
     if (col.status === "running") {
       if (cpill) { cpill.textContent = "collector: RUNNING"; cpill.style.color = "var(--green)"; }
+      setCollectorBanner(null);
+      return;
+    }
+    if (col.status === "idle") {
+      // The cycle COMPLETED and the board is empty upstream: there are no
+      // fixtures to collect (e.g. the virtual feed is between rounds).  That
+      // is not a fault, so it must not raise the STALLED alarm — the pill
+      // carries the state and the banner stays down.
+      if (cpill) { cpill.textContent = "collector: IDLE"; cpill.style.color = "var(--muted, #8a94a6)"; }
       setCollectorBanner(null);
       return;
     }
