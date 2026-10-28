@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import re
 import time
 import traceback
@@ -23,6 +24,18 @@ from playwright.sync_api import sync_playwright, Browser, Page, Route, Request
 from blm_v1.database import upsert_game, insert_snapshot, get_live_game
 
 logger = logging.getLogger(__name__)
+
+
+def _target_closed(exc: BaseException) -> bool:
+    """True when Playwright reports the page/context/browser is gone.
+
+    Matched by type name and message so the collector keeps no import-time
+    dependency on Playwright's private error classes.
+    """
+    if type(exc).__name__ in ("TargetClosedError", "BrowserClosedError"):
+        return True
+    msg = str(exc)
+    return "has been closed" in msg or "Target closed" in msg
 
 # ── Configuration ───────────────────────────────────────────────────
 
@@ -229,6 +242,9 @@ class SnapshotCollector:
     def __init__(self, headless: bool = True):
         self.headless = headless
         self._running = False
+        # Wakes the inter-tick / retry waits so a stop costs one tick at
+        # most instead of SCRAPE_INTERVAL or the retry backoff.
+        self._stop = threading.Event()
         self._browser: Optional[Browser] = None
         self._latest_state: Optional[dict] = None
         self._snapshot_count = 0
@@ -302,9 +318,20 @@ class SnapshotCollector:
                         try:
                             text = page.inner_text("body", timeout=5000)
                             state = extract_game_state(text)
-                        except Exception:
+                        except Exception as exc:
                             logger.error("Tick error: %s", traceback.format_exc())
-                            time.sleep(SCRAPE_INTERVAL)
+                            if not self._running or self._stop.is_set():
+                                break
+                            if _target_closed(exc):
+                                # A closed page cannot recover: systemd stops the
+                                # whole cgroup, so chromium dies the instant
+                                # SIGTERM lands.  Retrying the same dead page
+                                # spun at 1 error/s and held the unit open until
+                                # SIGKILL (26-91 s of 502s on every restart).
+                                # Leave the session: the finally closes it and
+                                # the loop below decides whether to restart.
+                                raise
+                            self._stop.wait(SCRAPE_INTERVAL)
                             continue
 
                         if state:
@@ -340,7 +367,7 @@ class SnapshotCollector:
                                 self._last_progress = progress
                         else:
                             logger.debug("No game state — waiting")
-                        time.sleep(SCRAPE_INTERVAL)
+                        self._stop.wait(SCRAPE_INTERVAL)
 
             except StalePageError as e:
                 logger.warning("Stale page — restarting session: %s", e)
@@ -363,7 +390,8 @@ class SnapshotCollector:
                 "Collector session ended unexpectedly — restarting in %.1fs",
                 backoff_s,
             )
-            time.sleep(backoff_s)
+            if self._stop.wait(backoff_s):
+                break
             backoff_s = min(backoff_s * 2.0, MAX_RETRY_BACKOFF_S)
 
     def _store_snapshot(self, state: dict) -> None:
@@ -390,7 +418,15 @@ class SnapshotCollector:
         self._snapshot_count += 1
 
     def stop(self) -> None:
+        """Ask the collector to stop.
+
+        Sets the wake flag as well as the running flag: without it a stop waits
+        out the current SCRAPE_INTERVAL (or the retry backoff) while the unit's
+        stop timeout runs.  The owning thread is joined by
+        ``V1CollectorAdapter.stop(timeout)``.
+        """
         self._running = False
+        self._stop.set()
 
 
 if __name__ == "__main__":

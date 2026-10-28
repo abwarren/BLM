@@ -44,6 +44,17 @@ class V1CollectorAdapter(Collector):
         self._thread = threading.Thread(target=self._v1.start, daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: Optional[float] = None) -> bool:
+        """Stop the collector and join its thread.
+
+        Returns True when the thread has ended.  The bounded join is what keeps
+        a restart from being SIGKILLed at the unit's stop timeout: the shutdown
+        handler waits a known time instead of racing the process exit.
+        """
         self._running = False
         self._v1.stop()
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()

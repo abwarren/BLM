@@ -687,6 +687,17 @@ def main() -> None:
 
     @app.on_event("shutdown")
     async def stop_pipeline():
+        # The collector owns the Playwright browser and a daemon loop that
+        # retries its page.  systemd stops the whole cgroup
+        # (KillMode=control-group), so chromium dies the moment SIGTERM lands;
+        # stopping the collector FIRST and joining it turns a 30-90 s stop
+        # (ending in SIGKILL) into a tick's worth of work, and stops the 1 Hz
+        # "Tick error" storm that filled the journal on every restart.
+        try:
+            if not collector.stop(timeout=15):
+                logger.warning("collector_thread_still_alive_after_stop")
+        except Exception:
+            logger.exception("collector_stop_failed")
         await scheduler.stop()
         thread = getattr(app.state, "_scheduler_thread", None)
         if thread and thread.is_alive():
@@ -732,7 +743,6 @@ def main() -> None:
             sct.cancel()
             try: await sct
             except asyncio.CancelledError: pass
-        collector.stop()
         logger.info("pipeline_stopped")
 
     # ── Start uvicorn ────────────────────────────────────────
