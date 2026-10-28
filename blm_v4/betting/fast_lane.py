@@ -146,6 +146,11 @@ class FastLaneWorker:
         #: minimum seconds between two attempts on the same stale game
         self.retry_gap_s = 20.0
         self._last_attempt_at: dict[str, float] = {}
+        #: market-gap monitor: own cadence, diagnostic only
+        self.gap_interval_s = 30.0
+        self.gap_threshold_s = 120.0
+        self._gap_at = 0.0
+        self._gap_logged: dict[str, float] = {}
         self._log = log or logger.info
         self._warn = getattr(logger, "warning", logger.info)
         self._stop = threading.Event()
@@ -349,6 +354,10 @@ class FastLaneWorker:
         rows = self.fresh_rows()
         summary["rows"] = len(rows)
         if not rows:
+            # heartbeat: an empty slate and a dead lane look identical in the
+            # journal otherwise, and that ambiguity is what hid the original
+            # stall.  Throttled inside _log_pass.
+            self._log_pass(summary)
             return summary
         pace_ref = self._pace_reference()
         stats = self.store.today_stats()
@@ -433,10 +442,71 @@ class FastLaneWorker:
                       status=out.get("status"),
                       error_code=out.get("error_code"))
             stats = self.store.today_stats()
+        # ── market-gap monitor (diagnostic, own clock, never a gate) ──
+        nowm = time.monotonic()
+        if (nowm - self._gap_at) >= self.gap_interval_s:
+            self._gap_at = nowm
+            summary["gaps"] = self._market_gap_check(sorted(seen))
         self._log_pass(summary)
         return summary
 
     # ── helpers ──────────────────────────────────────────────────────
+    def _market_gap_check(self, game_ids: list) -> int:
+        """How many of these games have a WS-vs-line market gap right now.
+
+        DIAGNOSTIC ONLY, it decides nothing.  For each game it compares the
+        age of the last WS ``MatchTotal`` row (market_observations) with the
+        age of the last full-game ``Total Points`` row (betual_line_observations).
+        When the line feed is more than ``gap_threshold_s`` fresher, the book
+        has re-listed the total under a new ``market_id`` and one transport
+        saw it while the other did not — the shape found on 2026-10-28 (event
+        31381886: total absent 12:25:36-12:37:09, re-listed with a new id).
+
+        Without this the only evidence is a stale capture, which cannot tell
+        "the book pulled the market" from "we stopped listening"."""
+        if not game_ids:
+            return 0
+        now = time.time()
+        found = 0
+        try:
+            conn = self._ro(self._prod_db)
+        except Exception:
+            return 0
+        try:
+            for gid in game_ids:
+                ws = conn.execute(
+                    "SELECT captured_at FROM market_observations "
+                    "WHERE source_game_id=? AND market_type='MatchTotal' "
+                    "ORDER BY captured_at DESC LIMIT 1", (gid,)).fetchone()
+                ln = conn.execute(
+                    "SELECT captured_at FROM betual_line_observations "
+                    "WHERE source_game_id=? AND market_name='Total Points' "
+                    "ORDER BY captured_at DESC LIMIT 1", (gid,)).fetchone()
+                ln_at = _epoch(ln["captured_at"]) if ln else None
+                if ln_at is None:
+                    continue          # no line feed for this event: not a gap
+                ws_at = _epoch(ws["captured_at"]) if ws else None
+                ws_age = None if ws_at is None else now - ws_at
+                ln_age = now - ln_at
+                if ws_age is not None and \
+                        (ws_age - ln_age) <= self.gap_threshold_s:
+                    continue
+                last = self._gap_logged.get(gid)
+                if last is not None and (now - last) < 600.0:
+                    continue          # one line per game per ten minutes
+                self._gap_logged[gid] = now
+                found += 1
+                self._log("market_gap", game_id=gid,
+                          ws_age_s=None if ws_age is None else round(ws_age),
+                          line_age_s=round(ln_age),
+                          ws_last=(ws["captured_at"] if ws else None),
+                          line_last=ln["captured_at"])
+        except Exception as e:
+            self._warn("market_gap_check_failed", error=str(e)[:200])
+        finally:
+            conn.close()
+        return found
+
     def _stale_attempt(self, game_id: str) -> tuple:
         """The operator's stale-line rule (2026-10-28): up to N attempts.
 
@@ -490,7 +560,7 @@ class FastLaneWorker:
         one line a minute, so the lane cannot flood the journal."""
         now = time.monotonic()
         interesting = bool(summary.get("armed") or summary.get("executed")
-                           or summary.get("would_bet"))
+                           or summary.get("would_bet") or summary.get("gaps"))
         if not interesting and (now - self._last_pass_log) < 60.0:
             return
         self._last_pass_log = now
@@ -501,4 +571,5 @@ class FastLaneWorker:
                   games=summary.get("games"), armed=summary.get("armed"),
                   executed=summary.get("executed"),
                   would_bet=summary.get("would_bet"),
+                  gaps=summary.get("gaps"),
                   refused_top=top or None)

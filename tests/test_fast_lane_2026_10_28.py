@@ -206,3 +206,49 @@ def test_one_bet_per_game_across_passes(tmp_path):
     assert first["would_bet"] == 1
     assert second["would_bet"] == 0 and second["executed"] == 0
     assert store.today_stats()["bets"] == 1
+
+
+# ── 7. the market-gap monitor (diagnostic: WS total vs line feed) ─────
+def _market_db(tmp_path, ws_age_s=None, line_age_s=5.0, game="31380565"):
+    path = tmp_path / "blm_pokerbet.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE IF NOT EXISTS market_observations "
+                "(source_game_id TEXT, market_type TEXT, captured_at TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS betual_line_observations "
+                "(source_game_id TEXT, market_name TEXT, captured_at TEXT)")
+    now = datetime.now(timezone.utc)
+    if ws_age_s is not None:
+        con.execute("INSERT INTO market_observations VALUES (?,?,?)",
+                    (game, "MatchTotal",
+                     _iso(now - timedelta(seconds=ws_age_s))))
+    if line_age_s is not None:
+        con.execute("INSERT INTO betual_line_observations VALUES (?,?,?)",
+                    (game, "Total Points",
+                     _iso(now - timedelta(seconds=line_age_s))))
+    con.commit()
+    con.close()
+    return path
+
+
+def test_market_gap_detected_when_ws_lags_the_line_feed(tmp_path):
+    _market_db(tmp_path, ws_age_s=600, line_age_s=5)
+    w, _ = _worker(tmp_path, [_row()])
+    assert w._market_gap_check(["31380565"]) == 1
+
+
+def test_market_gap_detected_when_ws_has_no_row_at_all(tmp_path):
+    _market_db(tmp_path, ws_age_s=None, line_age_s=5)
+    w, _ = _worker(tmp_path, [_row()])
+    assert w._market_gap_check(["31380565"]) == 1
+
+
+def test_no_market_gap_when_both_feeds_are_fresh(tmp_path):
+    _market_db(tmp_path, ws_age_s=5, line_age_s=8)
+    w, _ = _worker(tmp_path, [_row()])
+    assert w._market_gap_check(["31380565"]) == 0
+
+
+def test_no_market_gap_without_any_line_observation(tmp_path):
+    _market_db(tmp_path, ws_age_s=600, line_age_s=None)
+    w, _ = _worker(tmp_path, [_row()])
+    assert w._market_gap_check(["31380565"]) == 0
