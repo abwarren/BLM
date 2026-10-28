@@ -3848,6 +3848,23 @@ function paintCollectorStatus(st, verified) {
     return;
   }
 
+  // ANSWERED, but NO collector block: the API is reachable and a server-only
+  // deployment publishes no heartbeat at all.  That is NOT "API unavailable" —
+  // say what is actually true and quote the freshest COMPLETE state age.
+  if (verified && st) {
+    const gsf = st.db && st.db.game_state_freshness;
+    let dataAgeS = gsf && typeof gsf.state_age_seconds === "number"
+      ? gsf.state_age_seconds : null;
+    if (dataAgeS === null && st.db && st.db.last_snapshot_at) {
+      dataAgeS = (now - new Date(st.db.last_snapshot_at).getTime()) / 1000;
+    }
+    if (cpill) { cpill.textContent = "collector: NO HEARTBEAT"; cpill.style.color = "var(--orange)"; }
+    setCollectorBanner("amber",
+      "COLLECTOR NOT REPORTING — API reachable, no heartbeat published"
+      + (dataAgeS !== null && isFinite(dataAgeS) ? ` · data ${fmtAgeExact(dataAgeS)} old` : ""));
+    return;
+  }
+
   // UNVERIFIED — the API could not be asked.  Never OFFLINE.
   if (cpill) { cpill.textContent = "collector: UNVERIFIED"; cpill.style.color = "var(--orange)"; }
   if (lastCollectorState && lastCollectorState.last_tick_at) {

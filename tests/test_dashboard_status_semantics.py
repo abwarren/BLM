@@ -216,3 +216,50 @@ def test_abort_is_documented_as_not_cancelling_server_work(js):
     # line breaks in the comment
     block = " ".join(js[block_start:idx].split())
     assert "does NOT cancel the server-side Python work" in block
+
+
+# ══════════════════════════════════════════════════════════════════════
+# FIX 4 (2026-10-28) — an ANSWERED status read with NO heartbeat block is
+# not "API/DATA UNAVAILABLE"
+# ══════════════════════════════════════════════════════════════════════
+#
+# On the stage box the collector is disabled by design, so /api/v4/status
+# answers 200 with ``collector: null`` — and the board painted
+# "API/DATA UNAVAILABLE — collector state cannot be verified · no heartbeat
+# read yet" while the API was answering in ~20 ms.  "The API could not be
+# asked" and "the API answered but publishes no heartbeat" are different
+# faults and must not share one label.  Nothing here may render OFFLINE:
+# absence is still never evidence of a down collector.
+
+def test_an_answered_read_without_a_heartbeat_is_not_labelled_api_unavailable(js):
+    body = _function_body(js, "paintCollectorStatus")
+    reporting = body.index("COLLECTOR NOT REPORTING")
+    unavailable = body.index("API/DATA UNAVAILABLE")
+    assert reporting < unavailable, (
+        "the served-but-heartbeat-less branch must precede the unverified one")
+    between = body[reporting:unavailable]
+    assert "return;" in between, (
+        "the heartbeat-less branch must return so it cannot fall through to "
+        "the API-unavailable text")
+    assert re.search(r"if\s*\(\s*verified\s*&&\s*st\s*\)", body[:reporting]), (
+        "the heartbeat-less branch must be gated on a VERIFIED read")
+    assert 'col.status === "idle"' not in between
+
+
+def test_a_heartbeat_less_read_quotes_the_data_age_not_a_tick_age(js):
+    body = _function_body(js, "paintCollectorStatus")
+    # the branch prelude (guard .. banner text) is where the age is computed
+    prelude = body[body.index("if (verified && st)"):body.index("COLLECTOR NOT REPORTING")]
+    assert "state_age_seconds" in prelude, (
+        "the banner must surface the freshest COMPLETE state age from db")
+    banner = body[body.index("COLLECTOR NOT REPORTING"):]
+    assert "fmtAgeExact" in banner[:400]
+    assert "last_tick_at" not in prelude, (
+        "with no heartbeat there is no tick age to quote")
+
+
+def test_the_unverified_path_keeps_its_api_unavailable_wording(js):
+    """The transport-failure wording still belongs to the unverified path."""
+    body = _function_body(js, "paintCollectorStatus")
+    tail = body[body.index('"collector: UNVERIFIED"'):]
+    assert "API/DATA UNAVAILABLE" in tail

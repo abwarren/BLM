@@ -519,7 +519,18 @@ FRESH_CONTEXT_AFTER_EMPTY = 3
 BROWSER_RELAUNCH_AFTER_EMPTY = 10
 BROWSER_MAX_LIFETIME_S = 3600.0
 
-STATE_DIR = Path(__file__).resolve().parent / "state"
+# Runtime state lives in the DATA ROOT, not beside the code.  blm_v4/api.py
+# serves its heartbeat from <data root>/blm_v4/state/collector_state.json, so a
+# checkout pointed at a DIFFERENT data root (stage: repo /home/ubuntu/blm,
+# BLM_DATA_ROOT=/srv/blm/data) must write where that reader looks — otherwise
+# the collector is running and /api/v4/status still serves collector: null.
+# Unset BLM_DATA_ROOT keeps the previous location (state beside the code), and
+# on the production box the collector checkout IS the data root, so nothing
+# moves there.
+_DATA_ROOT = (Path(os.environ["BLM_DATA_ROOT"])
+              if os.environ.get("BLM_DATA_ROOT")
+              else Path(__file__).resolve().parent.parent)
+STATE_DIR = _DATA_ROOT / "blm_v4" / "state"
 COMP_IDS_FILE = STATE_DIR / "comp_ids.json"
 STATE_FILE = STATE_DIR / "collector_state.json"
 
