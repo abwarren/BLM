@@ -2840,7 +2840,21 @@ class PokerBetCollector:
         fast path.  Every exception in the loop body is swallowed.
         """
         _block_deadline_signal()
-        deadline = FAST_TICK_S * FAST_LIVENESS_FACTOR  # 30 s threshold
+        # Liveness deadline: WATCHDOG_USEC / 3, never tighter than the
+        # FAST_TICK_S * FAST_LIVENESS_FACTOR floor (30 s) the fast path is
+        # designed for.  The hardcoded 30 s ignored WATCHDOG_USEC entirely, so
+        # under load a 27-40 s cycle (state_write alone has been measured at
+        # 27 s) stopped the pings while systemd was still set to 90-240 s — and
+        # the unit was killed even though the cycle DID complete.  Deriving it
+        # from the window keeps a genuine hang (no completed cycle for
+        # deadline + WatchdogSec) fail-closed while letting a slow cycle finish.
+        deadline = FAST_TICK_S * FAST_LIVENESS_FACTOR  # 30 s floor
+        try:
+            _wus = float(os.environ.get("WATCHDOG_USEC") or 0)
+        except (TypeError, ValueError):
+            _wus = 0.0
+        if _wus > 0:
+            deadline = max(deadline, _wus / 1e6 / 3.0)
         # Bounded startup grace (2026-09-29 forensic follow-up): ping
         # while the process has NEVER completed a fast cycle and start-up
         # is younger than min(WATCHDOG_STARTUP_GRACE_S, WatchdogSec / 2).
