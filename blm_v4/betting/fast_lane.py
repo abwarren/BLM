@@ -186,9 +186,11 @@ class FastLaneWorker:
         # thread — the same transport a submit will use.
         try:
             p = self._provider()
+            from blm_v4 import trade_window as _tw
             self._log("fast_lane_ready",
                       provider=getattr(p, "name", type(p).__name__),
-                      balance=self._balance())
+                      balance=self._balance(),
+                      pace_rung=getattr(_tw, "TRADE_MIN_PACE_RATIO", None))
         except Exception as e:
             self._warn("fast_lane_provider_wire_failed",
                        error=str(e)[:200])
