@@ -59,11 +59,21 @@ _RE_CYBER = re.compile(r"cyber|2k26|2k25|2k24", re.I)
 _RE_BETUAL = re.compile(r"betual", re.I)
 _RE_VIRTUAL_MATCHES = re.compile(r"virtual", re.I)
 
-# BetConstruct event-view URL taxonomy:
-# /en/sports/live/event-view/{sport}/{region}/{comp_id}/{comp_slug}/{game_id}/{slug}
+# BetConstruct event-view URL taxonomy.  PokerBet ships TWO path shapes for
+# the same event and switches between them server-side without notice:
+#
+#   split  (until 2026-10-26 13:58 SAST):
+#     /en/sports/live/event-view/{sport}/{region}/{comp_id}/{comp_slug}/{game_id}/{slug}
+#   merged (from 2026-10-26 13:58 SAST — upstream change, no announcement):
+#     /en/sports/live/event-view/{sport}/{region}/{comp_id}-{comp_slug}/{game_id}-{slug}
+#
+# Both must parse to the IDENTICAL taxonomy: the merged flip silently killed
+# every resolve (no taxonomy → 0 tracked games → zero capture for hours), so
+# the separator between the numeric id and its slug is "/" OR "-" here.
 _EVENT_URL_RE = re.compile(
-    r"/event-view/(?P<sport>[^/]+)/(?P<region>[^/]+)/(?P<competition_id>\d+)/"
-    r"(?P<competition_slug>[^/]+)/(?P<game_id>\d+)/(?P<game_slug>[^/?#]+)"
+    r"/event-view/(?P<sport>[^/]+)/(?P<region>[^/]+)/"
+    r"(?P<competition_id>\d+)(?:/|-)(?P<competition_slug>[^/]+)/"
+    r"(?P<game_id>\d+)(?:/|-)(?P<game_slug>[^/?#]+)"
 )
 
 
