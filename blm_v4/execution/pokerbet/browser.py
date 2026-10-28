@@ -78,6 +78,27 @@ class CdpBrowser:
         with self._lock:
             self._teardown()
 
+    def disconnect(self) -> None:
+        """Let go of OUR driver WITHOUT touching the operator's browser.
+
+        ``close()`` calls ``browser.close()``, which on a connect-over-CDP
+        handle asks the browser to shut down.  When the browser has been
+        relaunched underneath us (crash, snap refresh, operator restart) we
+        only want to drop the dead handle so a later ``connect()`` can
+        re-attach to the NEW process — stopping the Playwright driver drops
+        the CDP socket and leaves the browser and its signed-in session
+        running untouched.
+        """
+        with self._lock:
+            try:
+                if self._pw is not None:
+                    self._pw.stop()
+            except Exception:
+                pass
+            self._browser = None
+            self._context = None
+            self._pw = None
+
     def _teardown(self) -> None:
         try:
             if self._browser is not None:
