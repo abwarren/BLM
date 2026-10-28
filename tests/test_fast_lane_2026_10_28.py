@@ -80,6 +80,21 @@ def _worker(tmp_path, rows, *, cfg=None, enabled=True):
     return w, store
 
 
+def _claim(store, game, n, status="FAILED", error_code=None):
+    """Put one ledger attempt on the store, as a real attempt would."""
+    eid = f"bet-test-{game}-{n}-{status}"
+    ok, _ = store.claim({"execution_id": eid,
+                         "idempotency_key": f"{game}|75|{game}|75#r{n}",
+                         "game_id": game, "alert_id": f"{game}|75#r{n}",
+                         "checkpoint": "75", "status": status,
+                         "triggered_line": 196.5, "price": 1.9})
+    assert ok, "fixture claim must succeed"
+    if error_code:
+        with store._conn() as c:
+            c.execute("UPDATE bet_executions SET error_code=? "
+                      "WHERE execution_id=?", (error_code, eid))
+
+
 # ── 1. the legs ───────────────────────────────────────────────────────
 def test_legs_report_the_failing_leg_and_pass_when_all_hold(monkeypatch):
     # production runs the strict TC-X rung (unit file: TRADE_MIN_PACE_RATIO=1.16)
@@ -148,13 +163,39 @@ def test_kill_switch_off_means_no_bet(tmp_path):
     assert store.today_stats()["bets"] == 0
 
 
-# ── 5. a stale market is refused before the executor ──────────────────
-def test_stale_market_is_refused(tmp_path):
+# ── 5. a stale market is ATTEMPTED, not refused (operator rule 2026-10-28) ──
+def test_stale_market_is_attempted_not_refused(tmp_path):
     w, store = _worker(tmp_path, [_row(market_age_s=900)])
+    w.retry_gap_s = 0.0
     out = w.pass_once()
-    assert out["armed"] == 0
-    assert out["refused"].get("eligibility") == 1
-    assert store.today_stats()["bets"] == 0
+    assert out["armed"] == 1 and out["would_bet"] == 1
+    assert out["refused"].get("eligibility") is None
+    assert out.get("retries") == 1
+
+
+def test_stale_retries_stop_at_the_cap(tmp_path):
+    w, store = _worker(tmp_path, [_row(market_age_s=900)])
+    w.retry_gap_s = 0.0
+    for i in range(3):
+        assert w._stale_attempt("31380565") == (i + 1, None)
+        _claim(store, "31380565", i)
+    assert w._stale_attempt("31380565") == (
+        0, "eligibility:market_stale_exhausted")
+
+
+def test_ambiguous_attempt_ends_the_retries(tmp_path):
+    w, store = _worker(tmp_path, [_row(market_age_s=900)])
+    w.retry_gap_s = 0.0
+    _claim(store, "31380565", 0, status="UNKNOWN",
+           error_code="PROVIDER_AMBIGUOUS")
+    assert w._stale_attempt("31380565") == (0, "eligibility:ambiguous_hold")
+
+
+def test_retry_gap_spaces_the_attempts(tmp_path):
+    w, store = _worker(tmp_path, [_row(market_age_s=900)])
+    w.retry_gap_s = 60.0
+    assert w._stale_attempt("31380565")[0] == 1
+    assert w._stale_attempt("31380565") == (0, "eligibility:retry_backoff")
 
 
 # ── 6. one bet per game, even when the moment persists ────────────────

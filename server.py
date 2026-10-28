@@ -661,12 +661,15 @@ def main() -> None:
                         os.environ.get("FAST_LANE_INTERVAL_S", "3")),
                     lookback_s=float(
                         os.environ.get("FAST_LANE_LOOKBACK_S", "120")),
+                    stale_attempts=int(
+                        os.environ.get("FAST_LANE_STALE_ATTEMPTS", "3")),
                     log=logger.info)
                 fast_lane.start()
                 app.state._fast_lane = fast_lane
                 logger.info("fast_lane_started",
                             interval_s=fast_lane.interval_s,
                             lookback_s=fast_lane.lookback_s,
+                            stale_attempts=fast_lane.stale_attempts,
                             dry_run=betting_cfg.dry_run)
             except Exception:
                 logger.exception("fast_lane_start_failed")

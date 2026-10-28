@@ -224,6 +224,30 @@ class BettingStore:
                 (str(game_id),)).fetchone()
         return row is not None
 
+    def attempts_today(self, game_id: str) -> int:
+        """How many execution attempts this game already has TODAY.
+
+        Counted from the ledger, not from memory, so the cap survives a
+        restart.  Every attempt inserts one row (a retry carries its own
+        ``#rN`` idempotency key), so this is the honest count."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) FROM bet_executions WHERE game_id=? "
+                "AND day_utc=?", (str(game_id), _day())).fetchone()
+        return int(row[0]) if row else 0
+
+    def ambiguous_today(self, game_id: str) -> bool:
+        """True when ANY attempt on this game today ended AMBIGUOUS.
+
+        An ambiguous submit may already have moved money; the operator's rule
+        is that it is NEVER retried, so the retry path must see it."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM bet_executions WHERE game_id=? AND day_utc=? "
+                "AND (status='UNKNOWN' OR error_code='PROVIDER_AMBIGUOUS') "
+                "LIMIT 1", (str(game_id), _day())).fetchone()
+        return row is not None
+
     def set_game_enabled(self, game_id: str, enabled: bool) -> None:
         with self._lock, self._conn() as c:
             c.execute(

@@ -28,6 +28,15 @@ from must be seconds old, not minutes.
 
 Kill switch: reads ``store.is_enabled()`` fresh on every pass, exactly like the
 worker.  ``FAST_LANE_ENABLED=0`` disables the loop at start-up.
+
+STALE LINES (operator directive 2026-10-28): a captured market older than
+``MAX_MARKET_AGE_S`` is NOT refused outright.  The book's live betslip is the
+authority on line and price and the provider verifies both before it submits,
+so the lane spends up to ``stale_attempts`` (default 3, env
+``FAST_LANE_STALE_ATTEMPTS``) attempts on that game, at least ``retry_gap_s``
+apart.  Every attempt is its own ledger row (``#rN`` identity), the cap is
+counted from the ledger so a restart cannot reset it, and an AMBIGUOUS attempt
+ends the game's retries immediately — that money may already have moved.
 """
 from __future__ import annotations
 
@@ -116,6 +125,7 @@ class FastLaneWorker:
     def __init__(self, *, prod_db_path: Path, clean_db_path: Path,
                  cfg, store, provider=None, interval_s: float = 3.0,
                  lookback_s: float = DEFAULT_LOOKBACK_S,
+                 stale_attempts: int = 3,
                  log: Optional[Callable[..., None]] = None) -> None:
         self._prod_db = Path(prod_db_path)
         self._clean_db = Path(clean_db_path)
@@ -130,6 +140,12 @@ class FastLaneWorker:
         self._owns_provider = provider is None
         self.interval_s = float(interval_s)
         self.lookback_s = float(lookback_s)
+        #: how many attempts a STALE captured line gets (operator: "retry 3
+        #: times").  Counted from the ledger, so a restart cannot reset it.
+        self.stale_attempts = max(1, int(stale_attempts))
+        #: minimum seconds between two attempts on the same stale game
+        self.retry_gap_s = 20.0
+        self._last_attempt_at: dict[str, float] = {}
         self._log = log or logger.info
         self._warn = getattr(logger, "warning", logger.info)
         self._stop = threading.Event()
@@ -279,7 +295,8 @@ class FastLaneWorker:
         finally:
             conn.close()
 
-    def build_game(self, row, slug: Optional[str], avg_pace, now: float) -> dict:
+    def build_game(self, row, slug: Optional[str], avg_pace, now: float,
+                   attempt: int = 0) -> dict:
         """The executor's input contract, built from one captured row.
 
         ONLY the fields ``evaluate`` reads are populated.  Everything that
@@ -313,6 +330,9 @@ class FastLaneWorker:
                             "trigger_line": line},
             "under_alert_exec_armed": True,
             "under_alert_eligibility": {"eligible": True, "reason": None},
+            # 0 = the normally-fresh path; >0 = a stale-line retry, which the
+            # executor records under its own ``#rN`` identity
+            "under_alert_attempt": int(attempt or 0),
             "under_alert_competition": {"slug": slug, "known": True,
                                         "reason": None},
             "under_alert_line_move": {"entry_line": line, "open_line": None,
@@ -356,20 +376,27 @@ class FastLaneWorker:
             cap = _epoch(row["market_captured_at"])
             if cap is not None:
                 market_age = now - cap
-            if refusal is None and (market_age is None
-                                    or market_age > MAX_MARKET_AGE_S):
-                refusal = "eligibility:market_stale"
+            stale = (refusal is None
+                     and (market_age is None or market_age > MAX_MARKET_AGE_S))
+            attempt = 0
+            if stale:
+                # operator directive 2026-10-28: a stale captured line is not
+                # refused outright — retry it up to N times and let the book's
+                # live betslip be the authority on line and price.
+                attempt, refusal = self._stale_attempt(base)
             if refusal is not None:
                 key = refusal.split(":")[0]
                 summary["refused"][key] = summary["refused"].get(key, 0) + 1
                 continue
             summary["armed"] += 1
+            if attempt:
+                summary["retries"] = summary.get("retries", 0) + 1
             try:
                 if self.store.has_placed_bet(base):
                     continue
             except Exception:
                 continue
-            game = self.build_game(row, slug, avg, now)
+            game = self.build_game(row, slug, avg, now, attempt=attempt)
             bal = balance if isinstance(balance, (int, float)) else None
             res = evaluate(
                 game, cfg=self.cfg, store=self.store, enabled=True,
@@ -402,7 +429,7 @@ class FastLaneWorker:
                 summary["executed"] += 1
             self._log("fast_lane_execute", game_id=base,
                       line=row["live_total_line"], price=row["under_price"],
-                      progress=row["progress_pct"],
+                      progress=row["progress_pct"], retry=attempt,
                       status=out.get("status"),
                       error_code=out.get("error_code"))
             stats = self.store.today_stats()
@@ -410,6 +437,35 @@ class FastLaneWorker:
         return summary
 
     # ── helpers ──────────────────────────────────────────────────────
+    def _stale_attempt(self, game_id: str) -> tuple:
+        """The operator's stale-line rule (2026-10-28): up to N attempts.
+
+        A stale captured market is not refused outright, because the book's
+        LIVE betslip is the authority on line and price and the provider
+        verifies both before it submits.  Each attempt is its own ledger row
+        (``#rN`` idempotency key).  Two hard stops:
+          * an AMBIGUOUS attempt means money may already have moved — the
+            operator's rule is that it is never retried, so the game's
+            retries end there;
+          * the cap is counted from the ledger, so a restart cannot reset it.
+        Returns ``(attempt_number, refusal_or_None)``.
+        """
+        try:
+            if self.store.ambiguous_today(game_id):
+                return 0, "eligibility:ambiguous_hold"
+            used = self.store.attempts_today(game_id)
+        except Exception:
+            return 0, "eligibility:attempts_unverifiable"
+        if used >= self.stale_attempts:
+            return 0, "eligibility:market_stale_exhausted"
+        # space the attempts: a stale row repeats every pass, and three DOM
+        # round-trips inside nine seconds is hammering, not retrying
+        last = self._last_attempt_at.get(game_id)
+        if last is not None and (time.monotonic() - last) < self.retry_gap_s:
+            return 0, "eligibility:retry_backoff"
+        self._last_attempt_at[game_id] = time.monotonic()
+        return used + 1, None
+
     def _provider(self):
         """The provider, built on first use in the calling thread."""
         if self.provider is None:

@@ -115,6 +115,19 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if _ck is None:
         _ck = int(EXEC_MIN_PROGRESS_PCT)
     alert_id = f"{game.get('game_id')}|{_ck}"
+    # ── STALE-LINE RETRIES (operator directive 2026-10-28): a stale captured
+    # market may still be bettable against the book's LIVE betslip, and the
+    # provider verifies line and price there before it submits.  An attempt
+    # therefore carries its own identity so the ledger records each retry
+    # separately instead of collapsing them into one duplicate claim.  The
+    # poll path never sets this key, so its behaviour is unchanged.
+    _attempt = 0
+    try:
+        _attempt = max(0, int(game.get("under_alert_attempt") or 0))
+    except (TypeError, ValueError):
+        _attempt = 0
+    if _attempt > 0:
+        alert_id = f"{alert_id}#r{_attempt}"
     checkpoint = str(_ck)
     game_id = str(game.get("game_id") or "")
     if not game_id or _ck is None:
