@@ -704,41 +704,54 @@ def main() -> None:
         """
         t0 = time.monotonic()
 
+        def _note(msg):
+            # stderr as well as the logger: uvicorn may tear logging down
+            # before this handler finishes, and a silent shutdown is what made
+            # the 90 s stop invisible.
+            try:
+                print(msg, file=sys.stderr, flush=True)
+            except Exception:
+                pass
+            try:
+                logger.info(msg)
+            except Exception:
+                pass
+
         def _step(name, fn, timeout):
             s0 = time.monotonic()
             ok = None
             try:
                 ok = fn(timeout)
             except Exception:
-                logger.exception("shutdown_step_failed step=%s", name)
-            logger.info("shutdown_step step=%s ok=%s seconds=%.2f", name, ok,
-                        time.monotonic() - s0)
+                _note("shutdown_step_failed step=%s" % name)
+            _note("shutdown_step step=%s ok=%s seconds=%.2f"
+                  % (name, ok, time.monotonic() - s0))
             return ok
 
         # ── 1. producers: browser owners and outbound fetchers ──────────
-        _step("collector", collector.stop, 15)
+        _step("collector", collector.stop, 2)
         result_reconciler = getattr(app.state, "_result_reconciler", None)
         if result_reconciler is not None:
-            _step("result_reconciler", result_reconciler.stop, 5)
+            _step("result_reconciler", result_reconciler.stop, 1)
             try:
                 result_reconciler.reconciler._fetcher.close()
             except Exception:
                 pass
         fast_lane = getattr(app.state, "_fast_lane", None)
         if fast_lane is not None:
-            _step("fast_lane", fast_lane.stop, 5)
+            _step("fast_lane", fast_lane.stop, 1)
         betting_worker = getattr(app.state, "_betting_worker", None)
         if betting_worker is not None:
-            _step("betting_worker", betting_worker.stop, 5)
+            _step("betting_worker", betting_worker.stop, 1)
         result_verifier = getattr(app.state, "_result_verifier", None)
         if result_verifier is not None:
-            _step("result_verifier", result_verifier.stop, 5)
+            _step("result_verifier", result_verifier.stop, 1)
 
         # ── 2. the scheduler that drives them, then its thread ──────────
         await scheduler.stop()
         thread = getattr(app.state, "_scheduler_thread", None)
         if thread and thread.is_alive():
-            thread.join(timeout=10)
+            thread.join(timeout=3)
         recthread = getattr(app.state, "_reconciler_thread", None)
         if recthread and recthread.is_alive():
             recthread.join(timeout=2)
@@ -751,7 +764,7 @@ def main() -> None:
                            ("line_ref_worker", "_line_ref_worker")):
             worker = getattr(app.state, attr, None)
             if worker is not None:
-                _step(name, worker.stop, 2)
+                _step(name, worker.stop, 1)
 
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
@@ -760,7 +773,7 @@ def main() -> None:
                 await sct
             except asyncio.CancelledError:
                 pass
-        logger.info("pipeline_stopped seconds=%.2f", time.monotonic() - t0)
+        _note("pipeline_stopped seconds=%.2f" % (time.monotonic() - t0))
 
     # ── Start uvicorn ────────────────────────────────────────
     import uvicorn
