@@ -105,7 +105,8 @@ def _scan_now(window_s: int = 240) -> int:
     verdict of the live gate and the FIRST failing leg."""
     from blm_v4.trade_window import (exec_shortfall_reason,
                                      exec_alert_reason, execution_window_reason,
-                                     score_reason, trade_price_reason)
+                                     score_reason, trade_price_reason,
+                                     trade_competition_reason)
     conn = sqlite3.connect(f"file:{PROD_DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     ref = competition_pace_reference(conn)
@@ -142,7 +143,8 @@ def _scan_now(window_s: int = 240) -> int:
         slug, home, away = meta.get(gid, ("-", "?", "?"))
         avg = (ref.get(slug) or {}).get("avg_pace")
         pace = (r["required_pts_per_min"] / avg) if avg else None
-        why = (execution_window_reason(r["progress_pct"])
+        why = (trade_competition_reason(slug)
+               or execution_window_reason(r["progress_pct"])
                or score_reason(r["total_points"])
                or exec_alert_reason(r["required_pts_per_min"], avg, r["progress_pct"])
                or exec_shortfall_reason(r["required_pts_per_min"],
