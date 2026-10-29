@@ -1592,6 +1592,21 @@ table.cohort-ledger tr.st-unknown td { color: #f0c56b; }
 .vm-mode { display: inline-flex; gap: 2px; }
 .vm-mode .filter.active { background: var(--cyan); color: #04121a; }
 @media (max-width: 1200px) {
-  .live-table .c-odds, .live-table .c-age { display: none; }
+  /* Keep UNDER PRICE (a trading value); drop the two least actionable columns. */
+  .live-table .c-age, .live-table .c-lge { display: none; }
   .live-table-wrap { max-height: none; }
+  .live-table .c-game { max-width: 260px; min-width: 170px; }
+
+  /* Eight destinations on one line — scroll the bar, never wrap the labels. */
+  .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
+  .tabs .tab { white-space: nowrap; padding: 8px 10px; letter-spacing: .5px; font-size: 10px; }
+  .tabs .tab-note { display: none; }
+
+  /* Two deliberate rows instead of four: brand+controls, then status. */
+  .topbar { padding: 8px 12px; gap: 6px; }
+  .brand-sub { display: none; }
+  .status-cluster { flex-wrap: wrap; gap: 4px; }
+  .status-cluster .pill { font-size: 9px; padding: 2px 6px; }
+  .audio-toggle { font-size: 9px; padding: 3px 6px; }
+  .ab-top { flex-wrap: nowrap; gap: 4px; }
 }

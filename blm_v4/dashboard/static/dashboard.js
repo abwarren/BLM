@@ -2896,9 +2896,7 @@ function renderCards(payload) {
   const emptyEl = $("empty");
   if (emptyEl) {
     emptyEl.style.display = visible.length ? "none" : "block";
-    emptyEl.textContent = games.length
-      ? "no games match these filters — RESET FILTERS to widen the view"
-      : "Waiting for live data…";
+    emptyEl.textContent = liveEmptyMessage();
   }
 }
 
@@ -4811,6 +4809,21 @@ function cellText(g, labels) {
   };
 }
 
+/* One empty-state vocabulary for both presentations.  The previous copy always
+   blamed the filters; with the live-only default and a feed of finished games,
+   RESET was the ONE action that could not help. */
+function liveEmptyMessage() {
+  const payloadGames = (state.lastPayload && state.lastPayload.games)
+    || state.games || [];
+  const total = payloadGames.length;
+  if (!total) return "no games in the feed — the collector is not reporting";
+  if (state.hideNonLive) {
+    return `${total} games in the feed, none LIVE right now — ` +
+           `ADVANCED → SHOW ALL to include ended games`;
+  }
+  return "no games match these filters — RESET FILTERS to widen the view";
+}
+
 const liveRows = new Map();      // game_id -> { tr, cells: {col: td} }
 
 function renderLiveTable() {
@@ -4871,9 +4884,12 @@ function renderLiveTable() {
     if (!emptyRow) {
       emptyRow = document.createElement("tr");
       emptyRow.className = "live-empty";
-      emptyRow.innerHTML = '<td colspan="13" class="empty">no games match these filters — RESET FILTERS to widen the view</td>';
       host.replaceChildren(emptyRow);
     }
+    // Recompute EVERY render: the cause can change (feed arrives, filters change,
+    // SHOW ALL toggles) and a stale sentence is worse than no sentence.
+    const msg = '<td colspan="13" class="empty">' + esc(liveEmptyMessage()) + '</td>';
+    if (emptyRow.innerHTML !== msg) emptyRow.innerHTML = msg;
   } else if (emptyRow) {
     emptyRow.remove();
   }
