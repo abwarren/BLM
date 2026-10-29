@@ -110,3 +110,58 @@ Production, the `:2262` mirror, Auto-Bet configuration/execution and the cohort
 evaluator were untouched. Deployment target was `127.0.0.1:2263` only; the deploy
 script refuses any other host and restarts only the transient
 `blm-tc2263.service`. `:2262` health remained 200 throughout.
+
+---
+
+# Phase 2 — charcoal terminal redesign
+
+**Commits:** `b55f6e8` (theme, market zone, signal tags) · `0f5be49` (filter
+toolbar, inline ADVANCED) · `228545b` (toolbar row grouping).
+**Deployed:** `127.0.0.1:2263` from `228545b`; worktree clean.
+
+## Why, from the populated screenshots
+
+The earlier captures were taken in the default state, which on this slice is zero
+rows — they could not show density or hierarchy. Populated captures at 1440 and
+1280 (SHOW ALL) showed a flat blue-black field: header, toolbar and rows shared
+one surface; the price 1.90 was typographically identical to the line 178.5;
+numeric columns floated in uniform grey; SIGNAL could only ever be a dash because
+it rendered as plain text; and the ADVANCED popover floated over the toolbar and
+clipped the RESET button.
+
+## What changed
+
+| Area | Before | After |
+|---|---|---|
+| Palette | blue-black surfaces | neutral charcoal (`#141517` / `#1a1c1f` / `#202327`) with the cyan accent carrying hierarchy |
+| Rows | 34 px, near-invisible separation | 32-34 px, real zebra contrast, cyan hover, focus ring |
+| Numbers | uniform grey | near-white, tabular, right-aligned |
+| Market | line and price identical | MARKET zone tinted; price bold cyan at 13 px, line in a lighter slate |
+| Signal | plain text (`–`) | pill: amber `ACTIVE`, cyan `CP 75%`, dim `—` |
+| Cohort | plain text | bordered tag |
+| Toolbar | controls pinned left, empty middle, RESET stranded | `FILTERS` rule, boxed dataset tabs, grouped selectors, search, `ADVANCED` |
+| ADVANCED | absolutely positioned popover that covered RESET | inline disclosure that pushes content, never covers it |
+| Chips | own detached line | one row with `ACTIVE` label, row count and RESET |
+| Nav | — | active destination is a filled cyan pill, consistent with the toolbar |
+
+## Verification on the deployed build
+
+- interaction/layout acceptance: **26/26** (`acc_redesign.out`)
+- three viewports 1440×900 / 1280×800 / 1152×800: no page-level overflow, filters
+  and presentation toggle visible
+- no console errors, no page errors, no failed requests
+- row order and scroll position still survive a poll; no duplicate rows or poll
+  loop after navigation
+- read-only lifecycle: **5/5**, away-window **0** requests
+
+## Remaining, not fixed
+
+1. With ADVANCED **open**, its summary occupies a row above the expanded body, so
+   the toolbar reads as three rows. Closed (the default) it shares the row with
+   the ACTIVE chips and RESET. Cosmetic; not worth another CSS pass without a
+   visual sign-off.
+2. SIGNAL and COHORT are dashes for every row in this slice (no live games, no
+   cohort membership on ended games) — correct, but the tags cannot be visually
+   exercised here.
+3. The collector banner still costs ~30 px at the top on this host.
+4. REQ / ACT / PROG stay dashed because the projector block is live-only.
