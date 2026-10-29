@@ -205,13 +205,14 @@ Interpreter `/home/ubuntu/blm/.venv/bin/python`, `BLM_ALLOW_HEAVY_TESTS=1`,
 |---|---|---:|---:|---:|---:|---:|
 | base | `06c5ca4` | 2,741 | 2,484 | **111** | 146 | 546 s |
 | tip | `55e58e3` | 2,756 | 2,497 | **113** | 146 | 663 s |
-| final tip | `66707a6` | *run issued after this report was drafted — see `suite3-tip.log`* | | | | |
+| final tip | `66707a6` | — | 2,499 | **111** | 146 | 486 s |
 
 Base vs `55e58e3` delta: **111 inherited**, **2 new**, 0 fixed. Both new failures
 were static-contract tests pinned to the old markup
 (`dashboard.js?v=6855974.11`, `data-filter=""`); neither was a behavioural
 regression, and both were re-pointed at the new markup in `66707a6` with their
-intent preserved.
+intent preserved. **Final tip vs base: 111 vs 111 failures — 0 new, 0 fixed, and
+15 more passing tests** (the new selector suite).
 
 ### 6.2 Targeted sets
 
@@ -229,7 +230,8 @@ intent preserved.
   at 1440×900 and 1280×800, seven cohort cards, 12 KPI cards, 7-row comparison,
   paged ledger with firing-time price/line, data-quality cards, legacy
   diagnostics collapsed, no console/page errors, no failed requests.
-- **Live Games run:** 25/26 then **26/26** after the RESET-state fix — filters,
+- **Live Games run:** 25/26 on the first pass, **26/26 on the deployed build**
+  (`389c742`, i.e. `462ba6d` + test/docs commits) after the RESET-state fix — filters,
   chips, individual removal, empty state, sort stability across a poll
   (identical first-12 ids), scroll retention (600 → 600), no duplicate rows or
   poll loop after navigation, CARDS toggle + persistence, three viewports with
