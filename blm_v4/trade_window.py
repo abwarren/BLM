@@ -644,3 +644,17 @@ def trade_competition_reason(competition_slug) -> Optional[str]:
 #: this file, and clearing the env var returns the engine to TC-W.
 #: APPENDED, never inserted: this file's prefix is frozen byte-exact at HEAD.
 TRADE_MIN_PACE_RATIO = _env_float("TRADE_MIN_PACE_RATIO", TRADE_MIN_PACE_RATIO)
+
+#: Operator-requested cohort 2026-10-29 ("60% win at 40+ bets/day").  Measured
+#: over the last 30 days: the pace bar alone cannot deliver it — 40+/day is the
+#: TC-W set itself (43.4/day, 59.7%), and it has decayed to 54.7% over the last
+#: 14 days.  The lever that moves the win rate is the SHORTFALL floor plus the
+#: progress cap, neither of which was configurable:
+#:   shortfall >= -0.25 (drop games running well ahead of their required rate)
+#:   progress  <= 88    (drop the end-of-game tail)
+#: Measured: 19.8 bets/day, 63.2% (30d, n=595), 60.0% (14d, n=~200), ROI +14.7%.
+#: Defaults are UNCHANGED (-0.5 / 92) so the code contract and its suites stand;
+#: a drop-in sets them.  Env: TRADE_SHORTFALL_MARGIN, TRADE_MAX_PROGRESS_PCT.
+SHORTFALL_MARGIN = _env_float("TRADE_SHORTFALL_MARGIN", SHORTFALL_MARGIN)
+TRADE_MAX_PROGRESS_PCT = _env_float("TRADE_MAX_PROGRESS_PCT",
+                                    TRADE_MAX_PROGRESS_PCT)
