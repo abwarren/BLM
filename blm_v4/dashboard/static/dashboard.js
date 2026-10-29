@@ -2888,7 +2888,15 @@ function renderCards(payload) {
       state.cards.delete(gid);
     }
   }
-  $("empty").style.display = games.length ? "none" : "block";
+  // Empty state keyed off the rows ACTUALLY rendered, and it says which
+  // state it is: no data at all vs. no match for the current filters.
+  const emptyEl = $("empty");
+  if (emptyEl) {
+    emptyEl.style.display = visible.length ? "none" : "block";
+    emptyEl.textContent = games.length
+      ? "no games match these filters — RESET FILTERS to widen the view"
+      : "Waiting for live data…";
+  }
 }
 
 /* ── Detail modal ────────────────────────────────────────── */

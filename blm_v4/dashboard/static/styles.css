@@ -1534,3 +1534,21 @@ table.cohort-ledger tr.st-unknown td { color: #f0c56b; }
   .ds-counts { margin-left: 0; flex: 1 1 100%; }
   .tc-card-v { font-size: 18px; }
 }
+
+/* destination gutters — one consistent page margin for every view */
+.view { padding: 0 18px 32px; }
+.tc-header .cohort-meta { flex-wrap: wrap; justify-content: flex-end; max-width: 62%; }
+.ds-selects { min-width: 0; }
+.ds-toolbar .global-search { flex: 1 1 220px; min-width: 160px; width: auto; }
+
+/* the empty state must be READABLE, not a whisper over the backdrop */
+.grid .empty {
+  color: var(--text, #d7e1f0);
+  background: rgba(13, 20, 32, .86);
+  border: 1px dashed var(--border2);
+  border-radius: 10px;
+  padding: 22px 16px;
+  margin: 18px 0;
+  font-size: 12px;
+  letter-spacing: .4px;
+}
