@@ -140,14 +140,28 @@ def _stats(conn: sqlite3.Connection, key: str, cutoff_iso: str,
     lo = int(pbucket[1:])
     q += "AND p.progress_pct >= ? AND p.progress_pct < ? "
     params += [float(lo), float(lo + 5)]
-    rows = [r[0] for r in conn.execute(q, params).fetchall()]
-    n = len(rows)
+    # ── AGGREGATE IN SQL, never fetch the population ──────────────────
+    # This used to pull every matching pace into Python (a 4th-quarter
+    # population is ~30 000 rows) and compute mean/variance in a loop.  Measured
+    # on prod 2026-10-29: 4-70 s PER CALL, and a live payload asks for a
+    # benchmark per game per quarter — a pass took 10-30 minutes, so the betting
+    # worker was blind for half an hour at a time and missed most candidates.
+    # COUNT/SUM/SUM(x²) is the same statistic (σ = sqrt((Σx² − n·μ²)/(n−1)))
+    # computed by SQLite over the index, one row back instead of 30 000.
+    agg = q.replace("SELECT p.actual_pts_per_min FROM ",
+                    "SELECT COUNT(*), SUM(p.actual_pts_per_min), "
+                    "SUM(p.actual_pts_per_min * p.actual_pts_per_min) FROM ", 1)
+    row = conn.execute(agg, params).fetchone()
+    n = int(row[0] or 0)
     if n == 0:
         return PaceBenchmark(key, 0, None, None)
-    mean = sum(rows) / n
+    s1 = float(row[1] or 0.0)
+    s2 = float(row[2] or 0.0)
+    mean = s1 / n
     if n < 2:
         return PaceBenchmark(key, n, round(mean, 6), None)
-    var = sum((x - mean) ** 2 for x in rows) / (n - 1)  # sample σ (n−1)
+    var = (s2 - n * mean * mean) / (n - 1)  # sample σ (n−1)
+    var = max(0.0, var)                     # float cancellation guard
     return PaceBenchmark(key, n, round(mean, 6), round(math.sqrt(var), 6))
 
 
