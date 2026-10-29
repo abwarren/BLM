@@ -91,6 +91,15 @@ def main(argv=None) -> int:
     pace_ref = competition_pace_reference(conn)
     slugs = {r["source_game_id"]: r["competition_slug"]
              for r in conn.execute("SELECT source_game_id, competition_slug FROM games")}
+    peaks: dict[str, float] = {}
+    cc0 = sqlite3.connect(f"file:{CLEAN_DB}?mode=ro", uri=True)
+    try:
+        for gid, peak in cc0.execute(
+                "SELECT source_game_id, MAX(total_points) FROM clean_observations "
+                "WHERE total_points IS NOT NULL GROUP BY source_game_id"):
+            peaks[gid] = peak
+    finally:
+        cc0.close()
     finals = {r["source_game_id"]: r["final_total"] for r in conn.execute(
         "SELECT source_game_id, final_total FROM game_results "
         "WHERE final_result_status = 'OK' AND final_total IS NOT NULL")}
@@ -147,7 +156,16 @@ def main(argv=None) -> int:
                      codes=coh["codes"], code=coh["code"],
                      final=final)
         if final is None:
-            entry.update(res="?", pnl=0.0)
+            # contested / not yet settled.  The collector is a second witness:
+            # if it already scored MORE than the line, the UNDER lost for
+            # certain (final >= peak > line) — that is a decided loss, not a
+            # missing result.  Anything else stays genuinely unknown.
+            peak = peaks.get(gid)
+            if peak is not None and peak > r["live_total_line"]:
+                entry.update(res="L", pnl=-a.units, contested=True)
+            else:
+                entry.update(res="?", pnl=0.0,
+                             contested=peak is not None)
         elif final < r["live_total_line"]:
             entry.update(res="W", pnl=(r["under_price"] - 1.0) * a.units)
         elif final > r["live_total_line"]:
@@ -157,6 +175,9 @@ def main(argv=None) -> int:
         pick[gid] = entry
 
     out = sorted(pick.values(), key=lambda e: e["ts"])
+    # counted BEFORE the unsettled filter: these are the candidates with no
+    # decidable outcome at all, and silently dropping them flatters the record
+    unknown_total = sum(1 for e in out if e["res"] == "?")
     if not a.unsettled:
         out = [e for e in out if e["res"] != "?"]
     if a.limit:
@@ -203,10 +224,17 @@ def main(argv=None) -> int:
     n = len(out)
     w = sum(1 for e in out if e["res"] == "W")
     l = sum(1 for e in out if e["res"] == "L")
+    unk = sum(1 for e in out if e["res"] == "?")
+    con = sum(1 for e in out if e.get("contested"))
     print(f"\n{n} candidates · W{w} L{l} "
           f"{'· win% ' + format(w / max(1, w + l) * 100, '.1f') if w + l else ''} "
           f"· {unit_sum:+.2f}u at {a.units:g}u   " +
           "  ".join(f"{c}={k}" for c, k in counts.items() if k))
+    if con or unknown_total:
+        print(f"   note: {con} settled as LOSSES on the collector's own score "
+              f"(peak passed the line before the feed stopped); "
+              f"{unknown_total} candidate(s) have no decidable result and are "
+              f"NOT in the figures above — see --unsettled")
     return 0
 
 
