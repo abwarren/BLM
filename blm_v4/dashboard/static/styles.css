@@ -1673,3 +1673,50 @@ body { background: var(--bg); }
 .live-table td.res-over { color: var(--red); font-weight: 700; }
 .live-table td.res-push { color: var(--amber); font-weight: 700; }
 .live-table td.c-age { color: var(--dim); }
+
+/* ═══════════ FILTER TOOLBAR (Live Games redesign, stage B) ═══════════ */
+.ds-toolbar {
+  background: linear-gradient(180deg, #1c1f23 0%, #181a1e 100%);
+  border: 1px solid var(--border2);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+  padding: 10px 14px 8px;
+}
+.ds-toolbar::before {
+  content: "FILTERS";
+  flex: 0 0 auto;
+  font: 700 9px var(--mono); letter-spacing: 1.6px; color: var(--dim);
+  align-self: center; padding-right: 10px; margin-right: 2px;
+  border-right: 1px solid var(--border2);
+}
+.ds-tabs { background: #101113; border-color: var(--border2); padding: 3px; }
+.ds-tab { padding: 6px 15px; font-size: 11px; letter-spacing: .8px; color: #9aa1ab; }
+.ds-tab:hover { color: #fff; background: var(--panel2); }
+.ds-tab.active {
+  background: var(--cyan); color: #0b0d0f; font-weight: 700;
+  box-shadow: 0 0 0 1px rgba(34,211,238,.35);
+}
+.vm-mode { margin-left: 4px; padding-left: 10px; border-left: 1px solid var(--border2); }
+.ds-selects { gap: 10px; }
+
+/* inline ADVANCED: a disclosure that pushes the row instead of covering it */
+.ds-advanced { align-self: center; }
+.ds-advanced-body {
+  position: static; z-index: auto; box-shadow: none;
+  background: #15171a; border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; margin-top: 8px; min-width: 0;
+  flex: 1 1 100%;
+}
+
+/* chips + counts + RESET on one line, labelled */
+.ds-chips {
+  flex: 1 1 auto; gap: 8px; align-items: center; padding-top: 8px; margin-top: 8px;
+  border-top: 1px solid rgba(255,255,255,.05);
+}
+.ds-chips::before {
+  content: "ACTIVE"; font: 700 9px var(--mono); letter-spacing: 1.4px;
+  color: var(--dim); margin-right: 2px;
+}
+.chip { background: #22262b; border-color: var(--border2); color: #dfe3e8; }
+.chip:hover { border-color: var(--red); color: var(--red); }
+.ds-counts { flex: 0 0 auto; padding-top: 10px; gap: 10px; }
+.ds-counts .filter { border-color: var(--border2); }
