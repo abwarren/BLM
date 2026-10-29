@@ -63,6 +63,21 @@ Three windows of 66 s with 45 s on TRADE COHORTS in between:
 The cadence is 20 s (`LIVE_POLL_MS`), so 3 requests per 66 s is one per interval;
 the fourth on return is the single immediate refresh.
 
+### 3.3 Which lifecycle artifacts are canonical
+
+Four lifecycle runs exist under `/tmp/tc-evidence`; not all of them are evidence.
+
+| Artifact | Result | Status |
+|---|---|---|
+| `poll_final.out` (after `ee94113`, settled server) | 3 / **0** / 4 — 5/5 | **canonical** |
+| `poll2.out` (after `7a9ac79`, settled server) | 3 / **0** / 4 — 5/5 | canonical (same code) |
+| first run, before any fix | 3 / **2** / 4 — 4/5 | **the defect measurement** — the failure it reports is the bug this commit fixes |
+| run started while a deploy restarted the server | 2 / 0 / 3 — 4/5 | **invalid** — the server was down inside the first window, so only two intervals were observed. Not a product result. |
+
+Lesson kept in the harness: never start an acceptance run in the same command as
+a deploy; the deploy's restart can land inside a measurement window and produce a
+false failure (or a false "away = 0").
+
 ## 4. Screenshots
 
 `/tmp/tc-evidence/value/live-final/` — `final-desktop.png`, `final-laptop.png`,
