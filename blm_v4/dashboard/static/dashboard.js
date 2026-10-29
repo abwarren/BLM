@@ -4665,8 +4665,27 @@ initAccordionSection({
 });
 // /live runs on its OWN cadence (LIVE_POLL_MS), longer than the server's
 // single-flight cache TTL, and refresh() self-gates so polls never overlap.
-// The light-weight channels keep the original fast cadence.
-liveTimer = setInterval(refresh, LIVE_POLL_MS);
+//
+// The feed is polled ONLY while LIVE GAMES is the open destination.  Measured
+// before this change: 2 requests per 45 s arrived while the operator was on
+// TRADE COHORTS — the timer was created at load and never paused, so every
+// other page paid for a fetch and a re-render of a table nobody could see.
+// Entry fires ONE immediate refresh (the data may be stale), then the cadence
+// resumes; leaving clears the timer, so a return cannot stack a second one.
+function startLivePolling() {
+  if (!liveTimer) liveTimer = setInterval(refresh, LIVE_POLL_MS);
+}
+function stopLivePolling() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+}
+document.addEventListener("blm:view", (ev) => {
+  const onLive = !!ev.detail && ev.detail.view === "live";
+  if (onLive) { refresh(); startLivePolling(); }
+  else stopLivePolling();
+});
+// The light-weight channels (status pills, betting state) stay global: the
+// operator must see the collector and Auto-Bet state from every destination.
+if (window.blmNav && window.blmNav.current === "live") startLivePolling();
 bettingTimer = setInterval(refreshBettingStatus, POLL_MS);
 startStatusPolling();
 
