@@ -762,7 +762,13 @@ def main() -> None:
             return ok
 
         # ── 1. producers: browser owners and outbound fetchers ──────────
-        _step("collector", collector.stop, 2)
+        # collector is None when BLM_V1_COLLECTOR=0 disables the legacy
+        # scraper — the shutdown must skip it, not call stop() on nothing
+        # (measured 2026-10-29: "AttributeError: 'NoneType' object has no
+        # attribute 'stop'" on every stop, which aborted the rest of the
+        # ordered shutdown).
+        if collector is not None:
+            _step("collector", collector.stop, 2)
         result_reconciler = getattr(app.state, "_result_reconciler", None)
         if result_reconciler is not None:
             _step("result_reconciler", result_reconciler.stop, 1)
