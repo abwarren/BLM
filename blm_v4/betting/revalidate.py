@@ -72,7 +72,13 @@ def fetch_state(game_id: str) -> Optional[dict]:
             "SELECT captured_at, total_points, progress_pct, required_pts_per_min,"
             " actual_pts_per_min, under_price, live_total_line, status"
             " FROM clean_observations WHERE source_game_id = ?"
-            " ORDER BY captured_at DESC LIMIT 1", (str(game_id),)).fetchone()
+            # the NEWEST READABLE capture, not the newest row: the collector
+            # emits MISSING_CLOCK frames every ~30-60 s, and taking one of those
+            # would refuse a perfectly good bet.  The age bound below is what
+            # keeps this honest — if no VALID capture is recent enough, the
+            # verdict is STALE, not a pass.
+            " AND status = 'VALID' ORDER BY captured_at DESC LIMIT 1",
+            (str(game_id),)).fetchone()
         cc.close()
     except sqlite3.Error:
         return None
