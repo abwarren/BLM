@@ -132,7 +132,9 @@ const API_GAME_PACE_Z = (id) => `/api/v4/game/${encodeURIComponent(id)}/pace-z`;
 const API_GAME_HIST_CTX = (id) => `/api/v4/game/${encodeURIComponent(id)}/historical-context`;
 
 const state = {
-  filter: "",
+  filter: "",              // league slug (empty = all) — the LEAGUE dropdown
+  segment: "",             // "" | UNDER | OVER | WATCH — the in-view tabs
+  sort: "",                // "" | league | team | progress — stable ordering
   games: [],
   cards: new Map(),        // game_id -> {el, spark, detOpen, chartsOpen}
   modalGameId: null,
@@ -457,12 +459,16 @@ const CYBER_HIST = { obs: "59.3%", game: "56.5%", n: "84" };
    canonical slug → label mapping in the page. */
 const LEAGUE_LABELS = {};
 function leagueLabelsFrom(root) {
+  // League is a DROPDOWN (destination-spec): the slug is the option VALUE and
+  // the label is its text, so there is exactly one place a league name lives
+  // and no second copy of the selected league as a button pill.
   const map = {};
-  const nodes = (root && root.querySelectorAll)
-    ? root.querySelectorAll("#filters .filter[data-filter]") : [];
-  for (const b of nodes) {
-    const slug = b.dataset ? b.dataset.filter : "";
-    const label = (b.textContent || "").trim();
+  const sel = (root && root.querySelector)
+    ? root.querySelector("#leagueFilter") : null;
+  const opts = sel ? Array.from(sel.options) : [];
+  for (const o of opts) {
+    const slug = o.value;
+    const label = (o.textContent || "").trim();
     if (slug && label) map[slug] = label;
   }
   return map;
@@ -2724,6 +2730,46 @@ function renderCards(payload) {
   let games = (payload.games || []).filter(
     (g) => !state.filter || g.competition_slug === state.filter,
   );
+  // Dataset SEGMENT — the only place the four tabs are defined.  UNDER/OVER
+  // read the SERVED alert/execution fields (never re-derived here); WATCH is
+  // the pre-firing window: in the alert band (checkpoint >= 75) but not active.
+  const execOf = (g) => (state.betting && state.betting.recent || []).find(
+    (r) => String(r.game_id) === String(g.game_id));
+  games = games.filter((g) => {
+    if (!state.segment) return true;
+    const a = g.under_alert || {}, q = g.under_alert_q3_break || {};
+    const active = !!(a.active || q.active);
+    if (state.segment === "UNDER") return active;
+    if (state.segment === "OVER") {
+      const exec = execOf(g);
+      const sel = String((exec && exec.selection) || "").toUpperCase();
+      const byCp = (g.under_alert_outcome || {}).by_checkpoint || {};
+      const settledOver = Object.values(byCp).some(
+        (v) => String((v && v.outcome) || "").toUpperCase() === "OVER");
+      return sel === "OVER" || settledOver;
+    }
+    const cp = a.checkpoint ?? q.checkpoint;
+    return !active && cp !== null && cp !== undefined
+      && Number(cp) >= 75 && gameMatchesGameState(g, "live");
+  });
+  // STABLE ordering: the sort key is immutable per game (league/team/progress
+  // band), with the feed index as the final tiebreak, so a data tick refreshes
+  // values in place instead of shuffling rows under the operator's cursor.
+  if (state.sort) {
+    const idx = new Map(games.map((g, i) => [g.game_id, i]));
+    const key = (g) => {
+      if (state.sort === "league") return String(g.competition_slug || "");
+      if (state.sort === "team") return String(g.home_team || g.home || "");
+      const p = (g.projector || {}).progress_pct;
+      return p === null || p === undefined ? -1 : -Number(p);
+    };
+    games = games.slice().sort((ga, gb) => {
+      const ka = key(ga), kb = key(gb);
+      if (ka < kb) return -1;
+      if (ka > kb) return 1;
+      return (idx.get(ga.game_id) ?? 0) - (idx.get(gb.game_id) ?? 0);
+    });
+  }
   games = games.filter((g) => {
     const a = g.under_alert || {}, q = g.under_alert_q3_break || {};
     const active = !!(a.active || q.active);
@@ -3936,19 +3982,142 @@ function syncLiveToggle(total, visible) {
 // LIVE ALERTS row → reveal the matching game card (scroll + emphasis)
 bindAlertReveal();
 
-$("filters").addEventListener("click", (ev) => {
-  const btn = ev.target.closest(".filter");
-  if (!btn) return;
-  if (btn.dataset.livefilter !== undefined) {
-    state.hideNonLive = !state.hideNonLive;
-    renderCards(state.lastPayload || { games: state.games });
+/* ── DATASET TOOLBAR (Live Games) ─────────────────────────────────────────
+   One state per concept:
+     segment  → the four tabs (ALL / UNDER / OVER / WATCH)
+     league   → the LEAGUE dropdown (state.filter)
+     checkpoint / direction / signal / bet / state → selects
+     sort     → the SORT dropdown
+   The toolbar renders the ACTIVE state back as removable chips plus a RESET
+   that clears dataset filters only — it never touches model or Auto-Bet
+   configuration. */
+const reRender = () => {
+  if (state.lastPayload) renderCards(state.lastPayload);
+  renderFilterChips();
+};
+
+function activeFilterChips() {
+  const chips = [];
+  if (state.segment) chips.push({ key: "segment", label: "segment: " + state.segment });
+  if (state.filter) {
+    const labels = leagueLabelsFrom(document);
+    chips.push({ key: "filter", label: "league: " + (labels[state.filter] || state.filter) });
+  }
+  const selChips = [
+    ["checkpointFilter", "checkpoint"], ["directionFilter", "direction"],
+    ["alertStateFilter", "signal"], ["betStateFilter", "bet"],
+    ["gameStateFilter", "state"],
+  ];
+  for (const [key, label] of selChips) {
+    if (state[key]) chips.push({ key, label: label + ": " + state[key] });
+  }
+  if (state.search) chips.push({ key: "search", label: "search: " + state.search });
+  if (!state.hideNonLive) chips.push({ key: "hideNonLive", label: "showing all (ended included)" });
+  if (state.sort) chips.push({ key: "sort", label: "sort: " + state.sort });
+  return chips;
+}
+
+function renderFilterChips() {
+  const host = $("filterChips");
+  if (!host) return;
+  const chips = activeFilterChips();
+  host.innerHTML = "";
+  if (!chips.length) {
+    host.innerHTML = '<span class="muted">no filters — showing the default dataset</span>';
     return;
   }
-  document.querySelectorAll(".filter").forEach((f) => f.classList.remove("active"));
-  btn.classList.add("active");
-  state.filter = btn.dataset.filter || "";
-  renderCards(state.lastPayload || { games: state.games });
-});
+  for (const chip of chips) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip";
+    b.dataset.chip = chip.key;
+    b.setAttribute("aria-label", "Remove filter " + chip.label);
+    b.innerHTML = `<span>${chip.label}</span><span class="chip-x" aria-hidden="true">✕</span>`;
+    b.addEventListener("click", () => clearFilter(chip.key));
+    host.appendChild(b);
+  }
+}
+
+function clearFilter(key) {
+  if (key === "segment") state.segment = "";
+  else if (key === "filter") { state.filter = ""; const s = $("leagueFilter"); if (s) s.value = ""; }
+  else if (key === "search") {
+    state.search = "";
+    const s = $("globalSearch"); if (s) s.value = "";
+  } else if (key === "hideNonLive") state.hideNonLive = true;
+  else if (key === "sort") { state.sort = ""; const s = $("gameSort"); if (s) s.value = ""; }
+  else {
+    state[key] = "";
+    const s = $(key); if (s) s.value = "";
+  }
+  syncSegmentTabs();
+  reRender();
+}
+
+function syncSegmentTabs() {
+  document.querySelectorAll("#liveSegments .ds-tab").forEach((b) => {
+    const on = (b.dataset.segment || "") === state.segment;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", String(on));
+  });
+}
+
+const segHost = $("liveSegments");
+if (segHost) {
+  segHost.addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".ds-tab[data-segment]");
+    if (!btn) return;
+    state.segment = btn.dataset.segment || "";
+    syncSegmentTabs();
+    reRender();
+  });
+}
+
+const leagueSel = $("leagueFilter");
+if (leagueSel) {
+  leagueSel.addEventListener("change", (ev) => {
+    state.filter = ev.target.value || "";
+    reRender();
+  });
+}
+
+const sortSel = $("gameSort");
+if (sortSel) {
+  sortSel.addEventListener("change", (ev) => {
+    state.sort = ev.target.value || "";
+    reRender();
+  });
+}
+
+const liveToggleBtn = $("liveToggle");
+if (liveToggleBtn) {
+  liveToggleBtn.addEventListener("click", () => {
+    state.hideNonLive = !state.hideNonLive;
+    reRender();
+  });
+}
+
+const resetBtn = $("filterReset");
+if (resetBtn) {
+  resetBtn.addEventListener("click", () => {
+    state.segment = "";
+    state.filter = "";
+    state.sort = "";
+    state.search = "";
+    state.hideNonLive = true;
+    for (const id of ["checkpointFilter", "directionFilter", "alertStateFilter",
+                      "betStateFilter", "gameStateFilter", "leagueFilter",
+                      "gameSort", "globalSearch"]) {
+      const el = $(id);
+      if (el) el.value = "";
+    }
+    syncSegmentTabs();
+    reRender();
+  });
+}
+
+syncSegmentTabs();
+renderFilterChips();
 
 $("modalClose").addEventListener("click", closeModal);
 $("modalBackdrop").addEventListener("click", (ev) => {
@@ -4355,6 +4524,9 @@ function bindAlertReveal() {
     if (ev.target.closest("button, a, input, select, summary, details")) return;
     if (ev.type === "keydown" && ev.key !== "Enter" && ev.key !== " ") return;
     ev.preventDefault();
+    // The card lives on the LIVE GAMES destination; reveal it there rather
+    // than scrolling a hidden container (filters survive the switch).
+    if (window.blmNav && window.blmNav.current !== "live") window.blmNav.show("live");
     revealGameCard(row.dataset.gameId);
   };
   host.addEventListener("click", activate);
@@ -4541,144 +4713,9 @@ traceTimer = setInterval(() => {
   }
 })();
 
-/* ── Trade Cohorts panel (TC-*) — renders API output only, no business logic ── */
-(function () {
-  const API = "/api/v4/cohorts";
-  const state = { spec: null, summary: null, cohort: null, source: "reconstructed_firing", loaded: false };
-
-  const $ = (id) => document.getElementById(id);
-  const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
-  const pct = (v) => (v === null || v === undefined ? "–" : (100 * v).toFixed(1) + "%");
-
-  async function getJSON(url) {
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!res.ok) throw new Error(url + " -> " + res.status);
-    return res.json();
-  }
-
-  function tab(code, name) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.role = "tab";
-    b.className = "cohort-tab" + (state.cohort === code ? " active" : "");
-    b.dataset.code = code;
-    b.textContent = code + " " + name;
-    b.addEventListener("click", () => { state.cohort = code; renderTabs(); renderScorecard(); renderLedger(); });
-    return b;
-  }
-
-  function renderTabs() {
-    const wrap = $("cohortTabs");
-    if (!wrap || !state.spec) return;
-    wrap.innerHTML = "";
-    for (const c of state.spec.cohorts) wrap.appendChild(tab(c.code, c.name));
-  }
-
-  function scorecardCard(c) {
-    const lo = c.wilson95 ? c.wilson95[0] : null, hi = c.wilson95 ? c.wilson95[1] : null;
-    const div = document.createElement("div");
-    div.className = "cohort-card" + (c.code === state.cohort ? " active" : "");
-    div.innerHTML = `
-      <div class="cohort-card-head"><strong>${c.code}</strong> ${c.name}</div>
-      <div class="cohort-card-grid">
-        <div><span class="k">games</span><span class="v">${c.unique_games}</span></div>
-        <div><span class="k">UNDER</span><span class="v">${c.under}</span></div>
-        <div><span class="k">OVER</span><span class="v">${c.over}</span></div>
-        <div><span class="k">PUSH</span><span class="v">${c.push}</span></div>
-        <div><span class="k">pending</span><span class="v">${c.pending}</span></div>
-        <div><span class="k">UNDER rate</span><span class="v">${pct(c.under_rate)}</span></div>
-        <div><span class="k">Wilson 95%</span><span class="v">${lo === null ? "–" : pct(lo) + "–" + pct(hi)}</span></div>
-        <div title="share of FIRST FIRINGS per game that carry a trigger price and frozen line — the SAME population as the outcome rate"><span class="k">firing cover</span><span class="v">${pct(c.firing_coverage && c.firing_coverage.pct != null ? c.firing_coverage.pct / 100 : null)}</span></div>
-        <div title="share of ALL ledger rows for this cohort that carry market data (data-quality measure, NOT the outcome denominator)"><span class="k">obs cover</span><span class="v">${pct(c.observation_coverage && c.observation_coverage.pct != null ? c.observation_coverage.pct / 100 : null)}</span></div>
-        <div><span class="k">avg price</span><span class="v">${fmt(c.avg_trigger_price)}</span></div>
-        <div><span class="k">break-even</span><span class="v">${pct(c.break_even_rate_at_avg_price)}</span></div>
-      </div>
-      <div class="cohort-card-rule">pace &gt; ${c.rule.pace_ratio_gt} · shortfall ≥ ${c.rule.shortfall_gte} · price ≥ ${c.rule.min_under_price_gte}</div>`;
-    div.addEventListener("click", () => { state.cohort = c.code; renderTabs(); renderScorecard(); renderLedger(); });
-    return div;
-  }
-
-  function renderScorecard() {
-    if (!state.summary) return;
-    const wrap = $("cohortScorecard");
-    wrap.innerHTML = "";
-    const cards = state.summary.cohorts;
-    for (const c of cards) wrap.appendChild(scorecardCard(c));
-    const m = state.summary.read_model || {};
-    $("cohortRuleVersion").textContent = "rule " + state.summary.rule_version;
-    $("cohortWindow").textContent = "window " + (m.window_start || "–").slice(0, 10) + " → " + (m.window_end || "–").slice(0, 10);
-    $("cohortLeague").textContent = "league ref " + (m.league_reference || "–");
-    const rec = m.reconciliation || {};
-    $("cohortsSub").textContent = `${state.summary.totals.firings} firings · ${state.summary.totals.checkpoints} checkpoints · ${state.summary.totals.unknown} unknown · ${rec.games || 0} games scanned`;
-  }
-
-  async function renderLedger() {
-    const tbody = $("cohortLedger").querySelector("tbody");
-    tbody.innerHTML = '<tr><td colspan="17" class="empty">loading…</td></tr>';
-    const params = new URLSearchParams({ source_type: state.source, limit: "25" });
-    if (state.cohort) params.set("cohort", state.cohort);
-    try {
-      const data = await getJSON(API + "/ledger?" + params.toString());
-      $("cohortLedgerCount").textContent = `${data.total} rows · showing ${data.rows.length}`;
-      if (!data.rows.length) {
-        tbody.innerHTML = '<tr><td colspan="17" class="empty">no rows for this filter</td></tr>';
-        return;
-      }
-      tbody.innerHTML = "";
-      for (const r of data.rows) {
-        const tr = document.createElement("tr");
-        tr.className = "cohort-row st-" + r.status.toLowerCase() + " src-" + r.source_type;
-        tr.innerHTML = `
-          <td>${(r.observed_at || "").slice(0, 16).replace("T", " ")}</td>
-          <td>${r.competition_slug || "–"}</td>
-          <td>${r.source_game_id}</td>
-          <td><strong>${r.tightest_cohort || "–"}</strong></td>
-          <td>${(r.qualifying_cohorts || []).join(", ") || "–"}</td>
-          <td>${fmt(r.progress_pct, 1)}</td>
-          <td>${r.scored_points ?? "–"}</td>
-          <td>${fmt(r.required_ppm)}</td>
-          <td>${fmt(r.actual_ppm)}</td>
-          <td>${fmt(r.league_ppm)}</td>
-          <td>${fmt(r.pace_ratio, 3)}</td>
-          <td>${fmt(r.shortfall)}</td>
-          <td>${fmt(r.under_price)}</td>
-          <td>${fmt(r.trigger_line, 1)}</td>
-          <td>${r.outcome || "–"}${r.final_total != null ? " (" + r.final_total + ")" : ""}</td>
-          <td><span class="badge ${r.status.toLowerCase()}">${r.status}</span>${(r.reason_codes || []).length ? " <span class=muted>" + r.reason_codes.join(",") + "</span>" : ""}</td>
-          <td>${r.source_type === "reconstructed_firing" ? "firing" : "checkpoint"}</td>`;
-        tbody.appendChild(tr);
-      }
-    } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="17" class="empty">error: ${String(err.message || err)}</td></tr>`;
-    }
-  }
-
-  async function load(force) {
-    if (state.loaded && !force) return;
-    try {
-      state.spec = await getJSON(API + "/spec");
-      state.summary = await getJSON(API + "/summary");
-      if (!state.cohort) state.cohort = state.spec.cohorts[0].code;
-      state.loaded = true;
-      renderTabs(); renderScorecard(); renderLedger();
-    } catch (err) {
-      $("cohortScorecard").innerHTML = `<div class="empty">cohort read-model unavailable: ${String(err.message || err)}</div>`;
-    }
-  }
-
-  const toggle = $("cohortsToggle");
-  if (toggle) {
-    toggle.addEventListener("click", () => {
-      const body = $("cohortsBody");
-      const open = body.hidden;
-      body.hidden = !open;
-      toggle.setAttribute("aria-expanded", String(open));
-      if (open) load(false);
-    });
-  }
-  const sel = $("cohortSource");
-  if (sel) sel.addEventListener("change", () => { state.source = sel.value; renderLedger(); });
-  const rbtn = $("cohortRefresh");
-  if (rbtn) rbtn.addEventListener("click", () => load(true));
-  window.__tcCohorts = { load, state };
-})();
+/* ── Trade Cohorts panel moved to /static/tc.js ──────────────────────
+   It is its own destination (TRADE COHORTS) with scorecards,
+   comparisons, the paged ledger, the data-quality panel and the Auto-Bet
+   cohort selector.  Keeping it in this file meant the cohort page had to
+   share the live board's poll rhythm and its DOM ids; the page now loads
+   its read model only when the destination is opened. */

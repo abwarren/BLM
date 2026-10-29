@@ -438,29 +438,12 @@
 
   /* ── view switching ────────────────────────────────────────── */
 
-  function show(view) {
-    const live = el("viewLive"), stats = el("viewStats");
-    const tabLive = el("tabLive"), tabStats = el("tabStats");
-    const note = el("tabNote");
-    if (!live || !stats) return;
-    const onStats = view === "stats";
-    S.active = onStats;
-    live.hidden = onStats;
-    stats.hidden = !onStats;
-    if (tabLive) {
-      tabLive.classList.toggle("active", !onStats);
-      tabLive.setAttribute("aria-selected", String(!onStats));
-    }
-    if (tabStats) {
-      tabStats.classList.toggle("active", onStats);
-      tabStats.setAttribute("aria-selected", String(onStats));
-    }
-    if (note) {
-      note.textContent = onStats
-        ? "fired-alert cohort · fingerprints · league standings"
-        : "live games + alerts";
-    }
-    if (onStats) {
+  /* POLLING LIFECYCLE ONLY.  Visibility belongs to nav.js (one switcher for
+     every destination); this module reacts to `blm:view` and starts/stops its
+     own poll.  `show()` stays exported for tests and the console. */
+  function applyPolling(on) {
+    S.active = !!on;
+    if (on) {
       // Fetch immediately on open (the payload is already computed
       // server-side, so this is a memory read, not a scan), then poll.
       pull();
@@ -470,17 +453,18 @@
     }
   }
 
+  function show(view) {
+    const target = view === "stats" ? "model" : view;
+    if (window.blmNav) window.blmNav.show(target);
+    else applyPolling(target === "model");
+    return target;
+  }
+
   function init() {
-    const tabs = el("tabs");
-    if (tabs) {
-      tabs.addEventListener("click", (ev) => {
-        const btn = ev.target.closest(".tab");
-        if (btn && btn.dataset.view) show(btn.dataset.view);
-      });
-    }
-    // Hoist the fetched logs/notes out of the way when the live view is up:
-    // the stats view is opt-in, so the live board is never bled into.
-    show("live");
+    document.addEventListener("blm:view", (ev) => {
+      applyPolling(ev.detail && ev.detail.view === "model");
+    });
+    applyPolling(window.blmNav ? window.blmNav.current === "model" : false);
   }
 
   if (document.readyState === "loading") {

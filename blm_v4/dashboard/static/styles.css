@@ -1359,3 +1359,178 @@ table.cohort-ledger tr.st-unknown td { color: #f0c56b; }
 .legacy-diag { margin-top: 12px; border-top: 1px dashed rgba(255,255,255,.10); padding-top: 10px; }
 .legacy-diag summary { cursor: pointer; font-size: 11px; color: #9aa4b2; }
 .legacy-diag p { font-size: 10.5px; margin: 8px 0 0; }
+/* ═══════════ TC COHORT ANALYTICS + DESTINATION IA (2026-10-29) ═══════════
+   Density and spacing scale for the reworked analytics surfaces.  One page
+   scroll (no nested scroll containers except the ledger viewport, which is a
+   real paged table with a sticky header).  Numbers are tabular and numeric
+   columns are right-aligned; colour is never the only signal (every state also
+   carries a word). */
+:root {
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --row-h: 44px;
+}
+
+/* ── dataset toolbar (Live Games) ─────────────────────────────────────── */
+.ds-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  align-items: center;
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.ds-tabs { display: flex; gap: 2px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+.ds-tab {
+  background: transparent; color: var(--muted); border: 0; border-radius: 4px;
+  padding: 5px 12px; font: 11px var(--mono); letter-spacing: .6px; cursor: pointer;
+}
+.ds-tab:hover { color: var(--text); }
+.ds-tab.active { background: var(--cyan); color: #04121a; font-weight: 700; }
+.ds-tab:focus-visible, .chip:focus-visible, .tc-card:focus-visible,
+.ab-cohort-opt:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.ds-selects { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.ds-advanced { position: relative; }
+.ds-advanced > summary {
+  list-style: none; cursor: pointer; color: var(--muted); font: 10px var(--mono);
+  letter-spacing: .6px; border: 1px solid var(--border2); border-radius: 4px; padding: 5px 8px;
+}
+.ds-advanced > summary::-webkit-details-marker { display: none; }
+.ds-advanced[open] > summary { color: var(--cyan); border-color: var(--cyan); }
+.ds-advanced-body {
+  position: absolute; z-index: 30; top: calc(100% + 6px); left: 0;
+  display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center;
+  background: var(--panel); border: 1px solid var(--border2); border-radius: 8px;
+  padding: var(--sp-3); box-shadow: 0 12px 30px rgba(0,0,0,.55); min-width: 320px;
+}
+.ds-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 1 1 100%; min-height: 22px; }
+.ds-chips .muted { font-size: 11px; }
+.chip {
+  display: inline-flex; gap: 6px; align-items: center;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border2);
+  border-radius: 999px; padding: 3px 10px; font: 10px var(--mono); cursor: pointer;
+}
+.chip:hover { border-color: var(--red); color: var(--red); }
+.chip-x { color: var(--muted); }
+.ds-counts { display: flex; gap: var(--sp-2); align-items: center; margin-left: auto; }
+
+/* ── destination cards (Overview) ──────────────────────────────────────── */
+.desk-cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--sp-4); margin: var(--sp-4) 0 var(--sp-5);
+}
+.desk-card {
+  display: flex; flex-direction: column; gap: 4px; text-align: left;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: var(--sp-4); color: var(--text); cursor: pointer;
+}
+.desk-card:hover { border-color: var(--cyan); }
+.desk-k { font: 10px var(--mono); letter-spacing: 1px; color: var(--muted); }
+.desk-v { font: 700 22px var(--mono); color: #eaf2ff; }
+.desk-n { font-size: 11px; color: var(--dim); }
+
+/* ── Trade Cohorts page ────────────────────────────────────────────────── */
+.tc-page { display: flex; flex-direction: column; gap: var(--sp-4); }
+.tc-header { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: flex-start; justify-content: space-between; }
+.tc-title { margin: 0; font: 700 16px var(--mono); letter-spacing: 2px; color: #eaf2ff; }
+.tc-sub { margin: 4px 0 0; font-size: 11px; max-width: 60ch; }
+.tc-block {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: var(--sp-4);
+}
+.tc-h { margin: 0 0 var(--sp-3); font: 700 11px var(--mono); letter-spacing: 1.2px; color: var(--cyan); }
+.tc-h .muted { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: 8px; }
+.tc-scroll { max-width: 100%; overflow-x: auto; }
+.tc-ledger-viewport { max-height: 62vh; overflow: auto; }   /* the ONE table viewport */
+.tc-selector { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: var(--sp-2); }
+.tc-card {
+  display: flex; flex-direction: column; gap: 2px; text-align: left; cursor: pointer;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  padding: var(--sp-3) var(--sp-3) var(--sp-2); color: var(--text);
+}
+.tc-card:hover { border-color: var(--border2); }
+.tc-card.active { border-color: var(--cyan); box-shadow: inset 0 0 0 1px var(--cyan); }
+.tc-card-head { display: flex; gap: 6px; align-items: baseline; font: 11px var(--mono); }
+.tc-card-head em { color: var(--muted); font-style: normal; letter-spacing: .8px; }
+.tc-card-v { font: 700 20px var(--mono); color: #eaf2ff; }
+.tc-card-sub { font-size: 10px; color: var(--muted); }
+.tc-card-rule { font-size: 9px; color: var(--dim); letter-spacing: .3px; }
+
+.tc-kpi-head { display: flex; gap: var(--sp-3); align-items: baseline; margin-bottom: var(--sp-3); }
+.tc-kpi-head strong { font: 700 13px var(--mono); letter-spacing: 1px; }
+.tc-kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-2); }
+.tc-kpi { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: var(--sp-3); }
+.tc-kpi-k { font: 10px var(--mono); letter-spacing: .9px; color: var(--muted); }
+.tc-kpi-v { font: 700 20px var(--mono); color: #eaf2ff; font-variant-numeric: tabular-nums; }
+.tc-kpi-n { font-size: 10px; color: var(--dim); line-height: 1.35; }
+.tc-kpi.under-over .tc-kpi-v { color: var(--cyan); }
+.tc-caveat { font-size: 10px; line-height: 1.5; margin: var(--sp-3) 0 0; }
+
+.tc-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.tc-table th, .tc-table td { padding: 7px 9px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.tc-table th {
+  position: sticky; top: 0; z-index: 2; background: var(--panel);
+  font: 10px var(--mono); letter-spacing: .8px; color: var(--muted); text-transform: uppercase;
+}
+.tc-table tbody tr { height: var(--row-h); }
+.tc-table tbody tr:hover { background: rgba(34,211,238,.04); }
+.tc-table .num, .tc-table td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+.tc-table tr.active { background: rgba(34,211,238,.07); }
+.tc-table .mono { font-family: var(--mono); color: var(--muted); }
+.tc-table td.under { color: var(--green); }
+.tc-table td.over { color: var(--red); }
+.tc-table td.push { color: var(--amber); }
+.tc-table td.unk { color: var(--muted); }
+.tc-row.src-checkpoint { opacity: .82; }
+.tc-row.src-checkpoint td:last-child { color: var(--amber); }
+.tc-row.src-firing td:last-child { color: var(--green); }
+.tc-row.st-unknown { background: rgba(251,191,36,.05); }
+.small-n {
+  font: 9px var(--mono); letter-spacing: .4px; color: var(--amber);
+  border: 1px solid var(--amber); border-radius: 3px; padding: 0 4px; margin-left: 4px;
+}
+.legacy-badge {
+  font: 9px var(--mono); letter-spacing: .6px; color: var(--amber);
+  border: 1px solid var(--amber); border-radius: 3px; padding: 0 4px; margin-left: 6px;
+}
+.tc-pager { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-3); }
+.tc-pager .filter[disabled] { opacity: .45; cursor: not-allowed; }
+
+.tc-q-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--sp-3); }
+.tc-q-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: var(--sp-3); }
+.tc-q-card h4 { margin: 0 0 6px; font: 700 10px var(--mono); letter-spacing: 1px; color: var(--text); }
+.tc-q-list { list-style: none; margin: 0; padding: 0; }
+.tc-q-list li { display: flex; justify-content: space-between; gap: var(--sp-2); font-size: 11px; padding: 3px 0; border-top: 1px dashed var(--border); }
+.tc-q-card .muted { font-size: 10px; line-height: 1.45; }
+.cohort-pill.err { border-color: var(--red); color: var(--red); }
+
+/* ── Auto-Bet cohort selector (Settings) ───────────────────────────────── */
+.ab-cohort-head { display: flex; flex-wrap: wrap; gap: var(--sp-3); justify-content: space-between; align-items: flex-start; }
+.ab-cohort-head p { margin: 0; font-size: 11px; max-width: 72ch; }
+.ab-cohort-state { display: flex; gap: var(--sp-2); align-items: center; }
+.ab-cohort-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-2); margin: var(--sp-3) 0; }
+.ab-cohort-opt {
+  display: flex; flex-direction: column; gap: 2px; text-align: left; cursor: pointer;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  padding: var(--sp-3); color: var(--text);
+}
+.ab-cohort-opt strong { font: 700 12px var(--mono); letter-spacing: 1px; }
+.ab-cohort-opt span { font-size: 10px; color: var(--muted); letter-spacing: .8px; }
+.ab-cohort-opt em { font-size: 9px; font-style: normal; color: var(--dim); }
+.ab-cohort-opt:hover { border-color: var(--border2); }
+.ab-cohort-opt.active { border-color: var(--cyan); box-shadow: inset 0 0 0 1px var(--cyan); background: rgba(34,211,238,.08); }
+.ab-cohort-opt[disabled] { opacity: .6; cursor: progress; }
+.ab-cohort-foot { display: flex; gap: var(--sp-3); align-items: center; justify-content: space-between; font-size: 10px; }
+.ab-cohort-foot .muted.err { color: var(--red); }
+@media (max-width: 900px) {
+  .ds-advanced-body { position: static; box-shadow: none; min-width: 0; }
+  .tc-ledger-viewport { max-height: none; }        /* let the page scroll on small screens */
+  .ds-counts { margin-left: 0; flex: 1 1 100%; }
+  .tc-card-v { font-size: 18px; }
+}

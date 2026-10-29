@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BLM Command Center — PokerBet Live Analytics</title>
-  <link rel="stylesheet" href="/static/styles.css?v=6855974.3">
+  <link rel="stylesheet" href="/static/styles.css?v=6855974.4">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -51,250 +51,439 @@
               data-audio="off" aria-pressed="false"
               title="Alert audio off — click to enable">AUDIO OFF</button>
     </div>
-    <div class="filters" id="filters">
-      <span class="filters-label">Filters</span>
-      <div class="fgroup">
-        <button class="filter active" data-filter="">ALL</button>
-        <button class="filter" data-filter="betual-nba">NBA</button>
-        <button class="filter" data-filter="betual-kbl">KBL</button>
-        <button class="filter" data-filter="betual-cba">CBA</button>
-        <button class="filter" data-filter="betual-tbsl">TBSL</button>
-        <button class="filter" data-filter="betual-euroleague">EUROLEAGUE</button>
-        <button class="filter" data-filter="cyber-basketball-2k26-matches">CYBER 2K26</button>
-      </div>
-      <div class="fgroup">
-        <button class="filter active" id="liveToggle" data-livefilter="live" title="Show ended/stale games too">SHOWING LIVE</button>
-        <input type="search" id="globalSearch" class="global-search" placeholder="SEARCH teams · league · game id · exec / alert id" spellcheck="false" aria-label="Global search across live games">
-      </div>
-      <div class="fgroup fgroup-selects">
-        <label class="filter-select">CHECKPOINT <select id="checkpointFilter"><option value="">ALL</option><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option></select></label>
-        <label class="filter-select">DIRECTION <select id="directionFilter"><option value="">ALL</option><option value="UNDER">UNDER</option><option value="OVER">OVER</option></select></label>
-        <label class="filter-select">ALERT <select id="alertStateFilter"><option value="">ALL</option><option value="ACTIVE">ACTIVE</option><option value="INACTIVE">INACTIVE</option></select></label>
-        <label class="filter-select">BET <select id="betStateFilter"><option value="">ALL</option><option value="EXECUTED">HAS EXECUTION</option><option value="NONE">NO EXECUTION</option></select></label>
-        <label class="filter-select">STATE <select id="gameStateFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="stale">STALE</option><option value="ended">ENDED</option><option value="invalid">INVALID</option></select></label>
-        <span class="muted filter-count" id="liveCount"></span>
-      </div>
-    </div>
   </header>
 
-  <!-- ═══════════ VIEW TABS ═══════════ -->
-  <nav class="tabs" id="tabs" role="tablist" aria-label="Dashboard views">
-    <button class="tab active" role="tab" id="tabLive" data-view="live"
-            aria-selected="true">LIVE</button>
-    <button class="tab" role="tab" id="tabStats" data-view="stats"
-            aria-selected="false">STATS</button>
-    <button class="tab" role="tab" id="tabExplorer" data-view="explorer"
-            aria-selected="false">DB EXPLORER</button>
+  <!-- ═══════════ DESTINATIONS (top-level navigation) — one per job ═══════════
+       Destinations only.  Dataset segmentation lives INSIDE Live Games as tabs
+       (ALL / UNDER / OVER / WATCH); league/period/signal/sort are dropdowns in
+       that view, never a second copy of the same state up here. -->
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Dashboard destinations">
+    <button class="tab" role="tab" data-view="overview" aria-selected="false">OVERVIEW</button>
+    <button class="tab active" role="tab" id="tabLive" data-view="live" aria-selected="true">LIVE GAMES</button>
+    <button class="tab" role="tab" data-view="alerts" aria-selected="false">ALERTS</button>
+    <button class="tab" role="tab" data-view="cohorts" aria-selected="false">TRADE COHORTS</button>
+    <button class="tab" role="tab" data-view="history" aria-selected="false">HISTORY &amp; RESULTS</button>
+    <button class="tab" role="tab" id="tabStats" data-view="model" aria-selected="false">MODEL ACCURACY</button>
+    <button class="tab" role="tab" id="tabExplorer" data-view="health" aria-selected="false">DATA HEALTH</button>
+    <button class="tab" role="tab" data-view="settings" aria-selected="false">SETTINGS</button>
     <span class="tab-note muted" id="tabNote">live games + alerts</span>
   </nav>
 
-  <!-- ═══════════ VIEW: LIVE ═══════════ -->
-  <div class="view" id="viewLive">
+  <!-- ═══════════ VIEW: OVERVIEW — the desk state, no controls ═══════════ -->
+  <div class="view" id="viewOverview" data-view="overview" hidden>
 
-  <!-- ═══════════ SUMMARY STRIP ═══════════ -->
-  <section class="summary" id="summary">
-    <div class="sum-card"><div class="sum-label">CYBER 2K26</div><div class="sum-value" id="sumCyber">–</div><div class="sum-sub" id="sumCyberSub">–</div></div>
-    <div class="sum-card"><div class="sum-label">BETUAL NBA</div><div class="sum-value" id="sumBetual">–</div><div class="sum-sub" id="sumBetualSub">–</div></div>
-    <div class="sum-card"><div class="sum-label">LIVE GAMES</div><div class="sum-value" id="sumLive">–</div><div class="sum-sub">monitored</div></div>
-    <div class="sum-card"><div class="sum-label">SNAPSHOTS (window)</div><div class="sum-value" id="sumSnaps">–</div><div class="sum-sub">served games only</div></div>
-    <div class="sum-card"><div class="sum-label">LAST SNAPSHOT</div><div class="sum-value" id="sumAge">–</div><div class="sum-sub" id="sumAgeSub">–</div></div>
-  </section>
+    <section class="summary" id="summary">
+      <div class="sum-card"><div class="sum-label">CYBER 2K26</div><div class="sum-value" id="sumCyber">–</div><div class="sum-sub" id="sumCyberSub">–</div></div>
+      <div class="sum-card"><div class="sum-label">BETUAL NBA</div><div class="sum-value" id="sumBetual">–</div><div class="sum-sub" id="sumBetualSub">–</div></div>
+      <div class="sum-card"><div class="sum-label">LIVE GAMES</div><div class="sum-value" id="sumLive">–</div><div class="sum-sub">monitored</div></div>
+      <div class="sum-card"><div class="sum-label">SNAPSHOTS (window)</div><div class="sum-value" id="sumSnaps">–</div><div class="sum-sub">served games only</div></div>
+      <div class="sum-card"><div class="sum-label">LAST SNAPSHOT</div><div class="sum-value" id="sumAge">–</div><div class="sum-sub" id="sumAgeSub">–</div></div>
+    </section>
 
-  <!-- ═══════════ 🔴 LIVE ALERTS — what is firing NOW ═══════════
-       Compact rows ONLY — the full game card stays in the grid below.
-       Clicking a row reveals that game's card (no navigation, no reload). -->
-  <section class="alerts sec-alerts" id="activeAlertsSection">
-    <div class="alerts-head">
-      <span class="alerts-title">🔴 LIVE ALERTS</span>
-      <span class="muted" id="activeAlertsCount"></span>
-      <span class="muted alerts-sub">click a row to jump to its game card</span>
-    </div>
-    <div class="alerts-body" id="activeAlerts">
-      <div class="alerts-empty">No active UNDER alerts</div>
-    </div>
-  </section>
+    <section class="desk-cards" aria-label="Jump to a destination">
+      <button class="desk-card" type="button" data-goto="live">
+        <span class="desk-k">LIVE GAMES</span>
+        <span class="desk-v" id="deskLive">–</span>
+        <span class="desk-n">every monitored game, segmented</span>
+      </button>
+      <button class="desk-card" type="button" data-goto="alerts">
+        <span class="desk-k">ALERTS</span>
+        <span class="desk-v" id="deskAlerts">–</span>
+        <span class="desk-n">what is firing right now</span>
+      </button>
+      <button class="desk-card" type="button" data-goto="cohorts">
+        <span class="desk-k">TRADE COHORTS</span>
+        <span class="desk-v" id="deskCohorts">TC-*</span>
+        <span class="desk-n">firing-time statistics, ledger, quality</span>
+      </button>
+      <button class="desk-card" type="button" data-goto="history">
+        <span class="desk-k">HISTORY &amp; RESULTS</span>
+        <span class="desk-v" id="deskHistory">–</span>
+        <span class="desk-n">settled alerts against their frozen line</span>
+      </button>
+    </section>
+  </div><!-- /#viewOverview -->
 
-  <!-- ═══════════ TRADE COHORTS (TC-*) — analytics only ═══════════ -->
-  <section class="scorecard cohorts" id="cohortsSection">
-    <button class="scorecard-toggle" id="cohortsToggle" aria-expanded="false" aria-controls="cohortsBody">
-      <span class="scorecard-title">TRADE COHORTS</span>
-      <span class="scorecard-sub" id="cohortsSub">TC-X … TC-C+ · actual firings vs checkpoints</span>
-      <span class="scorecard-chev">▾</span>
-    </button>
-    <div class="scorecard-body" id="cohortsBody" hidden>
-      <div class="cohort-meta" id="cohortMeta">
-        <span class="cohort-pill" id="cohortRuleVersion">rule –</span>
-        <span class="cohort-pill" id="cohortWindow">window –</span>
-        <span class="cohort-pill" id="cohortLeague">league ref –</span>
-        <span class="cohort-pill warn" id="cohortCaveat">firings are reconstructed from observations</span>
+  <!-- ═══════════ VIEW: LIVE GAMES — the operational betting surface ═══════════
+       Segment tabs (ALL / UNDER / OVER / WATCH) are the dataset axis; league,
+       checkpoint/period, signal and sort are dropdowns; rarely used criteria
+       live in the ADVANCED popover.  Active filters render as removable chips. -->
+  <div class="view" id="viewLive" data-view="live">
+
+    <section class="live-head">
+      <span class="live-title">LIVE GAMES</span>
+      <span class="muted" id="liveHeadSub">🟨 = this game has an active alert · clean post-epoch observations only · default view</span>
+    </section>
+
+    <div class="ds-toolbar" id="liveToolbar">
+      <div class="ds-tabs" id="liveSegments" role="tablist" aria-label="Dataset segment">
+        <button class="ds-tab active" role="tab" aria-selected="true" data-segment="">ALL</button>
+        <button class="ds-tab" role="tab" aria-selected="false" data-segment="UNDER">UNDER</button>
+        <button class="ds-tab" role="tab" aria-selected="false" data-segment="OVER">OVER</button>
+        <button class="ds-tab" role="tab" aria-selected="false" data-segment="WATCH">WATCH</button>
       </div>
-      <div class="cohort-toolbar">
-        <div class="cohort-tabs" id="cohortTabs" role="tablist" aria-label="Cohort"></div>
-        <label class="cohort-filter">
-          source
-          <select id="cohortSource">
-            <option value="reconstructed_firing">actual firings</option>
-            <option value="checkpoint">checkpoint only</option>
+
+      <div class="ds-selects">
+        <label class="filter-select">LEAGUE
+          <select id="leagueFilter" aria-label="League filter">
+            <option value="">ALL</option>
+            <option value="betual-nba">NBA</option>
+            <option value="betual-kbl">KBL</option>
+            <option value="betual-cba">CBA</option>
+            <option value="betual-tbsl">TBSL</option>
+            <option value="betual-euroleague">EUROLEAGUE</option>
+            <option value="cyber-basketball-2k26-matches">CYBER 2K26</option>
           </select>
         </label>
-        <button class="cohort-refresh" id="cohortRefresh" type="button">refresh</button>
+        <label class="filter-select">CHECKPOINT
+          <select id="checkpointFilter"><option value="">ALL</option><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option></select>
+        </label>
+        <label class="filter-select">SIGNAL
+          <select id="alertStateFilter"><option value="">ALL</option><option value="ACTIVE">ACTIVE</option><option value="INACTIVE">INACTIVE</option></select>
+        </label>
+        <label class="filter-select">SORT
+          <select id="gameSort" aria-label="Sort games">
+            <option value="">FEED ORDER</option>
+            <option value="league">LEAGUE</option>
+            <option value="team">TEAM</option>
+            <option value="progress">PROGRESS</option>
+          </select>
+        </label>
+        <details class="ds-advanced" id="advancedFilters">
+          <summary>ADVANCED</summary>
+          <div class="ds-advanced-body">
+            <label class="filter-select">DIRECTION
+              <select id="directionFilter"><option value="">ALL</option><option value="UNDER">UNDER</option><option value="OVER">OVER</option></select>
+            </label>
+            <label class="filter-select">BET
+              <select id="betStateFilter"><option value="">ALL</option><option value="EXECUTED">HAS EXECUTION</option><option value="NONE">NO EXECUTION</option></select>
+            </label>
+            <label class="filter-select">STATE
+              <select id="gameStateFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="stale">STALE</option><option value="ended">ENDED</option><option value="invalid">INVALID</option></select>
+            </label>
+            <button class="filter" id="liveToggle" data-livefilter="live" title="Show ended/stale games too">SHOWING LIVE</button>
+          </div>
+        </details>
+        <input type="search" id="globalSearch" class="global-search" placeholder="SEARCH teams · league · game id" spellcheck="false" aria-label="Search games">
       </div>
-      <div class="cohort-scorecard" id="cohortScorecard" aria-live="polite">
-        <div class="empty">Open the panel to load cohort scorecards…</div>
+
+      <div class="ds-chips" id="filterChips" aria-live="polite"></div>
+      <div class="ds-counts">
+        <span class="muted filter-count" id="liveCount"></span>
+        <button class="filter" id="filterReset" type="button" title="Clear every dataset filter — this never touches model or Auto-Bet configuration">RESET FILTERS</button>
       </div>
-      <h4 class="cohort-h">Fired-alert ledger <span class="muted" id="cohortLedgerCount"></span></h4>
-      <div class="cohort-ledger-wrap">
-        <table class="cohort-ledger" id="cohortLedger">
-          <thead>
-            <tr>
-              <th>fired (UTC)</th><th>competition</th><th>game</th><th>cohort</th>
-              <th>all matches</th><th>prog%</th><th>pts</th><th>req</th><th>act</th>
-              <th>league</th><th>ratio</th><th>shortfall</th><th>price</th>
-              <th>trigger line</th><th>result</th><th>status</th><th>source</th>
-            </tr>
-          </thead>
-          <tbody><tr><td colspan="17" class="empty">–</td></tr></tbody>
-        </table>
+    </div>
+
+    <!-- ═══════════ GAME CARDS GRID — the betting surface ═══════════ -->
+    <main class="grid" id="grid">
+      <div class="empty" id="empty">Waiting for live data…</div>
+    </main>
+  </div><!-- /#viewLive -->
+
+  <!-- ═══════════ VIEW: ALERTS — what is firing NOW ═══════════
+       Compact rows ONLY — the full game card stays in LIVE GAMES.
+       Clicking a row reveals that game's card (no navigation, no reload). -->
+  <div class="view" id="viewAlerts" data-view="alerts" hidden>
+    <section class="alerts sec-alerts" id="activeAlertsSection">
+      <div class="alerts-head">
+        <span class="alerts-title">🔴 LIVE ALERTS</span>
+        <span class="muted" id="activeAlertsCount"></span>
+        <span class="muted alerts-sub">click a row to jump to its game card</span>
       </div>
+      <div class="alerts-body" id="activeAlerts">
+        <div class="alerts-empty">No active UNDER alerts</div>
+      </div>
+    </section>
+  </div><!-- /#viewAlerts -->
+
+  <!-- ═══════════ VIEW: TRADE COHORTS (TC-*) — the primary analytics view ═══════════
+       Every number is computed server-side by the frozen evaluator
+       (blm_v4/cohorts) and rendered from /api/v4/cohorts/*.  The browser does
+       no cohort arithmetic and holds no thresholds.  Legacy fingerprint tables
+       are NOT here: they live, clearly labelled, in MODEL ACCURACY. -->
+  <div class="view" id="viewCohorts" data-view="cohorts" hidden>
+    <section class="tc-page" id="tcPage">
+
+      <div class="tc-header">
+        <div>
+          <h2 class="tc-title">TRADE COHORTS</h2>
+          <p class="tc-sub muted">
+            Firing-time evidence only · one row per firing/checkpoint · the rule set is frozen and versioned
+          </p>
+        </div>
+        <div class="cohort-meta" id="cohortMeta">
+          <span class="cohort-pill" id="cohortRuleVersion">rule –</span>
+          <span class="cohort-pill" id="cohortWindow">window –</span>
+          <span class="cohort-pill" id="cohortLeague">league ref –</span>
+          <span class="cohort-pill warn" id="cohortCaveat">firings are reconstructed from observations</span>
+        </div>
+      </div>
+
+      <!-- cohort selector cards — one per frozen cohort -->
+      <div class="tc-selector" id="cohortCards" role="tablist" aria-label="Cohort"></div>
+
+      <!-- scorecard for the selected cohort -->
+      <div class="tc-kpis" id="cohortScorecard" aria-live="polite">
+        <div class="empty">Open this page to load cohort scorecards…</div>
+      </div>
+
+      <!-- comparison across all seven cohorts -->
+      <section class="tc-block">
+        <h3 class="tc-h">Cohort comparison <span class="muted" id="cohortCompareNote"></span></h3>
+        <div class="tc-scroll">
+          <table class="tc-table" id="cohortCompare">
+            <thead><tr>
+              <th>cohort</th><th class="num">games</th><th class="num">firings</th>
+              <th class="num">settled</th><th class="num">UNDER</th><th class="num">OVER</th>
+              <th class="num">PUSH</th><th class="num">pending</th>
+              <th class="num">UNDER rate</th><th>Wilson 95%</th>
+              <th class="num">firing cov.</th><th class="num">break-even</th>
+            </tr></thead>
+            <tbody><tr><td colspan="12" class="empty">–</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- breakdowns -->
+      <section class="tc-block">
+        <h3 class="tc-h">Breakdowns
+          <span class="muted">every bucket shows its own denominator; small samples are labelled</span>
+        </h3>
+        <div class="ds-selects">
+          <label class="filter-select">GROUP BY
+            <select id="tcCompareBy">
+              <option value="competition">COMPETITION</option>
+              <option value="price">TRIGGER PRICE</option>
+              <option value="pace_ratio">PACE RATIO</option>
+              <option value="shortfall">SHORTFALL</option>
+              <option value="progress">PROGRESS</option>
+            </select>
+          </label>
+          <label class="filter-select">SOURCE
+            <select id="tcCompareSource">
+              <option value="reconstructed_firing">ACTUAL FIRINGS</option>
+              <option value="checkpoint">HYPOTHETICAL CHECKPOINTS</option>
+            </select>
+          </label>
+        </div>
+        <div class="tc-scroll">
+          <table class="tc-table" id="cohortBreakdown">
+            <thead><tr>
+              <th>bucket</th><th class="num">rows</th><th class="num">settled</th>
+              <th class="num">UNDER</th><th class="num">OVER</th><th class="num">PUSH</th>
+              <th class="num">UNDER rate</th><th>Wilson 95%</th><th class="num">avg price</th>
+            </tr></thead>
+            <tbody><tr><td colspan="9" class="empty">–</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- alert ledger -->
+      <section class="tc-block">
+        <h3 class="tc-h">Alert ledger <span class="muted" id="cohortLedgerCount"></span></h3>
+        <div class="ds-selects">
+          <label class="filter-select">COHORT
+            <select id="tcLedgerCohort"><option value="">ALL</option></select>
+          </label>
+          <label class="filter-select">SOURCE
+            <select id="tcLedgerSource">
+              <option value="reconstructed_firing">ACTUAL FIRINGS</option>
+              <option value="">FIRINGS + CHECKPOINTS</option>
+              <option value="checkpoint">CHECKPOINTS ONLY</option>
+            </select>
+          </label>
+          <label class="filter-select">STATUS
+            <select id="tcLedgerStatus">
+              <option value="">ALL</option>
+              <option value="QUALIFIED">QUALIFIED</option>
+              <option value="NOT_QUALIFIED">NOT QUALIFIED</option>
+              <option value="UNKNOWN">UNKNOWN</option>
+            </select>
+          </label>
+          <label class="filter-select">COMPETITION
+            <select id="tcLedgerCompetition"><option value="">ALL</option></select>
+          </label>
+        </div>
+        <div class="tc-scroll tc-ledger-viewport" id="tcLedgerViewport">
+          <table class="tc-table tc-ledger" id="cohortLedger">
+            <thead>
+              <tr>
+                <th>fired (UTC)</th><th>competition</th><th>game</th><th>cohort</th>
+                <th>all matches</th><th class="num">prog%</th><th class="num">pts</th>
+                <th class="num">req</th><th class="num">act</th><th class="num">league</th>
+                <th class="num">ratio</th><th class="num">shortfall</th><th class="num">price</th>
+                <th class="num">trigger line</th><th>result</th><th>status</th><th>source</th>
+              </tr>
+            </thead>
+            <tbody><tr><td colspan="17" class="empty">–</td></tr></tbody>
+          </table>
+        </div>
+        <div class="tc-pager" id="tcLedgerPager">
+          <button class="filter" id="tcLedgerPrev" type="button">‹ PREV</button>
+          <span class="muted" id="tcLedgerPage">–</span>
+          <button class="filter" id="tcLedgerNext" type="button">NEXT ›</button>
+        </div>
+      </section>
+
+      <!-- data quality -->
+      <section class="tc-block">
+        <h3 class="tc-h">Data quality <span class="muted">why rows are UNKNOWN or excluded — never a silent pass</span></h3>
+        <div class="tc-quality" id="tcQuality"><div class="empty">–</div></div>
+      </section>
+
       <p class="cohort-note">
         Firing-time inputs only. Untested/no-market rows show <strong>UNKNOWN</strong> with a
         reason code and are never counted as passes. PUSH/VOID are excluded from the
         UNDER-vs-OVER denominator. Historical rescore is descriptive, not prospective proof.
       </p>
+
       <details class="legacy-diag" id="legacyDiagnostics">
-        <summary>Legacy diagnostics (C1/C2/C3/C5/R2 fingerprints — legacy rules, not TC-*)</summary>
+        <summary>Legacy diagnostics — C1/C2/C3/C5/R2 fingerprints (legacy rules, not TC-*)</summary>
         <p class="muted">
-          The fingerprint tables below this panel are LEGACY-rule output. They are preserved
-          for comparison and are <strong>not</strong> renamed or relabelled as TC cohorts; no
-          legacy data has been deleted. Use the panels above (Model scorecard / Trends /
-          Event dataset) for the underlying research tables.
+          The fingerprint tables are LEGACY-rule output. They are preserved for comparison and are
+          <strong>not</strong> renamed or relabelled as TC cohorts; no legacy data has been deleted.
+          They render under <strong>MODEL ACCURACY</strong>. Cohort membership on this page never
+          uses a fingerprint.
         </p>
       </details>
-    </div>
-  </section>
+    </section>
+  </div><!-- /#viewCohorts -->
 
-
-  <!-- ═══════════ 🟢 RESULTS — what happened to previous alerts ═══════════
+  <!-- ═══════════ VIEW: HISTORY & RESULTS — what happened to previous alerts ═══════════
        Every triggered alert, kept and colour-coded by its settled verdict.
        Collapsed by default; the header count keeps counting while collapsed. -->
-  <section class="alerts sec-results" id="alertHistorySection">
-    <details class="resulted-details" id="resultedDetails">
-    <summary class="alerts-head" id="resultedHead">
-      <span class="alerts-title">🟢 RESULTS</span>
-      <span class="muted" id="alertHistoryCount"></span>
-      <span class="muted alerts-sub">every triggered alert ·
-        <span class="lg-under">UNDER</span> /
-        <span class="lg-over">OVER</span> /
-        <span class="lg-push">PUSH</span> against its immutable triggered line</span>
-      <span class="resulted-toggle" id="resultedToggle">
-        <button class="resulted-expand-btn" id="resultedExpandBtn" type="button" title="Expand results panel">▼</button>
-      </span>
-    </summary>
-    <div class="alerts-body" id="alertHistory">
-      <div class="alerts-empty">No alerts triggered</div>
+  <div class="view" id="viewHistory" data-view="history" hidden>
+    <section class="alerts sec-results" id="alertHistorySection">
+      <details class="resulted-details" id="resultedDetails">
+      <summary class="alerts-head" id="resultedHead">
+        <span class="alerts-title">🟢 RESULTS</span>
+        <span class="muted" id="alertHistoryCount"></span>
+        <span class="muted alerts-sub">every triggered alert ·
+          <span class="lg-under">UNDER</span> /
+          <span class="lg-over">OVER</span> /
+          <span class="lg-push">PUSH</span> against its immutable triggered line</span>
+        <span class="resulted-toggle" id="resultedToggle">
+          <button class="resulted-expand-btn" id="resultedExpandBtn" type="button" title="Expand results panel">▼</button>
+        </span>
+      </summary>
+      <div class="alerts-body" id="alertHistory">
+        <div class="alerts-empty">No alerts triggered</div>
+      </div>
+      </details>
+    </section>
+
+    <!-- ═══════════ EXECUTION / AUDIT TRACE — ALERT → GAME → SIGNAL → EXECUTION → RESULT.
+         One chain per game that has an execution: every value served by the
+         betting status/history endpoints and the per-game state endpoint —
+         the browser invents no state, no id and no reason. -->
+    <section class="alerts sec-collapsible" id="traceSection">
+      <details class="sec-details">
+      <summary class="alerts-head sec-summary">
+        <span class="alerts-title">EXECUTION / AUDIT TRACE</span>
+        <span class="muted alerts-sub">ALERT → GAME → SIGNAL → EXECUTION → RESULT ·
+          states as served by the betting API · UNKNOWN needs provider reconciliation</span>
+      </summary>
+      <div class="sec-tools"><button id="traceRefresh" type="button">REFRESH</button></div>
+      <div class="alerts-body" id="traceList">
+        <div class="alerts-empty">No executions to trace</div>
+      </div>
+      </details>
+    </section>
+  </div><!-- /#viewHistory -->
+
+  <!-- ═══════════ VIEW: MODEL ACCURACY — the fired-alert cohort, live ═══════════
+       Everything here is served by /api/v4/stats from a background worker's
+       last completed scan (see StatsWorker) — the page NEVER triggers a scan,
+       so switching tabs and polling stay instant however slow the scan is.
+       Segmentation is by COMPETITION, never by classification: BETUAL_NBA
+       bundles five competitions.  These are LEGACY fingerprint/rule outputs. -->
+  <div class="view" id="viewStats" data-view="model" hidden>
+
+    <!-- ─── headline ─── -->
+    <section class="st-card" id="stHeadline">
+      <div class="st-head">
+        <span class="st-title">OF ALL GAMES WHERE THE ALERT FIRED</span>
+        <span class="pill" id="stAsOf">–</span>
+        <span class="muted" id="stModel"></span>
+      </div>
+      <div class="st-kpis" id="stKpis"></div>
+      <div class="st-note muted" id="stHeadlineNote"></div>
+    </section>
+
+    <!-- ─── league standings — the "which league is weak" table ─── -->
+    <section class="st-card">
+      <div class="st-head">
+        <span class="st-title">LEAGUE STANDINGS</span>
+        <span class="muted">weakest first · Wilson 95% interval · a lower bound
+          below 50% is NOT distinguishable from a coin flip</span>
+      </div>
+      <div class="st-scroll"><table class="st-table" id="stLeagues"></table></div>
+      <div class="st-note muted" id="stLeaguesNote"></div>
+    </section>
+
+    <!-- ─── timing window ─── -->
+    <section class="st-card">
+      <div class="st-head">
+        <span class="st-title">ALERT TIMING WINDOW</span>
+        <span class="muted">6th min of Q3 → 4th min of Q4 · measured from each
+          game's FIRST firing moment · REPORTED, not enforced</span>
+      </div>
+      <div class="st-scroll"><table class="st-table" id="stWindow"></table></div>
+      <div class="st-scroll"><table class="st-table" id="stWindowBounds"></table></div>
+      <div class="st-note muted" id="stWindowNote"></div>
+    </section>
+
+    <!-- ─── fingerprints (LEGACY) ─── -->
+    <section class="st-card">
+      <div class="st-head">
+        <span class="st-title">FINGERPRINTS <span class="legacy-badge">LEGACY</span></span>
+        <span class="muted">RECORDED context — they gate nothing; the alert
+          fires on the required-pace rule alone · not TC cohort membership</span>
+      </div>
+      <div class="st-scroll"><table class="st-table" id="stFingerprints"></table></div>
+      <div class="st-note muted" id="stFingerprintsNote"></div>
+    </section>
+
+    <div class="st-split">
+      <!-- ─── count ladder ─── -->
+      <section class="st-card">
+        <div class="st-head"><span class="st-title">FINGERPRINT COUNT LADDER <span class="legacy-badge">LEGACY</span></span></div>
+        <div class="st-scroll"><table class="st-table" id="stLadder"></table></div>
+        <div class="st-note muted" id="stCollapse"></div>
+      </section>
+
+      <!-- ─── req/bar bands ─── -->
+      <section class="st-card">
+        <div class="st-head">
+          <span class="st-title">REQUIRED-PACE BANDS</span>
+          <span class="muted">the edge is not monotone</span>
+        </div>
+        <div class="st-scroll"><table class="st-table" id="stBands"></table></div>
+      </section>
     </div>
-    </details>
-  </section>
 
-
-  <!-- ═══════════ 🎯 LIVE GAMES — the operational betting surface ═══════════
-       The existing game cards ARE the betting grid; nothing here replaces
-       them.  A card with an active alert carries a 2px yellow border. -->
-  <section class="live-head">
-    <span class="live-title">LIVE GAMES</span>
-    <span class="muted" id="liveHeadSub">🟨 = this game has an active alert · clean post-epoch observations only · default view</span>
-  </section>
-
-  <!-- ═══════════ GAME CARDS GRID — the betting surface ═══════════ -->
-  <main class="grid" id="grid">
-    <div class="empty" id="empty">Waiting for live data…</div>
-  </main>
-
-  <!-- ═══════════ GLOBAL CONTROLS — kill switch + auto bet status ═══════════ -->
-  <section class="alerts sec-collapsible" id="autoBettingSection">
-    <details class="sec-details">
-    <summary class="alerts-head sec-summary">
-      <span class="alerts-title">GLOBAL CONTROLS</span>
-      <span class="pill ab-mode-pill" id="abModePill">--</span>
-      <span class="pill muted" id="abKillSwitchPill" title="Kill-switch state — server-controlled">KILL SWITCH: --</span>
-      <span class="pill muted" id="abSubmitPill" title="Server-side real-submission authorization (BETTING_BROWSER_SUBMIT) — read live from the backend">REAL SUBMIT: --</span>
-    </summary>
-    <div class="alerts-body" id="autoBettingBody">
-      <div class="ab-note muted">AUTO BETTING ON/OFF and UNIT PRICE are in the top bar ↑ — this section keeps the detailed state, limits and today's totals.</div>
-      <!-- global state bar -->
-      <div class="ab-global-bar" id="abGlobalBar">
-        <div class="ab-state-item">
-          <span class="ab-state-label">KILL SWITCH</span>
-          <span class="ab-state-val" id="abKillSwitchVal">--</span>
-        </div>
-        <div class="ab-state-item">
-          <span class="ab-state-label">MODE</span>
-          <span class="ab-state-val" id="abModeVal">--</span>
-        </div>
-        <div class="ab-state-item">
-          <span class="ab-state-label">STATUS</span>
-          <span class="ab-state-val" id="abStatusVal">--</span>
-        </div>
-        <div class="ab-state-item">
-          <span class="ab-state-label">CREDENTIALS</span>
-          <span class="ab-state-val muted" id="abCredVal">--</span>
-        </div>
+    <!-- ─── observed fired sets ─── -->
+    <section class="st-card">
+      <div class="st-head">
+        <span class="st-title">OBSERVED FIRED-SET COMBINATIONS</span>
+        <span class="muted">the keys share legs, so full houses are rare</span>
       </div>
-      <div class="ab-grid">
-        <div class="ab-settings">
-          <div class="ab-note muted" id="abLimitsNote">limits: --</div>
-          <div class="ab-note muted">stake = unit price × 1 unit · server-side limits cannot be raised from this page</div>
-        </div>
-        <div class="ab-today">
-          <div class="ab-row"><span>Today's Bets:</span><span class="al-num" id="abTodayBets">–</span></div>
-          <div class="ab-row"><span>Units:</span><span class="al-num" id="abTodayUnits">–</span></div>
-          <div class="ab-row"><span>Amount wagered:</span><span class="al-num" id="abTodayAmount">–</span></div>
-          <div class="ab-row"><span>Remaining daily exposure:</span><span class="al-num" id="abTodayRemaining">–</span></div>
-        </div>
-      </div>
-      <div class="ab-exec-head muted">RECENT EXECUTIONS
-        <span class="muted ab-exec-legend">ALERT → CHECKPOINT → EXEC ID → STATUS</span>
-      </div>
-      <ul class="ab-exec-list" id="abExecList">
-        <li class="alerts-empty">No executions yet</li>
-      </ul>
-      <div class="ab-history-tools">
-        <label>SEARCH <input id="abHistoryQuery" type="search" placeholder="game / alert / execution / provider / error"></label>
-        <label>STATE <select id="abHistoryState"><option value="">ALL</option><option>WOULD_BET</option><option>SUBMITTING</option><option>SUBMITTED</option><option>ACCEPTED</option><option>REJECTED</option><option>BLOCKED</option><option>UNKNOWN</option><option>RECONCILING</option><option>EXPIRED</option></select></label>
-        <button id="abHistorySearch" type="button">SEARCH LEDGER</button>
-      </div>
-      <div class="ab-history-title">EXECUTION LEDGER + AUDIT TRAIL</div>
-      <ul class="ab-exec-list" id="abHistoryList"><li class="alerts-empty">Search execution history</li></ul>
-      <ul class="ab-audit-list" id="abAuditList"></ul>
-    </div>
-    </details>
-  </section>
+      <div class="st-scroll"><table class="st-table" id="stCombos"></table></div>
+    </section>
 
-  <!-- ═══════════ EXECUTION / AUDIT TRACE — ALERT → GAME → SIGNAL → EXECUTION → RESULT.
-       One chain per game that has an execution: every value served by the
-       betting status/history endpoints and the per-game state endpoint —
-       the browser invents no state, no id and no reason. -->
-  <section class="alerts sec-collapsible" id="traceSection">
-    <details class="sec-details">
-    <summary class="alerts-head sec-summary">
-      <span class="alerts-title">EXECUTION / AUDIT TRACE</span>
-      <span class="muted alerts-sub">ALERT → GAME → SIGNAL → EXECUTION → RESULT ·
-        states as served by the betting API · UNKNOWN needs provider reconciliation</span>
-    </summary>
-    <div class="sec-tools"><button id="traceRefresh" type="button">REFRESH</button></div>
-    <div class="alerts-body" id="traceList">
-      <div class="alerts-empty">No executions to trace</div>
-    </div>
-    </details>
-  </section>
+    <!-- ─── definitions + caveats ─── -->
+    <section class="st-card">
+      <div class="st-head"><span class="st-title">DEFINITIONS</span></div>
+      <div class="st-scroll"><table class="st-table" id="stDefinitions"></table></div>
+      <div class="st-note muted" id="stNotes"></div>
+    </section>
 
-  </div><!-- /#viewLive -->
+  </div><!-- /#viewStats -->
 
-  <!-- ═══════════ VIEW: EXPLORER — data/database visibility over the EXISTING
-       read-only API endpoints (games, scorecard checkpoint events, betting
-       ledger, quarter-collection observability, result integrity).
-       Read-only investigation surface; no data is modified. -->
-  <div class="view" id="viewExplorer" hidden>
+  <!-- ═══════════ VIEW: DATA HEALTH — read-only explorer over the existing API
+       endpoints (games, scorecard checkpoint events, betting ledger, quarter
+       collection observability, result integrity).  No data is modified. -->
+  <div class="view" id="viewExplorer" data-view="health" hidden>
     <section class="st-card" id="explorerCard">
       <div class="st-head">
         <span class="st-title">DATABASE / DATA EXPLORER</span>
@@ -342,94 +531,91 @@
     </section>
   </div><!-- /#viewExplorer -->
 
-  <!-- ═══════════ VIEW: STATS — the fired-alert cohort, live ═══════════
-       Everything here is served by /api/v4/stats from a background worker's
-       last completed scan (see StatsWorker) — the page NEVER triggers a scan,
-       so switching tabs and polling stay instant however slow the scan is.
-       Segmentation is by COMPETITION, never by classification: BETUAL_NBA
-       bundles five competitions. -->
-  <div class="view" id="viewStats" hidden>
+  <!-- ═══════════ VIEW: SETTINGS — Auto-Bet configuration (display + cohort selection) ═══════════
+       The cohort selector is the ONLY write on this page, it writes ONE config
+       key, and it cannot enable, size, arm or submit anything. -->
+  <div class="view" id="viewSettings" data-view="settings" hidden>
 
-    <!-- ─── headline ─── -->
-    <section class="st-card" id="stHeadline">
-      <div class="st-head">
-        <span class="st-title">OF ALL GAMES WHERE THE ALERT FIRED</span>
-        <span class="pill" id="stAsOf">–</span>
-        <span class="muted" id="stModel"></span>
-      </div>
-      <div class="st-kpis" id="stKpis"></div>
-      <div class="st-note muted" id="stHeadlineNote"></div>
-    </section>
-
-    <!-- ─── league standings — the "which league is weak" table ─── -->
-    <section class="st-card">
-      <div class="st-head">
-        <span class="st-title">LEAGUE STANDINGS</span>
-        <span class="muted">weakest first · Wilson 95% interval · a lower bound
-          below 50% is NOT distinguishable from a coin flip</span>
-      </div>
-      <div class="st-scroll"><table class="st-table" id="stLeagues"></table></div>
-      <div class="st-note muted" id="stLeaguesNote"></div>
-    </section>
-
-    <!-- ─── timing window ─── -->
-    <section class="st-card">
-      <div class="st-head">
-        <span class="st-title">ALERT TIMING WINDOW</span>
-        <span class="muted">6th min of Q3 → 4th min of Q4 · measured from each
-          game's FIRST firing moment · REPORTED, not enforced</span>
-      </div>
-      <div class="st-scroll"><table class="st-table" id="stWindow"></table></div>
-      <div class="st-scroll"><table class="st-table" id="stWindowBounds"></table></div>
-      <div class="st-note muted" id="stWindowNote"></div>
-    </section>
-
-    <!-- ─── fingerprints ─── -->
-    <section class="st-card">
-      <div class="st-head">
-        <span class="st-title">FINGERPRINTS</span>
-        <span class="muted">RECORDED context — they gate nothing; the alert
-          fires on the required-pace rule alone</span>
-      </div>
-      <div class="st-scroll"><table class="st-table" id="stFingerprints"></table></div>
-      <div class="st-note muted" id="stFingerprintsNote"></div>
-    </section>
-
-    <div class="st-split">
-      <!-- ─── count ladder ─── -->
-      <section class="st-card">
-        <div class="st-head"><span class="st-title">FINGERPRINT COUNT LADDER</span></div>
-        <div class="st-scroll"><table class="st-table" id="stLadder"></table></div>
-        <div class="st-note muted" id="stCollapse"></div>
-      </section>
-
-      <!-- ─── req/bar bands ─── -->
-      <section class="st-card">
-        <div class="st-head">
-          <span class="st-title">REQUIRED-PACE BANDS</span>
-          <span class="muted">the edge is not monotone</span>
+    <!-- ═══ AUTO-BET COHORT — one click, validated server-side, execution stays locked ═══ -->
+    <section class="tc-block ab-cohort" id="abCohortCard">
+      <div class="ab-cohort-head">
+        <div>
+          <h3 class="tc-h">AUTO-BET COHORT</h3>
+          <p class="muted">Which named cohort Auto-Bet is <strong>configured</strong> to use.
+            Selecting one never enables Auto-Bet, changes stakes, limits, the kill switch,
+            dry-run or browser submission.</p>
         </div>
-        <div class="st-scroll"><table class="st-table" id="stBands"></table></div>
-      </section>
-    </div>
-
-    <!-- ─── observed fired sets ─── -->
-    <section class="st-card">
-      <div class="st-head">
-        <span class="st-title">OBSERVED FIRED-SET COMBINATIONS</span>
-        <span class="muted">the keys share legs, so full houses are rare</span>
+        <div class="ab-cohort-state">
+          <span class="pill" id="abCohortSelected">SELECTED —</span>
+          <span class="pill muted" id="abCohortLock">EXECUTION LOCKED</span>
+        </div>
       </div>
-      <div class="st-scroll"><table class="st-table" id="stCombos"></table></div>
+      <div class="ab-cohort-grid" id="abCohortOptions" role="radiogroup" aria-label="Auto-Bet cohort"></div>
+      <div class="ab-cohort-foot">
+        <span class="muted" id="abCohortNote">configuration only · persisted in the TEST environment</span>
+        <button class="filter" id="abCohortReload" type="button">RELOAD</button>
+      </div>
     </section>
 
-    <!-- ─── definitions + caveats ─── -->
-    <section class="st-card">
-      <div class="st-head"><span class="st-title">DEFINITIONS</span></div>
-      <div class="st-scroll"><table class="st-table" id="stDefinitions"></table></div>
-      <div class="st-note muted" id="stNotes"></div>
+    <section class="alerts sec-collapsible" id="autoBettingSection">
+      <details class="sec-details" open>
+      <summary class="alerts-head sec-summary">
+        <span class="alerts-title">GLOBAL CONTROLS</span>
+        <span class="pill ab-mode-pill" id="abModePill">--</span>
+        <span class="pill muted" id="abKillSwitchPill" title="Kill-switch state — server-controlled">KILL SWITCH: --</span>
+        <span class="pill muted" id="abSubmitPill" title="Server-side real-submission authorization (BETTING_BROWSER_SUBMIT) — read live from the backend">REAL SUBMIT: --</span>
+      </summary>
+      <div class="alerts-body" id="autoBettingBody">
+        <div class="ab-note muted">AUTO BETTING ON/OFF and UNIT PRICE are in the top bar ↑ — this section keeps the detailed state, limits and today's totals.</div>
+        <!-- global state bar -->
+        <div class="ab-global-bar" id="abGlobalBar">
+          <div class="ab-state-item">
+            <span class="ab-state-label">KILL SWITCH</span>
+            <span class="ab-state-val" id="abKillSwitchVal">--</span>
+          </div>
+          <div class="ab-state-item">
+            <span class="ab-state-label">MODE</span>
+            <span class="ab-state-val" id="abModeVal">--</span>
+          </div>
+          <div class="ab-state-item">
+            <span class="ab-state-label">STATUS</span>
+            <span class="ab-state-val" id="abStatusVal">--</span>
+          </div>
+          <div class="ab-state-item">
+            <span class="ab-state-label">CREDENTIALS</span>
+            <span class="ab-state-val muted" id="abCredVal">--</span>
+          </div>
+        </div>
+        <div class="ab-grid">
+          <div class="ab-settings">
+            <div class="ab-note muted" id="abLimitsNote">limits: --</div>
+            <div class="ab-note muted">stake = unit price × 1 unit · server-side limits cannot be raised from this page</div>
+          </div>
+          <div class="ab-today">
+            <div class="ab-row"><span>Today's Bets:</span><span class="al-num" id="abTodayBets">–</span></div>
+            <div class="ab-row"><span>Units:</span><span class="al-num" id="abTodayUnits">–</span></div>
+            <div class="ab-row"><span>Amount wagered:</span><span class="al-num" id="abTodayAmount">–</span></div>
+            <div class="ab-row"><span>Remaining daily exposure:</span><span class="al-num" id="abTodayRemaining">–</span></div>
+          </div>
+        </div>
+        <div class="ab-exec-head muted">RECENT EXECUTIONS
+          <span class="muted ab-exec-legend">ALERT → CHECKPOINT → EXEC ID → STATUS</span>
+        </div>
+        <ul class="ab-exec-list" id="abExecList">
+          <li class="alerts-empty">No executions yet</li>
+        </ul>
+        <div class="ab-history-tools">
+          <label>SEARCH <input id="abHistoryQuery" type="search" placeholder="game / alert / execution / provider / error"></label>
+          <label>STATE <select id="abHistoryState"><option value="">ALL</option><option>WOULD_BET</option><option>SUBMITTING</option><option>SUBMITTED</option><option>ACCEPTED</option><option>REJECTED</option><option>BLOCKED</option><option>UNKNOWN</option><option>RECONCILING</option><option>EXPIRED</option></select></label>
+          <button id="abHistorySearch" type="button">SEARCH LEDGER</button>
+        </div>
+        <div class="ab-history-title">EXECUTION LEDGER + AUDIT TRAIL</div>
+        <ul class="ab-exec-list" id="abHistoryList"><li class="alerts-empty">Search execution history</li></ul>
+        <ul class="ab-audit-list" id="abAuditList"></ul>
+      </div>
+      </details>
     </section>
-
-  </div><!-- /#viewStats -->
+  </div><!-- /#viewSettings -->
 
   <!-- ═══════════ DETAIL MODAL ═══════════ -->
   <div class="modal-backdrop" id="modalBackdrop" hidden>
@@ -458,7 +644,7 @@
       it satisfies. Legs: <em>pace</em> = required pts/min ÷ league-average pace (strict &gt;) ·
       <em>shortfall</em> = required − actual pts/min (≥) · <em>price</em> = UNDER price floor (≥).
     </div>
-    <details open>
+    <details>
       <summary><strong>Cohort key</strong> — names, parameters and what each one means</summary>
       <table class="cohort-table">
         <thead>
@@ -468,10 +654,10 @@
           <tr><td>TC-X</td><td>ELITE</td><td>&gt;1.16</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>16 % over league pace — tightest pace rung, ~8 bets/day</td></tr>
           <tr><td>TC-E</td><td>EDGE</td><td>&gt;1.12</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>12 % over league pace, ~13/day</td></tr>
           <tr><td>TC-S</td><td>SHARP</td><td>&gt;1.08</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>8 % over league pace, ~25/day</td></tr>
-          <tr><td>TC-C</td><td>CORE</td><td>&gt;1.04</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>the old alert-era pace bar, ~50/day</td></tr>
-          <tr><td>TC-W</td><td>WIDE</td><td>&gt;1.00</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>the live gate — everything the engine will take, ~88/day</td></tr>
-          <tr><td>TC-D</td><td>DEEP</td><td>&gt;1.00</td><td>&ge;0.50</td><td>&ge;1.60</td><td>shortfall route: half a point/min under the required rate</td></tr>
           <tr><td>TC-C+</td><td>CORE+</td><td>&gt;1.04</td><td>&ge;0.25</td><td>&ge;1.80</td><td>CORE pace + shortfall + a price floor</td></tr>
+          <tr><td>TC-C</td><td>CORE</td><td>&gt;1.04</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>the old alert-era pace bar, ~50/day</td></tr>
+          <tr><td>TC-D</td><td>DEEP</td><td>&gt;1.00</td><td>&ge;0.50</td><td>&ge;1.60</td><td>shortfall route: half a point/min under the required rate</td></tr>
+          <tr><td>TC-W</td><td>WIDE</td><td>&gt;1.00</td><td>&ge;&minus;0.50</td><td>&ge;1.60</td><td>the live gate — everything the engine will take, ~88/day</td></tr>
         </tbody>
       </table>
       <p class="muted">
@@ -480,16 +666,18 @@
         <strong>pace</strong> = required pts/min &divide; league-average pace (strict &gt;) &middot;
         <strong>shortfall</strong> = required &minus; actual pts/min (&ge;) &middot;
         <strong>price</strong> = UNDER price floor (&ge;).
-        The cohorts nest (TC-X &sub; TC-E &sub; TC-S &sub; TC-C &sub; TC-W), so a game is tagged with the
-        tightest one it satisfies and the tooltip lists every cohort that holds.
+        TC-X &rarr; TC-E &rarr; TC-S &rarr; TC-C form the pace ladder; TC-C+ and TC-D are alternate
+        routes (price/shortfall), so the rows above are ordered by the reporting precedence, not by
+        a claim that each row nests inside the one before it.
       </p>
     </details>
   </footer>
 
-  <script src="/static/dashboard.js?v=6855974.11"></script>
-  <script src="/static/stats.js?v=6855974.1"></script>
-  <script src="/static/explorer.js?v=6855974.3"></script>
+  <script src="/static/nav.js?v=6855974.1"></script>
+  <script src="/static/dashboard.js?v=6855974.12"></script>
+  <script src="/static/tc.js?v=6855974.1"></script>
+  <script src="/static/stats.js?v=6855974.2"></script>
+  <script src="/static/explorer.js?v=6855974.4"></script>
   <script src="/static/assistant.js?v=6855974.1"></script>
 </body>
 </html>
-

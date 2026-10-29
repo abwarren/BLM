@@ -310,39 +310,25 @@
   // The canonical switcher lives in stats.js; it hides only viewLive and
   // viewStats.  This re-export keeps the DB EXPLORER tab working through
   // the same click path without changing stats.js behavior.
-  function show(view) {
-    const live = $("viewLive"), stats = $("viewStats"), explorer = $("viewExplorer");
-    const tabLive = $("tabLive"), tabStats = $("tabStats"), tabExplorer = $("tabExplorer");
-    const note = $("tabNote");
-    if (!live || !stats || !explorer) return;
-    const onExplorer = view === "explorer";
-    const onStats = view === "stats";
-    live.hidden = onStats || onExplorer;
-    stats.hidden = !onStats;
-    explorer.hidden = !onExplorer;
-    for (const [tab, active] of [[tabLive, !onStats && !onExplorer],
-                                 [tabStats, onStats], [tabExplorer, onExplorer]]) {
-      if (!tab) continue;
-      tab.classList.toggle("active", active);
-      tab.setAttribute("aria-selected", String(active));
-    }
-    if (note) {
-      note.textContent = onExplorer ? "read-only data / database explorer"
-        : onStats ? "fired-alert cohort · fingerprints · league standings"
-        : "live games + alerts";
-    }
-    if (onExplorer) { pull(); startPolling(); }
+  /* POLLING LIFECYCLE ONLY — see stats.js.  Visibility is nav.js's job. */
+  function applyPolling(on) {
+    S.active = !!on;
+    if (on) { pull(); startPolling(); }
     else stopPolling();
   }
 
+  function show(view) {
+    const target = view === "explorer" ? "health" : view;
+    if (window.blmNav) window.blmNav.show(target);
+    else applyPolling(target === "health");
+    return target;
+  }
+
   function init() {
-    const tabs = $("tabs");
-    if (tabs) {
-      tabs.addEventListener("click", (ev) => {
-        const btn = ev.target.closest(".tab");
-        if (btn && btn.dataset.view) show(btn.dataset.view);
-      });
-    }
+    document.addEventListener("blm:view", (ev) => {
+      applyPolling(ev.detail && ev.detail.view === "health");
+    });
+    applyPolling(window.blmNav ? window.blmNav.current === "health" : false);
     $("exDataset").addEventListener("change", (ev) => {
       setDataset(ev.target.value);
       syncFilterControls();
