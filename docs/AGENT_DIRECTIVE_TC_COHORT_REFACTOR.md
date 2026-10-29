@@ -2,6 +2,8 @@
 
 **MANDATORY: read docs/ENVIRONMENT_BOUNDARIES.md before doing any work.**
 
+**Step-by-step execution plan:** [docs/AGENT_WORKFLOW_TC_COHORT_STATS_AND_UI.md](AGENT_WORKFLOW_TC_COHORT_STATS_AND_UI.md). This workflow is mandatory for the cohort-statistics rebuild and dashboard cleanup; it defines phase gates, data lineage, denominator rules, UI filter/tab/spacing/scroll requirements, tests, and test-only deployment evidence.
+
 ## Target environment order
 
 1. Implement and test this refactor on the designated EC2 test environment: http://13.247.58.81/login?next=/
