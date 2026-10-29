@@ -33,10 +33,45 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 os.environ.setdefault("BLM_DATA_ROOT", str(REPO.parent / "BLM"))
 
+
+def _adopt_running_gate() -> dict:
+    """Use the LIVE engine's TRADE_* gate, not the code defaults.
+
+    The deployment selects its cohort through systemd drop-ins, so a report run
+    from a shell would otherwise describe a different gate than the one firing —
+    exactly the mismatch that made a fired bet look "not in the cohort".
+    Reads /proc/<server pid>/environ; anything already in the environment wins,
+    and any failure is silent (the defaults stay honest).
+    """
+    import subprocess
+    adopted = {}
+    try:
+        pid = subprocess.run(
+            ["systemctl", "--user", "show", "blm-server.service", "-p",
+             "MainPID", "--value"], capture_output=True, text=True,
+            timeout=5).stdout.strip()
+        if not pid or pid == "0":
+            return adopted
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            for kv in fh.read().split(b"\0"):
+                k, _, v = kv.partition(b"=")
+                name = k.decode()
+                if name.startswith("TRADE_") and name not in os.environ:
+                    os.environ[name] = v.decode()
+                    adopted[name] = v.decode()
+    except Exception:
+        pass
+    return adopted
+
+
+_ADOPTED = _adopt_running_gate()
+
 from blm_v4.live_analytics.competition_pace import competition_pace_reference  # noqa: E402
 from blm_v4.trade_cohorts import COHORT_ORDER, resolve_cohort  # noqa: E402
-from blm_v4.trade_window import (TRADE_MAX_PROGRESS_PCT, TRADE_MIN_PROGRESS_PCT,
-                                 TRADE_MIN_SCORED_POINTS)  # noqa: E402
+from blm_v4.trade_window import (SHORTFALL_MARGIN, TRADE_MAX_PROGRESS_PCT,
+                                 TRADE_MIN_PACE_RATIO, TRADE_MIN_PROGRESS_PCT,
+                                 TRADE_MIN_SCORED_POINTS,
+                                 exec_shortfall_reason)  # noqa: E402
 
 DATA = Path(os.environ["BLM_DATA_ROOT"])
 PROD_DB = DATA / "blm_pokerbet.db"
@@ -135,6 +170,12 @@ def main(argv=None) -> int:
         if gid in pick:
             continue
         slug = slugs.get(gid)
+        # the ENGINE's shortfall leg — the cohort labels carry each rung's own
+        # floor, which is NOT the live gate.  Without this the tool reported
+        # 40 candidates/day where the engine could fire 20.
+        if exec_shortfall_reason(r["required_pts_per_min"],
+                                 r["actual_pts_per_min"]) is not None:
+            continue
         avg = (pace_ref.get(slug) or {}).get("avg_pace") if slug else None
         coh = resolve_cohort(progress_pct=r["progress_pct"],
                             total_points=r["total_points"],
@@ -184,7 +225,11 @@ def main(argv=None) -> int:
         out = out[:a.limit]
 
     counts = {c: sum(1 for e in out if c in e["codes"]) for c in COHORT_ORDER}
+    gate = (f"gate: pace>{TRADE_MIN_PACE_RATIO:.2f} shortfall>="
+            f"{SHORTFALL_MARGIN:+.2f} progress<={TRADE_MAX_PROGRESS_PCT:.0f}"
+            f"{'  (live engine)' if _ADOPTED else '  (code defaults)'}")
     if a.summary:
+        print(gate)
         print(f"candidates: {len(out)}   " +
               "  ".join(f"{c}={n}" for c, n in counts.items() if n))
         return 0
