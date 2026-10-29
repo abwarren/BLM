@@ -1552,3 +1552,46 @@ table.cohort-ledger tr.st-unknown td { color: #f0c56b; }
   font-size: 12px;
   letter-spacing: .4px;
 }
+
+/* `hidden` must beat the class-level display rules on both surfaces */
+#grid[hidden], .live-table-wrap[hidden] { display: none !important; }
+
+/* ── Live Games table: compact, tabular, sticky header, one scroll axis ── */
+.live-table-wrap {
+  margin: 0 18px 24px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; overflow: auto; max-height: calc(100vh - 260px);
+}
+.live-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.live-table thead th {
+  position: sticky; top: 0; z-index: 3; background: #0d1420;
+  border-bottom: 1px solid var(--border2); padding: 8px 10px; text-align: left;
+  font: 10px var(--mono); letter-spacing: .8px; color: var(--muted);
+  text-transform: uppercase; white-space: nowrap;
+}
+.live-table thead th.num { text-align: right; }
+.live-table tbody td {
+  padding: 6px 10px; border-bottom: 1px solid rgba(30,42,58,.7);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.live-table tbody tr { height: 34px; cursor: pointer; }
+.live-table tbody tr:nth-child(even) { background: rgba(255,255,255,.012); }
+.live-table tbody tr:hover { background: rgba(34,211,238,.06); }
+.live-table tbody tr:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+.live-table td.num, .live-table th.num { text-align: right; font-family: var(--mono); }
+.live-table .c-game { max-width: 340px; min-width: 220px; color: #eaf2ff; font-weight: 600; }
+.live-table .c-cohort { font-family: var(--mono); letter-spacing: .5px; }
+.live-table .sig-active { color: var(--amber); font-weight: 700; }
+.live-table .sig-cp { color: var(--cyan); }
+.live-table .coh-on { color: var(--cyan); }
+.live-table .res-under { color: var(--green); }
+.live-table .res-over { color: var(--red); }
+.live-table .res-push { color: var(--amber); }
+.live-table .res- { color: var(--muted); }
+.live-table td.empty { text-align: center; color: var(--muted); padding: 22px 0; }
+.vm-mode { display: inline-flex; gap: 2px; }
+.vm-mode .filter.active { background: var(--cyan); color: #04121a; }
+@media (max-width: 1200px) {
+  .live-table .c-odds, .live-table .c-age { display: none; }
+  .live-table-wrap { max-height: none; }
+}

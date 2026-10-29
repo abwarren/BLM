@@ -2794,6 +2794,9 @@ function renderCards(payload) {
   const visible = state.hideNonLive
     ? games.filter(isActuallyLive)
     : games;
+  // ONE filtered set, two presentations: the table renders from this exact
+  // array, so a filter can never mean two different things on one page.
+  state.lastVisible = visible;
   syncLiveToggle(games.length, visible.length);
   const seen = new Set();
   for (const g of visible) {
@@ -4113,6 +4116,14 @@ if (resetBtn) {
     state.sort = "";
     state.search = "";
     state.hideNonLive = true;
+    // Clear the STORE, not just the widgets: setting .value fires no change
+    // event, so clearing the <select> alone left the filter applied while the
+    // control read ALL (a stale selection the operator cannot see).
+    state.checkpointFilter = "";
+    state.directionFilter = "";
+    state.alertStateFilter = "";
+    state.betStateFilter = "";
+    state.gameStateFilter = "";
     for (const id of ["checkpointFilter", "directionFilter", "alertStateFilter",
                       "betStateFilter", "gameStateFilter", "leagueFilter",
                       "gameSort", "globalSearch"]) {
@@ -4727,3 +4738,151 @@ traceTimer = setInterval(() => {
    cohort selector.  Keeping it in this file meant the cohort page had to
    share the live board's poll rhythm and its DOM ids; the page now loads
    its read model only when the destination is opened. */
+
+/* ═══════════ LIVE GAMES — compact table (default presentation) ═══════════
+   Renders state.lastVisible, the array renderCards already filtered.  Rows are
+   keyed by game_id and updated in place: a poll changes text, never structure,
+   so scroll position survives and nothing flickers.  Every value is read from
+   the served payload; no metric is computed, rescaled or renamed here. */
+const LIVE_COLUMNS = ["game", "lge", "period", "score", "line", "odds",
+                      "req", "act", "prog", "signal", "cohort", "result", "age"];
+
+function cellText(g, labels) {
+  const m = g.market || {};
+  const a = g.under_alert || {};
+  const p = g.projector || {};
+  const coh = g.trade_cohort || {};
+  const fin = g.final_result || {};
+  const num = (v, d = 1) => (v === null || v === undefined || !isFinite(v))
+    ? "–" : Number(v).toFixed(d);
+  const active = !!a.active;
+  const cp = a.checkpoint;
+  const signal = active ? "ACTIVE" : (cp !== null && cp !== undefined ? "CP " + cp + "%" : "–");
+  const score = (g.home_score === null || g.home_score === undefined) ? "–"
+    : `${g.home_score}–${g.away_score}`;
+  const period = [g.period_label || (g.quarter ? "Q" + g.quarter : ""), g.clock || ""]
+    .filter(Boolean).join(" ") || "–";
+  const result = fin.status ? String(fin.status).toUpperCase() : "–";
+  const age = g.age_s === null || g.age_s === undefined ? "–" : fmtAgeExact(g.age_s);
+  return {
+    game: {
+      // HOME first, matching the SCORE column and the game card, so a reader can
+      // never pair the score with the wrong side.  The tooltip says so.
+      text: `${g.home_team || "?"} v ${g.away_team || "?"}`,
+      title: `game ${g.game_id} · home v away · score is home–away · ` +
+             `${g.status || ""}${g.live_reason ? " · " + g.live_reason : ""}`,
+    },
+    lge: { text: labels[g.competition_slug] || g.competition_slug || "–" },
+    period: { text: period },
+    score: { text: score },
+    line: { text: num(m.total_line, 1) },
+    odds: { text: num(m.under_odds, 2) },
+    req: { text: num(a.required_pace !== null && a.required_pace !== undefined
+                     ? a.required_pace : p.required_pts_per_min, 2) },
+    act: { text: num(a.actual_pace !== null && a.actual_pace !== undefined
+                     ? a.actual_pace : p.actual_pts_per_min, 2) },
+    prog: { text: a.trigger_progress !== null && a.trigger_progress !== undefined
+                    ? num(a.trigger_progress, 1) + "%"
+                    : (p.progress_pct !== null && p.progress_pct !== undefined
+                       ? num(p.progress_pct, 1) + "%" : "–") },
+    signal: { text: signal, cls: active ? "sig-active" : (cp ? "sig-cp" : "") },
+    cohort: { text: coh.code || "–", cls: coh.code ? "coh-on" : "" },
+    result: { text: result, cls: "res-" + result.toLowerCase() },
+    age: { text: age },
+  };
+}
+
+const liveRows = new Map();      // game_id -> { tr, cells: {col: td} }
+
+function renderLiveTable() {
+  const host = $("liveTableBody");
+  if (!host) return;
+  const rows = state.lastVisible || [];
+  const labels = leagueLabelsFrom(document);   // once per render, not per row
+  const order = [];
+  for (const g of rows) {
+    const gid = String(g.game_id);
+    order.push(gid);
+    const values = cellText(g, labels);
+    let row = liveRows.get(gid);
+    if (!row) {
+      const tr = document.createElement("tr");
+      tr.dataset.gameId = gid;
+      tr.tabIndex = 0;
+      const cells = {};
+      for (const col of LIVE_COLUMNS) {
+        const td = document.createElement("td");
+        td.className = (col === "game") ? "c-game" : "c-" + col;
+        tr.appendChild(td);
+        cells[col] = td;
+      }
+      tr.addEventListener("click", (ev) => {
+        if (ev.target.closest("button, a, input, select")) return;
+        openModal(gid);
+      });
+      tr.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openModal(gid); }
+      });
+      row = { tr, cells };
+      liveRows.set(gid, row);
+    }
+    for (const col of LIVE_COLUMNS) {
+      const v = values[col] || { text: "–" };
+      const td = row.cells[col];
+      if (td.textContent !== v.text) td.textContent = v.text;
+      const cls = "c-" + col + (v.cls ? " " + v.cls : "");
+      if (td.className !== cls) td.className = cls;
+      if (v.title && td.title !== v.title) td.title = v.title; else if (!v.title) td.title = "";
+    }
+  }
+  // drop rows that left the filtered set
+  for (const [gid, row] of liveRows) {
+    if (!order.includes(gid)) { row.tr.remove(); liveRows.delete(gid); }
+  }
+  // order is stable unless the sort itself changed
+  const current = Array.from(host.children).map((tr) => tr.dataset.gameId).filter(Boolean);
+  const same = current.length === order.length && current.every((id, i) => id === order[i]);
+  if (!same) {
+    const frag = document.createDocumentFragment();
+    for (const gid of order) frag.appendChild(liveRows.get(gid).tr);
+    host.replaceChildren(frag);
+  }
+  let emptyRow = host.querySelector("tr.live-empty");
+  if (!rows.length) {
+    if (!emptyRow) {
+      emptyRow = document.createElement("tr");
+      emptyRow.className = "live-empty";
+      emptyRow.innerHTML = '<td colspan="13" class="empty">no games match these filters — RESET FILTERS to widen the view</td>';
+      host.replaceChildren(emptyRow);
+    }
+  } else if (emptyRow) {
+    emptyRow.remove();
+  }
+}
+
+/* presentation toggle — TABLE (default) or CARDS; persisted per browser */
+const VIEWMODE_KEY = "pz.liveViewMode";
+function applyViewMode(mode) {
+  const table = $("liveTableViewport"), grid = $("grid");
+  const tb = $("viewTableBtn"), cb = $("viewCardsBtn");
+  const isCards = mode === "cards";
+  if (table) table.hidden = isCards;
+  if (grid) grid.hidden = !isCards;
+  if (tb) { tb.classList.toggle("active", !isCards); tb.setAttribute("aria-pressed", String(!isCards)); }
+  if (cb) { cb.classList.toggle("active", isCards); cb.setAttribute("aria-pressed", String(isCards)); }
+  try { localStorage.setItem(VIEWMODE_KEY, isCards ? "cards" : "table"); } catch (_) {}
+  if (!isCards) renderLiveTable();
+}
+let __viewMode = "table";
+try { __viewMode = localStorage.getItem(VIEWMODE_KEY) === "cards" ? "cards" : "table"; } catch (_) {}
+applyViewMode(__viewMode);
+const tbtn = $("viewTableBtn"); if (tbtn) tbtn.addEventListener("click", () => applyViewMode("table"));
+const cbtn = $("viewCardsBtn"); if (cbtn) cbtn.addEventListener("click", () => applyViewMode("cards"));
+
+// Every existing render path also refreshes the table (one filtered set).
+const __renderCardsBase = renderCards;
+renderCards = function (payload) {
+  __renderCardsBase(payload);
+  renderLiveTable();
+};
+renderLiveTable();

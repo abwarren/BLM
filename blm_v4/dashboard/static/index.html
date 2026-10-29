@@ -123,6 +123,11 @@
         <button class="ds-tab" role="tab" aria-selected="false" data-segment="WATCH">WATCH</button>
       </div>
 
+      <span class="vm-mode" role="group" aria-label="Presentation">
+        <button class="filter active" id="viewTableBtn" type="button" aria-pressed="true" title="Compact table (default)">TABLE</button>
+        <button class="filter" id="viewCardsBtn" type="button" aria-pressed="false" title="Full game cards">CARDS</button>
+      </span>
+
       <div class="ds-selects">
         <label class="filter-select">LEAGUE
           <select id="leagueFilter" aria-label="League filter">
@@ -172,6 +177,34 @@
         <span class="muted filter-count" id="liveCount"></span>
         <button class="filter" id="filterReset" type="button" title="Clear every dataset filter — this never touches model or Auto-Bet configuration">RESET FILTERS</button>
       </div>
+    </div>
+
+    <!-- ═══════════ GAMES TABLE — the compact scanning surface (default) ═══════════
+         Rows are rendered from the SAME filtered set as the cards.  Click a row
+         for that game's full card.  Values are the served payload's own. -->
+    <div class="live-table-wrap" id="liveTableViewport">
+      <table class="live-table" id="liveTable">
+        <thead>
+          <tr>
+            <th class="c-game">GAME</th>
+            <th class="c-lge">LEAGUE</th>
+            <th class="c-period">PERIOD</th>
+            <th class="num c-score">SCORE</th>
+            <th class="num c-line">TOTAL</th>
+            <th class="num c-odds">UND</th>
+            <th class="num c-pace">REQ</th>
+            <th class="num c-pace">ACT</th>
+            <th class="num c-prog">PROG</th>
+            <th class="c-signal">SIGNAL</th>
+            <th class="c-cohort">COHORT</th>
+            <th class="c-result">RESULT</th>
+            <th class="num c-age">AGE</th>
+          </tr>
+        </thead>
+        <tbody id="liveTableBody">
+          <tr><td colspan="13" class="empty">Waiting for live data…</td></tr>
+        </tbody>
+      </table>
     </div>
 
     <!-- ═══════════ GAME CARDS GRID — the betting surface ═══════════ -->
@@ -674,7 +707,7 @@
   </footer>
 
   <script src="/static/nav.js?v=6855974.1"></script>
-  <script src="/static/dashboard.js?v=6855974.12"></script>
+  <script src="/static/dashboard.js?v=6855974.13"></script>
   <script src="/static/tc.js?v=6855974.1"></script>
   <script src="/static/stats.js?v=6855974.2"></script>
   <script src="/static/explorer.js?v=6855974.4"></script>
