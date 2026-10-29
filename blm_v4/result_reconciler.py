@@ -620,6 +620,23 @@ class ResultReconciler:
         """
         last_snap = _row_get(game, "last_snap_at")
         marker = bool(_row_get(game, "_terminal_marker"))
+        # The GAMES TABLE is a second, independent witness, and it outranks the
+        # snapshot stream: a game it still lists as `live` has NOT finished,
+        # however quiet its snapshots are.  Silence is only evidence of an end
+        # when the collector had no gap — and it does have gaps.
+        # Measured 2026-10-29 16:40:17 on 31394934 (Orlando v Denver): the
+        # snapshot stream had been quiet 14 minutes, `game_is_terminal` said
+        # terminal on the 90 s grace, and a MID-Q4 render (quarters
+        # 30:33, 23:24, 32:23, 5:7 → 90:87 = 177) was written as the final —
+        # while the game ran on to 218+ points with status still `live`.
+        status = str(_row_get(game, "status") or "").strip().lower()
+        if status == "live":
+            return False, {
+                "terminal_guard": "game_still_live",
+                "last_snapshot_at": last_snap,
+                "terminal_marker": marker,
+                "status": status,
+            }
         if last_snap is None:
             return True, {"terminal_guard": "no_snapshot_stream"}
         terminal = game_is_terminal(last_snap, now, terminal_marker=marker)
@@ -627,6 +644,7 @@ class ResultReconciler:
             "terminal_guard": "terminal" if terminal else "game_not_terminal",
             "last_snapshot_at": last_snap,
             "terminal_marker": marker,
+            "status": status,
         }
         return terminal, checks
 
