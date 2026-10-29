@@ -4,6 +4,8 @@
 
 **Step-by-step execution plan:** [docs/AGENT_WORKFLOW_TC_COHORT_STATS_AND_UI.md](AGENT_WORKFLOW_TC_COHORT_STATS_AND_UI.md). This workflow is mandatory for the cohort-statistics rebuild and dashboard cleanup; it defines phase gates, data lineage, denominator rules, UI filter/tab/spacing/scroll requirements, tests, and test-only deployment evidence.
 
+**MANDATORY commit/deploy cadence:** work in the verified EC2 test checkout only. Commit each coherent work unit after relevant tests pass, then deploy that exact validated commit to the isolated parallel test instance at `127.0.0.1:2263` and run smoke checks. Re-verify target identity before every deploy. Never deploy to production; do not replace the existing `:2262`/`:80` mirror. If a build is broken or unvalidated, fix/test before deploying it. Follow the detailed cadence in the workflow.
+
 ## Target environment order
 
 1. Implement and test this refactor on the designated EC2 test environment: http://13.247.58.81/login?next=/
