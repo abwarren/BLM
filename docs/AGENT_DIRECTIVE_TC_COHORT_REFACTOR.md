@@ -37,13 +37,13 @@ Calculate all cohort memberships at the recorded firing time using only data ava
 - Add a fired-alert ledger showing firing-time inputs, tightest cohort, all qualifying cohorts, triggering line/price and final outcome.
 - Add cohort comparisons by actual competition, price, pace ratio, shortfall and progress.
 - Move C1/C2/C3/C5/R2 fingerprint output to collapsed Legacy Diagnostics; preserve legacy data.
-- Show Auto-Bet configuration read-only, including persisted selected cohort (currently reported as TC-X), enabled/dry-run/submission authorization state and missing risk limits. Do not mutate any of these values.
+- Add a one-click Auto-Bet cohort selector for all seven TC cohorts, persisted only in the isolated TEST configuration. Selection must never enable execution or change stakes/limits, kill switch, dry-run, or browser-submit authorization. Keep execution fail-closed and production untouched. See the mandatory UI workflow for acceptance tests.
 - Keep business logic in the backend; the frontend renders API output only.
 - Preserve the repository's frozen research and prospective-confirmation firewall.
 
 ## Hard prohibitions
 
-No production changes, deployment, service restart, migration, backfill, rescore writes, Auto-Bet changes, stake changes, kill-switch changes, browser submission, or live bets. Do not point test jobs at production DBs or services. Do not put secrets or production data into Git.
+No production changes, deployment, service restart, migration, backfill, or rescore writes. The explicitly scoped test-only Auto-Bet cohort-selector UI/config selection may be implemented and tested on EC2 test only; do not enable execution or change stakes/limits, kill switch, dry-run, browser-submit authorization, browser submission, or live bets. Do not point test jobs at production DBs or services. Do not put secrets or production data into Git.
 
 ## Required completion evidence
 
