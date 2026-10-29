@@ -167,6 +167,7 @@ def main(argv=None) -> int:
     print(f"{'when (UTC)':19s} {'game':12s} {'cohort':7s} {'prog':>6s} {'pts':>4s} "
           f"{'pace':>5s} {'short':>6s} {'price':>5s} {'line':>6s} {'final':>5s} "
           f"{'res':>3s} {'units':>6s}  competition")
+    icon = {"W": "✅", "L": "❌", "P": "➖", "?": "⏳"}
     unit_sum = 0.0
     for e in out:
         unit_sum += e["pnl"]
@@ -174,7 +175,8 @@ def main(argv=None) -> int:
         print(f"{e['ts']:19s} {e['gid']:12s} {e['code']:7s} {e['prog']:6.1f} "
               f"{e['pts']:4.0f} {(e['pace'] or 0):5.2f} {e['short']:+6.2f} "
               f"{e['price']:5.2f} {e['line']:6.1f} "
-              f"{(e['final'] if e['final'] is not None else '-'):>5} {e['res']:>3s} "
+              f"{(e['final'] if e['final'] is not None else '-'):>5} "
+              f"{icon.get(e['res'], e['res']):>3s} "
               f"{e['pnl']:+6.2f}  {e['slug']}{(' ⊂' + also) if also else ''}")
 
     n = len(out)
