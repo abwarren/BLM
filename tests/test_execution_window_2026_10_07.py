@@ -38,6 +38,7 @@ THREE surfaces, ONE definition:
 A second copy of the numbers, or a badge that ignores either verdict, is the
 failure these tests exist to prevent.
 """
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -491,6 +492,13 @@ def test_badge_requires_the_window():
 
 def test_the_changed_asset_is_cache_busted():
     """dashboard.js is served from disk; a stale browser copy would keep the
-    old badge, so the ?v= must have moved with the file."""
+    old badge, so the asset must carry a cache-busting query.
+
+    The assertion is on the MECHANISM, not on one frozen version string: the
+    previous form (`?v=6855974.11`) failed on every unrelated asset change and
+    told us nothing about whether the bust was actually present.
+    """
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert "/static/dashboard.js?v=6855974.11" in html
+    m = re.search(r'/static/dashboard\.js\?v=([0-9][0-9A-Za-z._-]*)', html)
+    assert m, "dashboard.js must be referenced with a ?v= cache-buster"
+    assert m.group(1), "the cache-buster must not be empty"

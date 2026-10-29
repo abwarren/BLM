@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+import re
+
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -206,11 +208,16 @@ def test_dashboard_production_ui_has_no_raw_debug(client):
     assert "rawDrawer" not in html
     assert "rawClose" not in html
     assert "RAW / DEBUG" not in html
-    # competition filters present, keyed on the CANONICAL competition ids
-    assert 'data-filter=""' in html
+    # competition filter present, keyed on the CANONICAL competition ids.
+    # 2026-10-29: the league filter is a DROPDOWN (tabs are dataset segments),
+    # so the ids are asserted on the option values of #leagueFilter.
+    assert 'id="leagueFilter"' in html
+    select = re.search(r'<select id="leagueFilter".*?</select>', html, re.S)
+    assert select, "the LEAGUE dropdown must exist"
+    assert 'value=""' in select.group(0)               # ALL = no filter
     for cid in ("betual-nba", "betual-kbl", "betual-cba", "betual-tbsl",
                 "betual-euroleague", "cyber-basketball-2k26-matches"):
-        assert f'data-filter="{cid}"' in html, cid
+        assert f'value="{cid}"' in select.group(0), cid
 
 
 def test_dashboard_static_assets(client):
