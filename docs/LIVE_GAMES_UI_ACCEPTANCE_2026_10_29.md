@@ -165,3 +165,19 @@ clipped the RESET button.
    exercised here.
 3. The collector banner still costs ~30 px at the top on this host.
 4. REQ / ACT / PROG stay dashed because the projector block is live-only.
+
+## Phase 2b — banner click-through (commit `404f758`)
+
+A capture run died with `collectorBanner intercepts pointer events` while
+clicking a filter control. The banner is prepended to `<body>` as
+`position: sticky; top: 0; z-index: 999` and carries text only, but had no
+`pointer-events` rule, so it floated above the sticky top bar and swallowed
+clicks on anything scrolled underneath it.
+
+`#collectorBanner { pointer-events: none; }` restores click-through; the element
+has no interactive child, so nothing is lost. Probe after deploy:
+`pointer_events: none`, and `document.elementFromPoint` at its centre no longer
+returns the banner.
+
+Its stacking over the top bar when the page is scrolled remains cosmetic and was
+not changed. Acceptance after the change: **26/26**, no console errors.
