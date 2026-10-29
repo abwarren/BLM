@@ -138,6 +138,23 @@ RECONCILE_VERIFY_INTERVAL_S = float(
     os.environ.get("RECONCILE_VERIFY_INTERVAL_S", "3600"))
 
 
+def _v1_collector_enabled(environ=None) -> bool:
+    """Whether the in-server LEGACY V1 collector and its 20 s snapshot
+    scheduler run.  DEFAULT ON — unchanged behaviour — and ``BLM_V1_COLLECTOR``
+    set to 0/false/no/off disables both.
+
+    It is a SECOND headless scraping loop beside the standalone blm-collector:
+    measured 2026-10-29 it held 18 chromium processes and roughly a third of the
+    box's CPU, which starved the v4 collector's page captures on the shared box
+    (fast ticks 50–178 s against a 5 s design, heartbeat past the dashboard's
+    90 s OFFLINE threshold).  Disabled, it costs only blm_v2's own ts/alert
+    views — the v4 dashboard and the betting worker never read them.
+    """
+    env = environ if environ is not None else os.environ
+    val = env.get("BLM_V1_COLLECTOR", "1")
+    return str(val).strip().lower() not in ("0", "false", "no", "off", "")
+
+
 def main() -> None:
     from pathlib import Path
     root = Path(_DATA_ROOT)          # runtime data (DBs/state)
@@ -168,7 +185,11 @@ def main() -> None:
 
     core_engine = CoreEngine()
     engine_adapter = BlmEngineAdapter(core_engine)
-    collector = V1CollectorAdapter(headless=True)
+    # LEGACY V1 collector — the second scraping loop (see _v1_collector_enabled).
+    v1_collector_on = _v1_collector_enabled()
+    collector = V1CollectorAdapter(headless=True) if v1_collector_on else None
+    if not v1_collector_on:
+        logger.info("v1_collector_disabled", reason="BLM_V1_COLLECTOR=0")
 
     # ── OLV/CLV + Historical + UNDER timing ──────────────────────
     line_tracker = LineTracker()
@@ -180,15 +201,17 @@ def main() -> None:
         async def emit(self, event_type: str, data: dict) -> None:
             logger.debug("scheduler_event", type=event_type)
 
-    scheduler = SnapshotScheduler(
-        collector=collector,
-        ts_db=ts,
-        engine=engine_adapter,
-        event_bus=_SchedulerEventBus(),
-        tick_s=20.0,
-        line_tracker=line_tracker,
-        under_timing_engine=under_timing_engine,
-    )
+    scheduler = None
+    if v1_collector_on:
+        scheduler = SnapshotScheduler(
+            collector=collector,
+            ts_db=ts,
+            engine=engine_adapter,
+            event_bus=_SchedulerEventBus(),
+            tick_s=20.0,
+            line_tracker=line_tracker,
+            under_timing_engine=under_timing_engine,
+        )
 
     # ── Register event handlers ──────────────────────────────
     from blm_v2.models.events import BlmEvent
@@ -352,21 +375,25 @@ def main() -> None:
     # ── Lifespan handlers ────────────────────────────────────
     @app.on_event("startup")
     async def start_pipeline():
-        logger.info("collector_starting")
-        collector.start()
-        logger.info("scheduler_starting")
-        # The scheduler's ticks are LONG SYNCHRONOUS work (SQLite reads,
-        # json_extract scans in the historical layer).  Running that
-        # coroutine on the uvicorn event loop blocked every HTTP request
-        # for seconds per tick (dashboard polls never completing — the
-        # page froze on its initial state).  Give it its own loop/thread:
-        # the API event loop stays responsive.
-        def _run_scheduler():
-            asyncio.run(scheduler.run())
-        thread = threading.Thread(target=_run_scheduler,
-                                  name="blm-scheduler", daemon=True)
-        thread.start()
-        app.state._scheduler_thread = thread
+        if scheduler is None:
+            logger.info("v1_collector_and_scheduler_skipped",
+                        reason="BLM_V1_COLLECTOR=0")
+        else:
+            logger.info("collector_starting")
+            collector.start()
+            logger.info("scheduler_starting")
+            # The scheduler's ticks are LONG SYNCHRONOUS work (SQLite reads,
+            # json_extract scans in the historical layer).  Running that
+            # coroutine on the uvicorn event loop blocked every HTTP request
+            # for seconds per tick (dashboard polls never completing — the
+            # page froze on its initial state).  Give it its own loop/thread:
+            # the API event loop stays responsive.
+            def _run_scheduler():
+                asyncio.run(scheduler.run())
+            thread = threading.Thread(target=_run_scheduler,
+                                      name="blm-scheduler", daemon=True)
+            thread.start()
+            app.state._scheduler_thread = thread
 
         # ── Projection accuracy scorecard (persisted, quality-gated) ──
         # The scorecard run is a long synchronous SQLite workload (1-3 min
@@ -754,7 +781,8 @@ def main() -> None:
             _step("result_verifier", result_verifier.stop, 1)
 
         # ── 2. the scheduler that drives them, then its thread ──────────
-        await scheduler.stop()
+        if scheduler is not None:
+            await scheduler.stop()
         thread = getattr(app.state, "_scheduler_thread", None)
         if thread and thread.is_alive():
             thread.join(timeout=1)
