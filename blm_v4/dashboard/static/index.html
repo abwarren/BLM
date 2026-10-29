@@ -154,7 +154,11 @@
             <option value="progress">PROGRESS</option>
           </select>
         </label>
-        <details class="ds-advanced" id="advancedFilters">
+        
+        <input type="search" id="globalSearch" class="global-search" placeholder="SEARCH teams · league · game id" spellcheck="false" aria-label="Search games">
+      </div>
+
+      <details class="ds-advanced" id="advancedFilters">
           <summary>ADVANCED</summary>
           <div class="ds-advanced-body">
             <label class="filter-select">DIRECTION
@@ -169,8 +173,6 @@
             <button class="filter" id="liveToggle" data-livefilter="live" title="Show ended/stale games too">SHOWING LIVE</button>
           </div>
         </details>
-        <input type="search" id="globalSearch" class="global-search" placeholder="SEARCH teams · league · game id" spellcheck="false" aria-label="Search games">
-      </div>
 
       <div class="ds-chips" id="filterChips" aria-live="polite"></div>
       <div class="ds-counts">

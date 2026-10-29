@@ -1720,3 +1720,35 @@ body { background: var(--bg); }
 .chip:hover { border-color: var(--red); color: var(--red); }
 .ds-counts { flex: 0 0 auto; padding-top: 10px; gap: 10px; }
 .ds-counts .filter { border-color: var(--border2); }
+
+/* ═══════════ TOOLBAR LAYOUT (stage C) ═══════════ */
+.ds-advanced { flex: 0 0 auto; align-self: center; order: 3; }
+.ds-advanced > summary {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border-radius: 4px;
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border2);
+  font: 10px var(--mono); letter-spacing: .6px; cursor: pointer;
+}
+.ds-advanced > summary:hover { color: #fff; border-color: var(--cyan); }
+.ds-advanced[open] > summary {
+  background: rgba(34,211,238,.12); color: var(--cyan);
+  border-color: rgba(34,211,238,.45);
+}
+.ds-advanced-body { flex: 1 1 100%; order: 4; }
+.ds-selects { order: 2; flex: 1 1 auto; }
+.ds-tabs { order: 1; }
+.ds-toolbar::before { order: 0; }
+.ds-toolbar .global-search { flex: 1 1 200px; max-width: 380px; width: auto; }
+.ds-chips { order: 5; }
+.ds-counts { order: 6; }
+.vm-mode { order: 2; }
+
+/* ═══════════ TOOLBAR ROW GROUPING (stage D) ═══════════ */
+.ds-advanced { order: 3; }
+.ds-chips {
+  order: 3; flex: 1 1 auto; padding-top: 0; margin-top: 8px; border-top: 0;
+}
+.ds-counts { order: 3; padding-top: 0; margin-top: 8px; }
+.ds-advanced-body { order: 4; margin-top: 8px; }
+.ds-chips:only-child, .ds-chips { min-height: 0; }
