@@ -23,6 +23,7 @@ from blm_v4.betting.provider import (
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import stake as _stake
+from blm_v4.betting import cohort_selection as _cohort_selection
 
 router = APIRouter(prefix="/api/v4/betting", tags=["blm-v4-betting"])
 
@@ -99,6 +100,10 @@ def betting_status() -> dict:
         "game_controls": store.game_controls(),
         "today": today_block,
         "credentials": credentials_present(),   # booleans ONLY
+        # The cohort Auto-Bet is CONFIGURED to use (workflow doc §6.5).  Read-only
+        # here: the write path is POST /cohort-selection, and neither touches
+        # the switch, stake, limits, dry-run or the browser-submit authorization.
+        "selected_cohort": _cohort_selection.get_selection(store).as_dict(),
         "recent": [_public_execution(r) for r in store.recent(25)],
     }
 
@@ -445,3 +450,46 @@ def betting_settings(payload: dict) -> dict:
         store.audit("unit_price", details={"unit_price": round(v, 2)})
 
     return betting_status()
+
+
+# ── cohort selection (TEST-ONLY, configuration only) ─────────────────────────
+
+@router.get("/cohort-selection")
+def betting_cohort_selection() -> dict:
+    """The configured cohort + the fail-closed execution lock, read-only.
+
+    Never writes: a page load cannot change configuration.  See
+    ``blm_v4.betting.cohort_selection`` for the scope contract.
+    """
+    store, cfg = _require()
+    return _cohort_selection.selection_payload(store, cfg)
+
+
+@router.post("/cohort-selection")
+def set_betting_cohort_selection(payload: dict) -> dict:
+    """Persist ONE validated cohort code.  Fail closed on anything else.
+
+    Writes exactly the ``autobet_selected_cohort`` key plus an audit row.  It
+    deliberately does not accept any other field: a request that tries to carry
+    ``auto_betting``/``unit_price``/limits is rejected rather than partially
+    applied, so a cohort switch can never smuggle a risk change.
+    """
+    store, cfg = _require()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid payload")
+    extra = sorted(set(payload) - {"cohort", "actor"})
+    if extra:
+        raise HTTPException(
+            status_code=400,
+            detail=f"cohort selection accepts only 'cohort'/'actor', got {extra}")
+    if "cohort" not in payload:
+        raise HTTPException(status_code=400, detail="missing cohort")
+    actor = payload.get("actor")
+    if actor is not None and not isinstance(actor, str):
+        raise HTTPException(status_code=400, detail="actor must be a string")
+    try:
+        _cohort_selection.set_selection(store, payload["cohort"], actor=actor)
+    except _cohort_selection.CohortSelectionError as exc:
+        # 422 = well-formed request, unprocessable value.  Nothing was written.
+        raise HTTPException(status_code=422, detail=str(exc))
+    return _cohort_selection.selection_payload(store, cfg)
