@@ -1610,3 +1610,66 @@ table.cohort-ledger tr.st-unknown td { color: #f0c56b; }
   .audio-toggle { font-size: 9px; padding: 3px 6px; }
   .ab-top { flex-wrap: nowrap; gap: 4px; }
 }
+
+/* ═══════════ CHARCOAL TERMINAL (Live Games redesign, stage A) ═══════════
+   Neutral charcoal instead of blue-black, so the cyan accent and the market
+   zone carry the hierarchy instead of everything being equally dark. */
+:root {
+  --bg: #141517;
+  --panel: #1a1c1f;
+  --panel2: #202327;
+  --border: #2a2e34;
+  --border2: #3a4048;
+  --text: #e8eaed;
+  --muted: #9aa1ab;
+  --dim: #6b7280;
+}
+body { background: var(--bg); }
+.topbar, .tabs { background: #17191c; border-color: var(--border); }
+.tabs .tab { color: #a8b0ba; }
+.tabs .tab:hover { color: #fff; background: var(--panel2); }
+.tabs .tab.active {
+  color: #0b0d0f; background: var(--cyan); font-weight: 700;
+  box-shadow: 0 0 0 1px rgba(34,211,238,.35), 0 6px 16px rgba(34,211,238,.12);
+}
+
+/* table: higher contrast rows, explicit zones, numbers that read as numbers */
+.live-table { font-size: 12.5px; }
+.live-table thead th {
+  background: #101113; color: #b9c0c9; border-bottom: 1px solid var(--border2);
+  padding: 7px 12px;
+}
+.live-table tbody td {
+  padding: 5px 12px; border-bottom: 1px solid rgba(255,255,255,.045);
+  color: #dfe3e8;
+}
+.live-table tbody tr:nth-child(even) { background: rgba(255,255,255,.025); }
+.live-table tbody tr:hover { background: rgba(34,211,238,.09); }
+.live-table td.num { color: #f2f4f6; font-variant-numeric: tabular-nums; }
+.live-table td.c-game { color: #fff; font-weight: 600; font-size: 12.5px; }
+.live-table td.c-period { color: var(--muted); }
+.live-table td.c-score { color: #fff; font-weight: 700; }
+
+/* the MARKET zone: line and price get their own tinted band so the price you
+   would actually take is distinguishable from the total at a glance */
+.live-table td.c-line, .live-table td.c-odds { background: rgba(34,211,238,.06); }
+.live-table th.c-line, .live-table th.c-odds { color: var(--cyan); }
+.live-table td.c-line { color: #cfd6de; }
+.live-table td.c-odds { color: var(--cyan); font-weight: 700; font-size: 13px; }
+
+/* SIGNAL and COHORT are tags, not sentences */
+.sig-pill {
+  display: inline-block; padding: 1px 7px; border-radius: 999px;
+  font: 10px/1.7 var(--mono); letter-spacing: .6px; border: 1px solid transparent;
+}
+.sig-pill.active { background: rgba(251,191,36,.18); color: var(--amber);
+  border-color: rgba(251,191,36,.55); font-weight: 700; }
+.sig-pill.cp { background: rgba(34,211,238,.12); color: var(--cyan);
+  border-color: rgba(34,211,238,.40); }
+.sig-pill.none { color: var(--dim); }
+.coh-tag { font: 10px var(--mono); letter-spacing: .5px; color: var(--cyan);
+  border: 1px solid rgba(34,211,238,.35); border-radius: 4px; padding: 0 5px; }
+.live-table td.res-under { color: var(--green); font-weight: 700; }
+.live-table td.res-over { color: var(--red); font-weight: 700; }
+.live-table td.res-push { color: var(--amber); font-weight: 700; }
+.live-table td.c-age { color: var(--dim); }

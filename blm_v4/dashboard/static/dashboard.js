@@ -4802,8 +4802,21 @@ function cellText(g, labels) {
                     ? num(a.trigger_progress, 1) + "%"
                     : (p.progress_pct !== null && p.progress_pct !== undefined
                        ? num(p.progress_pct, 1) + "%" : "–") },
-    signal: { text: signal, cls: active ? "sig-active" : (cp ? "sig-cp" : "") },
-    cohort: { text: coh.code || "–", cls: coh.code ? "coh-on" : "" },
+    // Tags, not sentences: a live alert must be unmistakable in a scan, and an
+    // absent one must not compete with it.
+    signal: {
+      text: signal,
+      cls: active ? "sig-active" : (cp ? "sig-cp" : ""),
+      html: active
+        ? `<span class="sig-pill active">${esc(signal)}</span>`
+        : (cp ? `<span class="sig-pill cp">${esc(signal)}</span>`
+              : '<span class="sig-pill none">—</span>'),
+    },
+    cohort: {
+      text: coh.code || "–",
+      cls: coh.code ? "coh-on" : "",
+      html: coh.code ? `<span class="coh-tag">${esc(coh.code)}</span>` : "",
+    },
     result: { text: result, cls: "res-" + result.toLowerCase() },
     age: { text: age },
   };
@@ -4861,7 +4874,12 @@ function renderLiveTable() {
     for (const col of LIVE_COLUMNS) {
       const v = values[col] || { text: "–" };
       const td = row.cells[col];
-      if (td.textContent !== v.text) td.textContent = v.text;
+      if (v.html !== undefined) {
+        // tag cells are rewritten only when the markup actually changes
+        if (td.dataset.markup !== v.html) { td.innerHTML = v.html; td.dataset.markup = v.html; }
+      } else if (td.textContent !== v.text) {
+        td.textContent = v.text;
+      }
       const cls = "c-" + col + (v.cls ? " " + v.cls : "");
       if (td.className !== cls) td.className = cls;
       if (v.title && td.title !== v.title) td.title = v.title; else if (!v.title) td.title = "";
