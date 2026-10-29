@@ -31,6 +31,7 @@ from blm_v4.betting.provider import (
     ProviderUnavailable,
 )
 from blm_v4.betting.account_guard import verify_account
+from blm_v4.betting import revalidate as _reval
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import stake as _stake
@@ -358,6 +359,24 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                              "guard": "account_identity"})
         return {"status": "BLOCKED", "error_code": "ACCOUNT_MISMATCH"}
     store.update_status(execution_id, "SUBMITTING")
+    # ── GATE RE-VALIDATION AT THE SUBMISSION BOUNDARY (2026-10-29) ────
+    # The gate is evaluated once, at CLAIM time.  Measured on prod: claim
+    # 22:52:14.548, submit 22:53:25.428 — 71 seconds in which the game moved
+    # from a passing state (75.0%, pace 1.116, shortfall -0.15) to one the
+    # cohort would have refused (77.5%, shortfall -0.38), and still got filled.
+    # Same reason the kill switch is re-read here: an earlier check cannot
+    # authorise a later provider call.  Fails CLOSED on an unprovable state.
+    _refusal = _reval.revalidate(candidate) if _reval.enabled() else None
+    if _refusal is not None:
+        _code, _why = _refusal
+        store.update_status(execution_id, STATUS_FAILED,
+                            error_code=_code, error_message=_why[:300],
+                            rejection_reason=_code)
+        store.audit("result", idempotency_key=ik, execution_id=execution_id,
+                    reason=_why[:300],
+                    details={"result": "FAILED", "guard": "revalidation",
+                             "error_code": _code})
+        return {"status": STATUS_FAILED, "error_code": _code}
     try:
         result = provider.submit(
             execution_id=execution_id, game_id=candidate["game_id"],
