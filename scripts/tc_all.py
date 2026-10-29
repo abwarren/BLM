@@ -6,10 +6,11 @@ hold (the same rule the engine fires on), labelled with the tightest cohort and
 every cohort it belongs to, then settled against the game's final total.
 
     tc-all                      all cohorts, whole clean era
-    tc-all --since 2026-10-22   from a date (also --until)
+    tc-all 2026-10-12           that day
+    tc-all 2026-10-12 2026-10-14   that span (inclusive)
+    tc-all --since 2026-10-22   open-ended, from a date (also --until)
     tc-all --cohort TC-X        only games that satisfy TC-X
-    tc-all --unsettled          include candidates with no final yet
-    tc-all --csv out.csv        machine-readable, one row per candidate
+    tc-all 2026-10-12 --csv out.csv   machine-readable, one row per candidate
     tc-all --summary            cohort counts only
 
 Cohorts (blm_v4/trade_cohorts.py — imported, never re-implemented):
@@ -45,6 +46,8 @@ CLEAN_DB = DATA / "blm_metrics_clean.db"
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="tc-all", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("dates", nargs="*", metavar="YYYY-MM-DD",
+                   help="since [until] — tc-all 2026-10-12  or  tc-all 2026-10-12 2026-10-14")
     p.add_argument("--since", help="first day, YYYY-MM-DD (inclusive)")
     p.add_argument("--until", help="last day, YYYY-MM-DD (inclusive)")
     p.add_argument("--cohort", default=None, metavar="TC-X",
@@ -60,6 +63,24 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     a = parse_args(argv)
+    # positional shorthand: tc-all 2026-10-12 [2026-10-14]
+    import re as _re
+    if a.dates:
+        if len(a.dates) > 2:
+            print("give at most two dates: since [until]", file=sys.stderr)
+            return 2
+        for d in a.dates:
+            if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+                print(f"bad date {d!r} — use YYYY-MM-DD", file=sys.stderr)
+                return 2
+        if a.since or a.until:
+            print("use either positional dates or --since/--until, not both",
+                  file=sys.stderr)
+            return 2
+        a.since = a.dates[0]
+        # one date = THAT DAY; two dates = the span between them.
+        # (Open-ended "from here on" is --since, so it stays unambiguous.)
+        a.until = a.dates[1] if len(a.dates) == 2 else a.dates[0]
     if a.cohort and a.cohort not in COHORT_ORDER:
         print(f"unknown cohort {a.cohort!r}; choose from {', '.join(COHORT_ORDER)}",
               file=sys.stderr)
