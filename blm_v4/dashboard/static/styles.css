@@ -1752,3 +1752,11 @@ body { background: var(--bg); }
 .ds-counts { order: 3; padding-top: 0; margin-top: 8px; }
 .ds-advanced-body { order: 4; margin-top: 8px; }
 .ds-chips:only-child, .ds-chips { min-height: 0; }
+
+/* ═══════════ COLLECTOR BANNER MUST NOT EAT CLICKS ═══════════
+   The banner is prepended to <body> with position:sticky; top:0; z-index:999 and
+   carries text only — no control. With no pointer-events rule it sat above the
+   sticky top bar and swallowed clicks on whatever scrolled underneath it: a
+   Playwright run died with "collectorBanner intercepts pointer events" while
+   clicking a filter control. Informational surfaces must not intercept input. */
+#collectorBanner { pointer-events: none; }
