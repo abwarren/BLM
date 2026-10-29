@@ -392,6 +392,9 @@ def select_matching_row(rows: list[dict], game: dict) -> dict[str, Any]:
                        f"another instance of the same fixture")}
 
 
+_FEED_UNSET = object()      # "caller said nothing" vs "caller said none"
+
+
 class ResultReconciler:
     """Result-reconciliation worker over one pipeline SQLite DB."""
 
@@ -400,8 +403,18 @@ class ResultReconciler:
                  swarm: Optional[Any] = None,
                  max_attempts: int = 3,
                  batch_limit: int = 25,
+                 feed_db_path: Optional[Path | str] = _FEED_UNSET,
                  log: Optional[logging.Logger] = None):
         self._db_path = Path(db_path)
+        # The COLLECTOR's own observations — the second witness that can
+        # contradict a render (a "final" lower than a score the game reached).
+        # Defaults to the sibling metrics DB; None disables the check entirely
+        # (tests and any deployment without a feed).
+        if feed_db_path is _FEED_UNSET:
+            self._feed_db = self._db_path.parent / "blm_metrics_clean.db"
+        else:
+            # explicit None/"" DISABLES the guard (tests, no-feed deployments)
+            self._feed_db = Path(feed_db_path) if feed_db_path else None
         self._fetcher = fetcher
         # The authoritative result source (blm_v4.swarm_results): the feed
         # that BACKS the results page.  Preferred over any DOM path because
@@ -894,7 +907,14 @@ class ResultReconciler:
         if verdict["result"] != "VERIFIED":
             self._stamp_unresolved(game, rec)
             return self._record(game, rec)
-        self._persist_result(game, parsed, rec)
+        if not self._persist_result(game, parsed, rec):
+            # the collector's own scores disprove this render
+            rec["outcome"] = "REJECTED"
+            checks = rec.setdefault("checks", {})
+            checks["reason"] = ("render total below the score our own feed "
+                                "recorded — not a final")
+            self._stamp_unresolved(game, rec)
+            return self._record(game, rec)
         return self._record(game, rec)
 
     # ── per-game pipeline ---------------------------------------------
@@ -991,7 +1011,13 @@ class ResultReconciler:
             if verdict["result"] != "VERIFIED":
                 self._stamp_unresolved(game, rec)
                 return self._record(game, rec)
-            self._persist_result(game, parsed, rec)
+            if not self._persist_result(game, parsed, rec):
+                rec["outcome"] = "REJECTED"
+                rec.setdefault("checks", {})["reason"] = (
+                    "render total below the score our own feed recorded — "
+                    "not a final")
+                self._stamp_unresolved(game, rec)
+                return self._record(game, rec)
             return self._record(game, rec)
 
         # ── TEXT fallback (fetchers that expose only body text) ───────
@@ -1033,7 +1059,14 @@ class ResultReconciler:
             return self._record(game, rec)
         # VERIFIED — fill the game_results row (NEVER overwriting a
         # verified result; the UPDATE guards on the non-OK state).
-        self._persist_result(game, parsed, rec)
+        if not self._persist_result(game, parsed, rec):
+            # the collector's own scores disprove this render
+            rec["outcome"] = "REJECTED"
+            checks = rec.setdefault("checks", {})
+            checks["reason"] = ("render total below the score our own feed "
+                                "recorded — not a final")
+            self._stamp_unresolved(game, rec)
+            return self._record(game, rec)
         return self._record(game, rec)
 
     def _stamp_unresolved(self, game: dict, rec: dict) -> None:
@@ -1070,8 +1103,44 @@ class ResultReconciler:
             finally:
                 conn.close()
 
+    def _feed_contradiction(self, conn: sqlite3.Connection,
+                            gid: str, final_total) -> tuple[bool, dict]:
+        """Reject a render our own collector's scores CONTRADICT.
+
+        The collector is a second, independent witness: if the live feed ever
+        recorded MORE points than this render calls the final total, the render
+        is not a final — the game was still scoring.  Measured 2026-10-29: 1,562
+        of 38,824 stored OK results were contradicted this way (one was stamped
+        final 200 while the feed ran to 267), and because a too-low final always
+        wins an UNDER, all of the affected TC-W bets were recorded as wins.
+
+        Returns ``(allowed, checks)``.  Fails OPEN on anything unprovable (no
+        feed, no observations, unreadable DB) — this guard can only ever REFUSE a
+        render the feed disproves, never invent one.
+        """
+        if final_total is None or self._feed_db is None:
+            return True, {"feed_contradiction": "disabled"}
+        try:
+            conn.execute("ATTACH DATABASE ? AS feed",
+                         (f"file:{self._feed_db}?mode=ro",))
+        except sqlite3.OperationalError:
+            pass                      # already attached on this connection
+        try:
+            row = conn.execute(
+                "SELECT MAX(total_points) FROM feed.clean_observations "
+                "WHERE source_game_id = ?", (gid,)).fetchone()
+        except sqlite3.Error:
+            return True, {"feed_contradiction": "unavailable"}
+        peak = row[0] if row else None
+        if peak is None:
+            return True, {"feed_contradiction": "no_observations"}
+        if float(peak) > float(final_total) + 2:
+            return False, {"feed_contradiction": "render_below_feed",
+                           "feed_peak": peak, "render_total": final_total}
+        return True, {"feed_contradiction": "ok", "feed_peak": peak}
+
     def _persist_result(self, game: dict, parsed: dict,
-                        rec: dict) -> None:
+                        rec: dict) -> bool:
         """Write the verified result + state, guarded against clobber.
 
         * game_results: only a non-OK row is updated (an OK verdict —
@@ -1090,6 +1159,16 @@ class ResultReconciler:
                               final_result_status
                        FROM game_results WHERE source_game_id = ?""",
                     (game["source_game_id"],)).fetchone()
+                # ── SECOND WITNESS, BEFORE ANY WRITE ─────────────────
+                _feed_ok, _feed_chk = self._feed_contradiction(
+                    conn, game["source_game_id"], parsed.get("final_total"))
+                rec.setdefault("checks", {}).update(_feed_chk)
+                if not _feed_ok:
+                    self._log.warning(
+                        "result_refused_feed_contradiction game=%s render=%s "
+                        "feed_peak=%s", game["source_game_id"],
+                        parsed.get("final_total"), _feed_chk.get("feed_peak"))
+                    return False
                 live_total = None
                 if existing and existing["final_result_status"] == "OK":
                     live_total = existing["final_total"]
@@ -1154,6 +1233,7 @@ class ResultReconciler:
                 conn.commit()
             finally:
                 conn.close()
+        return True
 
     def _flag_conflict(self, conn: sqlite3.Connection, game: dict,
                        live_total: Optional[int],
