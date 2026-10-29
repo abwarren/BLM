@@ -197,6 +197,21 @@ Use a consistent spacing scale; suggested starting values:
 - On laptop widths, prioritize the primary table and stack secondary panels. On mobile, use compact cards or a selected-column view rather than shrinking text to illegibility.
 - Ensure keyboard navigation, visible focus, accessible labels, and clear status text.
 
+#### 6.5 Auto-Bet cohort selector — one-click selection, fail-closed execution
+
+Build a dedicated **Auto-Bet Cohort** control so the operator can select which named cohort Auto-Bet is configured to use. This is a cohort-selection feature, not permission to execute real bets.
+
+- Provide an explicit selector for all seven cohorts: TC-X ELITE, TC-E EDGE, TC-S SHARP, TC-C CORE, TC-W WIDE, TC-D DEEP, and TC-C+ CORE+.
+- Make the currently selected cohort unmistakable. A single click may select a cohort, but changing selection must show a clear confirmation/selected state and persist only to the isolated TEST configuration during this task.
+- The selected cohort must be passed to the backend as a validated cohort code; never rely on display labels or frontend-only filtering.
+- Show a clear status for selected cohort, Auto-Bet enabled/disabled, dry-run, browser-submit authorization, kill switch, unit/stake, daily caps, and missing/invalid risk limits. Read settings without exposing secrets.
+- Selection changes must not implicitly enable Auto-Bet, disable a kill switch, change stake/unit size or caps, authorize browser submission, launch a betting browser, submit a bet, or retry a submission.
+- If required limits are missing or invalid, execution remains fail-closed and the UI explains which prerequisite is missing. Never invent defaults.
+- The control must be usable by keyboard, announce selection accessibly, prevent accidental double actions, and show success/failure based on the backend response.
+- Add tests for all seven values, invalid/unknown cohort rejection, persistence/reload, concurrent requests, authorization checks, and the invariant that cohort switching never changes the enabled state, stakes, limits, kill switch, dry-run or browser-submit authorization.
+- Keep cohort selection separate from cohort analytics filters. Filtering the dashboard must never silently change the Auto-Bet selected cohort.
+- Implement and validate this feature only in the verified EC2 test environment. Do not switch the production Auto-Bet cohort or enable live betting. Any production use requires a separate explicit approval and independent review of risk limits and execution safeguards.
+
 #### 6.5 Charts
 
 - Default to the smallest useful set of series. For pace-vs-market, show market total and model total first; pace projection and secondary averages should be optional toggles.
