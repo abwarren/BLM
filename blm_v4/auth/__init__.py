@@ -72,6 +72,15 @@ def install(app, root: Path | str, *, logger: Optional[logging.Logger] = None,
     config = AuthConfig.from_env(root)
     if not config.enabled:
         log.warning("auth_disabled")
+
+        # An EXPLICIT "disabled" answer instead of a 404: the dashboard reads
+        # this route on every load, and a missing route is indistinguishable
+        # from a broken one.  No identity, no CSRF token, nothing asserted.
+        @app.get("/api/auth/me", include_in_schema=False)
+        async def _auth_me_disabled():
+            return {"username": None, "role": None, "csrf_token": None,
+                    "auth_disabled": True}
+
         return {"enabled": False, "config": config}
 
     if trust_proxy is None:
