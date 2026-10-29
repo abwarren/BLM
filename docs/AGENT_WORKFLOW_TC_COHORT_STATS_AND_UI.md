@@ -29,6 +29,19 @@ This document adds an explicit step-by-step execution order and UI acceptance cr
 - The Auto-Bet UI remains strictly read-only. Do not commit secrets, cookies, tokens, private keys, production data, or database files.
 - Keep all work on the dedicated test branch and produce a reviewable diff. No auto-deploy and no production promotion.
 
+### Mandatory commit-and-test-deploy cadence
+
+**Always commit and deploy validated work to the isolated EC2 TEST environment. Never deploy to production.**
+
+1. Work only in the verified EC2 test checkout on `feature/tc-cohort-refactor-test` (or a clearly documented child branch if needed for review). Do not make implementation edits on the production host.
+2. Commit every coherent, validated work unit—not just at the end. Use small, descriptive commits for evaluator/tests, data/read-model work, API work, UI work, and fixes. Never commit secrets, production data, generated DBs, credentials, or unrelated changes.
+3. Before each commit, inspect `git diff`, run the relevant tests, and confirm no production configuration, Auto-Bet behavior, or frozen research rules changed. Record the commit SHA and test result.
+4. After each meaningful milestone is committed and its relevant tests pass, deploy that exact commit to the verified parallel EC2 test instance at `127.0.0.1:2263` (through the approved tunnel/deployment path), then run health/API/UI smoke checks. This is a test deployment only.
+5. For changes that are not yet safe to run, commit them if coherent but do not deploy a broken or unvalidated build; fix and test first, then deploy. Do not leave a validated milestone undeployed.
+6. Re-verify instance identity, branch, commit SHA, target service, database path, and collector-disabled/test-only settings before every deployment. Preserve the existing `:2262`/`:80` staging mirror.
+7. If a commit or test deployment fails, capture the logs, stop promotion, repair or roll back the test deployment, and report the failure. Do not hide failures or deploy an unverified revision.
+8. A GitHub commit is not permission to deploy to production. Production deployment, merge-triggered release, production restart, migration, or promotion remains prohibited until separate explicit operator approval.
+
 ## 2. Canonical cohort rules
 
 Use the frozen server-side cohort evaluator/specification as the only source of truth. Do not recreate cohort thresholds in JavaScript.
