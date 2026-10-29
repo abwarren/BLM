@@ -90,10 +90,72 @@ def parse_args(argv=None):
     p.add_argument("--unsettled", action="store_true",
                    help="include games with no final result yet")
     p.add_argument("--summary", action="store_true", help="cohort counts only")
+    p.add_argument("--now", action="store_true",
+                   help="the games in the band RIGHT NOW, with why each passes/fails")
+    p.add_argument("--window", type=int, default=240, metavar="SECS",
+                   help="with --now: how far back to look (default 240)")
     p.add_argument("--csv", metavar="PATH", help="write CSV to PATH")
     p.add_argument("--limit", type=int, default=0, help="stop after N candidates")
     p.add_argument("--units", type=float, default=1.0, help="stake per candidate")
     return p.parse_args(argv)
+
+
+def _scan_now(window_s: int = 240) -> int:
+    """Every game captured in the last few minutes that is in the band, with the
+    verdict of the live gate and the FIRST failing leg."""
+    from blm_v4.trade_window import (exec_shortfall_reason,
+                                     exec_alert_reason, execution_window_reason,
+                                     score_reason, trade_price_reason)
+    conn = sqlite3.connect(f"file:{PROD_DB}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    ref = competition_pace_reference(conn)
+    meta = {r["source_game_id"]: (r["competition_slug"], r["home_team"], r["away_team"])
+            for r in conn.execute("SELECT source_game_id, competition_slug, home_team,"
+                                  " away_team FROM games")}
+    cc = sqlite3.connect(f"file:{CLEAN_DB}?mode=ro", uri=True)
+    cc.row_factory = sqlite3.Row
+    # cutoff in the SAME ISO format the column stores: datetime('now') returns
+    # "YYYY-MM-DD HH:MM:SS", and comparing that to "YYYY-MM-DDTHH:MM:SSZ" made
+    # every row of the day compare as "after" (1104 games "in band" in 4 minutes).
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_s)
+              ).strftime("%Y-%m-%dT%H:%M:%S")
+    rows = cc.execute(
+        "SELECT source_game_id, captured_at, total_points, progress_pct,"
+        " required_pts_per_min, actual_pts_per_min, live_total_line, under_price"
+        " FROM clean_observations WHERE captured_at >= ?"
+        " AND status='VALID' AND progress_pct BETWEEN 75 AND 92"
+        " ORDER BY captured_at DESC", (cutoff,)).fetchall()
+    cc.close()
+    latest = {}
+    for r in rows:
+        latest.setdefault(r["source_game_id"], r)
+    print(f"band {TRADE_MIN_PROGRESS_PCT:.0f}-{TRADE_MAX_PROGRESS_PCT:.0f}% · "
+          f"window {window_s}s · pace>{TRADE_MIN_PACE_RATIO:.2f} · "
+          f"shortfall>={SHORTFALL_MARGIN:+.2f} · price>=1.60   "
+          f"[{len(latest)} games in band]")
+    print(f"{'game':10s} {'prog':>5s} {'pts':>4s} {'pace':>5s} {'short':>6s} "
+          f"{'price':>5s} {'line':>6s}  verdict")
+    hits = 0
+    for gid, r in sorted(latest.items(), key=lambda kv: kv[1]["captured_at"],
+                         reverse=True):
+        slug, home, away = meta.get(gid, ("-", "?", "?"))
+        avg = (ref.get(slug) or {}).get("avg_pace")
+        pace = (r["required_pts_per_min"] / avg) if avg else None
+        why = (execution_window_reason(r["progress_pct"])
+               or score_reason(r["total_points"])
+               or exec_alert_reason(r["required_pts_per_min"], avg, r["progress_pct"])
+               or exec_shortfall_reason(r["required_pts_per_min"],
+                                        r["actual_pts_per_min"])
+               or trade_price_reason(r["under_price"]))
+        verdict = "PASS" if why is None else f"fail {why}"
+        hits += 1 if why is None else 0
+        print(f"{gid:10s} {r['progress_pct']:5.1f} {r['total_points']:4.0f} "
+              f"{(pace or 0):5.2f} {(r['required_pts_per_min'] - r['actual_pts_per_min']):+6.2f} "
+              f"{r['under_price']:5.2f} {(r['live_total_line'] or 0):6.1f}  {verdict}  "
+              f"{home} v {away} [{(slug or '?')[:24]}]")
+    print(f"\n{hits} of {len(latest)} currently pass the live gate")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -116,6 +178,9 @@ def main(argv=None) -> int:
         # one date = THAT DAY; two dates = the span between them.
         # (Open-ended "from here on" is --since, so it stays unambiguous.)
         a.until = a.dates[1] if len(a.dates) == 2 else a.dates[0]
+    if a.now:
+        return _scan_now(a.window)
+
     if a.cohort and a.cohort not in COHORT_ORDER:
         print(f"unknown cohort {a.cohort!r}; choose from {', '.join(COHORT_ORDER)}",
               file=sys.stderr)
@@ -124,8 +189,11 @@ def main(argv=None) -> int:
     conn = sqlite3.connect(f"file:{PROD_DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     pace_ref = competition_pace_reference(conn)
-    slugs = {r["source_game_id"]: r["competition_slug"]
-             for r in conn.execute("SELECT source_game_id, competition_slug FROM games")}
+    games_meta = {r["source_game_id"]: (r["competition_slug"], r["home_team"], r["away_team"])
+                  for r in conn.execute(
+                      "SELECT source_game_id, competition_slug, home_team, away_team "
+                      "FROM games")}
+    slugs = {g: m[0] for g, m in games_meta.items()}
     peaks: dict[str, float] = {}
     cc0 = sqlite3.connect(f"file:{CLEAN_DB}?mode=ro", uri=True)
     try:
@@ -189,8 +257,10 @@ def main(argv=None) -> int:
         if a.cohort and a.cohort not in coh["codes"]:
             continue
         final = finals.get(gid)
+        _slug, _home, _away = games_meta.get(gid, (slug, "?", "?"))
         entry = dict(gid=gid, ts=str(r["captured_at"])[:19].replace("T", " "),
-                     slug=slug or "-", prog=r["progress_pct"], pts=r["total_points"],
+                     slug=slug or "-", teams=f"{_home or '?'} v {_away or '?'}",
+                     prog=r["progress_pct"], pts=r["total_points"],
                      pace=(r["required_pts_per_min"] / avg) if avg else None,
                      short=r["required_pts_per_min"] - r["actual_pts_per_min"],
                      price=r["under_price"], line=r["live_total_line"],
@@ -238,11 +308,11 @@ def main(argv=None) -> int:
         import csv
         with open(a.csv, "w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["ts", "game", "competition", "cohort", "also", "prog",
+            w.writerow(["ts", "game", "teams", "competition", "cohort", "also", "prog",
                         "pts", "pace", "shortfall", "price", "line", "final",
                         "result", "units"])
             for e in out:
-                w.writerow([e["ts"], e["gid"], e["slug"], e["code"],
+                w.writerow([e["ts"], e["gid"], e["teams"], e["slug"], e["code"],
                             "+".join(c for c in e["codes"] if c != e["code"]),
                             f"{e['prog']:.1f}", e["pts"],
                             f"{e['pace']:.3f}" if e["pace"] else "",
@@ -253,7 +323,7 @@ def main(argv=None) -> int:
 
     print(f"{'when (UTC)':19s} {'game':12s} {'cohort':7s} {'prog':>6s} {'pts':>4s} "
           f"{'pace':>5s} {'short':>6s} {'price':>5s} {'line':>6s} {'final':>5s} "
-          f"{'res':>3s} {'units':>6s}  competition")
+          f"{'res':>3s} {'units':>6s}  game / competition")
     icon = {"W": "✅", "L": "❌", "P": "➖", "?": "⏳"}
     unit_sum = 0.0
     for e in out:
@@ -264,7 +334,8 @@ def main(argv=None) -> int:
               f"{e['price']:5.2f} {e['line']:6.1f} "
               f"{(e['final'] if e['final'] is not None else '-'):>5} "
               f"{icon.get(e['res'], e['res']):>3s} "
-              f"{e['pnl']:+6.2f}  {e['slug']}{(' ⊂' + also) if also else ''}")
+              f"{e['pnl']:+6.2f}  {e['teams'][:38]} [{e['slug']}]"
+              f"{(' ⊂' + also) if also else ''}")
 
     n = len(out)
     w = sum(1 for e in out if e["res"] == "W")
