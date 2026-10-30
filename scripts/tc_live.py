@@ -122,13 +122,14 @@ def main(argv) -> int:
               f"{u:+8.2f}  {run:+9.2f}")
 
     if show_rows:
-        print("\n  when (UTC)          game         price   line final res     units  teams")
+        print("\n  when (UTC)          game         comp        price   line final res     units  fixture")
         for r in rows:
-            print(f"  {r['ts'][:19]}  {r['game']:11s} {float(r['price']):5.2f} "
+            comp = (r.get("competition") or "").strip("[]")[:11]
+            print(f"  {r['ts'][:19]}  {r['game']:11s} {comp:11s} {float(r['price']):5.2f} "
                   f"{(float(r['line']) if r['line'] else 0):6.1f} "
                   f"{(r['final'] if r['final'] else '-'):>5} "
                   f"{'✅' if r['result'] == 'W' else '❌'} "
-                  f"{float(r['units']):+7.2f}  {(r['teams'] or '')[:38]}")
+                  f"{float(r['units']):+7.2f}  {(r['teams'] or '')[:52]}")
 
     nw = sum(1 for d in byday if byday[d][3] > 0)
     print(f"\n  {nw} up days · {trading_days - nw} down · "
