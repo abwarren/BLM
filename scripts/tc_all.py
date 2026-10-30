@@ -56,7 +56,8 @@ def _adopt_running_gate() -> dict:
             for kv in fh.read().split(b"\0"):
                 k, _, v = kv.partition(b"=")
                 name = k.decode()
-                if name.startswith("TRADE_") and name not in os.environ:
+                if (name.startswith("TRADE_")
+                        or name.startswith("BET_REVALIDATE")) and name not in os.environ:
                     os.environ[name] = v.decode()
                     adopted[name] = v.decode()
     except Exception:
