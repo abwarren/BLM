@@ -57,9 +57,9 @@ def _ladder_live_state(store, cfg) -> dict:
             return {"ladder_rung": 0, "ladder_next_units": None,
                     "ladder_next_stake": None}
         from blm_v4.betting import settlement as _settlement
-        rung = _settlement.current_rung(store.db_path, d)
-        units = _ladder.stake_units(rung, cfg.stake_units)
         unit_price = store.get_unit_price() or 0.0
+        rung = _settlement.current_rung(store.db_path, d, unit_price=unit_price)
+        units = _ladder.stake_units(rung, cfg.stake_units)
         return {"ladder_rung": rung, "ladder_next_units": units,
                 "ladder_next_stake": round(units * unit_price, 2)}
     except Exception:

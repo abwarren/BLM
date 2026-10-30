@@ -34,11 +34,21 @@ def _prod_path(prod_db: Optional[str] = None) -> str:
 
 
 def settled_outcomes(betting_db: str, prod_db: Optional[str] = None,
-                     limit: int = 200) -> List[str]:
+                     limit: int = 200,
+                     unit_price: Optional[float] = None) -> List[str]:
     """Outcome of each placed bet, oldest first ("WON"/"LOST"/"PUSH").
 
     `limit` bounds the replay (the rung only needs enough history to reach the
     last non-win; 200 is far beyond any permitted depth).
+
+    `unit_price` scopes the replay to bets staked at the CURRENT unit.  This is
+    what keeps the ladder self-funding: its whole premise is that rungs 1-3 won
+    the money that funds rung 4, which is only true if those rungs were staked
+    at the same unit.  Carrying rungs across a unit change (R20 -> R115) makes
+    the ladder jump from R20 bets to a R670 bet with none of the winnings that
+    were supposed to pay for it — measured 2026-10-30: three R20 wins worth
+    R46.40 were being counted as rungs 1-3 of a R115 ladder.  A unit change
+    therefore restarts the progression at rung 1, which is the safe direction.
     """
     prod = _prod_path(prod_db)
     try:
@@ -59,9 +69,12 @@ def settled_outcomes(betting_db: str, prod_db: Optional[str] = None,
               LEFT JOIN p.game_results r ON r.source_game_id = e.game_id
              WHERE e.status IN ({ph})
                AND e.triggered_line IS NOT NULL
+               {unit_clause}
              ORDER BY COALESCE(e.submitted_at_utc, e.requested_at_utc) ASC, e.id ASC
-            """.format(ph=",".join("?" * len(PLACED_STATUSES))),
-            PLACED_STATUSES,
+            """.format(ph=",".join("?" * len(PLACED_STATUSES)),
+                       unit_clause=("AND ROUND(e.unit_price, 2) = ROUND(?, 2)"
+                                    if unit_price is not None else "")),
+            (*PLACED_STATUSES, *((unit_price,) if unit_price is not None else ())),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -79,7 +92,8 @@ def settled_outcomes(betting_db: str, prod_db: Optional[str] = None,
     return out[-limit:]
 
 
-def current_rung(betting_db: str, depth_value, prod_db: Optional[str] = None) -> int:
+def current_rung(betting_db: str, depth_value, prod_db: Optional[str] = None,
+                 unit_price: Optional[float] = None) -> int:
     """The rung the NEXT bet should be staked at.
 
     1 when the ladder is off, when no history is readable, or when the newest
@@ -89,7 +103,8 @@ def current_rung(betting_db: str, depth_value, prod_db: Optional[str] = None) ->
     if d == 0:
         return 1
     try:
-        return _ladder.rung_from_history(settled_outcomes(betting_db, prod_db), d)
+        return _ladder.rung_from_history(
+            settled_outcomes(betting_db, prod_db, unit_price=unit_price), d)
     except Exception:
         # never stake a ladder rung we cannot justify: rung 1 is the minimum
         return 1

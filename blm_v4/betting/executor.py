@@ -219,7 +219,8 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
         ladder_depth = 0
     if ladder_depth:
         try:
-            rung = _settlement.current_rung(store.db_path, ladder_depth)
+            rung = _settlement.current_rung(store.db_path, ladder_depth,
+                                            unit_price=unit_price)
         except Exception:
             rung = 1
         units = _ladder.stake_units(rung, units)

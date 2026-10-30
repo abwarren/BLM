@@ -221,3 +221,38 @@ def test_executor_refuses_a_rung_over_the_per_bet_cap(tmp_path, monkeypatch):
 def test_executor_treats_a_corrupt_depth_as_off(tmp_path, monkeypatch):
     res = _evaluate(tmp_path, monkeypatch, 2, 3)      # 2 is not a permitted depth
     assert res["candidate"]["stake_amount"] == 10.0
+
+
+# 20 ── a UNIT CHANGE restarts the ladder: rungs won at R20 cannot fund a R115
+#       rung-4 stake (measured 2026-10-30: R46.40 of winnings were being counted
+#       as rungs 1-3 of a R670.68 bet).  This is what keeps "the ladder pays for
+#       itself" true.
+def test_unit_change_restarts_the_ladder(tmp_path):
+    betting = tmp_path / "bet.db"
+    prod = tmp_path / "prod.db"
+    b = sqlite3.connect(betting)
+    b.execute("""CREATE TABLE bet_executions (
+        id INTEGER PRIMARY KEY, game_id TEXT, market TEXT, selection TEXT,
+        triggered_line REAL, status TEXT, submitted_at_utc TEXT,
+        requested_at_utc TEXT, unit_price REAL)""")
+    b.executemany("INSERT INTO bet_executions VALUES (?,?,?,?,?,?,?,?,?)", [
+        (1, "g1", "TOTAL", "TOTAL UNDER", 180.5, "SUBMITTED", "2026-10-30T00:00:00Z", None, 20.0),
+        (2, "g2", "TOTAL", "TOTAL UNDER", 180.5, "SUBMITTED", "2026-10-30T01:00:00Z", None, 20.0),
+        (3, "g3", "TOTAL", "TOTAL UNDER", 180.5, "SUBMITTED", "2026-10-30T02:00:00Z", None, 20.0),
+    ])
+    b.commit(); b.close()
+    p = sqlite3.connect(prod)
+    p.execute("""CREATE TABLE game_results (
+        source_game_id TEXT, final_total INTEGER, final_result_status TEXT)""")
+    p.executemany("INSERT INTO game_results VALUES (?,?,?)",
+                  [("g1", 170, "OK"), ("g2", 165, "OK"), ("g3", 160, "OK")])
+    p.commit(); p.close()
+
+    # at R20 the three wins are rungs 1-3 -> next is rung 4
+    assert settlement.current_rung(str(betting), "4", str(prod),
+                                   unit_price=20.0) == 4
+    # after the unit moved to R115 that history no longer funds the ladder
+    assert settlement.current_rung(str(betting), "4", str(prod),
+                                   unit_price=115.0) == 1
+    # and an unscoped read still sees the old history (back-compat)
+    assert settlement.current_rung(str(betting), "4", str(prod)) == 4
