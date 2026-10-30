@@ -35,6 +35,23 @@
           <button id="abSaveUnit" type="button" disabled>SAVE</button>
         </span>
       </span>
+      <!-- LADDER: 1 unit, then x1.8 per consecutive win; a loss resets to 1.
+           0 = OFF (plain unit staking).  Depth = bank after that many wins. -->
+      <span class="ab-top-sep" aria-hidden="true">|</span>
+      <span class="ab-top-unit-wrap">
+        <label class="ab-top-unit" for="abLadder" title="Win ladder: rung 1 stakes 1 unit, each consecutive win multiplies the stake by 1.8; a loss returns to 1 unit; at the selected depth a win banks the cycle">LADDER:</label>
+        <span class="ab-top-input">
+          <select id="abLadder" disabled aria-label="Bet ladder depth — bank after this many consecutive wins">
+            <option value="0">OFF</option>
+            <option value="3">3 wins</option>
+            <option value="4">4 wins</option>
+            <option value="5">5 wins</option>
+            <option value="6">6 wins</option>
+            <option value="7">7 wins</option>
+          </select>
+          <span class="ab-top-cur" id="abLadderState" title="current rung and stake">rung –</span>
+        </span>
+      </span>
     </div>
     <div class="status-cluster">
       <span class="pill live-pill" id="livePill"><span class="dot" id="liveDot"></span><span id="liveLabel">LIVE</span></span>

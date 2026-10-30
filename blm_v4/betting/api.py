@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from blm_v4.betting.config import BettingConfig, credentials_present
+from blm_v4.betting import ladder as _ladder
 from blm_v4.betting.executor import evaluate, execute
 from blm_v4.betting.provider import (
     browser_submit_authorized,
@@ -46,6 +47,24 @@ def _require() -> tuple[BettingStore, BettingConfig]:
         raise HTTPException(status_code=503,
                             detail="betting layer not configured")
     return _store, _cfg
+
+
+def _ladder_live_state(store, cfg) -> dict:
+    """Rung + the stake the NEXT bet will carry.  Never breaks the status call."""
+    try:
+        d = _ladder.depth(store.get_config("ladder_wins", "0"))
+        if d == 0:
+            return {"ladder_rung": 0, "ladder_next_units": None,
+                    "ladder_next_stake": None}
+        from blm_v4.betting import settlement as _settlement
+        rung = _settlement.current_rung(store.db_path, d)
+        units = _ladder.stake_units(rung, cfg.stake_units)
+        unit_price = store.get_unit_price() or 0.0
+        return {"ladder_rung": rung, "ladder_next_units": units,
+                "ladder_next_stake": round(units * unit_price, 2)}
+    except Exception:
+        return {"ladder_rung": 0, "ladder_next_units": None,
+                "ladder_next_stake": None}
 
 
 @router.get("/status")
@@ -92,6 +111,11 @@ def betting_status() -> dict:
         "mode": "DRY_RUN" if cfg.dry_run else "LIVE",
         "unit_price": unit_price,
         "stake_units": cfg.stake_units,
+        # ladder depth 0 = off; 3-7 = bank after that many consecutive wins
+        "ladder_wins": _ladder.depth(store.get_config("ladder_wins", "0")),
+        "ladder_step": _ladder.step_units(),
+        "ladder_factor": _ladder.factor(),
+        **_ladder_live_state(store, cfg),
         "max_stake_units": 1.0,
         "max_stake_per_bet": cfg.max_stake_per_bet,
         "max_bets_per_day": cfg.max_bets_per_day,
@@ -420,6 +444,25 @@ def betting_settings(payload: dict) -> dict:
                          else "false")
         store.audit("kill_switch", reason="frontend",
                     details={"enabled": enable, "dry_run": cfg.dry_run})
+
+    if "ladder_wins" in payload:
+        raw = payload["ladder_wins"]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise HTTPException(status_code=400,
+                                detail="ladder_wins must be a number")
+        try:
+            v = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400,
+                                detail="ladder_wins must be a number")
+        if v not in _ladder.DEPTHS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"ladder_wins must be one of {list(_ladder.DEPTHS)} "
+                       f"(0 = off)")
+        store.set_config("ladder_wins", str(v))
+        store.audit("ladder_wins", details={"ladder_wins": v,
+                                           "step_units": _ladder.step_units()})
 
     if "unit_price" in payload:
         raw = payload["unit_price"]

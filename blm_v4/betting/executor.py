@@ -34,6 +34,8 @@ from blm_v4.betting.account_guard import verify_account
 from blm_v4.betting import revalidate as _reval
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
+from blm_v4.betting import ladder as _ladder
+from blm_v4.betting import settlement as _settlement
 from blm_v4.betting import stake as _stake
 from blm_v4.trade_window import (EXEC_MIN_PROGRESS_PCT,
                                  execution_window_reason, score_reason,
@@ -203,14 +205,35 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     units = _finite(cfg.stake_units)
     if units is None or units <= 0:
         return _no("stake_units_invalid", ik)
-    if units > 1.0:
+    # ── 6b. LADDER (operator directive 2026-10-30) ────────────────────
+    # A win-progression selected from the UI: rung 1 stakes the configured
+    # unit, each consecutive win adds a FIXED step (0.8u default), a loss
+    # returns to rung 1, and at the chosen depth a win banks the cycle.
+    # The rung is DERIVED from settlements (blm_v4.betting.settlement), never
+    # stored, so a restart cannot resume on a stale rung.
+    # OFF (depth 0) keeps the original contract exactly: one unit maximum.
+    ladder_depth = 0
+    try:
+        ladder_depth = _ladder.depth(store.get_config("ladder_wins", "0"))
+    except Exception:
+        ladder_depth = 0
+    if ladder_depth:
+        try:
+            rung = _settlement.current_rung(store.db_path, ladder_depth)
+        except Exception:
+            rung = 1
+        units = _ladder.stake_units(rung, units)
+        if units != units or units <= 0:      # NaN / non-positive
+            return _no("ladder_stake_invalid", ik)
+    elif units > 1.0:
         return _no("ONE_UNIT_MAXIMUM", ik)
     stake_amount = round(unit_price * units, 2)
     # ── R5 (operator directive 2026-10-06): if the account BALANCE is below
     #    one unit, stake the WHOLE balance instead of the unit.
     if balance is not None and 0 < balance < stake_amount:
         stake_amount = round(balance, 2)
-        units = round(min(1.0, stake_amount / unit_price), 4)
+        # the one-unit floor applied here; a ladder rung must keep its units
+        units = round(stake_amount / unit_price, 4)
     if stake_amount <= 0 or not math.isfinite(stake_amount):
         return _no("stake_calculation_failed", ik)
     if cfg.max_stake_per_bet is not None \

@@ -4195,6 +4195,20 @@ function abStatusHTML(st) {
     `AUTO BETTING: ${st.enabled ? "ON" : "OFF"}${st.dry_run ? " (DRY RUN)" : ""}`;
   const up = $("abUnitPrice");
   if (document.activeElement !== up) up.value = st.unit_price ?? "";
+  // ladder selector + the rung the NEXT bet will carry
+  const lad = $("abLadder");
+  if (lad) {
+    lad.disabled = false;
+    if (document.activeElement !== lad) lad.value = String(st.ladder_wins ?? 0);
+    const stt = $("abLadderState");
+    if (stt) {
+      if (!st.ladder_wins) stt.textContent = "off";
+      else stt.textContent = `rung ${st.ladder_rung ?? 1} · ${st.ladder_next_units != null ? num1(st.ladder_next_units) + "u" : "–"}`;
+      stt.title = st.ladder_next_stake != null
+        ? `next stake ${money(st.ladder_next_stake)} (unit ${money(st.unit_price)} × ${st.ladder_next_units}u, factor ${st.ladder_factor})`
+        : "ladder is off — stakes the plain unit";
+    }
+  }
   // The operator must be able to TYPE the unit price, so enable it under the
   // SAME successful /api/v4/betting/status gate that enables the switch and
   // Save.  Range enforcement stays server-side (config.min/max_unit_price) —
@@ -4452,6 +4466,21 @@ $("abSwitch").addEventListener("change", async (ev) => {
       body: JSON.stringify({ auto_betting: want }),
     });
     if (!resp.ok) console.warn("auto-betting switch refused", resp.status);
+  } catch (_) {}
+  refreshBettingStatus();
+});
+
+const _ladderSel = $("abLadder");
+if (_ladderSel) _ladderSel.addEventListener("change", async (ev) => {
+  const v = parseInt(ev.target.value, 10);
+  ev.target.disabled = true;
+  try {
+    const resp = await fetch(`${BETTING_API}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ladder_wins: v }),
+    });
+    if (!resp.ok) console.warn("ladder selection refused", resp.status);
   } catch (_) {}
   refreshBettingStatus();
 });
