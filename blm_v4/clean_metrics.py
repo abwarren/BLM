@@ -822,7 +822,7 @@ class CleanMetricsStore:
                     """SELECT total_points, elapsed_game_minutes
                        FROM clean_observations
                        WHERE source_game_id = ? AND status = ?
-                       ORDER BY id DESC LIMIT 1""",
+                       ORDER BY captured_at DESC, id DESC LIMIT 1""",
                     (source_game_id, VALID),
                 ).fetchone()
                 return dict(r) if r else None
