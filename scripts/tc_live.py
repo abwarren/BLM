@@ -5,6 +5,8 @@ tc-all answers "what did this gate take" but leaves you to read a 250-row table
 and add up the days.  This runs the same gate (tc-all adopts the running
 engine's TRADE_* env) and prints the summary, the drawdown and the daily line.
 
+    tc-live --rows            also print every bet, one line each
+    tc-live 30 --rows         last 30 days, every bet
     tc-live                   last 14 days
     tc-live 30                last 30 days
     tc-live 2026-10-01 2026-10-31   explicit range
@@ -22,6 +24,8 @@ TC_ALL = "/home/ubuntu/blm-fix-price-mapping/scripts/tc_all.py"
 
 
 def main(argv) -> int:
+    show_rows = "--rows" in argv or "-v" in argv
+    argv = [a for a in argv if a not in ("--rows", "-v")]
     if len(argv) == 1:
         days = 14
         until = date.today()
@@ -116,6 +120,15 @@ def main(argv) -> int:
         dec = ww + ll
         print(f"  {d}  {c:3d}  {ww:3d}  {ll:3d}  {ww / dec * 100 if dec else 0:5.1f}  "
               f"{u:+8.2f}  {run:+9.2f}")
+
+    if show_rows:
+        print("\n  when (UTC)          game         price   line final res     units  teams")
+        for r in rows:
+            print(f"  {r['ts'][:19]}  {r['game']:11s} {float(r['price']):5.2f} "
+                  f"{(float(r['line']) if r['line'] else 0):6.1f} "
+                  f"{(r['final'] if r['final'] else '-'):>5} "
+                  f"{'✅' if r['result'] == 'W' else '❌'} "
+                  f"{float(r['units']):+7.2f}  {(r['teams'] or '')[:38]}")
 
     nw = sum(1 for d in byday if byday[d][3] > 0)
     print(f"\n  {nw} up days · {trading_days - nw} down · "
