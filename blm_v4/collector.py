@@ -792,7 +792,12 @@ class PokerBetCollector:
                         "tick_total_ms", "game_discovery_ms",
                         "page_content_ms", "score_parse_ms",
                         "board_parse_ms", "line_parse_ms", "db_write_ms",
-                        "retry_ms", "ended_game_ms")}
+                        "retry_ms", "ended_game_ms",
+                        # Bounded fast-path nav-panel read (2026-10-03 flap
+                        # fix).  When this carries the tick cost and
+                        # page_content_ms stays EMPTY, the whole-page
+                        # event-view capture is off the fast path.
+                        "panel_read_ms")}
         # ── Capture-efficiency state (directive 2026-09-30) ──────────
         # PHASE 3 lifecycle cache: gids whose capture stage is DONE.
         # 'ended' on the game object == DONE; this cache also holds gids
@@ -824,6 +829,29 @@ class PokerBetCollector:
         # (deviation.refresh_game call count must fall materially from the
         # 22,421-call / 175,783 ms Phase 2 baseline).
         self._deviation_dirty: set[str] = set()
+        # Producer/consumer split (2026-10-03): the fast tick only MARKS
+        # games dirty; a dedicated deviation worker thread drains them off
+        # the critical fast path.  The residual benchmark is O(bucket) and
+        # reached 97s inline, blowing the 30s fast-cycle budget; the tick
+        # now hands the work to this worker and returns immediately.
+        # `_deviation_dirty` is the coalescing queue (one entry per game by
+        # construction); all access is guarded by `_deviation_lock` because
+        # marks now arrive from the tick/WS handlers while the worker drains.
+        self._deviation_lock = threading.RLock()
+        self._deviation_wake = threading.Event()
+        self._deviation_stop = threading.Event()
+        self._deviation_worker_thread: Optional[threading.Thread] = None
+        # Ended-game finalization (2026-10-08): the fast tick only ENQUEUES
+        # the ended game; the worker runs clean_metrics.finalize() +
+        # _refresh_projections() off the critical path — they were the
+        # residual overrun that survived the deviation offload.  Access via
+        # _fin_sync() so object.__new__ test doubles keep working.
+        self._finalize_queue: list[tuple] = []
+        self._finalize_lock = threading.RLock()
+        self._finalize_wake = threading.Event()
+        self._finalize_stop = threading.Event()
+        self._finalize_worker_thread: Optional[threading.Thread] = None
+        self._finalize_dropped = 0
         self._running = False
         self._browser: Optional[Browser] = None
         self._pw: Any = None                  # active sync_playwright scope
@@ -2248,7 +2276,13 @@ class PokerBetCollector:
         try:
             if self._browser is None:
                 return self._relaunch(reason)
+            # Terminate the context THIS method created last time before making
+            # another: the empty-parse recovery calls it every few ticks, and an
+            # undisposed context leaks a renderer per call until the box is
+            # starved (observed 39 headless shells, load 36, watchdog flapping).
+            self._dispose_fresh_context()
             context = self._new_context(self._browser)
+            self._fresh_ctx = context
             page = context.new_page()
             self._empty_ticks = 0
             self._ensure_discovery_page(page)
@@ -2257,6 +2291,19 @@ class PokerBetCollector:
         except Exception:
             logger.error("fresh context failed:\n%s", traceback.format_exc())
             return self._relaunch(reason)
+
+    def _dispose_fresh_context(self) -> None:
+        """Close the previous fresh context.  Never raises into the fast path."""
+        context = getattr(self, "_fresh_ctx", None)
+        if context is None:
+            return
+        self._fresh_ctx = None
+        try:
+            context.close()
+            logger.info("previous fresh context disposed")
+        except Exception:
+            logger.warning("fresh context dispose failed:\n%s",
+                           traceback.format_exc())
 
     def _relaunch(self, reason: str) -> Page:
         """Close the browser and start a completely fresh session."""
@@ -2272,6 +2319,7 @@ class PokerBetCollector:
         # (_ensure_worker_page, top of its loop) recreates the slow page —
         # there is no main-thread mechanism to do it for the worker.
         self._slow_page = None            # worker's guard recreates it
+        self._fresh_ctx = None            # its browser is gone; drop the handle
         self._empty_ticks = 0
         try:
             return self._new_session()
@@ -2279,11 +2327,11 @@ class PokerBetCollector:
             logger.error("relaunch failed:\n%s", traceback.format_exc())
             raise
 
-    def _write_state(self, *, success: bool) -> None:
+    def _write_state(self, *, success: bool, idle: bool = False) -> None:
         with PERFORMANCE.measure("collector.write_state"):
-            return self._write_state_impl(success=success)
+            return self._write_state_impl(success=success, idle=idle)
 
-    def _write_state_impl(self, *, success: bool) -> None:
+    def _write_state_impl(self, *, success: bool, idle: bool = False) -> None:
         """Heartbeat file the dashboard API reads for collector status."""
         now_iso = utcnow_iso()
         if success:
@@ -2292,7 +2340,13 @@ class PokerBetCollector:
             betual_metrics = self.store.betual_collection_metrics()
         state = {
             "tick": self.stats["ticks"],
-            "status": "running" if success else "stalled",
+            # THREE states, because "no fixtures upstream" and "the cycle would
+            # not complete" are different facts: `idle` means the tick ran to
+            # completion and simply found nothing to collect (the board is
+            # empty), `stalled` means a cycle failed to complete.  Collapsing
+            # them made a quiet slate look like a broken collector.
+            "status": ("running" if success else
+                       ("idle" if idle else "stalled")),
             "started_at": self._started_at_iso,
             "last_tick_at": now_iso,
             "last_success_at": self._last_success_iso,
@@ -2603,6 +2657,13 @@ class PokerBetCollector:
                 target=self._deviation_backfill, name="blm-deviation-backfill",
                 daemon=True)
             self._deviation_backfill_thread.start()
+        # Producer/consumer split (2026-10-03): the dedicated deviation
+        # consumer.  The fast tick only marks dirty + signals; this worker
+        # drains the dirty set off the critical fast path.
+        self._start_deviation_worker()
+        # Ended-game finalization off the fast path (2026-10-08): the tick only
+        # enqueues; the worker runs the clean finalize + pace projections.
+        self._start_finalize_worker()
         # WS-frame persistence off the Playwright MainThread.
         self._start_ws_snap_worker()
         self._start_betual_line_worker()
@@ -2716,6 +2777,8 @@ class PokerBetCollector:
             self._stop_slow_worker()
             self._stop_ws_snap_worker()
             self._stop_betual_line_worker()
+            self._stop_deviation_worker()
+            self._stop_finalize_worker()
             if self._browser:
                 try:
                     self._browser.close()
@@ -2870,6 +2933,18 @@ class PokerBetCollector:
             stop_evt.set()
         self._slow_stop.set()
         self._slow_wake.set()
+        # Deviation consumer: signal stop; its final drain runs on its own
+        # thread (never blocks stop()'s caller here).
+        dev_stop = getattr(self, "_deviation_stop", None)
+        if dev_stop is not None:
+            dev_stop.set()
+            self._deviation_wake.set()
+        # Finalize consumer: same shape — its final drain runs on its own
+        # thread so stop() never waits on a clean finalize.
+        fin_stop = getattr(self, "_finalize_stop", None)
+        if fin_stop is not None:
+            fin_stop.set()
+            self._fin_sync()[1].set()
         # WS snapshot-persist consumer: signal stop; its final drain runs on
         # its own thread (never blocks stop()'s caller here).
         ws_snap_stop = getattr(self, "_ws_snap_stop", None)
@@ -3185,13 +3260,78 @@ class PokerBetCollector:
         except Exception:
             logger.error("expand sections failed:\n%s", traceback.format_exc())
 
+    #: Discovery landing pages, tried IN ORDER, ending with the generic live
+    #: page.  The left panel renders EVERY live competition, so any page that
+    #: actually carries game rows works as the discovery surface — this list
+    #: only fixes the order in which landings are tried, never a single page.
+    DISCOVERY_COMPETITIONS = (Classification.CYBER_2K26, Classification.BETUAL_NBA)
+
+    #: A landing proven to carry no relevant competition is not re-navigated to
+    #: for this long.  _ensure_discovery_page is called on EVERY empty tick as a
+    #: refresh, so without this a dark slate would spend 3 navigations (~18 s) per
+    #: tick and starve the 30 s watchdog contract.
+    DISCOVERY_DARK_TTL_S = 120.0
+
+    def _discovery_candidates(self) -> list[str]:
+        urls = [competition_url(cls, self.comp_ids)
+                for cls in self.DISCOVERY_COMPETITIONS]
+        return [*urls, f"{LIVE_BASE}/"]
+
     def _ensure_discovery_page(self, page: Page) -> None:
-        """Land on a live page whose left panel renders all live games."""
-        url = competition_url(Classification.CYBER_2K26, self.comp_ids)
+        """Land on a live page whose left panel renders all live games.
+
+        NEVER pinned to ONE competition: when a competition has no fixtures its
+        event-view renders no game rows and discovery then returns nothing for
+        EVERY league — observed when the cyber slate went dark at 10:51Z and the
+        collector went blind to live basketball elsewhere for two hours.  The
+        candidates are probed in ROTATION (one landing per cycle) and the first
+        that carries a relevant competition becomes the cached first choice; the
+        generic live page is the last resort, so a dark slate degrades to a slower
+        surface, never to no surface.
+        """
+        now = time.monotonic()
+        dark = getattr(self, "_discovery_dark", None)
+        if dark is None:
+            dark = self._discovery_dark = {}
+        candidates = self._discovery_candidates()
+        # ONE navigation per call, rotating through the candidates: the tick calls
+        # this on EVERY empty cycle, so walking the whole chain would cost ~18 s of
+        # navigation and starve the 30 s watchdog contract.  Rotation probes the
+        # next candidate each time, so every landing is covered within N cycles,
+        # and a landing that yields a competition becomes the cached first choice.
+        idx = getattr(self, "_discovery_probe_idx", 0) % len(candidates)
+        self._discovery_probe_idx = (idx + 1) % len(candidates)
+        cached = getattr(self, "_discovery_url", None)
+        ordered = ([cached] if cached else []) + candidates[idx:] + candidates[:idx]
+        url = next((u for u in ordered if dark.get(u, 0.0) <= now), None)
+        if url is None:
+            logger.debug("all discovery candidates in dark cooldown — not navigating")
+            return
         if not self._goto(page, url):
             logger.warning("goto failed — requesting fresh context")
             return
         self._expand_target_sections(page)
+        html = self._discovery_panel_html(page)
+        if html is None:
+            # Nav-panel selector absent — the tick still has its whole-page
+            # fallback, so treat the landing as usable rather than probing on.
+            dark.pop(url, None)
+            self._discovery_url = url
+            logger.info("discovery page landed (nav panel absent): %s", url)
+            return
+        try:
+            comps = find_relevant_competitions(html)
+        except Exception:
+            comps = []
+        if comps:
+            dark.pop(url, None)
+            self._discovery_url = url
+            logger.info("discovery page ready: %s (%d relevant competitions)",
+                        url, len(comps))
+            return
+        dark[url] = now + self.DISCOVERY_DARK_TTL_S
+        logger.warning("discovery landing carries no relevant competition (%s) — "
+                       "next candidate on the following cycle", url)
 
     # ── page.content() timeout wrapper ───────────────────────────────
     # Playwright's sync page.content() can hang indefinitely when the
@@ -3375,16 +3515,33 @@ class PokerBetCollector:
         # clock deadline, recycle the page so the pipeline does not stall.
         tick_deadline = t_tick + self.TICK_HARD_CEILING_S
 
-        # 1. Parse the live panel (the fast path's ONLY Playwright
-        #    round-trip; recovery navigations below are failure-only)
-        # Use timed wrapper so a wedged page never blocks the fast loop.
+        # 1. Capture the live panel (the fast path's ONLY Playwright
+        #    round-trip; recovery navigations below are failure-only).
+        #    BOUNDED READ (2026-10-03 flap fix): read ONLY the left-nav panel
+        #    that lists every live game — NOT the whole event-view page.  The
+        #    whole-page serialization took 30-100 s under host load and starved
+        #    the self-watchdog's 30 s liveness contract, SIGABRT-restarting the
+        #    unit (~13x/h).  The panel is where discovery already reads its
+        #    rows, so discovery semantics are unchanged.  Fall back to the
+        #    whole-page capture ONLY when the panel is absent, so discovery
+        #    coverage can never drop.
         t_capture = time.monotonic()
-        html = self._page_content_timed(page, "tick", timeout_s=self.PAGE_CONTENT_TICK_TIMEOUT_S)
+        html = self._discovery_panel_html(page)
+        self._tick_stats["panel_read_ms"].append(time.monotonic() - t_capture)
         if html is None:
-            logger.warning("page.content() timed out — requesting fresh context")
+            t_fallback = time.monotonic()
+            html = self._page_content_timed(
+                page, "tick", timeout_s=self.PAGE_CONTENT_TICK_TIMEOUT_S)
+            spend_fb = time.monotonic() - t_fallback
+            self._tick_stats["page_content_ms"].append(spend_fb)
+            logger.warning(
+                "nav panel absent — fell back to whole-page capture (%.3fs); "
+                "tick %d panel_read_ms will stay empty this cycle",
+                spend_fb, self.stats["ticks"])
+        if html is None:
+            logger.warning("page capture timed out — requesting fresh context")
             return self._fresh_context("page.content() timed out")
         spend = time.monotonic() - t_capture
-        self._tick_stats["page_content_ms"].append(spend)
         page_capture_budget_remaining -= spend
         logger.debug("tick page.content() used %.3fs, %.3fs budget remaining",
                      spend, page_capture_budget_remaining)
@@ -3400,9 +3557,14 @@ class PokerBetCollector:
                 logger.warning("page-capture budget exhausted — fresh context")
                 return self._fresh_context("page-capture budget exhausted")
             t_retry = time.monotonic()
-            html = self._page_content_timed(page, "retry", timeout_s=self.PAGE_CONTENT_RETRY_TIMEOUT_S)
+            # Bounded re-read of the nav panel, never the whole event-view
+            # page (2026-10-03 flap fix).  Fall back only when absent.
+            html = self._discovery_panel_html(page)
             if html is None:
-                logger.warning("retry page.content() timed out — requesting fresh context")
+                html = self._page_content_timed(
+                    page, "retry", timeout_s=self.PAGE_CONTENT_RETRY_TIMEOUT_S)
+            if html is None:
+                logger.warning("retry capture timed out — requesting fresh context")
                 return self._fresh_context("page.content() timed out (retry)")
             spend = time.monotonic() - t_retry
             # bucketed as retry_ms (NOT page_content_ms) so the two
@@ -3424,9 +3586,9 @@ class PokerBetCollector:
             # dog here is honest.  Counting it as incomplete would turn a
             # genuine site-side empty period into a systemd restart
             # storm; the state file's consecutive_empty_ticks +
-            # status=stalled are the observability signal for emptiness.
+            # status=idle are the observability signal for emptiness.
             self._tick_completed_fully = True
-            self._write_state(success=False)
+            self._write_state(success=False, idle=True)
             logger.warning(
                 "still no relevant competitions on page "
                 "(consecutive empties: %d)",
@@ -3540,19 +3702,71 @@ class PokerBetCollector:
         self._tick_completed_fully = True
         self._last_fast_completed_at = time.monotonic()
         self._fast_cycle_completed_at_iso = utcnow_iso()
+        # Deviation benchmark work is NO LONGER run on the fast path
+        # (2026-10-03).  The tick only SIGNALS the dedicated deviation
+        # worker to drain the dirty set and returns immediately, so the
+        # O(bucket) residual benchmark (observed up to 97s) can never blow
+        # the 30s fast-cycle deadline.  Semantics are unchanged: the worker
+        # runs the identical refresh_game per dirty game and only clears a
+        # game after a SUCCESSFUL refresh (see _flush_deviation_dirty).
         t_deviation = time.monotonic()
-        try:
-            self._flush_deviation_dirty()
-        except Exception:
-            logger.error("deviation dirty flush error:\n%s",
-                         traceback.format_exc())
-        logger.info("tick %d deviation_flush took %.3fs", self.stats["ticks"], time.monotonic() - t_deviation)
+        self._signal_deviation_worker()
+        logger.info("tick %d deviation_signal took %.4fs", self.stats["ticks"], time.monotonic() - t_deviation)
         t_state = time.monotonic()
         self._write_state(success=True)
         logger.info("tick %d state_write took %.3fs", self.stats["ticks"], time.monotonic() - t_state)
+        self._wal_housekeeping()
         self._tick_stats["fast_work_ms"].append(time.monotonic() - t_tick)
         self._tick_stats["work"].append(time.monotonic() - t_tick)
         return page
+
+    # ── WAL housekeeping (2026-10-30) ────────────────────────────────────
+    # The write-ahead log has taken the collector down three times: an 11 GB
+    # blm_pokerbet.db-wal, then 8.7 GB + 2.6 GB, then 230/164 MB tonight.
+    # The mechanism is always the same — once the log outgrows a few hundred
+    # megabytes, EVERY write has to push through a checkpoint, the tick
+    # stretches from ~10s to 60-118s, it crosses the 80s liveness deadline and
+    # the watchdog restarts the unit mid-cycle (orphaning a row each time).
+    #
+    # A PASSIVE checkpoint costs milliseconds when there is nothing to do and
+    # never blocks a reader (the server's payload builds hold read
+    # transactions); when the log is genuinely large and nothing blocks it, a
+    # TRUNCATE reclaims the file instead of leaving hundreds of MB of empty
+    # WAL behind.  Both are failure-isolated: housekeeping must never fail a
+    # tick that has already done its real work.
+    WAL_DBS = ("blm_pokerbet.db", "blm_metrics_clean.db")
+    WAL_TRUNCATE_PAGES = 25000        # ~100 MB of 4 KB pages
+    WAL_HOUSEKEEPING_EVERY = 2        # ticks
+
+    def _wal_housekeeping(self) -> None:
+        """Keep the WAL small enough that no tick has to absorb a checkpoint."""
+        try:
+            if self.stats.get("ticks", 0) % self.WAL_HOUSEKEEPING_EVERY:
+                return
+            base = Path(__file__).resolve().parents[1]
+            for name in self.WAL_DBS:
+                path = base / name
+                if not path.exists():
+                    continue
+                try:
+                    conn = sqlite3.connect(str(path), timeout=1.0)
+                except sqlite3.Error:
+                    continue
+                try:
+                    conn.execute("PRAGMA journal_size_limit=67108864")
+                    busy, log_pages, _ckpt = conn.execute(
+                        "PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                    if not busy and log_pages > self.WAL_TRUNCATE_PAGES:
+                        t0 = time.monotonic()
+                        b2, l2, c2 = conn.execute(
+                            "PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                        logger.info(
+                            "wal housekeeping %s: truncated busy=%s pages=%d->%d "
+                            "in %.2fs", name, b2, l2, c2, time.monotonic() - t0)
+                finally:
+                    conn.close()
+        except Exception as exc:      # never fail a tick over housekeeping
+            logger.warning("wal housekeeping skipped: %s", exc)
 
     def _recover_null_scores(
             self,
@@ -3595,10 +3809,16 @@ class PokerBetCollector:
                     self._null_recovery_stats["budget_skips"] += 1
                     break
                 t_ncap = time.monotonic()
-                html_n = self._page_content_timed(
-                    page, "null-retry",
-                    timeout_s=min(self.PAGE_CONTENT_RETRY_TIMEOUT_S,
-                                  max(0.5, budget_remaining)))
+                # Bounded re-read of the nav panel (2026-10-03 flap fix): the
+                # blank-score rows live in the panel, so the whole-page
+                # serialize is unnecessary and starves the watchdog.  Fall back
+                # only when the panel is absent.
+                html_n = self._discovery_panel_html(page)
+                if html_n is None:
+                    html_n = self._page_content_timed(
+                        page, "null-retry",
+                        timeout_s=min(self.PAGE_CONTENT_RETRY_TIMEOUT_S,
+                                      max(0.5, budget_remaining)))
                 n_spend = time.monotonic() - t_ncap
                 budget_remaining -= n_spend
                 if html_n is None:
@@ -4129,7 +4349,7 @@ class PokerBetCollector:
             # Mark dirty BEFORE _refresh_projections so the pace projector
             # still runs immediately (for subsequent-observation linkage),
             # but the deviation refresh is deferred to the end-of-tick flush.
-            self._deviation_dirty.add(game.source_game_id)
+            self._mark_deviation_dirty(game.source_game_id)
             self._refresh_projections(game.source_game_id)
         except Exception:
             logger.error("clean metrics record failed:\n%s",
@@ -4159,34 +4379,234 @@ class PokerBetCollector:
             logger.error("pace projector refresh failed:\n%s",
                          traceback.format_exc())
 
-    def _flush_deviation_dirty(self) -> None:
-        """Phase 3 P2 — flush dirty games through the deviation benchmark.
+    def _dev_sync(self):
+        """Return the (lock, wake) pair for the deviation queue.
 
-        Called ONCE per tick (at the end of ``_tick_body``) after all
-        observations for the tick have been accepted.  This collapses
-        N per-snapshot deviation refreshes per game into at most ONE
-        refresh per game per tick, eliminating the dominant work
-        amplification seen in the Phase 2 baseline (51.2 refreshes per
-        accepted snapshot → 1 per dirty game per tick).
-
-        Games are removed from ``_deviation_dirty`` only after a
-        SUCCESSFUL refresh so a transient failure retries on the next
-        tick rather than silently losing the residual.  Failure-isolated:
-        a crash during flush is logged and does not affect collection.
+        Production always sets these in ``__init__``; the lazy path exists
+        only so unit tests that build the collector via ``object.__new__``
+        (never running ``__init__``) keep working — production never takes it.
         """
-        if self._deviation is None or not self._deviation_dirty:
-            return
-        # Snapshot the set so new marks that arrive concurrently (from
-        # the WS frame handler on the main thread) are not cleared
-        # until they have their own flush.
-        to_flush = set(self._deviation_dirty)
+        lock = getattr(self, "_deviation_lock", None)
+        if lock is None:
+            lock = self._deviation_lock = threading.RLock()
+        wake = getattr(self, "_deviation_wake", None)
+        if wake is None:
+            wake = self._deviation_wake = threading.Event()
+        return lock, wake
+
+    def _flush_deviation_dirty(self) -> int:
+        """Drain the deviation dirty set ONCE — the WORKER's drain routine.
+
+        NOTE (2026-10-03): this is NO LONGER called from the fast tick.  It
+        is invoked by the dedicated ``blm-deviation-worker`` thread only.
+        The fast tick calls :meth:`_signal_deviation_worker` instead.  The
+        body is otherwise unchanged from the Phase 3 P2 flush:
+
+        This collapses N per-snapshot deviation refreshes per game into at
+        most ONE refresh per game per drain.  Games are removed from
+        ``_deviation_dirty`` only after a SUCCESSFUL refresh so a transient
+        failure retries on the next drain rather than silently losing the
+        residual.  Failure-isolated: a crash during drain is logged and
+        does not affect collection.  Returns the number of games drained
+        (0 when there is nothing to do).
+        """
+        if self._deviation is None:
+            return 0
+        # Snapshot under the lock so marks that arrive concurrently (from
+        # the fast tick / WS handler threads) are not cleared until they
+        # have their own drain.  The worker is the only remover of entries.
+        lock, _ = self._dev_sync()
+        with lock:
+            to_flush = set(self._deviation_dirty)
         for gid in to_flush:
             try:
                 self._deviation.refresh_game(gid)
-                self._deviation_dirty.discard(gid)
+                with lock:
+                    self._deviation_dirty.discard(gid)
             except Exception:
                 logger.error("deviation flush failed for %s:\n%s",
                              gid, traceback.format_exc())
+        return len(to_flush)
+
+    def _mark_deviation_dirty(self, source_game_id: str) -> None:
+        """Producer side: mark a game dirty and wake the deviation worker.
+
+        Coalescing: the set holds at most one entry per game, so repeated
+        observations for the same game within a drain window collapse into
+        a single ``refresh_game`` (the Phase 3 P2 guarantee is preserved).
+        """
+        with self._dev_sync()[0]:
+            self._deviation_dirty.add(source_game_id)
+        self._dev_sync()[1].set()
+
+    def _signal_deviation_worker(self) -> None:
+        """Fast-path side: notify the worker that dirty games await.
+
+        Deliberately O(1) and non-blocking — the fast tick must never wait
+        on the deviation benchmark again.
+        """
+        if self._deviation is not None:
+            self._dev_sync()[1].set()
+
+    def _start_deviation_worker(self) -> None:
+        """Start the dedicated deviation consumer thread (daemon).
+
+        The worker owns the drain loop; the fast tick only marks dirty +
+        signals.  Started before the fast loop's READY so the first marks
+        have a consumer.  Idempotent.
+        """
+        if self._deviation is None or self._deviation_worker_thread is not None:
+            return
+        self._deviation_stop.clear()
+        self._deviation_worker_thread = threading.Thread(
+            target=self._deviation_worker_main, name="blm-deviation-worker",
+            daemon=True)
+        self._deviation_worker_thread.start()
+        logger.info("deviation worker started")
+
+    def _stop_deviation_worker(self) -> None:
+        """Signal the worker to stop and drain the LAST backlog, then join.
+
+        On stop the worker performs one final drain so queued work is not
+        lost on a clean shutdown; a forced kill (SIGABRT/WatchdogSec)
+        cannot drain, which is fine — the next start's ``refresh_all``
+        backfill re-covers every game idempotently (restart recovery).
+        """
+        self._deviation_stop.set()
+        self._deviation_wake.set()
+        t = self._deviation_worker_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=30.0)
+
+    #: Bounded: an ended-game burst must never grow the queue without limit.
+    #: The worker drains ~2 games/minute; a drop is logged AND counted.
+    _FINALIZE_QUEUE_MAX = 64
+
+    def _fin_sync(self):
+        """Return the (lock, wake) pair for the finalize queue.
+
+        Production always sets these in ``__init__``; the lazy path exists
+        only so unit tests that build the collector via ``object.__new__``
+        (never running ``__init__``) keep working — production never takes it.
+        """
+        lock = getattr(self, "_finalize_lock", None)
+        if lock is None:
+            lock = self._finalize_lock = threading.RLock()
+        wake = getattr(self, "_finalize_wake", None)
+        if wake is None:
+            wake = self._finalize_wake = threading.Event()
+        return lock, wake
+
+    def _enqueue_finalize(self, game, obs=None) -> None:
+        """Producer side: queue an ended game for the finalize worker.
+
+        O(1) and NON-BLOCKING — the fast tick must not wait on the clean
+        finalize or its pace projections (2026-10-08).  Losing a queue slot
+        is logged and counted, never silent.
+        """
+        lock, wake = self._fin_sync()
+        with lock:
+            q = getattr(self, "_finalize_queue", None)
+            if q is None:
+                q = self._finalize_queue = []
+            if len(q) >= self._FINALIZE_QUEUE_MAX:
+                dropped = q.pop(0)
+                self._finalize_dropped = getattr(self, "_finalize_dropped", 0) + 1
+                logger.error("finalize queue full (%d) — dropping %s",
+                             self._FINALIZE_QUEUE_MAX,
+                             getattr(dropped[0], "source_game_id", "?"))
+            q.append((game, obs))
+        wake.set()
+
+    def _flush_finalize_queue(self) -> int:
+        """Drain the finalize queue ONCE — the WORKER's routine.
+
+        Each game runs the SAME call the fast path used to make inline
+        (``_finalize_clean``), so the clean record, the pace projection and
+        the deviation enqueue keep their order and content.
+        """
+        lock, _ = self._fin_sync()
+        with lock:
+            batch = getattr(self, "_finalize_queue", None) or []
+            self._finalize_queue = []
+        for game, obs in batch:
+            try:
+                self._finalize_clean(game, obs)
+            except Exception:
+                logger.error("finalize worker: %s failed:\n%s",
+                             getattr(game, "source_game_id", "?"),
+                             traceback.format_exc())
+        return len(batch)
+
+    def _finalize_worker_main(self) -> None:
+        """The finalize consumer loop — lives entirely on this thread.
+
+        Wake (an ended game queued / stop) → drain once → wait again.  A
+        drain can take seconds; that is the point — it no longer runs on the
+        fast tick.  Never raises out of the loop.
+        """
+        _block_deadline_signal()
+        _, wake = self._fin_sync()
+        while not self._finalize_stop.is_set():
+            wake.wait(timeout=1.0)
+            wake.clear()
+            try:
+                with PERFORMANCE.measure("finalize.worker_drain"):
+                    self._flush_finalize_queue()
+            except Exception:
+                logger.error("finalize worker drain error:\n%s",
+                             traceback.format_exc())
+        # final drain on clean stop so an ended game is not silently unfinalised
+        try:
+            self._flush_finalize_queue()
+        except Exception:
+            logger.error("finalize worker final drain error:\n%s",
+                         traceback.format_exc())
+        logger.info("finalize worker stopped")
+
+    def _start_finalize_worker(self) -> None:
+        if getattr(self, "_finalize_worker_thread", None) is not None:
+            return
+        self._finalize_stop = threading.Event()
+        self._finalize_worker_thread = threading.Thread(
+            target=self._finalize_worker_main, name="blm-finalize-worker",
+            daemon=True)
+        self._finalize_worker_thread.start()
+
+    def _stop_finalize_worker(self) -> None:
+        stop = getattr(self, "_finalize_stop", None)
+        if stop is not None:
+            stop.set()
+        self._fin_sync()[1].set()
+        t = getattr(self, "_finalize_worker_thread", None)
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=30.0)
+
+    def _deviation_worker_main(self) -> None:
+        """The deviation consumer loop — lives entirely on this thread.
+
+        Wake (dirty marked / stop) → drain the set once → wait again.  A
+        drain can take tens of seconds; that is acceptable because it no
+        longer runs on the fast tick.  Never raises out of the loop.
+        """
+        _block_deadline_signal()
+        _, wake = self._dev_sync()
+        while not self._deviation_stop.is_set():
+            wake.wait(timeout=1.0)
+            wake.clear()
+            try:
+                with PERFORMANCE.measure("deviation.worker_drain"):
+                    self._flush_deviation_dirty()
+            except Exception:
+                logger.error("deviation worker drain error:\n%s",
+                             traceback.format_exc())
+        # final drain on clean stop so queued work is not silently lost
+        try:
+            self._flush_deviation_dirty()
+        except Exception:
+            logger.error("deviation worker final drain error:\n%s",
+                         traceback.format_exc())
+        logger.info("deviation worker stopped")
 
     def _finalize_clean(
         self, game: PokerBetGame, obs: Optional[MarketObservation] = None,
@@ -4197,10 +4617,14 @@ class PokerBetCollector:
         observed the terminal state; otherwise the game ended unseen and
         the clean record is finalized as UNKNOWN (NULL finals).
 
-        Phase 3 P2: calls deviation.refresh_game IMMEDIATELY (not deferred)
-        because the game is ending — it will be dropped from tracking after
-        this call so the end-of-tick flush would never see it.  The pace
-        projection is updated unconditionally via _refresh_projections.
+        Delivery changed TWICE on 2026-10-08: this function now runs on the
+        dedicated ``blm-finalize-worker`` thread (``_enqueue_finalize`` →
+        ``_flush_finalize_queue``), never on the fast tick.  The clean
+        finalize, the pace projection AND the deviation refresh it triggers
+        were the residual overrun that survived the deviation offload
+        (measured 10-100s phase times against a 30s liveness deadline).
+        Its body is unchanged: the clean record, the projection and the
+        deviation enqueue keep the same order and content.
         """
         if self.clean_metrics is None:
             return
@@ -4212,20 +4636,106 @@ class PokerBetCollector:
                 classification=game.classification,
             )
             self._refresh_projections(game.source_game_id)
-            # Deviation refresh: run immediately on finalization (game is
-            # ending and will be untracked; the end-of-tick flush won't see
-            # it).  Remove from dirty set so the flush skips it (it was
-            # already processed here).
+            # Deviation refresh: ENQUEUE, never run inline (2026-10-08).
+            # The worker's drain reads the DIRTY SET — not the tracked games
+            # — so an ended game is still drained; the old "the end-of-tick
+            # flush won't see it" reasoning described the pre-worker design
+            # (see _flush_deviation_dirty: "to_flush = set(self._deviation_dirty)").
             if self._deviation is not None:
                 try:
-                    self._deviation.refresh_game(game.source_game_id)
-                    self._deviation_dirty.discard(game.source_game_id)
+                    self._mark_deviation_dirty(game.source_game_id)
                 except Exception:
-                    logger.error("deviation finalize refresh failed:\n%s",
+                    logger.error("deviation finalize enqueue failed:\n%s",
                                  traceback.format_exc())
         except Exception:
             logger.error("clean metrics finalize failed:\n%s",
                          traceback.format_exc())
+
+    # Class attribute pair that marks the SELECTED game's sidebar section
+    # ("market-game-section active" — stable BetConstruct markers; exactly
+    # one per event-view page).  See event_parser._RE_SELECTED_SECTION.
+    _SELECTED_SECTION_SELECTOR = (
+        '[class*="market-game-section"][class*="active"]')
+
+    def _selected_section_html(self, page: Optional[Page]) -> Optional[str]:
+        """outerHTML of the SELECTED game's sidebar section — the ONLY page
+        region that belongs to THIS event.
+
+        The BetConstruct event view renders the whole live sidebar (46
+        sections on a live 2026-10-03 capture, exactly one ``active``); the
+        rendered body TEXT inlines every listed game's scoreboard, so the
+        event-view identity/quarter-score parse must read the selected
+        section's MARKUP.  This is a single-element DOM read — deliberately
+        NOT ``page.content()`` (the whole-page round-trip that overruns its
+        tick budget).  Any failure returns None and the parser falls back to
+        the legacy text heuristics; it never raises into the capture path.
+        """
+        if page is None:
+            return None
+        try:
+            loc = page.locator(self._SELECTED_SECTION_SELECTOR)
+            if loc.count() > 0:
+                return loc.first.evaluate("el => el.outerHTML")
+        except Exception:
+            logger.debug("selected-section read failed:\n%s",
+                         traceback.format_exc())
+        return None
+
+    # The left-nav navigation tree that lists EVERY live competition and game
+    # row (sport → region → competition → ``.market-game-section`` rows).
+    # ``discover_competitions`` reads ``.market-game-section`` rows grouped by
+    # ``.sp-s-l-head-bc`` headers, all of which live inside this ONE container.
+    # Reading only this container keeps the fast tick off the heavy event-view
+    # MAIN content — the whole-page ``page.content()`` round-trip that took
+    # 30-100 s under load and starved the 30 s self-watchdog (2026-10-03 flap).
+    #
+    # 2026-10-04 selector correction: ``.verticalNavigationContent`` matches
+    # ~23 nested SPA collapse containers (one per sport/region/competition);
+    # Playwright's ``.first`` selects the FIRST — an EMPTY, display:none
+    # container with 0 ``.market-game-section`` rows — so the bounded read
+    # returned None on 100% of production ticks and every tick fell back to
+    # the very whole-page capture this fix exists to remove (49/49 fallbacks
+    # observed live).  ``.pp-sport-list-holder-bc`` is the SINGLE, non-generated
+    # container that wraps the WHOLE sport tree (verified on the real 2026-10-03
+    # event-view fixture: 1 element, all 48 ``.market-game-section`` rows, 34
+    # ``.sp-s-l-head-bc`` headers; live: 1 element, all 104 rows; discovery
+    # output byte-identical to whole-page).  Selector only — semantics unchanged.
+    _NAV_PANEL_SELECTOR = ".pp-sport-list-holder-bc"
+    _NAV_PANEL_FALLBACK_SELECTORS = (".left-menu-scroll", ".left-menu-container")
+
+    def _discovery_panel_html(self, page: Optional[Page]) -> Optional[str]:
+        """outerHTML of the left-nav panel — the fast path's ONLY capture.
+
+        A single-element DOM read, deliberately NOT ``page.content()``: the
+        whole-page round-trip serializes the selected game's entire event-view
+        main content (all market groups + every inlined sidebar scoreboard),
+        which is what overran the 3 s tick budget by 10-30x.  The nav panel is
+        exactly where ``discover_competitions`` already reads its game rows, so
+        discovery semantics are UNCHANGED — only the capture source is narrowed.
+
+        Returns None when the panel is absent or carries no game rows; the
+        caller then falls back to the whole-page capture so coverage can never
+        silently drop.  Never raises into the fast path.
+        """
+        if page is None:
+            return None
+        # Bounded, ordered candidates — the first whose subtree actually
+        # carries ``.market-game-section`` rows wins.  A single stale/renamed
+        # container class can never re-inert the read (the 2026-10-04
+        # regression); the read stays bounded (never ``page.content()``), and
+        # the caller keeps the whole-page fallback for genuine absence.
+        for selector in (self._NAV_PANEL_SELECTOR,
+                         *self._NAV_PANEL_FALLBACK_SELECTORS):
+            try:
+                loc = page.locator(selector)
+                if loc.count() > 0:
+                    html = loc.first.evaluate("el => el.outerHTML")
+                    if html and "market-game-section" in html:
+                        return html
+            except Exception:
+                logger.debug("nav-panel read failed for %s:\n%s",
+                             selector, traceback.format_exc())
+        return None
 
     def _capture_event_state(
         self, page: Optional[Page], cls: Classification, game: PokerBetGame,
@@ -4239,7 +4749,8 @@ class PokerBetCollector:
         fixture).  With ``end=True`` the game is marked ended afterwards
         (a verified final state observed via the event view)."""
         try:
-            parsed = parse_event_view(event_text)
+            parsed = parse_event_view(
+                event_text, identity_html=self._selected_section_html(page))
             if not self._verified_event_view(game, parsed):
                 self._event_view_failures += 1
                 logger.warning(
@@ -4327,7 +4838,7 @@ class PokerBetCollector:
                 self._reconcile(game, page.url, event_text, parsed)
             if end:
                 self._end_game(game)
-                self._finalize_clean(game, obs)
+                self._enqueue_finalize(game, obs)
             return True
         except Exception:
             logger.error("event capture failed:\n%s", traceback.format_exc())
@@ -4771,7 +5282,8 @@ class PokerBetCollector:
                 # market text -> structured parse) is its own bucket so a
                 # slow parse is never misattributed to page capture.
                 t_lp = time.monotonic()
-                parsed = parse_event_view(text)
+                parsed = parse_event_view(
+                    text, identity_html=self._selected_section_html(page))
                 self._tick_stats["line_parse_ms"].append(
                     time.monotonic() - t_lp)
                 if not self._verified_event_view(game, parsed):
@@ -5200,7 +5712,7 @@ class PokerBetCollector:
             for game in to_end:
                 self.store.upsert_game(game)
                 logger.info("game ended (disappeared): %s", game.source_game_id)
-                self._finalize_clean(game)
+                self._enqueue_finalize(game)
 
     def _find_tracked(self, source_game_id: str) -> Optional[PokerBetGame]:
         """Lock-guarded scan (dict-only) — safe from any thread.  Callers
