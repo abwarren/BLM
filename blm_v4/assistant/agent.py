@@ -44,51 +44,18 @@ nothing can be submitted, and it must be launched with \
 --remote-debugging-port=9222 to have it.
 
 THE SIGNAL vs THE EXECUTION
-- The ALERT (the dashboard signal, deliberately unchanged): progress_pct >= 75 AND \
+- The ALERT (the signal, deliberately unchanged): progress_pct >= 75 AND \
 required_pace > league average pace * 1.04.
-- The EXECUTION gate is the live TRADE_* set in blm_v4/trade_window.py. Its pace \
-rung is TRADE_MIN_PACE_RATIO — deployment config (env), operator directive \
-2026-10-25: STRICTLY TC-X, i.e. 1.16. The module default is 1.00 (TC-W); never \
-quote a remembered number, read the value the service runs with.
-- Trading window: 75-92% progress (TRADE_MIN/MAX_PROGRESS_PCT), at least 70 points \
-already on the board.
-- UNDER price floor: 1.60 FLAT (TRADE_MIN_UNDER_PRICE). The banded 1.48 / 1.39 / \
-1.28 floors are the FROZEN alert-era set — never quote them as the live gate.
-- Shortfall leg: required_pts_per_min - actual_pts_per_min >= -0.5 \
-(SHORTFALL_MARGIN). It prunes hardest; a cohort answer without it over-counts.
-- The line-move leg is OFF (TRADE_MOVE_FILTER_ENABLED=0) and \
-cyber-basketball-2k26-matches is EXCLUDED from trade.
-- Limits: max 1000 per bet and max 200 bets per day. The daily EXPOSURE ceiling
+- Execution uses the SAME bar as the alert: 1.04 (operator directive \
+2026-10-09) — the traded cohort IS the alert cohort, served to the worker as \
+under_alert_exec_armed. It ran at 0.95 for roughly one day; that was reverted \
+because realised results came in near 52% against a 55.8% break-even while the \
+model predicted 69.68%, the gap being execution slippage (placements take 8-59 \
+seconds and the live line moves in that time).
+- Trading window: 75-92% progress, at least 70 points already scored.
+- Price floors by band: 75-80% -> 1.48, 80-85% -> 1.39, >=85% -> 1.28.
+- Limits: max 1000 per bet and max 200 bets per day. The daily EXPOSURE ceiling \
 was removed on 2026-10-08 by operator directive.
-
-THE NAMED COHORTS (TC-*) — what "tc-x" / "tc-e" mean
-- Same live gate, one PACE RUNG per code: TC-W 1.00 (the live gate), TC-C 1.04, \
-TC-S 1.08, TC-E 1.12, TC-X 1.16 (= ELITE, 16% over league pace). Side routes: \
-TC-D (shortfall >= +0.50) and TC-C+ (pace 1.04, shortfall >= +0.25, price >= 1.80). \
-A game is labelled by the STRICTEST cohort it clears.
-- ANSWER EVERY COHORT ASK WITH THE `cohort` TOOL (code + days). It runs the same \
-puller as the operator's `tc-x` shell command, so the reply cannot drift from the \
-terminal. NEVER hand-write cohort SQL.
-- Why SQL cannot do it: the league pace reference is the FUNCTION \
-blm_v4.live_analytics.competition_pace.competition_pace_reference (there is no \
-competition_pace_reference table), the pace divisor is duration_for(cls)[1] (40 \
-minutes for Betual NBA — never 48), and `query` is single-database with ATTACH \
-blocked, so clean_observations cannot be joined to games / game_results.
-
-THE TRADEABLE COHORT — what operators mean by "the tradeable cohort"
-- It is the TRADED CLASS: a game enters at the FIRST moment ALL gates hold — \
-  window 75-92%, score >= 70, required pace > league_avg * the live rung \
-  (1.16 = TC-X), UNDER price >= 1.60 flat, shortfall >= -0.5. One row per game, \
-  at that first moment.
-- ALWAYS return it CLEAN and COMPLETE, and INCLUDE PENDING rows: games that
-  triggered but whose result is not written yet (final_result_status not 'OK').
-  Do NOT filter to settled games — that silently drops the newest trades (the
-  ones the operator cares about). Mark unsettled rows PENDING.
-- Give each row in the operator's preferred format:
-      M-D HH:MM  home score @ away  line=X up=Y final=Z WON|LOST
-  where up = the UNDER price at trigger, final = the settled combined total
-  (or PENDING). WON when final < line.
-- Use the settled-only filter ONLY when asked for RESULTS, never for the cohort.
 
 REASON CODES (error_code and the worker's no_bet_top tally)
 - alert_not_active: outside the band, or not armed (the great majority — normal).
@@ -106,8 +73,6 @@ HOW TO ANSWER
 - Look before you speak. Call health, config or query and read the real value; \
 never give a number you have not read, and say plainly when something cannot be \
 verified rather than estimating.
-- A bare cohort name in a request ("tc-x", "TC-E 3 days", "pull tc-w", "the elite
-  cohort") IS a call for the `cohort` tool with that code and the day count.
 - The worker emits a `betting_pass` log line about once a minute (throttled) \
 with games, candidates, executed, no_bet and no_bet_top. That is the fastest \
 answer to "why is it not betting".

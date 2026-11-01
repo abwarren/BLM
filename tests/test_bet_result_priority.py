@@ -168,7 +168,12 @@ def test_priority_order_sql_is_a_no_op_when_empty():
 # ── 6 · reconciler candidates ────────────────────────────────────────
 def _candidates(db: Path, priority=None):
     from blm_v4.result_reconciler import ResultReconciler
-    rec = ResultReconciler(db, feed_db_path=None, batch_limit=25)
+    try:
+        # this branch predates the feed-contradiction guard (feed_db_path);
+        # the check under test is candidate ORDERING, so either shape is fine.
+        rec = ResultReconciler(db, feed_db_path=None, batch_limit=25)
+    except TypeError:
+        rec = ResultReconciler(db, batch_limit=25)
     conn = rec._connect()
     try:
         return [c["source_game_id"] for c in

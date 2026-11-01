@@ -242,9 +242,14 @@ def min_price_for(progress_pct) -> Optional[float]:
             break
     else:
         band = MIN_PRICE_BANDS[-1][1]
-    # The PRIMARY floor is the HIGHER of the band break-even and the flat
-    # operator minimum (2026-10-12) — never the looser of the two.
-    return max(band, EXEC_MIN_UNDER_PRICE)
+    # 2026-11-02 (trunk := production): the flat 1.85 override is RETIRED here.
+    # The operator's floors now live on the trade path (TRADE_MIN_UNDER_PRICE
+    # 1.60 for the signal, TRADE_EXEC_MIN_PRICE 1.70 for every arm/place/
+    # re-validate), and this function goes back to being the MEASURED band table
+    # that blm_v4/live_analytics/fingerprint_stats.py reads (1.48 / 1.39 / 1.28).
+    # Keeping the max() here would make the published band floor disagree with
+    # that module's own quote of it.
+    return band
 
 
 def price_reason(price, progress_pct) -> Optional[str]:
@@ -737,7 +742,10 @@ def filter_tradeable_games(games) -> list:
 # Defaults to the signal floor, so an unconfigured deployment behaves exactly as
 # before; the deployment selects the value (systemd drop-in
 # TRADE_EXEC_MIN_PRICE=1.70), which is the repo's own pattern for a TRADE_* rung.
-TRADE_EXEC_MIN_PRICE = _env_float("TRADE_EXEC_MIN_PRICE", TRADE_MIN_UNDER_PRICE)
+#: Operator's flat execution floor (2026-11-02: "only place bets of 1.7 or
+#: larger").  The DEFAULT is the directive itself, not the signal floor: a
+#: deployment that forgets the env var must not silently trade at 1.60.
+TRADE_EXEC_MIN_PRICE = _env_float("TRADE_EXEC_MIN_PRICE", 1.70)
 
 
 def exec_price_reason(price) -> Optional[str]:

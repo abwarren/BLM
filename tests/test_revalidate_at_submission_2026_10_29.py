@@ -97,10 +97,10 @@ def test_no_capture_or_unreadable_is_a_refusal():
 
 
 def test_price_drift_beyond_the_cap_is_refused():
-    ok = R.verdict(_st(under_price=1.80), CAND, now=NOW)               # -0.05
+    ok = R.verdict(_st(under_price=1.95), CAND, now=NOW)               # -0.05
     assert ok is None
-    code, why = R.verdict(_st(under_price=1.60), CAND, now=NOW)        # -0.25
-    assert code == "REVALIDATION_PRICE_DRIFT" and "1.60" in why
+    code, why = R.verdict(_st(under_price=1.75), CAND, now=NOW)        # -0.25
+    assert code == "REVALIDATION_PRICE_DRIFT" and "1.75" in why
 
 
 def test_the_switch_disables_the_whole_check(monkeypatch):

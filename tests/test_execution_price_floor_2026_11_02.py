@@ -22,10 +22,12 @@ import pytest
 from blm_v4 import trade_window as tw
 
 
-def test_unconfigured_execution_floor_equals_the_signal_floor():
-    assert tw.TRADE_MIN_UNDER_PRICE == 1.60          # the SIGNAL floor, untouched
-    assert tw.TRADE_EXEC_MIN_PRICE == tw.TRADE_MIN_UNDER_PRICE, (
-        "an unconfigured deployment must behave exactly as before")
+def test_unconfigured_execution_floor_is_the_operator_directive():
+    """The SIGNAL floor is untouched at 1.60; the EXECUTION floor defaults to the
+    operator's 1.70 so a deployment that forgets the env var cannot trade below
+    the instruction."""
+    assert tw.TRADE_MIN_UNDER_PRICE == 1.60
+    assert tw.TRADE_EXEC_MIN_PRICE == 1.70
 
 
 def test_at_the_live_floor_only_the_execution_bar_moves(monkeypatch):

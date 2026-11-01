@@ -65,17 +65,6 @@ WAL_HYGIENE_INTERVAL_S = float(
 #: below it the default wal_autocheckpoint is managing fine alone.
 WAL_HYGIENE_THRESHOLD_MB = float(
     os.environ.get("BLM_WAL_HYGIENE_THRESHOLD_MB", "256"))
-#: above this the hygiene pass ESCALATES from PASSIVE to TRUNCATE (2026-10-31:
-#: the WAL reached 14.25 GB because PASSIVE never gives space back — see
-#: blm_v4/wal_hygiene.py).  Bounded by busy_timeout: a busy pass reports and
-#: retries on the next cadence tick, it never stalls the box.
-WAL_HYGIENE_HARD_CAP_MB = float(
-    os.environ.get("BLM_WAL_HYGIENE_HARD_CAP_MB", "2048"))
-#: HARD ALERT bound: a WAL past this logs ``wal_hygiene_alert`` with its size,
-#: far below the escalation cap — the growth has to be visible in the journal
-#: BEFORE writes slow down and a restart stops coming back.  0 disables it.
-WAL_HYGIENE_ALERT_MB = float(
-    os.environ.get("BLM_WAL_HYGIENE_ALERT_MB", "256"))
 #: a live-flagged game with NO snapshot AND NO WS observation for this
 #: long has left the source's live board — its authoritative final state
 #: exists upstream, so reconcile it to ended.
@@ -118,18 +107,6 @@ PACE_REF_INTERVAL_S = float(os.environ.get("BLM_PACE_REF_INTERVAL_S", "60"))
 #: Backstop age for the pace-reference payload (same rationale as
 #: STATS_MAX_AGE_S).
 PACE_REF_MAX_AGE_S = float(os.environ.get("BLM_PACE_REF_MAX_AGE_S", "900"))
-#: LINE REFERENCE worker cadence (2026-10-12 line-movement leg,
-#: docs/rag/15_EDGE_FINDINGS.md §15.8).  Precomputes the league AVERAGE LINE
-#: + each game's FIRST-captured line from clean_observations on its own
-#: daemon thread, so /api/v4/live never runs the ≈4 GB whole-table scan on the
-#: request path.  A cheap MAX(rowid) change-detector skips the scan unless a
-#: new observation (or a competition slug) landed; a backstop age re-scans
-#: regardless.  Read-only; no gate, threshold, alert or model input is
-#: touched.  0 disables the worker (the API then computes inline).
-LINE_REF_INTERVAL_S = float(os.environ.get("BLM_LINE_REF_INTERVAL_S", "60"))
-#: Backstop age for the line-reference payload (same rationale as
-#: PACE_REF_MAX_AGE_S).
-LINE_REF_MAX_AGE_S = float(os.environ.get("BLM_LINE_REF_MAX_AGE_S", "900"))
 #: Use the swarm feed that BACKS the PokerBet results page as the
 #: authoritative result source (directive 2026-09-24).  The page renders a
 #: list of games and carries no game id at all, so a DOM read can only guess
@@ -139,31 +116,6 @@ LINE_REF_MAX_AGE_S = float(os.environ.get("BLM_LINE_REF_MAX_AGE_S", "900"))
 #: Set to 0 to fall back to the results-page DOM path.
 RESULT_RECONCILE_SWARM = os.environ.get(
     "BLM_RESULT_RECONCILE_SWARM", "1") not in ("0", "false", "no", "")
-#: SCHEDULED RESULTS VERIFICATION cadence (operator audit) — re-reads the
-#: finished games' finals from the PokerBet results page (its backing swarm
-#: feed) and REPORTS every recorded final that disagrees with the source.
-#: REPORT-ONLY by default; blm_v4.result_verifier reads the look-back window
-#: (RECONCILE_VERIFY_DAYS, default 3) and the correction flag
-#: (RECONCILE_VERIFY_APPLY, default OFF) itself.  0 disables the worker.
-RECONCILE_VERIFY_INTERVAL_S = float(
-    os.environ.get("RECONCILE_VERIFY_INTERVAL_S", "3600"))
-
-
-def _v1_collector_enabled(environ=None) -> bool:
-    """Whether the in-server LEGACY V1 collector and its 20 s snapshot
-    scheduler run.  DEFAULT ON — unchanged behaviour — and ``BLM_V1_COLLECTOR``
-    set to 0/false/no/off disables both.
-
-    It is a SECOND headless scraping loop beside the standalone blm-collector:
-    measured 2026-10-29 it held 18 chromium processes and roughly a third of the
-    box's CPU, which starved the v4 collector's page captures on the shared box
-    (fast ticks 50–178 s against a 5 s design, heartbeat past the dashboard's
-    90 s OFFLINE threshold).  Disabled, it costs only blm_v2's own ts/alert
-    views — the v4 dashboard and the betting worker never read them.
-    """
-    env = environ if environ is not None else os.environ
-    val = env.get("BLM_V1_COLLECTOR", "1")
-    return str(val).strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def main() -> None:
@@ -196,11 +148,7 @@ def main() -> None:
 
     core_engine = CoreEngine()
     engine_adapter = BlmEngineAdapter(core_engine)
-    # LEGACY V1 collector — the second scraping loop (see _v1_collector_enabled).
-    v1_collector_on = _v1_collector_enabled()
-    collector = V1CollectorAdapter(headless=True) if v1_collector_on else None
-    if not v1_collector_on:
-        logger.info("v1_collector_disabled", reason="BLM_V1_COLLECTOR=0")
+    collector = V1CollectorAdapter(headless=True)
 
     # ── OLV/CLV + Historical + UNDER timing ──────────────────────
     line_tracker = LineTracker()
@@ -212,17 +160,15 @@ def main() -> None:
         async def emit(self, event_type: str, data: dict) -> None:
             logger.debug("scheduler_event", type=event_type)
 
-    scheduler = None
-    if v1_collector_on:
-        scheduler = SnapshotScheduler(
-            collector=collector,
-            ts_db=ts,
-            engine=engine_adapter,
-            event_bus=_SchedulerEventBus(),
-            tick_s=20.0,
-            line_tracker=line_tracker,
-            under_timing_engine=under_timing_engine,
-        )
+    scheduler = SnapshotScheduler(
+        collector=collector,
+        ts_db=ts,
+        engine=engine_adapter,
+        event_bus=_SchedulerEventBus(),
+        tick_s=20.0,
+        line_tracker=line_tracker,
+        under_timing_engine=under_timing_engine,
+    )
 
     # ── Register event handlers ──────────────────────────────
     from blm_v2.models.events import BlmEvent
@@ -238,7 +184,6 @@ def main() -> None:
     # ── BLM V4 PokerBet pipeline API (classification-aware) ──
     from blm_v4.api import router as v4_router
     from blm_v4.api import configure_stats, configure_pace_reference_worker
-    from blm_v4.api import configure_line_reference_worker
     app.include_router(v4_router)
 
     # ── PACE REFERENCE worker (empty-live-data fix, diagnostic
@@ -267,31 +212,6 @@ def main() -> None:
             consumer=_publish_pace_references)
         configure_pace_reference_worker(pace_ref_worker)
         app.state._pace_ref_worker = pace_ref_worker
-
-    # ── LINE REFERENCE worker (line-movement leg, 2026-10-12) ────
-    # The LINE-MOVEMENT VOLATILITY trade leg (docs/rag/15_EDGE_FINDINGS.md
-    # §15.8) needs each game's FIRST-captured live line and its competition's
-    # average of those; the average is a ≈4 GB whole-table scan of
-    # clean_observations, so this daemon thread precomputes BOTH off the
-    # request path and publishes them to blm_v4.api.  Read-only over both
-    # databases; no gate, threshold, alert or model input is touched.  The
-    # first scan runs when the startup handler starts it (never at import);
-    # until it lands /live serves an empty reference and the trade leg fails
-    # CLOSED.  0 disables it.
-    line_ref_worker = None
-    if LINE_REF_INTERVAL_S > 0:
-        from blm_v4.api import _publish_line_reference
-        from blm_v4.live_analytics.line_reference_worker import (
-            LineReferenceWorker)
-        line_ref_worker = LineReferenceWorker(
-            root / "blm_metrics_clean.db",
-            root / "blm_pokerbet.db",
-            interval_s=LINE_REF_INTERVAL_S,
-            max_age_s=LINE_REF_MAX_AGE_S,
-            log=logger,
-            consumer=_publish_line_reference)
-        configure_line_reference_worker(line_ref_worker)
-        app.state._line_ref_worker = line_ref_worker
 
     # ── LIVE ALERT STATS worker (operator stats tab) ─────────
     # Recomputes the stats payload on its own daemon thread so the
@@ -386,25 +306,21 @@ def main() -> None:
     # ── Lifespan handlers ────────────────────────────────────
     @app.on_event("startup")
     async def start_pipeline():
-        if scheduler is None:
-            logger.info("v1_collector_and_scheduler_skipped",
-                        reason="BLM_V1_COLLECTOR=0")
-        else:
-            logger.info("collector_starting")
-            collector.start()
-            logger.info("scheduler_starting")
-            # The scheduler's ticks are LONG SYNCHRONOUS work (SQLite reads,
-            # json_extract scans in the historical layer).  Running that
-            # coroutine on the uvicorn event loop blocked every HTTP request
-            # for seconds per tick (dashboard polls never completing — the
-            # page froze on its initial state).  Give it its own loop/thread:
-            # the API event loop stays responsive.
-            def _run_scheduler():
-                asyncio.run(scheduler.run())
-            thread = threading.Thread(target=_run_scheduler,
-                                      name="blm-scheduler", daemon=True)
-            thread.start()
-            app.state._scheduler_thread = thread
+        logger.info("collector_starting")
+        collector.start()
+        logger.info("scheduler_starting")
+        # The scheduler's ticks are LONG SYNCHRONOUS work (SQLite reads,
+        # json_extract scans in the historical layer).  Running that
+        # coroutine on the uvicorn event loop blocked every HTTP request
+        # for seconds per tick (dashboard polls never completing — the
+        # page froze on its initial state).  Give it its own loop/thread:
+        # the API event loop stays responsive.
+        def _run_scheduler():
+            asyncio.run(scheduler.run())
+        thread = threading.Thread(target=_run_scheduler,
+                                  name="blm-scheduler", daemon=True)
+        thread.start()
+        app.state._scheduler_thread = thread
 
         # ── Projection accuracy scorecard (persisted, quality-gated) ──
         # The scorecard run is a long synchronous SQLite workload (1-3 min
@@ -533,16 +449,12 @@ def main() -> None:
             wal_hygiene_worker = WalHygieneWorker(
                 root / "blm_pokerbet.db",
                 interval_s=WAL_HYGIENE_INTERVAL_S,
-                threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
-                hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB,
-                alert_mb=WAL_HYGIENE_ALERT_MB)
+                threshold_mb=WAL_HYGIENE_THRESHOLD_MB)
             wal_hygiene_worker.start()
             app.state._wal_hygiene_worker = wal_hygiene_worker
             logger.info("wal_hygiene_worker_started",
                         interval_s=WAL_HYGIENE_INTERVAL_S,
-                        threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
-                        hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB,
-                        alert_mb=WAL_HYGIENE_ALERT_MB)
+                        threshold_mb=WAL_HYGIENE_THRESHOLD_MB)
 
         # ── PACE REFERENCE worker (empty-live-data fix) ───────────────
         # Started early: its FIRST scan is the expensive one (the Q3
@@ -552,16 +464,6 @@ def main() -> None:
             pace_ref_worker.start()
             logger.info("pace_ref_worker_started",
                         interval_s=PACE_REF_INTERVAL_S)
-
-        # ── LINE REFERENCE worker (line-movement leg) ────────────────
-        # Started beside the pace-ref worker: its first scan (≈10 s, the
-        # whole-table read of clean_observations) runs on its own thread, and
-        # until it lands /live serves an empty reference (the trade leg fails
-        # CLOSED).  Read-only; publishing is a dict swap.
-        if line_ref_worker is not None:
-            line_ref_worker.start()
-            logger.info("line_ref_worker_started",
-                        interval_s=LINE_REF_INTERVAL_S)
 
         # ── RESULT RECONCILIATION WORKER (directive 2026-09-23) ──────
         # A disappearing live market is NOT evidence that a game has no
@@ -594,36 +496,6 @@ def main() -> None:
                         interval_s=RESULT_RECONCILE_INTERVAL_S,
                         batch=RESULT_RECONCILE_BATCH,
                         swarm=bool(swarm))
-
-        # ── SCHEDULED RESULTS VERIFICATION (operator audit) ─────────
-        # A SCHEDULED AUDIT of the finals the pipeline already recorded:
-        # re-reads the finished games' finals from the PokerBet results
-        # page (its backing swarm feed) and REPORTS every recorded final
-        # that disagrees — a drifted/premature final otherwise sits in the
-        # DB forever while every downstream reader trusts it.  REPORT-ONLY
-        # (RECONCILE_VERIFY_APPLY defaults OFF); it writes NO table unless
-        # the operator turns apply on, so the existing result_reconciler's
-        # authority/immutability contract is untouched.  Output is a report
-        # file under BLM_DATA_ROOT plus a log line.  It FAILS SOFT: an
-        # unreachable source is logged and retried next tick, the thread
-        # never dies, and startup is never blocked.  0 disables it.
-        if RECONCILE_VERIFY_INTERVAL_S > 0:
-            try:
-                from blm_v4.result_verifier import ResultVerifierWorker
-                result_verifier = ResultVerifierWorker(
-                    root / "blm_pokerbet.db",
-                    interval_s=RECONCILE_VERIFY_INTERVAL_S,
-                    data_root=root,
-                    log=logger)
-                result_verifier.start()
-                app.state._result_verifier = result_verifier
-                logger.info(
-                    "result_verifier_started",
-                    interval_s=RECONCILE_VERIFY_INTERVAL_S,
-                    window_days=result_verifier.verifier._window_days,
-                    apply=result_verifier.verifier._apply)
-            except Exception:
-                logger.exception("result_verifier_start_failed")
 
         # ── AUTO-BETTING WORKER (directive 2026-09-21) ─────────────
         # DRY_RUN by default; the persisted kill switch defaults OFF.
@@ -661,20 +533,6 @@ def main() -> None:
                     _live_games_for_betting._last_warn = now
                     logger.warning("betting_payload_unusable",
                                    games=len(games), error=_err)
-            else:
-                # UNIVERSE (operator directive 2026-10-31): the worker may only
-                # see the traded REGION.  Real-league fixtures share the
-                # "Betual NBA" section name and passed every gate leg — an R125
-                # KBL bet went out on 2026-10-31 — so the filter lives HERE, on
-                # the worker's only input, not in the six-leg chain (which the
-                # dashboard's BETTABLE badge and every test fixture share).
-                from blm_v4.trade_window import filter_tradeable_games
-                kept = filter_tradeable_games(games)
-                if len(kept) != len(games):
-                    logger.info("betting_payload_region_filtered",
-                                dropped=len(games) - len(kept),
-                                kept=len(kept))
-                games = kept
             with _betting_payload_lock:
                 _betting_payload_cache.update(at=time.monotonic(), games=games)
             return games
@@ -693,45 +551,6 @@ def main() -> None:
                     dry_run=betting_cfg.dry_run,
                     enabled=betting_store.is_enabled())
 
-        # ── FAST LANE (2026-10-28): the trade gate decided on FRESH rows ───
-        # The poll worker above decides on the /api/v4/live payload, which is
-        # 90-190 s old by construction (a build takes ~100 s; the unit sets a
-        # 90 s cache TTL).  A TC-X moment lasts a MEDIAN of one captured row,
-        # so that payload samples almost none of them: 1 candidate in 4,246
-        # passes since 2026-10-15, against ~100 qualifying runs the same rows
-        # show offline.  This lane reads the freshest captured rows every few
-        # seconds and runs the SAME executor against the SAME store — it
-        # changes WHEN the decision is taken, never WHAT is decided (every
-        # executor gate, limit and the one-bet-per-game rule still run).
-        # It builds its OWN provider on its own thread (Playwright sync
-        # objects are thread-affine; sharing the worker's provider raised
-        # greenlet.error on every balance read).  Disable with
-        # FAST_LANE_ENABLED=0.
-        if str(os.environ.get("FAST_LANE_ENABLED", "1")).strip().lower() \
-                not in ("0", "false", "no", "off", ""):
-            try:
-                from blm_v4.betting.fast_lane import FastLaneWorker
-                fast_lane = FastLaneWorker(
-                    prod_db_path=root / "blm_pokerbet.db",
-                    clean_db_path=root / "blm_metrics_clean.db",
-                    cfg=betting_cfg, store=betting_store,
-                    interval_s=float(
-                        os.environ.get("FAST_LANE_INTERVAL_S", "3")),
-                    lookback_s=float(
-                        os.environ.get("FAST_LANE_LOOKBACK_S", "120")),
-                    stale_attempts=int(
-                        os.environ.get("FAST_LANE_STALE_ATTEMPTS", "3")),
-                    log=logger.info)
-                fast_lane.start()
-                app.state._fast_lane = fast_lane
-                logger.info("fast_lane_started",
-                            interval_s=fast_lane.interval_s,
-                            lookback_s=fast_lane.lookback_s,
-                            stale_attempts=fast_lane.stale_attempts,
-                            dry_run=betting_cfg.dry_run)
-            except Exception:
-                logger.exception("fast_lane_start_failed")
-
         # ── LIVE ALERT STATS worker ───────────────────────────────────
         # Started LAST of the workers: it is read-only and its first scan is
         # a ~10 s full-history read, so it must never delay the pipeline
@@ -745,106 +564,44 @@ def main() -> None:
 
     @app.on_event("shutdown")
     async def stop_pipeline():
-        """Bounded, ordered shutdown — producers first.
-
-        systemd stops the whole cgroup (KillMode=control-group), so chromium and
-        every outbound fetch die the instant SIGTERM lands.  Measured
-        2026-10-28: a stop took 90 s and ended in SIGKILL while the result
-        reconciler kept issuing fetches (one FAILED_ATTEMPT per second) for the
-        WHOLE window, because its stop() sat behind a 25 s scheduler join.
-        Every second of that window is a 502 on /api/v4/status, which the board
-        paints as "API/DATA UNAVAILABLE".
-
-        Order: the things that touch the NETWORK/BROWSER stop first, then the
-        scheduler that drives them, then the passive DB workers.  Each step is
-        bounded and logged with its duration, so a future wedge names itself
-        instead of costing the unit's whole stop timeout.
-        """
-        t0 = time.monotonic()
-        deadline = t0 + 8.0   # hard cap on the whole handler
-
-        def _note(msg):
-            # stderr as well as the logger: uvicorn may tear logging down
-            # before this handler finishes, and a silent shutdown is what made
-            # the 90 s stop invisible.
-            try:
-                print(msg, file=sys.stderr, flush=True)
-            except Exception:
-                pass
-            try:
-                logger.info(msg)
-            except Exception:
-                pass
-
-        def _step(name, fn, timeout):
-            now = time.monotonic()
-            if now >= deadline:
-                _note("shutdown_step_skipped step=%s budget=0" % name)
-                return None
-            timeout = min(timeout, max(0.1, deadline - now))
-            s0 = time.monotonic()
-            ok = None
-            try:
-                ok = fn(timeout)
-            except Exception:
-                _note("shutdown_step_failed step=%s" % name)
-            _note("shutdown_step step=%s ok=%s seconds=%.2f"
-                  % (name, ok, time.monotonic() - s0))
-            return ok
-
-        # ── 1. producers: browser owners and outbound fetchers ──────────
-        # collector is None when BLM_V1_COLLECTOR=0 disables the legacy
-        # scraper — the shutdown must skip it, not call stop() on nothing
-        # (measured 2026-10-29: "AttributeError: 'NoneType' object has no
-        # attribute 'stop'" on every stop, which aborted the rest of the
-        # ordered shutdown).
-        if collector is not None:
-            _step("collector", collector.stop, 2)
+        await scheduler.stop()
+        thread = getattr(app.state, "_scheduler_thread", None)
+        if thread and thread.is_alive():
+            thread.join(timeout=25)
+        # the reconciler is daemon=True and its loop sleeps — the join is a
+        # formality that keeps shutdown ordering explicit
+        recthread = getattr(app.state, "_reconciler_thread", None)
+        if recthread and recthread.is_alive():
+            recthread.join(timeout=2)
+        settle_worker = getattr(app.state, "_settle_worker", None)
+        if settle_worker is not None:
+            settle_worker.stop(timeout=2)
+        wal_hygiene_worker = getattr(app.state, "_wal_hygiene_worker", None)
+        if wal_hygiene_worker is not None:
+            wal_hygiene_worker.stop(timeout=2)
         result_reconciler = getattr(app.state, "_result_reconciler", None)
         if result_reconciler is not None:
-            _step("result_reconciler", result_reconciler.stop, 1)
+            result_reconciler.stop(timeout=2)
             try:
                 result_reconciler.reconciler._fetcher.close()
             except Exception:
                 pass
-        fast_lane = getattr(app.state, "_fast_lane", None)
-        if fast_lane is not None:
-            _step("fast_lane", fast_lane.stop, 1)
         betting_worker = getattr(app.state, "_betting_worker", None)
         if betting_worker is not None:
-            _step("betting_worker", betting_worker.stop, 1)
-        result_verifier = getattr(app.state, "_result_verifier", None)
-        if result_verifier is not None:
-            _step("result_verifier", result_verifier.stop, 1)
-
-        # ── 2. the scheduler that drives them, then its thread ──────────
-        if scheduler is not None:
-            await scheduler.stop()
-        thread = getattr(app.state, "_scheduler_thread", None)
-        if thread and thread.is_alive():
-            thread.join(timeout=1)
-        recthread = getattr(app.state, "_reconciler_thread", None)
-        if recthread and recthread.is_alive():
-            recthread.join(timeout=1)
-
-        # ── 3. passive DB workers ───────────────────────────────────────
-        for name, attr in (("settle_worker", "_settle_worker"),
-                           ("wal_hygiene_worker", "_wal_hygiene_worker"),
-                           ("stats_worker", "_stats_worker"),
-                           ("pace_ref_worker", "_pace_ref_worker"),
-                           ("line_ref_worker", "_line_ref_worker")):
-            worker = getattr(app.state, attr, None)
-            if worker is not None:
-                _step(name, worker.stop, 0.5)
-
+            betting_worker.stop(timeout=2)
+        stats_worker_obj = getattr(app.state, "_stats_worker", None)
+        if stats_worker_obj is not None:
+            stats_worker_obj.stop(timeout=2)
+        pace_ref_worker = getattr(app.state, "_pace_ref_worker", None)
+        if pace_ref_worker is not None:
+            pace_ref_worker.stop(timeout=2)
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
             sct.cancel()
-            try:
-                await sct
-            except asyncio.CancelledError:
-                pass
-        _note("pipeline_stopped seconds=%.2f" % (time.monotonic() - t0))
+            try: await sct
+            except asyncio.CancelledError: pass
+        collector.stop()
+        logger.info("pipeline_stopped")
 
     # ── Start uvicorn ────────────────────────────────────────
     import uvicorn
@@ -853,13 +610,6 @@ def main() -> None:
         host=HOST,
         port=PORT,
         reload=RELOAD,
-        # uvicorn closes its sockets, then WAITS for in-flight connections with
-        # no default bound, and only THEN fires the app's shutdown handlers.
-        # A single hung sync request (measured: /api/v4/live at 45 s) therefore
-        # prevented every shutdown step from running and the unit was SIGKILLed
-        # at its stop timeout - 90 s of 502s per restart.  Bounding the wait
-        # lets the (bounded, logged) shutdown actually run.
-        timeout_graceful_shutdown=2,
         log_level="info" if ENVIRONMENT == "development" else "warning",
         access_log=False,
     )

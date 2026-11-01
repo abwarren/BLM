@@ -1214,18 +1214,6 @@ td.ex-st-submitted { color: #3b82f6; }
 }
 .ab-top-input button:hover:not(:disabled) { background: #fca5a5; }
 .ab-top-input button:disabled { opacity: .45; cursor: not-allowed; }
-/* Ladder depth selector — same skin as the unit field, native dropdown kept
-   so it stays usable with the keyboard and on mobile. */
-.ab-top-input select {
-  width: 92px; padding: 3px 6px; border-radius: 6px;
-  border: 1px solid var(--red); background: #1b0c0c; color: #fef2f2;
-  font-family: var(--mono); font-size: 12px; font-weight: 800; cursor: pointer;
-}
-.ab-top-input select:disabled {
-  opacity: .55; color: rgba(254, 202, 202, .6);
-  border-style: dashed; border-color: rgba(248, 113, 113, .4);
-  cursor: not-allowed;
-}
 
 /* Narrow screens: give the control block its own full-width row instead of
    squeezing the header; never let it force horizontal scrolling. */
@@ -1268,78 +1256,3 @@ td.ex-st-submitted { color: #3b82f6; }
   background-repeat: no-repeat, no-repeat;
   }
 
-
-/* ═══════════════════════════════════════════════════════════════
-   NAMED TRADE COHORTS (TC-*) — operator directive 2026-10-23.
-   The chip sits in the signal row next to BETTABLE; the footnote at
-   the bottom of the page defines every code.  Additive block: it
-   styles only .blm-sig-cohort / .cohort-* and touches nothing else.
-   ═══════════════════════════════════════════════════════════════ */
-.blm-sig-cohort {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .04em;
-  padding: 1px 6px;
-  border-radius: 3px;
-  border: 1px solid var(--border2);
-  white-space: nowrap;
-  cursor: help;
-}
-.blm-sig-cohort.blm-cohort-on {
-  color: var(--cyan);
-  border-color: var(--cyan);
-  background: rgba(34, 211, 238, .08);
-}
-.blm-sig-cohort.blm-cohort-off { color: var(--dim); }
-
-.cohort-footnote {
-  margin: 28px 8px 18px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 11px;
-}
-.cohort-footnote summary {
-  cursor: pointer;
-  color: var(--text);
-  font-size: 11.5px;
-  padding: 2px 0;
-}
-.cohort-footnote summary::marker { color: var(--cyan); }
-.cohort-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 10px 0 8px;
-  font-family: var(--mono);
-  font-size: 11px;
-}
-.cohort-table th {
-  text-align: left;
-  color: var(--dim);
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  padding: 4px 8px 4px 0;
-  border-bottom: 1px solid var(--border);
-}
-.cohort-table td {
-  padding: 3px 8px 3px 0;
-  border-bottom: 1px solid var(--panel2);
-  color: var(--text);
-}
-.cohort-table td:nth-child(5),
-.cohort-table td:nth-child(6) { color: var(--muted); }
-.cohort-footnote .muted { color: var(--dim); line-height: 1.55; margin: 6px 0 0; }
-
-/* Always-visible one-liner above the cohort table (definitions on the page,
-   not hidden behind a collapsed disclosure). */
-.cohort-inline {
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.6;
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--panel2);
-}
-.cohort-inline strong { color: var(--cyan); }
-.cohort-inline em { color: var(--text); font-style: normal; }

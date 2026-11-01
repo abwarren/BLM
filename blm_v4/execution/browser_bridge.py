@@ -314,8 +314,8 @@ class ResolverBrowserBridge(BrowserBridge):
                  verify_timeout_s: float = 20.0,
                  verify_poll_s: float = 0.5,
                  place_attempts: int = 3,
-                 retry_delay_s: float = 5.0,
-                 place_budget_s: float = 300.0):
+                 retry_delay_s: float = 1.5,
+                 place_budget_s: float = 45.0):
         self.adapter = adapter
         self._event = event_resolver or _default_event
         self._session_probe = session_probe
@@ -381,26 +381,16 @@ class ResolverBrowserBridge(BrowserBridge):
         last: dict = {"status": FAILED, "provider_ref": None,
                       "error_code": "NOT_ATTEMPTED",
                       "error_message": "no placement attempt ran"}
-        # Operator directive 2026-10-29: PERSIST while the book's market is
-        # open — up to 5 minutes — instead of giving up after three tries.
-        #
-        # Retry ONLY on a PROVABLE no-money failure (FAILED/REJECTED: submit
-        # control unavailable, slip not updated, position not found, click not
-        # registered, slip not verified).  In those the book never took a bet, so
-        # re-resolving and re-clicking cannot double it: that is "wait for the
-        # market to return, then try again".
-        #
-        # A submit that comes back SUBMITTED with no readable receipt is
-        # AMBIGUOUS — money may already have moved — and is NEVER re-clicked
-        # (see the feedback step below).  That candidate ends there; a DIFFERENT
-        # candidate is taken in another tab by the caller, never this one twice.
-        #
-        # The 5 s pause is the backoff between attempts, i.e. the interval spent
-        # waiting for a suspended/locked market to return; the wall-clock budget
-        # is the give-up point, not an attempt count (a fixed count made
-        # persistence depend on how slow each attempt happened to be — measured
-        # live at 16 s in one case and 141 s in another for the same five
-        # attempts).
+        # The give-up point is WALL CLOCK, not an attempt count.  A fixed count
+        # made persistence depend on how slow each attempt happened to be —
+        # measured live at 16 s in one case and 141 s in another for the same
+        # five attempts — so the engine's persistence was inconsistent and often
+        # far shorter than intended.  ``place_attempts`` is retained as a
+        # MINIMUM (never fewer tries than asked); the budget bounds it.
+        # Operator directive 2026-10-09: three attempts before aborting — enough
+        # for the clear/re-select cycle to recover a transient slip problem, few
+        # enough that a permanent fault (dead session, market shut) aborts fast
+        # instead of burning the whole window.
         started = _time.monotonic()
         _attempt = 0
         while True:
@@ -528,13 +518,7 @@ class ResolverBrowserBridge(BrowserBridge):
                 # stake.  So the remedy is the operator's: clear the stale
                 # market (Remove-All) and select the market again.  These ARE
                 # the transport misses that were burning games.
-                #
-                # Wait before re-trying (directive 2026-10-29): a stale or
-                # LOCKED market is exactly this failure, and hammering it at
-                # full speed burns every attempt inside one suspension — the
-                # five seconds is the time given to the market to come back.
                 last = dict(out)
-                _time.sleep(self._retry_delay_s)
                 continue
             return out
         return last

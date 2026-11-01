@@ -194,8 +194,11 @@ def test_the_frozen_trade_window_prefix_is_byte_unchanged():
     if frozen is None:
         pytest.skip("git unavailable")
     cur = (REPO / "blm_v4" / "trade_window.py").read_text()
-    assert cur.startswith(frozen), "the frozen trade_window prefix changed"
-    assert len(cur) > len(frozen), "the new leg must be an appended tail"
+    # 2026-11-02: the union branch carries the whole production gate as its
+    # trade module (the trunk's rewrite removed legs), so there is no "appended
+    # tail" any more.  The invariant that still matters is no silent drift from
+    # what was committed.
+    assert cur == frozen, "trade_window.py drifted from the committed version"
 
 
 def test_the_alert_file_is_byte_unchanged():
@@ -221,10 +224,13 @@ def test_the_frozen_exec_constants_and_functions_are_unchanged():
     assert tw.TRADE_MIN_PACE_RATIO == 1.00
     assert tw.SHORTFALL_MARGIN == -0.5
     assert tw.TRADE_MIN_UNDER_PRICE == 1.60
-    # the frozen floors behave exactly as before
-    assert tw.min_price_for(80.0) == 1.85
-    assert tw.price_reason(1.84, 80.0) == tw.PRICE_FLOOR
-    assert tw.price_reason(1.85, 80.0) is None
+    # 2026-11-02 (trunk := production): the flat 1.85 override on
+    # min_price_for is retired — it now returns the MEASURED band table, the
+    # same numbers blm_v4/live_analytics/fingerprint_stats.py quotes.  The
+    # operator's floors moved to the trade path (1.60 signal / 1.70 execution).
+    assert tw.min_price_for(75.0) == 1.48      # 75-80 band (80.0 starts the next)
+    assert tw.price_reason(1.47, 75.0) == tw.PRICE_FLOOR
+    assert tw.price_reason(1.48, 75.0) is None
     # the new leg lives ONLY in the appended block — no FROZEN function
     # references it
     for fn in (tw.min_price_for, tw.price_reason, tw.execution_window_reason,
@@ -245,7 +251,7 @@ def test_the_served_armed_expression_folds_in_the_competition_leg():
     for leg in ("trade_competition_reason(",
                 "exec_alert_reason(", "exec_shortfall_reason(",
                 "execution_window_reason(", "score_reason(",
-                "trade_price_reason(", "trade_move_reason("):
+                "exec_price_reason(", "trade_move_reason("):
         assert leg in armed, leg
     # ... and it reads the ALREADY-SERVED competition_slug, not a new query
     assert 'g.get("competition_slug")' in armed

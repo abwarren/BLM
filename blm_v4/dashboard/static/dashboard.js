@@ -2113,18 +2113,13 @@ function renderUnderAlerts(games, labels) {
    alert is completely independent of it. */
 /* __PURE_AUDIO_BEGIN__ */
 const ALERT_CUES = {
+  // 2026-11-02: the money and the moment — neither can be mistaken for an
+  // alert cue (bet is LOW and rising, tradable is HIGH and short).
   "pace-state": [523.25, 659.25, 783.99, 1046.5],  // four tones, top priority
   base:   [523.25],                       // one tone
   strong: [659.25, 880],                  // two tones
   high:   [783.99, 987.77, 1318.51],      // three tones, highest priority
-  // A bet was PLACED — deliberately lower and rising, so it can never be
-  // confused with an alert cue: the operator asked for a signal on the money,
-  // not only on the alert.
-  bet:    [392.0, 523.25, 659.25],
-  // A game just became TRADABLE (eligible AND inside the execution window AND
-  // through the price floor) — the ONE moment the operator can act.  A high,
-  // short two-note "ding-dong", distinct in both direction and register from
-  // every alert cue above.
+  bet:      [392.0, 523.25, 659.25],
   tradable: [880.0, 1174.66],
 };
 // One poll can enter/escalate several games at once.  Sound at most one
@@ -2208,9 +2203,9 @@ function syncAudioButton() {
   btn.dataset.audio = on ? "on" : "off";
   btn.textContent = on ? "AUDIO ON" : "AUDIO OFF";
   btn.setAttribute("aria-pressed", on ? "true" : "false");
-  btn.title = !on ? "Alert audio off — click to enable (alert rises AND every placed bet)"
-    : locked ? "Audio on — click anywhere to activate sound"
-    : "Audio on — click to silence";
+  btn.title = !on ? "Alert audio off — click to enable"
+    : locked ? "Alert audio on — click anywhere to activate sound"
+    : "Alert audio on — click to silence";
 }
 
 const hasChart = () => typeof Chart !== "undefined";
@@ -2422,11 +2417,7 @@ function gatedNoteHTML(g) {
    direction (UNDER/OVER/—), checkpoint (25/50/75/Q3_BREAK), trigger line.
    Consumes under_alert and under_alert_q3_break verbatim from the API.
    Direction is explicit; Trap/Under status is labelled directly. */
-// ── TRADABLE: the ONE definition of "the engine can act on this game now" ───
-// eligible AND inside the served execution window AND (because the window
-// verdict folds in the armed pace bar, the score floor and the EXECUTION price
-// floor) at a price the operator will trade.  Shared by the on-screen badge and
-// the audible cue — a second copy is how a badge and a gate drift apart.
+// ── TRADABLE: ONE definition, shared by the badge and the audible cue ──────
 function isBettable(g) {
   const elig = (g && g.under_alert_eligibility) || {};
   const win = (g && g.under_alert_execution_window) || {};
@@ -2489,16 +2480,6 @@ function blmAlertStateRowHTML(g) {
     ? "eligible AND inside the execution window (pace armed at the relaxed bar) — Auto-Bet will take the UNDER"
     : (!inWindow ? (win.reason || "outside the execution window")
        : (elig.reason || "not eligible"));
-  // ── NAMED COHORT (operator directive 2026-10-23): every alert says WHICH
-  // cohort it belongs to.  Served by the API (blm_v4/trade_cohorts.py) so the
-  // label can never disagree with the gate: `code` is the tightest cohort whose
-  // legs all hold, `codes` lists every one of them, tightest first.
-  const coh = g.trade_cohort || {};
-  const cohTxt = coh.code ? (coh.name ? `${coh.code} · ${coh.name}` : coh.code) : "—";
-  const cohWhy = coh.code
-    ? `cohort ${coh.code} (${coh.name}) — holds: ${(coh.codes || [coh.code]).join(" ⊃ ")}; `
-      + `pace ${coh.pace || ""} · shortfall ${coh.shortfall || ""} · price ≥ ${coh.price || ""}`
-    : "no named cohort: outside TC-W or an unprovable input (pace/score/price)";
   return `<div class="blm-signal-row">
     <span class="blm-sig-label">SIGNAL</span>
     <span class="${sigCls}">${sigTxt}</span>
@@ -2509,7 +2490,6 @@ function blmAlertStateRowHTML(g) {
     <span class="blm-sig-label">LINE</span>
     <span class="blm-sig-line">${esc(trigLine)}</span>
     <span class="blm-sig-trap ${trapCls}">${trapTxt}</span>
-    <span class="blm-sig-cohort ${coh.code ? "blm-cohort-on" : "blm-cohort-off"}" title="${esc(cohWhy)}">${esc(cohTxt)}</span>
     <span class="blm-sig-bettable ${btCls}" title="${esc(btWhy)}">${btTxt}</span>
   </div>`;
 }
@@ -2737,8 +2717,7 @@ function bindCardSections(el, card) {
 
 function renderCards(payload) {
   const grid = $("grid");
-  // AUDIBLE CUE on the transition into the TRADABLE set — keyed on the FULL
-  // payload, so it fires even while the operator is looking at a filtered view.
+  // keyed on the FULL payload so the cue fires even in a filtered view
   alertTradableArmed(payload.games || []);
   // Competition filter operates on the CANONICAL competition identifier
   // carried by each game record (competition_slug from the authoritative
@@ -3899,23 +3878,6 @@ function paintCollectorStatus(st, verified) {
     return;
   }
 
-  // ANSWERED, but NO collector block: the API is reachable and a server-only
-  // deployment publishes no heartbeat at all.  That is NOT "API unavailable" —
-  // say what is actually true and quote the freshest COMPLETE state age.
-  if (verified && st) {
-    const gsf = st.db && st.db.game_state_freshness;
-    let dataAgeS = gsf && typeof gsf.state_age_seconds === "number"
-      ? gsf.state_age_seconds : null;
-    if (dataAgeS === null && st.db && st.db.last_snapshot_at) {
-      dataAgeS = (now - new Date(st.db.last_snapshot_at).getTime()) / 1000;
-    }
-    if (cpill) { cpill.textContent = "collector: NO HEARTBEAT"; cpill.style.color = "var(--orange)"; }
-    setCollectorBanner("amber",
-      "COLLECTOR NOT REPORTING — API reachable, no heartbeat published"
-      + (dataAgeS !== null && isFinite(dataAgeS) ? ` · data ${fmtAgeExact(dataAgeS)} old` : ""));
-    return;
-  }
-
   // UNVERIFIED — the API could not be asked.  Never OFFLINE.
   if (cpill) { cpill.textContent = "collector: UNVERIFIED"; cpill.style.color = "var(--orange)"; }
   if (lastCollectorState && lastCollectorState.last_tick_at) {
@@ -4031,18 +3993,9 @@ $("audioToggle").addEventListener("click", () => {
   audioWindow = null;                     // fresh coalescing window per switch
   if (on) {
     unlockAudio();
-    // turning audio ON re-arms BOTH cues: the confirmation tone plus a fresh
-    // 'tradable' cue on the next render if a game is tradable RIGHT NOW — the
-    // operator flipping the switch wants to know about the current set, not
-    // only about future entries.
-    TRADABLE_ON = new Set();
+    TRADABLE_ON = new Set();              // re-announce the current set
     TRADABLE_LAST = {};
     AB_SEEN_IDS = null;                   // re-seed silently (no ledger replay)
-    // audible CONFIRMATION that sound now works: the resume() promise settles a
-    // tick after the gesture, so the tone is scheduled just past it.  Without
-    // this the operator has no way to tell "enabled" from "still blocked" until
-    // the next real alert — and an alert can be hours away.
-    setTimeout(() => playAlertCue("base"), 150);
   }
   syncAudioButton();
 });
@@ -4173,139 +4126,6 @@ function renderExecutionTrace() {
    entirely server-side.  Credential material never exists in this file. */
 const BETTING_API = "/api/v4/betting";
 
-/* ── AUTO-BET RESULTS (operator directive 2026-11-01) ────────────────────────
-   ONLY the candidates auto-bet actually FIRED on: execution rows the ledger holds
-   in a PLACED status.  FAILED / UNKNOWN / BLOCKED rows never moved money, so they
-   are excluded from the table (their count is named in the header, never mixed
-   into the totals).  This is deliberately NOT "every triggered alert" — the
-   operator asked for the bets and nothing else.
-
-   The RESULT is computed against the LEDGER's triggered line for that row — the
-   sealed line the bet was taken at — never the live line:
-       final <  line -> UNDER      final > line -> OVER
-       final == line -> PUSH       no settled final -> OPEN
-   Two EXISTING endpoints only, no backend change:
-       GET /api/v4/betting/history      the executions
-       GET /api/v4/alert-outcomes?ids=  the settled final per game (<=200 ids/call) */
-const AB_PLACED_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "SETTLED", "PUSHED"]);
-const AB_FINAL_CACHE = new Map();          // game_id -> final_total (null = not settled)
-/* The ledger's `price` column sometimes carries the LINE instead of odds (documented
-   mapping defect: 55 of these rows all-time).  P&L on such a row would fabricate a
-   win of stake x (212.5 - 1), so any price outside a real decimal-odds window is
-   treated as UNKNOWN: the row still shows its RESULT, it just books no money. */
-const AB_PRICE_MIN = 1.0;
-const AB_PRICE_MAX = 5.0;
-
-function autoBetPriceOk(row) {
-  const p = Number(row && row.price);
-  return isFinite(p) && p > AB_PRICE_MIN && p <= AB_PRICE_MAX;
-}
-
-function autoBetResult(final, line) {
-  if (line == null || !isFinite(Number(line))) {
-    return { code: "NOLINE", word: "NO LINE", cls: "al-noline" };
-  }
-  if (final == null || !isFinite(Number(final))) {
-    return { code: "OPEN", word: "OPEN", cls: "al-pending" };
-  }
-  const f = Number(final); const l = Number(line);
-  if (f < l) return { code: "UNDER", word: "UNDER", cls: "al-under" };
-  if (f > l) return { code: "OVER", word: "OVER", cls: "al-over" };
-  return { code: "PUSH", word: "PUSH", cls: "al-push" };
-}
-
-function autoBetPnl(row, res) {
-  const stake = Number(row.stake_amount);
-  if (!isFinite(stake) || stake <= 0) return null;
-  if (res.code === "PUSH") return 0;
-  if (!autoBetPriceOk(row)) return null;      // price unreadable: no money booked
-  const price = Number(row.price);
-  if (res.code === "UNDER") return stake * (price - 1);
-  if (res.code === "OVER") return -stake;
-  return null;                        // OPEN / NO LINE: nothing to book yet
-}
-
-async function _abFinals(gameIds) {
-  const want = [...new Set(gameIds.map(String))].filter((g) => g && !AB_FINAL_CACHE.has(g));
-  for (let i = 0; i < want.length; i += 195) {
-    const chunk = want.slice(i, i + 195);
-    try {
-      const resp = await fetch(`/api/v4/alert-outcomes?ids=${encodeURIComponent(chunk.join(","))}`);
-      if (!resp.ok) continue;
-      const outs = ((await resp.json()) || {}).outcomes || {};
-      chunk.forEach((g) => {
-        const fin = outs[g] && outs[g].final_total != null ? Number(outs[g].final_total) : null;
-        AB_FINAL_CACHE.set(g, isFinite(fin) ? fin : null);
-      });
-    } catch (_) { /* a failed chunk leaves those rows OPEN — never invented */ }
-  }
-}
-
-async function loadAutoBetResults() {
-  const list = $("abResList");
-  const head = $("abResHead");
-  if (!list) return;
-  let execs = [];
-  try {
-    const resp = await fetch(`${BETTING_API}/history?limit=500`);
-    if (!resp.ok) return;
-    execs = ((await resp.json()) || {}).executions || [];
-  } catch (_) { return; }
-  const placed = execs.filter((r) =>
-    AB_PLACED_STATUSES.has(String(r.status || "").toUpperCase()));
-  const notPlaced = execs.length - placed.length;
-  if (!placed.length) {
-    if (head) head.textContent = "no placed candidates yet";
-    list.innerHTML = '<div class="alerts-empty">No placed candidates yet</div>';
-    return;
-  }
-  await _abFinals(placed.map((r) => r.game_id));
-  const rows = placed.map((r) => {
-    const fin = AB_FINAL_CACHE.has(String(r.game_id))
-      ? AB_FINAL_CACHE.get(String(r.game_id)) : null;
-    const res = autoBetResult(fin, r.line);
-    return { r, fin, res, pnl: autoBetPnl(r, res) };
-  });
-  const tally = { UNDER: 0, OVER: 0, PUSH: 0, OPEN: 0, NOLINE: 0 };
-  let net = 0; let staked = 0; let badprice = 0;
-  rows.forEach((x) => {
-    tally[x.res.code] = (tally[x.res.code] || 0) + 1;
-    if (x.pnl != null) { net += x.pnl; staked += Number(x.r.stake_amount) || 0; }
-    else if (x.res.code === "UNDER" || x.res.code === "OVER") {
-      if (!autoBetPriceOk(x.r)) badprice += 1;
-    }
-  });
-  if (head) {
-    head.textContent =
-      `${rows.length} fired · ${tally.OPEN} awaiting result`
-      + (tally.NOLINE ? ` · ${tally.NOLINE} unpriced (no triggered line)` : "")
-      + ` · ${tally.UNDER} UNDER · ${tally.OVER} OVER · ${tally.PUSH} PUSH · `
-      + `net ${net >= 0 ? "+" : "−"}R${Math.abs(net).toFixed(2)} on `
-      + `R${staked.toFixed(2)} staked`
-      + (badprice ? ` · ${badprice} settled row(s) with no readable price book no P&L` : "")
-      + (notPlaced ? ` · ${notPlaced} non-placed row(s) excluded` : "");
-  }
-  const t = (v) => (v == null || !isFinite(Number(v)) ? "–" : Number(v).toFixed(1));
-  list.innerHTML = rows.map(({ r, fin, res, pnl }) => {
-    const pnlTxt = pnl == null
-      ? "–" : `${pnl >= 0 ? "+" : "−"}R${Math.abs(pnl).toFixed(2)}`;
-    const priceTxt = autoBetPriceOk(r) ? Number(r.price).toFixed(2) : "?";
-    return `<div class="al-row ab-res ${res.cls}">
-      <div class="al-headline"><span class="al-outcome">${res.word}</span>
-        <span class="al-num">· final ${t(fin)} vs triggered ${t(r.line)}</span></div>
-      <div class="al-line">${esc(r.requested_at_utc || "")} · game ${esc(r.game_id)}`
-      + ` · cp ${esc(r.checkpoint || "–")} · ${esc(r.selection || "UNDER")} @ ${t(r.line)}`
-      + ` · price ${priceTxt}`
-      + ` · stake R${(Number(r.stake_amount) || 0).toFixed(2)}`
-      + ` · ${esc(r.status)} · ${pnlTxt}</div></div>`;
-  }).join("");
-}
-
-const _abResRefresh = $("abResRefresh");
-if (_abResRefresh) _abResRefresh.addEventListener("click", () => loadAutoBetResults());
-loadAutoBetResults();
-setInterval(loadAutoBetResults, 60000);
-
 function money(v) {
   return (v == null || !isFinite(v)) ? "–" : `R${Number(v).toFixed(2)}`;
 }
@@ -4394,20 +4214,6 @@ function abStatusHTML(st) {
     `AUTO BETTING: ${st.enabled ? "ON" : "OFF"}${st.dry_run ? " (DRY RUN)" : ""}`;
   const up = $("abUnitPrice");
   if (document.activeElement !== up) up.value = st.unit_price ?? "";
-  // ladder selector + the rung the NEXT bet will carry
-  const lad = $("abLadder");
-  if (lad) {
-    lad.disabled = false;
-    if (document.activeElement !== lad) lad.value = String(st.ladder_wins ?? 0);
-    const stt = $("abLadderState");
-    if (stt) {
-      if (!st.ladder_wins) stt.textContent = "off";
-      else stt.textContent = `rung ${st.ladder_rung ?? 1} · ${st.ladder_next_units != null ? num1(st.ladder_next_units) + "u" : "–"}`;
-      stt.title = st.ladder_next_stake != null
-        ? `next stake ${money(st.ladder_next_stake)} (unit ${money(st.unit_price)} × ${st.ladder_next_units}u, factor ${st.ladder_factor})`
-        : "ladder is off — stakes the plain unit";
-    }
-  }
   // The operator must be able to TYPE the unit price, so enable it under the
   // SAME successful /api/v4/betting/status gate that enables the switch and
   // Save.  Range enforcement stays server-side (config.min/max_unit_price) —
@@ -4471,16 +4277,29 @@ function abStatusHTML(st) {
   }
 }
 
-/* ── AUDIO: a game entered the TRADABLE set (operator request 2026-11-02) ───
-   "make sure there are audio alerts for my tradable cohort".  Alert-rise cues
-   already exist per card; this is the other half — the transition into the set
-   the engine can actually take, so the operator does not have to watch the
-   board for the moment it opens.
+/* ── AUDIO: a bet was PLACED (2026-11-01) ─────────────────────────────────
+   Off /api/v4/betting/status's `recent` array (already polled).  The first
+   call SEEDS the set, so opening the dashboard never replays the ledger. */
+const AB_PLACED_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "SETTLED", "PUSHED"]);
+let AB_SEEN_IDS = null;
 
-   Keyed on the FULL payload, never the filtered view: the cue must fire even
-   while the operator is looking at a narrowed list.  A Set of game ids makes it
-   idempotent across the 5 s refresh, and a per-game cooldown stops a flap
-   (bettable -> not -> bettable) from machine-gunning the speaker. */
+function alertBetPlaced(recent) {
+  const placed = (Array.isArray(recent) ? recent : []).filter((r) =>
+    AB_PLACED_STATUSES.has(String((r && r.status) || "").toUpperCase()));
+  if (AB_SEEN_IDS === null) {
+    AB_SEEN_IDS = new Set(placed.map((r) => r.execution_id));
+    return;
+  }
+  const fresh = placed.filter((r) => r.execution_id && !AB_SEEN_IDS.has(r.execution_id));
+  placed.forEach((r) => { if (r.execution_id) AB_SEEN_IDS.add(r.execution_id); });
+  if (!fresh.length || !audioEnabled()) return;
+  playAlertCue("bet");
+}
+
+/* ── AUDIO: a game entered the TRADABLE set (2026-11-02) ──────────────────
+   Keyed on the FULL payload, never the filtered view; a Set keeps it idempotent
+   across the refresh, a 60 s per-game cooldown stops a flap, and a burst of
+   entries is one cue. */
 let TRADABLE_ON = new Set();
 let TRADABLE_LAST = {};
 const TRADABLE_COOLDOWN_MS = 60000;
@@ -4494,14 +4313,12 @@ function alertTradableArmed(games) {
     const id = String((g && g.game_id) || "");
     if (!id) continue;
     next.add(id);
-    if (!TRADABLE_ON.has(id) && now - (TRADABLE_LAST[id] || 0) > TRADABLE_COOLDOWN_MS) {
-      fresh.push(id);
-    }
+    if (!TRADABLE_ON.has(id) && now - (TRADABLE_LAST[id] || 0) > TRADABLE_COOLDOWN_MS) fresh.push(id);
   }
-  TRADABLE_ON = next;                       // leaving the set re-arms the cue
+  TRADABLE_ON = next;
   if (!fresh.length || !audioEnabled()) return;
   for (const id of fresh) TRADABLE_LAST[id] = now;
-  playAlertCue("tradable");                 // coalesced: one cue per refresh
+  playAlertCue("tradable");
 }
 
 async function refreshBettingStatus() {
@@ -4510,34 +4327,9 @@ async function refreshBettingStatus() {
     if (!resp.ok) return;
     state.betting = await resp.json();
     abStatusHTML(state.betting);
-    alertBetPlaced(state.betting.recent || []);   // audible cue on a NEW placed bet
+    alertBetPlaced(state.betting.recent || []);
     if (state.lastPayload) renderCards(state.lastPayload);
   } catch (_) { /* betting panel is best-effort; never breaks the board */ }
-}
-
-/* ── AUDIO: a bet was PLACED (§ operator request 2026-11-01) ──────────────
-   Shares the existing Web Audio machinery (AUDIO toggle, lazily-unlocked
-   context, synthesised tones — no files).  The FIRST call after a page load
-   only SEEDS the known set, so opening the dashboard never replays a cue for
-   bets that were already in the ledger; every later call sounds once per NEW
-   placed execution (the id set is what makes it idempotent across polls).
-
-   Detection runs off /api/v4/betting/status's `recent` array, which the panel
-   already polls — no extra request, no backend change. */
-let AB_SEEN_IDS = null;
-
-function alertBetPlaced(recent) {
-  const placed = (recent || []).filter((r) =>
-    AB_PLACED_STATUSES.has(String((r && r.status) || "").toUpperCase()));
-  if (AB_SEEN_IDS === null) {                     // seed only: stay silent
-    AB_SEEN_IDS = new Set(placed.map((r) => r.execution_id));
-    return;
-  }
-  const fresh = placed.filter((r) => r.execution_id && !AB_SEEN_IDS.has(r.execution_id));
-  placed.forEach((r) => { if (r.execution_id) AB_SEEN_IDS.add(r.execution_id); });
-  if (!fresh.length) return;
-  if (!audioEnabled()) return;                    // AUDIO OFF: visual only
-  playAlertCue("bet");
 }
 
 async function loadBettingHistory() {
