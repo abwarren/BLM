@@ -254,6 +254,40 @@ def _block_deadline_signal() -> None:
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
 
 
+def _backfill_settings(environ: dict | None = None) -> tuple[bool, float, float]:
+    """Paced deviation-backfill settings — ``(enabled, gap_s, max_s)``.
+
+    The one-time deviation backfill re-runs at EVERY collector start, and its
+    back-to-back per-game reads hold the shared clean-metrics store long enough
+    to starve the fast tick's per-snapshot ``_last_valid`` past the 80 s
+    watchdog deadline (measured 2026-11-01 20:45: the tick never completed,
+    systemd restarted the unit, and the restart started the same pass again).
+
+    ``BLM_DEVIATION_BACKFILL=0`` skips the pass outright;
+    ``BLM_DEVIATION_BACKFILL_GAP_S`` (default 0.25 s) sleeps between games so
+    the tick always gets the lock, and ``BLM_DEVIATION_BACKFILL_MAX_S``
+    (default 600 s) bounds the pass.  Every value parses with a fallback — a
+    bad setting must never stop the collector from starting.
+    """
+    env = os.environ if environ is None else environ
+
+    def _flag(name: str) -> bool:
+        raw = env.get(name)
+        if raw is None:
+            return True
+        return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
+
+    def _num(name: str, default: float) -> float:
+        try:
+            return max(0.0, float(env.get(name, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return (_flag("BLM_DEVIATION_BACKFILL"),
+            _num("BLM_DEVIATION_BACKFILL_GAP_S", 0.25),
+            _num("BLM_DEVIATION_BACKFILL_MAX_S", 600.0))
+
+
 @contextlib.contextmanager
 def _alarm_blocked() -> "Iterator[None]":
     """Run a block with the capture-deadline SIGALRM blocked, restoring
@@ -2565,16 +2599,35 @@ class PokerBetCollector:
         Called once at collector start in a daemon thread so the fast loop
         starts immediately.  Idempotent and failure-isolated — a failure
         here must never prevent the collector from running.
+
+        PACED (2026-11-01): the pass re-runs at EVERY collector start, and
+        back-to-back per-game reads on the shared clean-metrics store starved
+        the fast tick's per-snapshot ``_last_valid`` past the 80 s watchdog
+        deadline (measured 20:45: tick 51 never completed, systemd killed and
+        restarted the unit at 20:51, and the new process began the same pass).
+        A small gap between games gives the tick the lock, and ``max_s`` bounds
+        the pass; ``BLM_DEVIATION_BACKFILL=0`` skips it entirely.
         """
         _block_deadline_signal()
+        enabled, gap_s, max_s = _backfill_settings()
+        if not enabled:
+            logger.info("deviation backfill skipped (BLM_DEVIATION_BACKFILL=0)")
+            return
         try:
             if self._deviation is not None:
-                stats = self._deviation.refresh_all()
+                stats = self._deviation.refresh_all(
+                    gap_s=gap_s, max_s=max_s,
+                    progress=lambda g, a, e: logger.info(
+                        "deviation backfill progress: %d games, %d added, "
+                        "%d existing", g, a, e))
                 logger.info(
-                    "deviation backfill complete: %d games, %d added, %d existing",
+                    "deviation backfill complete: %d games, %d added, %d existing "
+                    "(gap=%.2fs cap=%.0fs elapsed=%.1fs truncated=%s)",
                     stats.get("games", 0),
                     stats.get("added", 0),
                     stats.get("existing", 0),
+                    gap_s, max_s, stats.get("elapsed_s", -1),
+                    stats.get("truncated", False),
                 )
         except Exception:
             logger.error(
