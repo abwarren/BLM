@@ -2121,6 +2121,11 @@ const ALERT_CUES = {
   // confused with an alert cue: the operator asked for a signal on the money,
   // not only on the alert.
   bet:    [392.0, 523.25, 659.25],
+  // A game just became TRADABLE (eligible AND inside the execution window AND
+  // through the price floor) — the ONE moment the operator can act.  A high,
+  // short two-note "ding-dong", distinct in both direction and register from
+  // every alert cue above.
+  tradable: [880.0, 1174.66],
 };
 // One poll can enter/escalate several games at once.  Sound at most one
 // cue per coalescing window — the first rise, plus any higher rise inside
@@ -2417,6 +2422,17 @@ function gatedNoteHTML(g) {
    direction (UNDER/OVER/—), checkpoint (25/50/75/Q3_BREAK), trigger line.
    Consumes under_alert and under_alert_q3_break verbatim from the API.
    Direction is explicit; Trap/Under status is labelled directly. */
+// ── TRADABLE: the ONE definition of "the engine can act on this game now" ───
+// eligible AND inside the served execution window AND (because the window
+// verdict folds in the armed pace bar, the score floor and the EXECUTION price
+// floor) at a price the operator will trade.  Shared by the on-screen badge and
+// the audible cue — a second copy is how a badge and a gate drift apart.
+function isBettable(g) {
+  const elig = (g && g.under_alert_eligibility) || {};
+  const win = (g && g.under_alert_execution_window) || {};
+  return elig.eligible === true && win.in_window === true;
+}
+
 function blmAlertStateRowHTML(g) {
   const ua = g.under_alert || {};
   const q3 = g.under_alert_q3_break || {};
@@ -2466,7 +2482,7 @@ function blmAlertStateRowHTML(g) {
   // the ENGINE, so it keys on eligibility + the served window verdict —
   // and that verdict already folds in the armed pace bar, the score floor
   // and the price floor, so the two cannot disagree.
-  const bettable = !!(elig.eligible === true && inWindow);
+  const bettable = isBettable(g);
   const btTxt = bettable ? "BETTABLE" : "NON-ACTIONABLE";
   const btCls = bettable ? "blm-bt-yes" : "blm-bt-no";
   const btWhy = bettable
@@ -2721,6 +2737,9 @@ function bindCardSections(el, card) {
 
 function renderCards(payload) {
   const grid = $("grid");
+  // AUDIBLE CUE on the transition into the TRADABLE set — keyed on the FULL
+  // payload, so it fires even while the operator is looking at a filtered view.
+  alertTradableArmed(payload.games || []);
   // Competition filter operates on the CANONICAL competition identifier
   // carried by each game record (competition_slug from the authoritative
   // source metadata), never a display alias.  The button's data-filter
@@ -4012,6 +4031,13 @@ $("audioToggle").addEventListener("click", () => {
   audioWindow = null;                     // fresh coalescing window per switch
   if (on) {
     unlockAudio();
+    // turning audio ON re-arms BOTH cues: the confirmation tone plus a fresh
+    // 'tradable' cue on the next render if a game is tradable RIGHT NOW — the
+    // operator flipping the switch wants to know about the current set, not
+    // only about future entries.
+    TRADABLE_ON = new Set();
+    TRADABLE_LAST = {};
+    AB_SEEN_IDS = null;                   // re-seed silently (no ledger replay)
     // audible CONFIRMATION that sound now works: the resume() promise settles a
     // tick after the gesture, so the tone is scheduled just past it.  Without
     // this the operator has no way to tell "enabled" from "still blocked" until
@@ -4443,6 +4469,39 @@ function abStatusHTML(st) {
       </li>`;
     }).join("");
   }
+}
+
+/* ── AUDIO: a game entered the TRADABLE set (operator request 2026-11-02) ───
+   "make sure there are audio alerts for my tradable cohort".  Alert-rise cues
+   already exist per card; this is the other half — the transition into the set
+   the engine can actually take, so the operator does not have to watch the
+   board for the moment it opens.
+
+   Keyed on the FULL payload, never the filtered view: the cue must fire even
+   while the operator is looking at a narrowed list.  A Set of game ids makes it
+   idempotent across the 5 s refresh, and a per-game cooldown stops a flap
+   (bettable -> not -> bettable) from machine-gunning the speaker. */
+let TRADABLE_ON = new Set();
+let TRADABLE_LAST = {};
+const TRADABLE_COOLDOWN_MS = 60000;
+
+function alertTradableArmed(games) {
+  const now = Date.now();
+  const next = new Set();
+  const fresh = [];
+  for (const g of games || []) {
+    if (!isBettable(g)) continue;
+    const id = String((g && g.game_id) || "");
+    if (!id) continue;
+    next.add(id);
+    if (!TRADABLE_ON.has(id) && now - (TRADABLE_LAST[id] || 0) > TRADABLE_COOLDOWN_MS) {
+      fresh.push(id);
+    }
+  }
+  TRADABLE_ON = next;                       // leaving the set re-arms the cue
+  if (!fresh.length || !audioEnabled()) return;
+  for (const id of fresh) TRADABLE_LAST[id] = now;
+  playAlertCue("tradable");                 // coalesced: one cue per refresh
 }
 
 async function refreshBettingStatus() {
