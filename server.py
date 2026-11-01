@@ -430,7 +430,8 @@ def main() -> None:
         # touched, and the 4-hour full-history sweep is UNTOUCHED.
         from blm_v4.settle_worker import SettleWorker
         settle_worker = SettleWorker(
-            root / "blm_pokerbet.db", interval_s=SETTLE_INTERVAL_S)
+            root / "blm_pokerbet.db", interval_s=SETTLE_INTERVAL_S,
+            betting_db_path=betting_cfg.db_path)
         settle_worker.start()
         app.state._settle_worker = settle_worker
         logger.info("settle_worker_started", interval_s=SETTLE_INTERVAL_S)
@@ -487,6 +488,7 @@ def main() -> None:
                 root / "blm_pokerbet.db",
                 interval_s=RESULT_RECONCILE_INTERVAL_S,
                 batch_limit=RESULT_RECONCILE_BATCH,
+                betting_db_path=betting_cfg.db_path,
                 swarm=swarm)
             result_reconciler.start()
             app.state._result_reconciler = result_reconciler

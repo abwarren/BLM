@@ -54,8 +54,9 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
+from blm_v4.bet_result_priority import priority_order_sql
 from blm_v4.result_policy import (
     flag_conflict,
     history_disagrees,
@@ -76,8 +77,16 @@ DEFAULT_BATCH_LIMIT = 25
 
 def settle_once(db_path: Path | str, *,
                 log: logging.Logger | None = None,
-                batch_limit: int = DEFAULT_BATCH_LIMIT) -> dict:
+                batch_limit: int = DEFAULT_BATCH_LIMIT,
+                priority_ids: Optional[Sequence[str]] = None) -> dict:
     """One settlement pass over ``db_path`` — the worker's whole job.
+
+    ``priority_ids`` (game ids, e.g. from
+    ``blm_v4.bet_result_priority.pending_bet_game_ids``) are settled FIRST,
+    ahead of the oldest-first backlog: a game carrying a placed bet is what the
+    win ladder reads, so it must not wait behind an unfixable tail.  It is an
+    ordering hint only — the candidate predicate, the quality gate and every
+    bound are unchanged, and an empty/None list reproduces the previous order.
 
     Returns ``{"checked": int, "settled": int, "unknown": int,
     "invalid": int, "skipped": int}``.  Never raises for per-game
@@ -120,8 +129,16 @@ def settle_once(db_path: Path | str, *,
         #      the re-derivation then NULLed the verified final.  A
         #      disagreement is now flagged (see _settle_game), never
         #      settled over.
+        # ── PLACED-BET PRIORITY (2026-11-01) ─────────────────────────
+        # A game a bet was placed on is settled FIRST.  The win ladder derives
+        # its rung from settled outcomes, so an open bet's game must not queue
+        # behind the general backlog — measured 13-32 min of waiting, and 8.6 h
+        # / 32.7 h at worst, with the engine re-deriving rung 1 meanwhile.
+        # Ordering only: the candidate predicate and every bound are unchanged.
+        order_sql, order_params = priority_order_sql(
+            "g.source_game_id", "g.last_seen_at ASC", priority_ids or ())
         rows = conn.execute(
-            """SELECT g.id, g.source_game_id, g.classification
+            ("""SELECT g.id, g.source_game_id, g.classification
                FROM games g
                LEFT JOIN game_results r
                       ON r.source_game_id = g.source_game_id
@@ -136,9 +153,9 @@ def settle_once(db_path: Path | str, *,
                                 AND s.captured_at > r.result_at)))
                  AND NOT (COALESCE(r.result_source, '') = 'RESULTS_PAGE'
                           AND COALESCE(r.final_result_status, '') = 'OK')
-               ORDER BY g.last_seen_at ASC
-               LIMIT ?""",
-            (batch_limit,)).fetchall()
+               ORDER BY __ORDER__
+               LIMIT ?""").replace("__ORDER__", order_sql),
+            (*order_params, batch_limit)).fetchall()
         stats = {"checked": 0, "settled": 0, "unknown": 0, "invalid": 0,
                  "skipped": 0}
         for g in rows:
@@ -320,17 +337,24 @@ class SettleWorker:
     def __init__(self, db_path: Path | str, *,
                  interval_s: float = DEFAULT_INTERVAL_S,
                  batch_limit: int = DEFAULT_BATCH_LIMIT,
+                 betting_db_path: Optional[Path | str] = None,
                  log: logging.Logger | None = None):
         self._db_path = Path(db_path)
         self._interval_s = float(interval_s)
         self._batch_limit = int(batch_limit)
+        #: the bet LEDGER — only used to learn which games carry an open bet,
+        #: so those settle first (None = no priority, today's ordering).
+        self._betting_db_path = betting_db_path
         self._log = log or logger
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def run_once(self) -> dict:
+        from blm_v4.bet_result_priority import pending_bet_game_ids
         return settle_once(self._db_path, log=self._log,
-                           batch_limit=self._batch_limit)
+                           batch_limit=self._batch_limit,
+                           priority_ids=pending_bet_game_ids(
+                               self._betting_db_path))
 
     def loop(self) -> None:
         import time
