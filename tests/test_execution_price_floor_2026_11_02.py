@@ -60,3 +60,20 @@ def test_executor_gate_uses_the_execution_floor(monkeypatch):
     assert ex.exec_price_reason is tw.exec_price_reason
     assert ex.exec_price_reason(1.65) == tw.PRICE_FLOOR
     assert ex.exec_price_reason(1.72) is None
+
+
+def test_fast_lane_price_leg_uses_the_execution_floor(monkeypatch):
+    """The fast lane composes the SAME legs as the served verdict.
+
+    A second definition stuck on the 1.60 SIGNAL floor would arm and place a
+    bet the executor then refuses — the parallel-composition hazard this repo
+    has been bitten by before.  Pinned here so the two can never drift.
+    """
+    from blm_v4.betting import fast_lane as fl
+    monkeypatch.setattr(tw, "TRADE_EXEC_MIN_PRICE", 1.70)
+    kw = dict(required_pace=1.0, avg_pace=1.1, actual_pace=1.1, progress_pct=80.0,
+              total_points=150.0, competition_slug="cyber-basketball-2k26")
+    assert fl.legs(under_odds=1.65, **kw)["price"] == tw.PRICE_FLOOR
+    assert fl.legs(under_odds=1.72, **kw)["price"] is None
+    assert fl.exec_price_reason is tw.exec_price_reason, (
+        "one definition, shared with the executor and the served verdict")

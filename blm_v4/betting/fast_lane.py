@@ -51,12 +51,12 @@ from blm_v4.betting.executor import evaluate, execute
 from blm_v4.trade_window import (
     EXEC_MIN_PROGRESS_PCT,
     exec_alert_reason,
+    exec_price_reason,
     exec_shortfall_reason,
     execution_window_reason,
     score_reason,
     trade_competition_reason,
     trade_move_reason,
-    trade_price_reason,
 )
 from blm_v2.telemetry.logging import get_logger
 
@@ -106,7 +106,7 @@ def legs(*, required_pace, avg_pace, actual_pace, progress_pct,
         "shortfall": exec_shortfall_reason(required_pace, actual_pace),
         "window": execution_window_reason(progress_pct),
         "score": score_reason(total_points),
-        "price": trade_price_reason(under_odds),
+        "price": exec_price_reason(under_odds),
         "move": trade_move_reason(entry_line, open_line, league_avg_line),
     }
 
