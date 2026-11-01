@@ -39,7 +39,7 @@ def _game(game_id="30990001", checkpoint=75) -> dict:
         "game_id": game_id, "live": True, "live_reason": None,
         "market": {"total_line": 193.5, "market_status": "LIVE",
                    "observed_lines": list(OBS)},
-        "projector": {"progress_pct": 76.0, "required_pts_per_min": 5.0,
+        "projector": {"progress_pct": 88.0, "required_pts_per_min": 5.0,
                       "actual_pts_per_min": 4.0, "captured_at": cap,
                       "live_total_line": 193.5, "market_status": "LIVE"},
         "under_alert_eligibility": {"eligible": True, "reason": "market_live"},
