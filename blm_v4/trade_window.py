@@ -726,3 +726,39 @@ def filter_tradeable_games(games) -> list:
     """
     return [game for game in games or []
             if trade_region_reason((game or {}).get("region")) is None]
+
+
+# ── EXECUTION PRICE FLOOR (operator directive 2026-11-02) ─────────────────────
+# "I do not want to play anything with a price of 1.69 or lower … only place bets
+# of 1.7 or larger."  The SIGNAL floor stays TRADE_MIN_UNDER_PRICE (1.60): the
+# alert, the board and the cohort label still show a game trading at 1.60-1.69.
+# This SECOND, higher bar gates only what can ARM, PLACE or RE-VALIDATE a bet.
+#
+# Defaults to the signal floor, so an unconfigured deployment behaves exactly as
+# before; the deployment selects the value (systemd drop-in
+# TRADE_EXEC_MIN_PRICE=1.70), which is the repo's own pattern for a TRADE_* rung.
+TRADE_EXEC_MIN_PRICE = _env_float("TRADE_EXEC_MIN_PRICE", TRADE_MIN_UNDER_PRICE)
+
+
+def exec_price_reason(price) -> Optional[str]:
+    """``None`` when the UNDER price clears the EXECUTION floor — else PRICE_FLOOR.
+
+    Separate from :func:`trade_price_reason` on purpose: raising the signal floor
+    would drag the on-screen alert and every frozen replay with it, and the
+    operator wants the trades restricted, not the signal.
+
+    Same absent-price contract as :func:`trade_price_reason`: an ABSENT price
+    (``None``) is NOT this rule's business — the payload's line and price come
+    from the same market row, so an omitted field is the executor's
+    ``market_missing`` concern.  A present-but-unprovable price IS refused, and
+    so is any present price below the floor.
+    """
+    if price is None:
+        return None
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return PRICE_FLOOR
+    if not math.isfinite(p):
+        return PRICE_FLOOR
+    return None if p >= TRADE_EXEC_MIN_PRICE else PRICE_FLOOR

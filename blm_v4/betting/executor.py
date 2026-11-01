@@ -39,7 +39,7 @@ from blm_v4.betting import settlement as _settlement
 from blm_v4.betting import stake as _stake
 from blm_v4.trade_window import (EXEC_MIN_PROGRESS_PCT,
                                  execution_window_reason, score_reason,
-                                 trade_price_reason)
+                                 exec_price_reason)
 
 # directive §5 — the execution-state vocabulary
 STATUS_PENDING = "PENDING"
@@ -181,7 +181,7 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     low_score = score_reason(proj.get("current_total_points"))
     if low_score is not None:
         return _no(low_score, ik)
-    below_break_even = trade_price_reason(market.get("under_odds"))
+    below_break_even = exec_price_reason(market.get("under_odds"))
     if below_break_even is not None:
         return _no(below_break_even, ik)
     # ── limits must be CONFIGURED before any stake math (§9): an

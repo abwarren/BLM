@@ -108,7 +108,7 @@ def verdict(state: dict, candidate: dict, *, now: Optional[datetime] = None,
     """Pure decision: ``None`` when the state still passes, else (code, why)."""
     from blm_v4.trade_window import (exec_alert_reason, exec_shortfall_reason,
                                      execution_window_reason, score_reason,
-                                     trade_competition_reason, trade_price_reason)
+                                     trade_competition_reason, exec_price_reason)
 
     if not state:
         return ("REVALIDATION_NO_CAPTURE", "no capture for this game at submission")
@@ -135,7 +135,7 @@ def verdict(state: dict, candidate: dict, *, now: Optional[datetime] = None,
                                 state.get("progress_pct"))
            or exec_shortfall_reason(state.get("required_pts_per_min"),
                                     state.get("actual_pts_per_min"))
-           or trade_price_reason(state.get("under_price")))
+           or exec_price_reason(state.get("under_price")))
     if why:
         return (f"REVALIDATION_{str(why).upper()}"[:60],
                 f"no longer qualifies at submission: {why}")

@@ -53,7 +53,8 @@ from blm_v4.live_analytics.under_alert import (
     under_alert_eligibility,
     under_alert_state,
 )
-from blm_v4.trade_window import (PACE_BELOW, TRADE_MAX_PROGRESS_PCT,
+from blm_v4.trade_window import (PACE_BELOW, TRADE_EXEC_MIN_PRICE,
+                                 TRADE_MAX_PROGRESS_PCT,
                                  TRADE_MIN_PACE_RATIO,
                                  TRADE_MIN_PROGRESS_PCT,
                                  TRADE_MIN_SCORED_POINTS,
@@ -62,7 +63,7 @@ from blm_v4.trade_window import (PACE_BELOW, TRADE_MAX_PROGRESS_PCT,
                                  exec_shortfall_reason,
                                  execution_window_reason,
                                  score_reason, trade_competition_reason,
-                                 trade_move_reason, trade_price_reason)
+                                 trade_move_reason, exec_price_reason)
 
 # ── NAMED TRADE COHORTS (TC-*), operator directive 2026-10-23: an alert must
 # carry the NAME of the cohort it belongs to.  Thin resolver over the same
@@ -318,7 +319,7 @@ def _execution_window_block(progress_pct, price=None, points=None,
     if reason is None:
         reason = score_reason(points)
     if reason is None:
-        reason = trade_price_reason(price)
+        reason = exec_price_reason(price)
     return {
         "min": TRADE_MIN_PROGRESS_PCT,
         "max": TRADE_MAX_PROGRESS_PCT,
@@ -2495,7 +2496,7 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                     proj.get("actual_pts_per_min")) is None
                 and execution_window_reason(proj.get("progress_pct")) is None
                 and score_reason(proj.get("current_total_points")) is None
-                and trade_price_reason(
+                and exec_price_reason(
                     (g.get("market") or {}).get("under_odds")) is None
                 and trade_move_reason(
                     entry_line, open_line, league_avg_line,
