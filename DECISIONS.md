@@ -4,8 +4,8 @@ Persistent operational memory for the BLM repository. This file is the
 single source of truth for what has been decided, what tooling exists, and
 what must be remembered across sessions.
 
-Last updated: 2026-09-20 19:14 UTC
-HEAD at last update: `76dba4a` — "Render exception tracebacks so a crash can name its own cause"
+Last updated: 2026-09-26 04:30 UTC
+HEAD at last update: `153415f` — "Quantify the unresolved backlog against the authoritative feed"
 
 ---
 
@@ -705,6 +705,30 @@ gates:
   `CYBER_2K26` — never hardcoded or shared across classifications.
 
 ---
+
+### I. Auto-Bet classification exclusion — CYBER_2K26 (directive 2026-10-13)
+
+The operator directed: **exclude CYBER_2K26 games from the parameters that
+trigger Auto-Bet.** Implemented at the AUTO-BET trigger layer — the alert
+/statistics layer is UNTOUCHED (dashboard alerts, cohort math, fingerprints,
+settlement and BetConstruct reconciliation continue to include CYBER_2K26
+normally; the exclusion removes CYBER_2K26 from BETTING only).
+
+- `blm_v4/betting/command.py` — `AUTO_BET_EXCLUDED_CLASSIFICATIONS =
+  ("CYBER_2K26",)` + `classification_excluded(game, source)`: refuses the
+  AUTONOMOUS source when the game's classification is in the excluded set
+  (`classification_excluded:CYBER_2K26`). The MANUAL source is NOT auto-bet
+  (an explicit operator command) and is never subject to this exclusion.
+- `blm_v4/betting/executor.py::evaluate` — the currently-authoritative
+  ladder checks `classification_excluded` BEFORE any alert evaluation, so
+  a CYBER_2K26 game is refused even when its alert would be active.
+- EXPLICIT-MATCH semantics: the `/live` payload always carries
+  `classification` (api.py detail builder), so a production CYBER game is
+  always caught by name; a test-seam payload without the field is not
+  refused by THIS gate (the other payload-integrity gates still apply).
+- Pinned by `tests/test_auto_bet_cyber_exclusion_2026-10-13.py` (11 tests).
+- NOT deployed: requires an operator-authorized `blm-server` restart to
+  activate; Auto-Bet remains disarmed regardless.
 
 ## 9. Checkpoint definitions (durable)
 
@@ -1524,6 +1548,169 @@ Implemented the auto-betting execution architecture per directive:
 - Status: DRY_RUN stays on; no real bet can be placed; alert logic
   untouched; fingerprints remain contextual only; R1 remains excluded.
 
+## 2026-09-26 — AUTO-BETTING PIPELINE COMPLETION (finish end-to-end)
+
+Completed the AUTO BETTING pipeline from signal → validation → limits →
+dry-run/live decision → persistence → execution history → dashboard.
+
+### Architecture
+
+```
+BettingWorker (5s poll, daemon thread)
+  │  reads /api/v4/live in-process (same authority as dashboard)
+  │
+  ▼
+executor.evaluate()   — 10-condition gate (server-authoritative)
+  1.  kill switch ON  (persisted in blm_betting.db; default OFF)
+  2.  under_alert.active == True  (production verdict, consumed verbatim)
+  3.  under_alert_eligibility.eligible == True
+  4.  game.live == True
+  5.  alert freshness ≤ BETTING_ALERT_MAX_AGE_S (default 90s)
+  6.  market line present and positive
+  7.  all three limits configured (BETTING_MAX_STAKE_PER_BET,
+      BETTING_MAX_BETS_PER_DAY, BETTING_MAX_DAILY_EXPOSURE)
+  8.  unit_price valid and within [min, max]
+  9.  daily bet count < max
+  10. daily exposure + stake ≤ max
+  10. idempotent claim (UNIQUE idempotency_key in SQLite — exactly-once)
+      ↓
+  DRY_RUN → WOULD_BET → update_status ACCEPTED (dryrun- prefix ref)
+  LIVE    → EXECUTE   → provider.submit() → ACCEPTED/SUBMITTED/FAILED/UNKNOWN
+      ↓
+  persist execution in bet_executions
+  refresh stats for next candidate in same pass (§ bug-fix)
+```
+
+### Configuration (server-side authority; browser cannot raise these)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `BETTING_DRY_RUN` | DRY_RUN mode | `true` (always) |
+| `BETTING_MAX_STAKE_PER_BET` | Per-bet stake cap | required (absent → blocked) |
+| `BETTING_MAX_BETS_PER_DAY` | Daily bet count cap | required (absent → blocked) |
+| `BETTING_MAX_DAILY_EXPOSURE` | Daily loss limit | required (absent → blocked) |
+| `BETTING_STAKE_UNITS` | Units per bet | `1.0` |
+| `BETTING_MIN_UNIT_PRICE` | Min allowed unit price | `1.0` |
+| `BETTING_MAX_UNIT_PRICE` | Max allowed unit price | `1000.0` |
+| `BETTING_ALERT_MAX_AGE_S` | Alert freshness cutoff | `90.0` |
+| `BETTING_DB_PATH` | Ledger database path | `blm_betting.db` |
+| `POKERBET_USERNAME` | Provider credential | read at runtime only |
+| `POKERBET_PASSWORD` | Provider credential | read at runtime only |
+
+Credentials live exclusively in the gitignored `.env`.  They are never
+logged, stored in the database, returned by any API endpoint, or present
+in any tracked file.  The API returns boolean presence indicators only.
+
+### DRY_RUN behaviour
+
+`BETTING_DRY_RUN=true` (the default and only supported mode today):
+- All 10 conditions are evaluated, stake is calculated, idempotency is
+  enforced — the full decision path runs.
+- No provider is contacted; `DryRunProvider.submit()` returns ACCEPTED
+  with a `dryrun-<execution_id>` reference.
+- The execution is persisted as ACCEPTED in `bet_executions`.
+- `today.amount_real = R0.00` (no money moved).
+- `today.amount_simulated` = sum of would-be stakes (displayed labelled).
+- The two are never mixed in the API response (`is_simulated` flag).
+
+### LIVE mode (NOT currently enabled)
+
+Enabling requires:
+1. `BETTING_DRY_RUN=false` in the environment.
+2. `POKERBET_USERNAME` and `POKERBET_PASSWORD` in the environment.
+3. The `PokerBetProvider.submit()` transport to be implemented (currently
+   a deliberate stub that raises `ProviderUnavailable` — no accidental
+   live bets are possible through configuration alone).
+
+### Execution states
+
+| Status | Meaning |
+|---|---|
+| `PENDING` | Claimed, not yet submitted |
+| `SUBMITTED` | Request sent; outcome unknown |
+| `ACCEPTED` | Provider confirmed / DRY_RUN |
+| `REJECTED` | Provider definitively refused (no money moved) |
+| `FAILED` | Definitive local failure (no bet exists) |
+| `UNKNOWN` | Ambiguous response (money MAY be in play — counts toward limits) |
+| `CANCELLED` | Cancelled before submission |
+
+### Idempotency
+
+Idempotency key: `{game_id}|{checkpoint}|{alert_id}` (`alert_id` =
+`{game_id}|{checkpoint}`).  The key has a UNIQUE index in SQLite.
+`store.claim()` uses `BEGIN IMMEDIATE` + `INSERT OR IGNORE` — two
+concurrent workers on the same game/checkpoint can never both claim it.
+The claim runs AFTER all other gates so refused opportunities never
+occupy a slot.
+
+### Daily statistics (§8)
+
+`today_stats()` counts ACCEPTED + SUBMITTED + UNKNOWN toward exposure
+(worst-case: unresolved money is still in play).  FAILED and REJECTED
+do NOT count.  `remaining_exposure = max(0, limit - amount)` — never
+negative.
+
+### Bug fixed (2026-09-26)
+
+`BettingWorker.poll_once()` was only refreshing the running stats after
+the `execute()` path (LIVE), not after the `WOULD_BET` path (DRY_RUN).
+This meant multiple games in the same poll pass all saw stale stats and
+the bet-count / exposure limits were not enforced within a single pass.
+Fixed: stats are now refreshed after both the `WOULD_BET` and `execute`
+paths.
+
+### How to verify the system safely
+
+```bash
+# 1. Confirm DRY_RUN is the active mode (no limits needed)
+curl -s http://localhost:2262/api/v4/betting/status | python3 -m json.tool | grep -E '"mode"|"dry_run"'
+
+# 2. Confirm limits state
+curl -s http://localhost:2262/api/v4/betting/status | python3 -m json.tool | grep -E 'max_|limits'
+
+# 3. Set a unit price and enable auto-betting
+curl -s -X POST http://localhost:2262/api/v4/betting/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"unit_price": 10.0}'
+curl -s -X POST http://localhost:2262/api/v4/betting/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"auto_betting": "ON"}'
+
+# 4. Wait for the next qualifying alert (worker polls every 5s)
+# 5. Verify a dry-run execution was persisted (no real bet placed)
+curl -s http://localhost:2262/api/v4/betting/status | python3 -m json.tool | python3 -c "
+import json, sys
+st = json.load(sys.stdin)
+print('today:', st['today'])
+print('recent:', len(st['recent']), 'executions')
+if st['recent']:
+    r = st['recent'][0]
+    print('  status:', r['status'], '| provider_ref:', r.get('provider_ref'))
+    assert r['provider_ref'].startswith('dryrun-'), 'LIVE BET DETECTED — check config!'
+    print('  CONFIRMED: dry-run only, no real bet placed')
+"
+```
+
+### Tests
+
+74 tests in `tests/test_betting_execution.py` (all pass).  Coverage:
+- Kill switch default OFF; restart defaults OFF; corrupt value → OFF
+- Valid alert → WOULD_BET (dry-run) or EXECUTE (live)
+- Duplicate alert / concurrent claim → exactly-one execution
+- Daily bet count: below / at / over max
+- Daily exposure: below / at / over limit; cumulative tracking
+- Stake: 1-unit calculation; invalid unit price; max stake exceeded
+- Unconfigured / partially-configured limits → blocked
+- Limits unverifiable (DB error) → blocked
+- Live mode: explicit config required; stub fails closed; FAILED recorded
+- Provider FAILED / UNKNOWN / ambiguous → correct state, not ACCEPTED
+- DRY_RUN simulated vs real amount labelling (is_simulated flag)
+- Recent executions: populated, provider_ref present, checkpoint shown
+- Blocked reason surfaced in API response
+- Browser cannot inject stake above server limit
+- Browser settings payload cannot override server-side limits
+- Credentials never in source, API payload, or database
+
 ## 2026-09-22 — NO FINAL result-resolution fix (collector + scorecard)
 - Root cause (read-only diagnostic): collector untracked games ~60s after
   they left the source panel; the last captured snapshot was frequently
@@ -1577,3 +1764,109 @@ Implemented the auto-betting execution architecture per directive:
   tests/test_betual_collector_integration.py (12); full suite 1355 passed, the
   4 freeze-test failures stash-verified pre-existing.
 - Report: analysis_betual_quarterly_dataset_2026-09-22.md (sections A-P).
+
+## 2026-09-28 — EXECUTION SUBSYSTEM SPLIT: state machine, adapter boundary, TEST/PAPER default (test-first directive §1–§7)
+
+DECISION: the auto-bet execution path now runs through an explicit subsystem
+(`blm_v4/betting/{machine,session,adapters,precheck,engine,replay}.py`) that is
+additive to the existing provider/executor layer — the existing
+`betting/provider.py` + `executor.py` + `store.py` and their suites are
+UNCHANGED and stay green.
+
+Why:
+1. The directive requires a strict adapter boundary
+   (BetEngine → BookmakerAdapter → TestAdapter/LiveAdapter). The new
+   `BookmakerAdapter` protocol is the only bookmaker surface the engine sees;
+   bookmaker-specific logic stays behind it, matching the established
+   SelectionResolver pattern in `blm_v4/execution/adapter.py`.
+2. The TestAdapter must be the DEFAULT outside explicit production config
+   (`adapter_from_environment`: live requires BLM_ADAPTER_MODE=production AND
+   BLM_ALLOW_LIVE_ADAPTER=1 together, and even then fails safe — the
+   LiveBookmakerAdapter is a stub whose every call raises). This extends the
+   proven fail-safe-stub doctrine of PokerBetProvider: live money requires
+   CODE, not configuration.
+3. The state machine is an explicit transition MATRIX (`machine.py`), not
+   string comparisons scattered through code. Invalid transitions raise —
+   fail closed. No SIGNAL→CONFIRMED edge exists structurally.
+4. Idempotency (§5) is claimed BEFORE any state move, because a losing
+   duplicate racing the original must never overwrite the original's claim
+   state (found by test: a premature SIGNAL→ELIGIBLE write corrupted the
+   original's row; the matrix then correctly refused the duplicate's
+   fabricated SIGNAL→REJECTED edge).
+5. Duplicate attempts return the ORIGINAL's disposition
+   (`duplicate_of_original`) instead of fabricating a terminal state for a
+   bet that never entered the machine — the §3 matrix has no SIGNAL→REJECTED
+   edge, by design.
+6. REJECTED is reserved for PRECHECK refusals; definitive post-submission
+   provider refusals are SUBMISSION_FAILED. UNKNOWN always reconciles through
+   adapter truth (find_order_by_idempotency) — never blind retry.
+7. Replay (§7) is type-enforced onto the TestAdapter: a replay process cannot
+   attach a live adapter even by accident.
+
+EVIDENCE: 63-test directive suite (tests/test_autobet_execution_subsystem.py);
+280 targeted passes across 8 betting suites; full suite 1759 passed / 19
+failed with all 19 verified pre-existing (0 betting-layer imports in any
+failing test file; this session modified 0 tracked files).
+
+## 2026-09-28 — LOGIN + AUTHENTICATION LAYER (directive: production auth + login page)
+
+DECISION: authentication is a NEW, ADDITIVE package, `blm_v4/auth/`, wired
+into the application by ONE call (`install(app, root)`) at each composition
+root — `server.py` (production) and `blm_v4/test_stack.py` (TEST/STAGING).
+No existing module's behaviour was changed, no existing table was touched,
+and no existing test was weakened.
+
+Why each choice:
+
+1. SERVER-SIDE SESSIONS, HTTP-ONLY COOKIE (not JWT, not localStorage).
+   The app is same-origin behind Caddy on `blm.haaaats.xyz`; a bearer token
+   in JS storage is exactly what §8 forbids. An opaque 256-bit token in an
+   HttpOnly + SameSite + Secure cookie, with the session row in SQLite, keeps
+   the authority server-side and makes logout instantly effective.
+2. A PURE-ASGI GUARD, not per-route dependencies. The directive requires that
+   protection cannot be bypassed by requesting a URL directly. A dependency
+   is opt-in per route; a middleware placed around the whole application is
+   not, and it also covers MOUNTED sub-apps (`/dashboard`) and the WebSocket
+   handshake (`/ws` closed with 1008 before accept).
+3. ALLOW-LIST, NOT DENY-LIST. `config.PUBLIC_EXACT` + `PUBLIC_PREFIX` name the
+   few paths that must work without a session (the login page and its CSS/JS,
+   `/healthz`, favicons). Everything else — including `/docs`,
+   `/openapi.json` and `/metrics`, which were previously exposed — is guarded.
+4. Passwords: bcrypt with a SHA-256 pre-hash (`bcrypt_sha256$…`, the Django
+   BCryptSHA256 construction). The pre-hash removes bcrypt's 72-byte
+   truncation without changing the deployment's package set (bcrypt is
+   already present at the interpreter level). `verify_password` ALWAYS
+   performs real work, so an unknown user and a wrong password are
+   indistinguishable in both body and timing.
+5. Role authority is the USER ROW, re-read on every validation — never the
+   session snapshot and never a client-supplied header/body/query. Demoting
+   an admin or deactivating an account therefore takes effect on the next
+   request, without a re-login.
+6. CSRF: SameSite is the baseline; a per-session token checked on every
+   mutating method (POST/PUT/PATCH/DELETE) is the second lock. The dashboard
+   attaches it from a single fetch wrapper, so no call site opts out.
+7. Throttling is in-memory, per-identity AND per-IP, sliding-window with a
+   lockout. Case-insensitive on the identity so `Admin` cannot double its
+   budget. The durable record is the `auth_audit` table.
+8. Seeding is IDEMPOTENT and environment-driven (`BLM_SEED_*`). An existing
+   account is never modified without `BLM_SEED_RESET_PASSWORDS=1`, so a
+   re-run cannot silently overwrite a password an operator changed. The
+   TEST stack seeds its own throwaway accounts from `BLM_AUTH_SEED_*`.
+   Usernames may be defaults; PASSWORDS must come from the environment.
+9. Separate database `blm_auth.db` (+ `test_env/blm_auth_test.db`): auth gets
+   its own failure domain; the analytics and betting databases are untouched.
+
+CONSEQUENCES / OPERATOR NOTES:
+- A production restart is REQUIRED for the guard to take effect (the running
+  process predates this change). Until then production remains unguarded.
+- `blm_auth.db` must exist with at least one active account BEFORE the
+  restart, or every request redirects to `/login`. Provisioned 2026-09-28.
+- Login throttling trusts `X-Forwarded-For` when `BLM_ENV=production`
+  (Caddy is the only ingress and the app binds 127.0.0.1); the LAST hop is
+  used, which the client cannot spoof. Override with `BLM_AUTH_TRUST_PROXY`.
+- `/metrics`, `/docs` and `/openapi.json` are now authenticated. A future
+  Prometheus scrape needs `BLM_AUTH_PUBLIC_PATHS=/metrics`.
+
+EVIDENCE: `blm_v4/auth/` (9 modules) + `blm_v4/dashboard/static/login.{html,css,js}`;
+119 auth tests across `tests/test_auth_{login,authorization,security,seed,ui}.py`;
+live HTTP smoke over the TEST stack on 127.0.0.1:2264.
