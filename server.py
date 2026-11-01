@@ -71,6 +71,11 @@ WAL_HYGIENE_THRESHOLD_MB = float(
 #: retries on the next cadence tick, it never stalls the box.
 WAL_HYGIENE_HARD_CAP_MB = float(
     os.environ.get("BLM_WAL_HYGIENE_HARD_CAP_MB", "2048"))
+#: HARD ALERT bound: a WAL past this logs ``wal_hygiene_alert`` with its size,
+#: far below the escalation cap — the growth has to be visible in the journal
+#: BEFORE writes slow down and a restart stops coming back.  0 disables it.
+WAL_HYGIENE_ALERT_MB = float(
+    os.environ.get("BLM_WAL_HYGIENE_ALERT_MB", "256"))
 #: a live-flagged game with NO snapshot AND NO WS observation for this
 #: long has left the source's live board — its authoritative final state
 #: exists upstream, so reconcile it to ended.
@@ -529,13 +534,15 @@ def main() -> None:
                 root / "blm_pokerbet.db",
                 interval_s=WAL_HYGIENE_INTERVAL_S,
                 threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
-                hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB)
+                hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB,
+                alert_mb=WAL_HYGIENE_ALERT_MB)
             wal_hygiene_worker.start()
             app.state._wal_hygiene_worker = wal_hygiene_worker
             logger.info("wal_hygiene_worker_started",
                         interval_s=WAL_HYGIENE_INTERVAL_S,
                         threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
-                        hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB)
+                        hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB,
+                        alert_mb=WAL_HYGIENE_ALERT_MB)
 
         # ── PACE REFERENCE worker (empty-live-data fix) ───────────────
         # Started early: its FIRST scan is the expensive one (the Q3

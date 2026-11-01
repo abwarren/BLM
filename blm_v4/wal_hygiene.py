@@ -85,6 +85,10 @@ DEFAULT_HARD_CAP_MB = 2048.0
 #: journal_size_limit applied on the hygiene connection so a completed
 #: TRUNCATE leaves a small WAL rather than the previous high-water mark.
 DEFAULT_JOURNAL_SIZE_LIMIT_MB = 64.0
+#: HARD ALERT bound — a WAL past this logs ``wal_hygiene_alert`` with the size,
+#: well below the escalation cap so the growth is visible before writes slow.
+#: 0 disables the alert.
+DEFAULT_ALERT_MB = 256.0
 
 
 def wal_bytes(db_path: Path | str) -> int:
@@ -106,7 +110,8 @@ def passive_checkpoint_once(db_path: Path | str, *,
                             log: logging.Logger | None = None,
                             threshold_mb: float = DEFAULT_THRESHOLD_MB,
                             busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
-                            hard_cap_mb: float = DEFAULT_HARD_CAP_MB
+                            hard_cap_mb: float = DEFAULT_HARD_CAP_MB,
+                            alert_mb: float = DEFAULT_ALERT_MB
                             ) -> dict:
     """One stat-gated ``wal_checkpoint(PASSIVE)`` pass on ``db_path``.
 
@@ -133,10 +138,22 @@ def passive_checkpoint_once(db_path: Path | str, *,
     """
     log = log or logger
     wal = wal_bytes(db_path)
+    # HARD ALERT — well below the escalation cap, because a WAL that is growing
+    # is visible in this line LONG before it stops writes: past a couple of
+    # hundred MB every write pays the checkpoint backlog and the service looks
+    # like it is simply slow.  Never fatal, never raises.
+    alert = alert_mb > 0 and wal >= alert_mb * 1024 * 1024
+    if alert:
+        log.warning(
+            "wal_hygiene_alert wal_bytes=%d alert_mb=%.1f hard_cap_mb=%.1f "
+            "threshold_mb=%.1f (WAL past the alert bound: a pinning reader or a "
+            "slow write path is growing it — see the checkpoint quartet "
+            "wal_bytes/log_frames/held_back/busy in this tick's lines)",
+            wal, alert_mb, hard_cap_mb, threshold_mb)
     if wal < threshold_mb * 1024 * 1024:
         return {"checked": False, "checkpointed": False, "wal_bytes": wal,
                 "busy": -1, "log": -1, "checkpointed_frames": -1,
-                "held_back": -1, "mode": "gated"}
+                "held_back": -1, "mode": "gated", "alert": bool(alert)}
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(str(db_path), timeout=30)
@@ -179,14 +196,14 @@ def passive_checkpoint_once(db_path: Path | str, *,
         return {"checked": True, "checkpointed": bool(copied),
                 "wal_bytes": wal, "busy": busy, "log": log_frames,
                 "checkpointed_frames": copied, "held_back": held_back,
-                "mode": mode}
+                "mode": mode, "alert": bool(alert)}
     except sqlite3.Error as exc:
         # fail-closed: locked/unreadable DB — logged, retried next tick
         log.warning("wal_hygiene_failed db=%s error=%s",
                     Path(db_path).name, exc)
         return {"checked": True, "checkpointed": False, "wal_bytes": wal,
                 "busy": -1, "log": -1, "checkpointed_frames": -1,
-                "held_back": -1, "mode": "error"}
+                "held_back": -1, "mode": "error", "alert": bool(alert)}
     finally:
         if conn is not None:
             try:
@@ -206,11 +223,13 @@ class WalHygieneWorker:
                  interval_s: float = DEFAULT_INTERVAL_S,
                  threshold_mb: float = DEFAULT_THRESHOLD_MB,
                  hard_cap_mb: float = DEFAULT_HARD_CAP_MB,
+                 alert_mb: float = DEFAULT_ALERT_MB,
                  log: logging.Logger | None = None):
         self._db_path = Path(db_path)
         self._interval_s = float(interval_s)
         self._threshold_mb = float(threshold_mb)
         self._hard_cap_mb = float(hard_cap_mb)
+        self._alert_mb = float(alert_mb)
         self._log = log or logger
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -221,7 +240,8 @@ class WalHygieneWorker:
             self._db_path, log=self._log,
             threshold_mb=self._threshold_mb,
             busy_timeout_ms=DEFAULT_BUSY_TIMEOUT_MS,
-            hard_cap_mb=self._hard_cap_mb)
+            hard_cap_mb=self._hard_cap_mb,
+            alert_mb=self._alert_mb)
 
     def loop(self) -> None:
         import time
@@ -274,3 +294,13 @@ def env_hard_cap_mb(environ: dict | None = None) -> float:
                              str(DEFAULT_HARD_CAP_MB)))
     except (TypeError, ValueError):
         return DEFAULT_HARD_CAP_MB
+
+
+def env_alert_mb(environ: dict | None = None) -> float:
+    """Resolved hard-alert bound from ``BLM_WAL_HYGIENE_ALERT_MB`` (0 = off)."""
+    env = os.environ if environ is None else environ
+    try:
+        return float(env.get("BLM_WAL_HYGIENE_ALERT_MB",
+                             str(DEFAULT_ALERT_MB)))
+    except (TypeError, ValueError):
+        return DEFAULT_ALERT_MB

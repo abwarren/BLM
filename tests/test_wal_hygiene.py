@@ -204,3 +204,41 @@ def test_should_checkpoint_boundaries(size, threshold, expected, tmp_path):
     wal = tmp_path / "bound.db-wal"
     wal.write_bytes(b"0" * size)
     assert should_checkpoint(tmp_path / "bound.db", threshold) is expected
+
+
+def test_hard_alert_fires_above_the_alert_bound_only(tmp_path, caplog):
+    """The WAL alert must be visible well below the escalation cap.
+
+    A growing WAL is the cheapest early symptom of a pinning reader, and it is
+    invisible today: the pass logs at INFO and nothing escalates until the file
+    is already hurting write latency.  2026-11-01: the box was at 2 MB with
+    held_back=0, but the same box reached 30.8 GB once — this line is what would
+    have named it on the first tick instead of the tenth hour.
+    """
+    conn = _wal_db(tmp_path, rows=2)
+    try:
+        db = conn.execute("PRAGMA database_list").fetchone()[2]
+        with caplog.at_level(logging.WARNING, logger="blm_v4.wal_hygiene"):
+            # a WAL of any real size trips a 0.000001 MB bound
+            res = passive_checkpoint_once(db, threshold_mb=0.0001,
+                                          alert_mb=0.000001)
+        assert res["alert"] is True
+        assert any("wal_hygiene_alert" in r.message for r in caplog.records)
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="blm_v4.wal_hygiene"):
+            res = passive_checkpoint_once(db, threshold_mb=0.0001,
+                                          alert_mb=1024.0)
+        assert res["alert"] is False
+        assert not any("wal_hygiene_alert" in r.message
+                       for r in caplog.records)
+    finally:
+        conn.close()
+
+
+def test_env_alert_mb_parses_and_falls_back():
+    from blm_v4.wal_hygiene import env_alert_mb
+    assert env_alert_mb({}) == wal_hygiene.DEFAULT_ALERT_MB
+    assert env_alert_mb({"BLM_WAL_HYGIENE_ALERT_MB": "64"}) == 64.0
+    assert env_alert_mb({"BLM_WAL_HYGIENE_ALERT_MB": "garbage"}) \
+        == wal_hygiene.DEFAULT_ALERT_MB

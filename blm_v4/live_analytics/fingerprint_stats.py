@@ -138,6 +138,14 @@ LEAGUE_LABELS = {
 #: Older data is EXCLUDED from the computation — never deleted; the databases
 #: keep the full history so any earlier window can still be recomputed.
 COHORT_SINCE_UTC = "2026-10-09T00:43:02"   # 02:43:02 SAST 2026-10-09
+#: The cohort-since predicates below stay TIMESTAMP-only on purpose.  Measured
+#: 2026-11-01 on the 4.19 M-row ``clean_projections``: the aggregate costs 2.40 s
+#: (median of 3) as written and 1.47 s with an ``id >= <id at cohort start>``
+#: bound — identical rows, but only 1.63x, because the cohort era is ~47% of the
+#: table.  A rolling 24 h window gains 17x (2.10 s -> 0.12 s) and is worth the
+#: bound where the window is genuinely narrower than the cohort; here the win
+#: does not justify making correctness depend on id/captured_at monotonicity in
+#: the trading-adjacent stats path.
 
 _COHORT_MODEL = ("traded-cohort (75<=progress<=92 AND pts>=70 AND "
                  "required>league_avg*1.04 AND under price>=band floor), "
