@@ -78,6 +78,11 @@ WAL_HYGIENE_HARD_CAP_MB = float(
 #: far below the escalation cap, so growth is visible in the journal early.
 WAL_HYGIENE_ALERT_MB = float(
     os.environ.get("BLM_WAL_HYGIENE_ALERT_MB", "256"))
+#: How long the janitor's TRUNCATE pass may wait for a gap between writes.
+#: The collector commits every few seconds, so a 5 s wait loses the exclusive
+#: lock routinely (measured: copy complete, busy_flag=1, file unchanged).
+WAL_HYGIENE_BUSY_TIMEOUT_MS = int(
+    os.environ.get("BLM_WAL_HYGIENE_BUSY_TIMEOUT_MS", "15000"))
 #: a live-flagged game with NO snapshot AND NO WS observation for this
 #: long has left the source's live board — its authoritative final state
 #: exists upstream, so reconcile it to ended.
@@ -464,7 +469,8 @@ def main() -> None:
                 interval_s=WAL_HYGIENE_INTERVAL_S,
                 threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
                 hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB,
-                alert_mb=WAL_HYGIENE_ALERT_MB)
+                alert_mb=WAL_HYGIENE_ALERT_MB,
+                busy_timeout_ms=WAL_HYGIENE_BUSY_TIMEOUT_MS)
             wal_hygiene_worker.start()
             app.state._wal_hygiene_worker = wal_hygiene_worker
             logger.info("wal_hygiene_worker_started",

@@ -224,12 +224,20 @@ class WalHygieneWorker:
                  threshold_mb: float = DEFAULT_THRESHOLD_MB,
                  hard_cap_mb: float = DEFAULT_HARD_CAP_MB,
                  alert_mb: float = DEFAULT_ALERT_MB,
+                 busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
                  log: logging.Logger | None = None):
         self._db_path = Path(db_path)
         self._interval_s = float(interval_s)
         self._threshold_mb = float(threshold_mb)
         self._hard_cap_mb = float(hard_cap_mb)
         self._alert_mb = float(alert_mb)
+        #: How long the ESCALATED (TRUNCATE) pass may wait for a tick gap.
+        #: 2026-11-02: measured `checkpointed_frames=62,374 held_back=727
+        #: busy_flag=1` — the copy finished but the exclusive lock was lost to a
+        #: writer committing every few seconds, so the file never shrank.  A
+        #: longer wait is safe: the pass is a daemon thread, and the truncate
+        #: holds the lock for milliseconds once it wins.
+        self._busy_timeout_ms = int(busy_timeout_ms)
         self._log = log or logger
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -239,7 +247,7 @@ class WalHygieneWorker:
         return passive_checkpoint_once(
             self._db_path, log=self._log,
             threshold_mb=self._threshold_mb,
-            busy_timeout_ms=DEFAULT_BUSY_TIMEOUT_MS,
+            busy_timeout_ms=self._busy_timeout_ms,
             hard_cap_mb=self._hard_cap_mb,
             alert_mb=self._alert_mb)
 
