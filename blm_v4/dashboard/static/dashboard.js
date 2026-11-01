@@ -2117,6 +2117,10 @@ const ALERT_CUES = {
   base:   [523.25],                       // one tone
   strong: [659.25, 880],                  // two tones
   high:   [783.99, 987.77, 1318.51],      // three tones, highest priority
+  // A bet was PLACED — deliberately lower and rising, so it can never be
+  // confused with an alert cue: the operator asked for a signal on the money,
+  // not only on the alert.
+  bet:    [392.0, 523.25, 659.25],
 };
 // One poll can enter/escalate several games at once.  Sound at most one
 // cue per coalescing window — the first rise, plus any higher rise inside
@@ -2199,9 +2203,9 @@ function syncAudioButton() {
   btn.dataset.audio = on ? "on" : "off";
   btn.textContent = on ? "AUDIO ON" : "AUDIO OFF";
   btn.setAttribute("aria-pressed", on ? "true" : "false");
-  btn.title = !on ? "Alert audio off — click to enable"
-    : locked ? "Alert audio on — click anywhere to activate sound"
-    : "Alert audio on — click to silence";
+  btn.title = !on ? "Alert audio off — click to enable (alert rises AND every placed bet)"
+    : locked ? "Audio on — click anywhere to activate sound"
+    : "Audio on — click to silence";
 }
 
 const hasChart = () => typeof Chart !== "undefined";
@@ -4006,7 +4010,14 @@ $("audioToggle").addEventListener("click", () => {
   const on = !audioEnabled();
   try { localStorage.setItem(PREF.ALERT_AUDIO, on ? "1" : "0"); } catch (_) {}
   audioWindow = null;                     // fresh coalescing window per switch
-  if (on) unlockAudio();
+  if (on) {
+    unlockAudio();
+    // audible CONFIRMATION that sound now works: the resume() promise settles a
+    // tick after the gesture, so the tone is scheduled just past it.  Without
+    // this the operator has no way to tell "enabled" from "still blocked" until
+    // the next real alert — and an alert can be hours away.
+    setTimeout(() => playAlertCue("base"), 150);
+  }
   syncAudioButton();
 });
 syncAudioButton();
@@ -4440,8 +4451,34 @@ async function refreshBettingStatus() {
     if (!resp.ok) return;
     state.betting = await resp.json();
     abStatusHTML(state.betting);
+    alertBetPlaced(state.betting.recent || []);   // audible cue on a NEW placed bet
     if (state.lastPayload) renderCards(state.lastPayload);
   } catch (_) { /* betting panel is best-effort; never breaks the board */ }
+}
+
+/* ── AUDIO: a bet was PLACED (§ operator request 2026-11-01) ──────────────
+   Shares the existing Web Audio machinery (AUDIO toggle, lazily-unlocked
+   context, synthesised tones — no files).  The FIRST call after a page load
+   only SEEDS the known set, so opening the dashboard never replays a cue for
+   bets that were already in the ledger; every later call sounds once per NEW
+   placed execution (the id set is what makes it idempotent across polls).
+
+   Detection runs off /api/v4/betting/status's `recent` array, which the panel
+   already polls — no extra request, no backend change. */
+let AB_SEEN_IDS = null;
+
+function alertBetPlaced(recent) {
+  const placed = (recent || []).filter((r) =>
+    AB_PLACED_STATUSES.has(String((r && r.status) || "").toUpperCase()));
+  if (AB_SEEN_IDS === null) {                     // seed only: stay silent
+    AB_SEEN_IDS = new Set(placed.map((r) => r.execution_id));
+    return;
+  }
+  const fresh = placed.filter((r) => r.execution_id && !AB_SEEN_IDS.has(r.execution_id));
+  placed.forEach((r) => { if (r.execution_id) AB_SEEN_IDS.add(r.execution_id); });
+  if (!fresh.length) return;
+  if (!audioEnabled()) return;                    // AUDIO OFF: visual only
+  playAlertCue("bet");
 }
 
 async function loadBettingHistory() {
