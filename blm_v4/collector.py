@@ -3433,6 +3433,16 @@ class PokerBetCollector:
                 comps = find_relevant_competitions(html)
             self._tick_stats["board_parse_ms"].append(
                 time.monotonic() - t_board)
+        if comps and not any(c.classification is Classification.BETUAL_NBA
+                             for c in comps):
+            # A panel that renders only OTHER competitions is the 2026-10-31
+            # starvation shape (tracked=1, "BETUAL_NBA lobby unreachable"):
+            # journal what IS on the panel, throttled, without touching the
+            # parse, the verdict or the empty-tick accounting.
+            self._log_panel_diag(page, Classification.BETUAL_NBA,
+                                 "discovery_no_betual")
+        self._log_board_diag(comps)
+        self._maybe_rotate_for_missing_classes(page, comps)
         if not comps:
             self._empty_ticks += 1
             # An empty panel is a COMPLETE cycle that found nothing to
@@ -4937,11 +4947,145 @@ class PokerBetCollector:
                     continue
                 self._wait_panel(page)
                 self._expand_target_sections(page)
+            self._log_panel_diag(page, cls, "comp_lobby_unreachable")
             return False
         except Exception:
             logger.error("ensure comp lobby failed:\n%s",
                          traceback.format_exc())
             return False
+
+    _ROTATE_COOLDOWN_S = 60.0
+
+    def _missing_discovery_classes(self, comps) -> list:
+        """Required classes with NO competition in the parsed board.
+
+        The parsed board is the universe the collector is supposed to trade.
+        A class that is absent from it is not "quiet" — it is unobserved.
+        The required list is the deployment's own (``DISCOVERY_COMPETITIONS``)
+        and falls back to the two basketball populations this pipeline exists
+        to collect, so the guard works on a tree that predates that attribute.
+        """
+        required = getattr(self, "DISCOVERY_COMPETITIONS", None) or (
+            Classification.CYBER_2K26, Classification.BETUAL_NBA)
+        return [c for c in required
+                if not any(getattr(x, "classification", None) is c
+                           for x in (comps or []))]
+
+    def _maybe_rotate_for_missing_classes(self, page, comps) -> list:
+        """Land on the lobby of a REQUIRED class that the board is missing.
+
+        2026-10-31 starvation: the board never went empty (Cyber always parsed
+        one game), so `_ensure_discovery_page()` — the only rotation, called
+        from the ``if not comps:`` branch — never ran.  The page stayed on the
+        Cyber event-view URL and the Betual section never rendered:
+        ``board_diag comps=1 [CYBER_2K26:…:games=1]``, ``tracked=1`` through
+        five restarts.
+
+        Delegating to `_ensure_discovery_page()` is NOT enough: it caches the
+        landing that carried ANY relevant competition (Cyber), so it re-picks
+        the same URL every time.  This navigates to the MISSING class's own
+        competition URL instead, which is the surface that renders its rows.
+
+        Cooldown per class (`_ROTATE_COOLDOWN_S`) so a genuinely dark
+        competition costs one navigation a minute, not one per tick, and a
+        failure is logged rather than raised into the tick.
+        """
+        missing = self._missing_discovery_classes(comps)
+        if not (comps and missing):
+            return missing
+        target_cls = missing[0]
+        now = time.monotonic()
+        cooldowns = getattr(self, "_rotate_at", None)
+        if cooldowns is None:
+            cooldowns = self._rotate_at = {}
+        if now - cooldowns.get(target_cls, 0.0) < self._ROTATE_COOLDOWN_S:
+            return missing
+        cooldowns[target_cls] = now
+        try:
+            url = competition_url(target_cls, self.comp_ids)
+            logger.warning(
+                "discovery rotation: board lacks %s — landing on %s",
+                getattr(target_cls, "value", target_cls), url)
+            if self._goto(page, url):
+                self._wait_panel(page)
+                self._expand_target_sections(page)
+        except Exception:
+            logger.warning("discovery rotation failed", exc_info=True)
+        return missing
+
+    def _log_board_diag(self, comps) -> None:
+        """Journal the PARSED board once a minute: what the panel really says.
+
+        The DOM dump answers "what is rendered"; this answers "what did the
+        parser keep" — competition name, classification and game count per
+        competition.  A Betual competition that parses with ``games=0`` is the
+        starvation shape seen on 2026-10-31 (tracked=1 with the lobby present
+        but empty), which the DOM dump alone cannot distinguish from a missing
+        section.  Throttled, read-only, ``BLM_PANEL_DIAG=0`` disables it.
+        """
+        try:
+            if os.environ.get("BLM_PANEL_DIAG", "1") == "0":
+                return
+            now = time.monotonic()
+            if now - getattr(self, "_board_diag_at", 0.0) < 60.0:
+                return
+            self._board_diag_at = now
+            parts = []
+            for c in comps or []:
+                cls = getattr(c, "classification", None)
+                parts.append(
+                    f"{getattr(cls, 'value', cls)}:"
+                    f"{(getattr(c, 'display_name', '') or '')[:28]}:"
+                    f"games={len(getattr(c, 'games', []) or [])}")
+            logger.warning("board_diag comps=%d [%s]", len(comps or []),
+                           " | ".join(parts)[:600] or "none")
+        except Exception:
+            logger.debug("board_diag failed", exc_info=True)
+
+    def _log_panel_diag(self, page, cls, where: str) -> None:
+        """Journal WHAT the panel actually renders when the lobby can't be found.
+
+        Diagnostic only (2026-10-31).  The collector sat at ``tracked=1`` for
+        half an hour logging ``BETUAL_NBA lobby unreachable`` with no way to
+        tell whether the site had stopped rendering a "Betual NBA" section or
+        the header needles had gone stale — the panel state was invisible.
+        This dumps the section/row counts and the header titles once a minute.
+
+        Never raises, never changes a verdict, and can be switched off with
+        ``BLM_PANEL_DIAG=0``.
+        """
+        try:
+            if os.environ.get("BLM_PANEL_DIAG", "1") == "0":
+                return
+            now = time.monotonic()
+            if now - getattr(self, "_panel_diag_at", 0.0) < 60.0:
+                return
+            self._panel_diag_at = now
+            diag = page.evaluate(
+                """() => {
+                    const clean = (s) => String(s || '')
+                        .split('\\n').join(' ').split('\\t').join(' ')
+                        .trim().slice(0, 48);
+                    const heads = [...document.querySelectorAll('.sp-s-l-head-bc')]
+                        .map(h => clean(h.textContent));
+                    const titles = [...document.querySelectorAll('p.sp-s-l-h-title-bc')]
+                        .map(p => clean(p.textContent));
+                    return {
+                        sections: document.querySelectorAll('.sp-sub-list-bc').length,
+                        rows: document.querySelectorAll('.market-game-section').length,
+                        heads: heads.slice(0, 20),
+                        titles: titles.slice(0, 20)
+                    };
+                }""") or {}
+            logger.warning(
+                "panel_diag where=%s cls=%s url=%s sections=%s rows=%s "
+                "heads=[%s] titles=[%s]",
+                where, getattr(cls, "value", cls), page.url,
+                diag.get("sections"), diag.get("rows"),
+                " | ".join(diag.get("heads") or [])[:400] or "none",
+                " | ".join(diag.get("titles") or [])[:400] or "none")
+        except Exception:
+            logger.debug("panel_diag failed", exc_info=True)
 
     def _click_panel_row(self, page: Page, row: RowGame) -> bool:
         """Open a PANEL ROW's event view by team names (resolver path).
