@@ -103,6 +103,31 @@ TEAM_TOTAL_SUFFIX = "Total Points"
 PREFERRED_PRICE_BAND = (1.80, 1.95)   # inclusive decimal-price interval
 PREFERRED_PRICE_TARGET = 1.85         # closest price to this value wins
 
+#: OPERATOR DIRECTIVE 2026-11-02 — the bookmaker sometimes leaves its OPENING
+#: line on the panel as an extra row BENEATH the live line, constant for most of
+#: the game.  Picking that number (by position, or by price, or by the "lower
+#: line is the main line" tie-break) puts a bet on a market that no longer
+#: exists, so a ladder carrying it must be REFUSED outright, never resolved.
+#:
+#: The tell is arithmetic: a real ladder steps by 1-2 points, and every ladder
+#: measured in this repo steps exactly 2.0 (169.5 / 171.5 / 173.5 …).  A stale
+#: opening line sits far below that band, so a gap LARGER than this between two
+#: rows of ONE reading means at least one row is not a live line.
+LADDER_MAX_ROW_GAP = 2.0
+
+
+def ladder_split_gap(ladder: list[dict] | None) -> float | None:
+    """Largest adjacent gap between the DISTINCT lines of one ladder, or None.
+
+    ``None`` means "fewer than two lines" — nothing to compare, so no split can
+    be proven.  Used only to REFUSE a reading; it never selects a line.
+    """
+    lines = sorted({float(r["line"]) for r in (ladder or [])
+                    if r.get("line") is not None})
+    if len(lines) < 2:
+        return None
+    return max(b - a for a, b in zip(lines, lines[1:]))
+
 
 def _valid_price(p: Any) -> bool:
     """A usable decimal price: finite and > 1.0 (implied prob < 100%)."""
@@ -133,7 +158,20 @@ def select_total_market(ladder: list[dict] | None) -> dict:
     records which branch fired ("band_closest_to_1.85" |
     "fallback_nearest_1.85" | "no_candidates") for auditability.  The
     triple (line, side, price) always comes from the SAME ladder row.
+
+    A SPLIT ladder is refused before any price is considered (operator
+    directive 2026-11-02): when two rows of ONE reading are more than
+    ``LADDER_MAX_ROW_GAP`` apart, one of them is the bookmaker's stale OPENING
+    line, so NO line is returned — the caller then has no line and cannot
+    place.  Refusing is the only safe answer: picking either number bets a
+    market that may not exist, and the price tie-break would happily choose
+    the stale row.
     """
+    gap = ladder_split_gap(ladder)
+    if gap is not None and gap > LADDER_MAX_ROW_GAP:
+        return {"line": None, "side": None, "price": None,
+                "over": None, "under": None,
+                "rule": "ladder_split_ambiguous", "ladder_gap": gap}
     lo_band, hi_band = PREFERRED_PRICE_BAND
     cands: list[tuple[float, float, str, dict]] = []  # (price, line, side, row)
     for row in ladder or []:
@@ -372,6 +410,10 @@ def parse_event_view(text: str, identity_html: Optional[str] = None
                     "over_odds": sel["over"],
                     "under_odds": sel["under"],
                     "ladder": ladder,
+                    # set only when the reading was REFUSED as split: the point
+                    # distance between the widest two rows (operator directive
+                    # 2026-11-02, LADDER_MAX_ROW_GAP)
+                    "ladder_gap": sel.get("ladder_gap"),
                 }
         elif header == "Points Handicap":
             home, away = _extract_teams(body)
