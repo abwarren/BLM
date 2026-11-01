@@ -67,6 +67,24 @@ DEFAULT_THRESHOLD_MB = 256.0
 #: return promptly even if it cannot make progress; PASSIVE never waits
 #: on readers anyway, this only bounds the connection setup handshake.
 DEFAULT_BUSY_TIMEOUT_MS = 5000
+#: HARD CAP (2026-10-31, the 14.25 GB incident) — above this the pass
+#: escalates from PASSIVE to TRUNCATE.
+#:
+#: PASSIVE cannot shrink the file: it copies the frames it can and leaves
+#: the rest, so with a writer appending continuously and even a small
+#: reader-pinned tail the WAL never resets and only grows.  Measured on
+#: 2026-10-31: passes copied 2.3-2.5 M frames each and held back only
+#: 19-285 k, yet wal_bytes climbed 8.8 -> 14.9 GB, the collector's fast
+#: cycle hit 231 s in the persistence stage, the self-watchdog killed the
+#: unit twice, and the restarts fragmented live games into instance ids
+#: that never settled.  TRUNCATE is the only mode that gives the space
+#: back.  It takes the exclusive lock at the end, so it is BOUNDED by
+#: busy_timeout here: if readers are active the pass reports busy and
+#: leaves the frames for the next tick — it can never stall the box.
+DEFAULT_HARD_CAP_MB = 2048.0
+#: journal_size_limit applied on the hygiene connection so a completed
+#: TRUNCATE leaves a small WAL rather than the previous high-water mark.
+DEFAULT_JOURNAL_SIZE_LIMIT_MB = 64.0
 
 
 def wal_bytes(db_path: Path | str) -> int:
@@ -87,7 +105,8 @@ def should_checkpoint(db_path: Path | str,
 def passive_checkpoint_once(db_path: Path | str, *,
                             log: logging.Logger | None = None,
                             threshold_mb: float = DEFAULT_THRESHOLD_MB,
-                            busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS
+                            busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+                            hard_cap_mb: float = DEFAULT_HARD_CAP_MB
                             ) -> dict:
     """One stat-gated ``wal_checkpoint(PASSIVE)`` pass on ``db_path``.
 
@@ -117,14 +136,23 @@ def passive_checkpoint_once(db_path: Path | str, *,
     if wal < threshold_mb * 1024 * 1024:
         return {"checked": False, "checkpointed": False, "wal_bytes": wal,
                 "busy": -1, "log": -1, "checkpointed_frames": -1,
-                "held_back": -1}
+                "held_back": -1, "mode": "gated"}
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(str(db_path), timeout=30)
         conn.execute(
             f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        # Escalate to TRUNCATE above the hard cap: PASSIVE alone never
+        # gives the space back (see DEFAULT_HARD_CAP_MB).  busy_timeout
+        # bounds the wait, so a busy pass reports instead of stalling.
+        truncate = wal >= hard_cap_mb * 1024 * 1024
+        if truncate:
+            conn.execute(
+                f"PRAGMA journal_size_limit="
+                f"{int(DEFAULT_JOURNAL_SIZE_LIMIT_MB * 1024 * 1024)}")
         row = conn.execute(
-            "PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            "PRAGMA wal_checkpoint(TRUNCATE)" if truncate
+            else "PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         # PRAGMA result row (sqlite3_wal_checkpoint_v2 semantics):
         #   busy         — 0 unless the pass was blocked by another
         #                  connection (PASSIVE reports, never waits);
@@ -133,30 +161,32 @@ def passive_checkpoint_once(db_path: Path | str, *,
         busy, log_frames, copied = (int(row[0]), int(row[1]),
                                     int(row[2]))
         held_back = max(0, log_frames - copied)
+        mode = "truncate" if truncate else "passive"
         if copied:
             log.info(
-                "wal_hygiene_checkpoint wal_bytes=%d "
+                "wal_hygiene_checkpoint mode=%s wal_bytes=%d "
                 "checkpointed_frames=%d held_back=%d busy_flag=%d "
-                "total_frames=%d", wal, copied, held_back, busy,
+                "total_frames=%d", mode, wal, copied, held_back, busy,
                 log_frames)
         elif log_frames:
             # frames exist but none could be copied this tick — readers
             # pin even the prefix; PASSIVE skips, the next tick retries.
             # Expected under sustained read pressure, never fatal.
             log.info(
-                "wal_hygiene_skipped_busy wal_bytes=%d total_frames=%d "
-                "busy_flag=%d (readers pin the WAL; retry next tick)",
-                wal, log_frames, busy)
+                "wal_hygiene_skipped_busy mode=%s wal_bytes=%d "
+                "total_frames=%d busy_flag=%d (readers pin the WAL; retry next tick)",
+                mode, wal, log_frames, busy)
         return {"checked": True, "checkpointed": bool(copied),
                 "wal_bytes": wal, "busy": busy, "log": log_frames,
-                "checkpointed_frames": copied, "held_back": held_back}
+                "checkpointed_frames": copied, "held_back": held_back,
+                "mode": mode}
     except sqlite3.Error as exc:
         # fail-closed: locked/unreadable DB — logged, retried next tick
         log.warning("wal_hygiene_failed db=%s error=%s",
                     Path(db_path).name, exc)
         return {"checked": True, "checkpointed": False, "wal_bytes": wal,
                 "busy": -1, "log": -1, "checkpointed_frames": -1,
-                "held_back": -1}
+                "held_back": -1, "mode": "error"}
     finally:
         if conn is not None:
             try:
@@ -175,10 +205,12 @@ class WalHygieneWorker:
     def __init__(self, db_path: Path | str, *,
                  interval_s: float = DEFAULT_INTERVAL_S,
                  threshold_mb: float = DEFAULT_THRESHOLD_MB,
+                 hard_cap_mb: float = DEFAULT_HARD_CAP_MB,
                  log: logging.Logger | None = None):
         self._db_path = Path(db_path)
         self._interval_s = float(interval_s)
         self._threshold_mb = float(threshold_mb)
+        self._hard_cap_mb = float(hard_cap_mb)
         self._log = log or logger
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -188,7 +220,8 @@ class WalHygieneWorker:
         return passive_checkpoint_once(
             self._db_path, log=self._log,
             threshold_mb=self._threshold_mb,
-            busy_timeout_ms=DEFAULT_BUSY_TIMEOUT_MS)
+            busy_timeout_ms=DEFAULT_BUSY_TIMEOUT_MS,
+            hard_cap_mb=self._hard_cap_mb)
 
     def loop(self) -> None:
         import time
@@ -231,3 +264,13 @@ def env_threshold_mb(environ: dict | None = None) -> float:
                              str(DEFAULT_THRESHOLD_MB)))
     except (TypeError, ValueError):
         return DEFAULT_THRESHOLD_MB
+
+
+def env_hard_cap_mb(environ: dict | None = None) -> float:
+    """Resolved TRUNCATE-escalation cap from ``BLM_WAL_HYGIENE_HARD_CAP_MB``."""
+    env = os.environ if environ is None else environ
+    try:
+        return float(env.get("BLM_WAL_HYGIENE_HARD_CAP_MB",
+                             str(DEFAULT_HARD_CAP_MB)))
+    except (TypeError, ValueError):
+        return DEFAULT_HARD_CAP_MB

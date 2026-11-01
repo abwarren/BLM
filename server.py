@@ -65,6 +65,12 @@ WAL_HYGIENE_INTERVAL_S = float(
 #: below it the default wal_autocheckpoint is managing fine alone.
 WAL_HYGIENE_THRESHOLD_MB = float(
     os.environ.get("BLM_WAL_HYGIENE_THRESHOLD_MB", "256"))
+#: above this the hygiene pass ESCALATES from PASSIVE to TRUNCATE (2026-10-31:
+#: the WAL reached 14.25 GB because PASSIVE never gives space back — see
+#: blm_v4/wal_hygiene.py).  Bounded by busy_timeout: a busy pass reports and
+#: retries on the next cadence tick, it never stalls the box.
+WAL_HYGIENE_HARD_CAP_MB = float(
+    os.environ.get("BLM_WAL_HYGIENE_HARD_CAP_MB", "2048"))
 #: a live-flagged game with NO snapshot AND NO WS observation for this
 #: long has left the source's live board — its authoritative final state
 #: exists upstream, so reconcile it to ended.
@@ -521,12 +527,14 @@ def main() -> None:
             wal_hygiene_worker = WalHygieneWorker(
                 root / "blm_pokerbet.db",
                 interval_s=WAL_HYGIENE_INTERVAL_S,
-                threshold_mb=WAL_HYGIENE_THRESHOLD_MB)
+                threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
+                hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB)
             wal_hygiene_worker.start()
             app.state._wal_hygiene_worker = wal_hygiene_worker
             logger.info("wal_hygiene_worker_started",
                         interval_s=WAL_HYGIENE_INTERVAL_S,
-                        threshold_mb=WAL_HYGIENE_THRESHOLD_MB)
+                        threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
+                        hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB)
 
         # ── PACE REFERENCE worker (empty-live-data fix) ───────────────
         # Started early: its FIRST scan is the expensive one (the Q3
@@ -644,6 +652,20 @@ def main() -> None:
                     _live_games_for_betting._last_warn = now
                     logger.warning("betting_payload_unusable",
                                    games=len(games), error=_err)
+            else:
+                # UNIVERSE (operator directive 2026-10-31): the worker may only
+                # see the traded REGION.  Real-league fixtures share the
+                # "Betual NBA" section name and passed every gate leg — an R125
+                # KBL bet went out on 2026-10-31 — so the filter lives HERE, on
+                # the worker's only input, not in the six-leg chain (which the
+                # dashboard's BETTABLE badge and every test fixture share).
+                from blm_v4.trade_window import filter_tradeable_games
+                kept = filter_tradeable_games(games)
+                if len(kept) != len(games):
+                    logger.info("betting_payload_region_filtered",
+                                dropped=len(games) - len(kept),
+                                kept=len(kept))
+                games = kept
             with _betting_payload_lock:
                 _betting_payload_cache.update(at=time.monotonic(), games=games)
             return games
