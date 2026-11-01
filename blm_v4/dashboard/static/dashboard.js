@@ -142,6 +142,7 @@ const state = {
   modalGapText: null,      // cached SCORE − LINE readout across header re-renders
   modalZMeta: null,        // authoritative /pace-z payload block for the Z panel
   hideNonLive: true,       // default view: LIVE games only
+  windowOnly: true,        // default view: ONLY games inside the execution window (operator 2026-11-01)
   lastPayload: null,
   betting: null,
   checkpointFilter: "",
@@ -2724,6 +2725,14 @@ function renderCards(payload) {
   let games = (payload.games || []).filter(
     (g) => !state.filter || g.competition_slug === state.filter,
   );
+  // COHORT VIEW (operator directive 2026-11-01): display ONLY the games inside the
+  // execution window — the set Auto-Bet can actually take.  Usually empty between
+  // triggers; that is the honest state, not a discovery failure.  The verdict is the
+  // API's own under_alert_execution_window, the same one the executor gates on.
+  const preWindowCount = games.length;
+  if (state.windowOnly) {
+    games = games.filter((g) => (g.under_alert_execution_window || {}).in_window === true);
+  }
   games = games.filter((g) => {
     const a = g.under_alert || {}, q = g.under_alert_q3_break || {};
     const active = !!(a.active || q.active);
@@ -2749,6 +2758,11 @@ function renderCards(payload) {
     ? games.filter(isActuallyLive)
     : games;
   syncLiveToggle(games.length, visible.length);
+  if (state.windowOnly) {
+    const cnt = $("liveCount");
+    if (cnt) cnt.textContent =
+      `${visible.length} in execution window · ${preWindowCount - visible.length} outside`;
+  }
   const seen = new Set();
   for (const g of visible) {
     seen.add(g.game_id);
@@ -3956,6 +3970,14 @@ bindAlertReveal();
 $("filters").addEventListener("click", (ev) => {
   const btn = ev.target.closest(".filter");
   if (!btn) return;
+  if (btn.dataset.window !== undefined) {
+    state.windowOnly = !state.windowOnly;
+    btn.classList.toggle("active", state.windowOnly);
+    btn.dataset.window = state.windowOnly ? "on" : "off";
+    btn.textContent = state.windowOnly ? "IN WINDOW" : "ALL GAMES";
+    renderCards(state.lastPayload || { games: state.games });
+    return;
+  }
   if (btn.dataset.livefilter !== undefined) {
     state.hideNonLive = !state.hideNonLive;
     renderCards(state.lastPayload || { games: state.games });
@@ -4191,6 +4213,13 @@ function abStatusHTML(st) {
   const sw = $("abSwitch");
   sw.disabled = false;
   sw.checked = st.enabled === true;
+  const stopBtn = $("abStop");
+  if (stopBtn) {
+    stopBtn.disabled = false;
+    // the button is a persistent OFF; show it as inert when betting is already off
+    stopBtn.classList.toggle("is-off", st.enabled !== true);
+    stopBtn.textContent = st.enabled === true ? "\u25A0 STOP" : "\u25A0 STOPPED";
+  }
   $("abSwitchLabel").textContent =
     `AUTO BETTING: ${st.enabled ? "ON" : "OFF"}${st.dry_run ? " (DRY RUN)" : ""}`;
   const up = $("abUnitPrice");
@@ -4468,6 +4497,25 @@ $("abSwitch").addEventListener("change", async (ev) => {
     if (!resp.ok) console.warn("auto-betting switch refused", resp.status);
   } catch (_) {}
   refreshBettingStatus();
+});
+
+/* STOP — one click, persists the kill switch.  Same audited endpoint the switch
+   uses (POST /settings {auto_betting:"OFF"} -> betting_config row + a
+   `kill_switch` bet_audit row), so it survives a restart.  Capture keeps running. */
+const _stopBtn = $("abStop");
+if (_stopBtn) _stopBtn.addEventListener("click", async () => {
+  if (!window.confirm("STOP auto-betting?\n\nThis persists the kill switch — no bet fires until you switch it back on. Data capture keeps running.")) return;
+  _stopBtn.disabled = true;
+  try {
+    const resp = await fetch(`${BETTING_API}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_betting: "OFF" }),
+    });
+    if (!resp.ok) console.warn("STOP refused", resp.status);
+  } catch (_) {}
+  refreshBettingStatus();
+  setTimeout(refreshBettingStatus, 1200);   // re-read after the write lands
 });
 
 const _ladderSel = $("abLadder");
