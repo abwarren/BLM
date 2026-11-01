@@ -225,7 +225,8 @@ def _extract_teams(lines: list[str]) -> tuple[Optional[str], Optional[str]]:
     return (names[0] if names else None, names[1] if len(names) > 1 else None)
 
 
-def parse_event_view(text: str) -> dict[str, Any]:
+def parse_event_view(text: str, identity_html: Optional[str] = None
+                     ) -> dict[str, Any]:
     """Parse event-view page text into a market observation dict.
 
     Returns fields consumable by MarketObservation plus ``markets_json``
@@ -235,6 +236,14 @@ def parse_event_view(text: str) -> dict[str, Any]:
     the live sidebar (see the _RE_SELECTED_* note) when present; the
     legacy whole-page text heuristics remain as fallback for older
     deploys where no selected section renders.
+
+    ``identity_html`` is the markup of the selected game's sidebar
+    section (a single-element DOM read by the collector).  The rendered
+    body ``text`` inlines EVERY listed game's scoreboard — a live capture
+    held 46 sections with exactly one ``active`` — so the selected game's
+    teams, score and quarter scores are unambiguous ONLY in that section's
+    markup.  When supplied (and it carries the section) identity comes
+    from it; the market token stream always comes from ``text``.
     """
     lines = _lines(text)
     period, quarter, clock = parse_period_label(text)
@@ -247,14 +256,26 @@ def parse_event_view(text: str) -> dict[str, Any]:
     # the section is absent (older deploys), never on top of it.
     home_score = away_score = None
     quarter_scores: list[tuple[int, int]] = []
-    sel = _RE_SELECTED_SECTION.search(text)
+    # Identity source: the selected-section MARKUP when the caller supplies
+    # it (the rendered text carries no class attributes at all, so the
+    # section regex can never match there), else the legacy text scan.
+    sel = (_RE_SELECTED_SECTION.search(identity_html)
+           if identity_html else None)
+    if sel is None:
+        sel = _RE_SELECTED_SECTION.search(text)
     sel_body = sel.group("body") if sel else ""
     m = None
+    sb_from_section = False
     if sel_body:
         mi = _RE_SELECTED_INFO.search(sel_body)
         if mi:
             m = _RE_COMPACT_SCORE.search(mi.group(1))
-    if m is None:
+            sb_from_section = m is not None
+    if m is None and not sel_body:
+        # Legacy deploys ONLY: with no selected section the whole-page scan
+        # is the only source.  When a section IS present but carries no
+        # scoreboard, fail closed (NULL) rather than import another listed
+        # game's numbers into this fixture's identity.
         m = _RE_COMPACT_SCORE.search(text)
     if m:
         home_score = int(m.group(1))
@@ -262,7 +283,9 @@ def parse_event_view(text: str) -> dict[str, Any]:
         quarter_scores = [
             (int(a), int(b)) for a, b in _RE_QUARTER_SCORES.findall(m.group(3))
         ]
-        if not clock:
+        if m.group(4) and (sb_from_section or not clock):
+            # the selected section's OWN scoreboard clock is authoritative:
+            # ``text`` may have matched another listed game's clock first.
             clock = m.group(4)
 
     # ── Team names: selected section first, legacy fallback ─────
@@ -271,10 +294,13 @@ def parse_event_view(text: str) -> dict[str, Any]:
         teams = _RE_TEAM_BLOCK.findall(sel_body)
         if len(teams) >= 2:
             home_team, away_team = teams[0][0].strip(), teams[1][0].strip()
-        if not period:
-            pm = _RE_SELECTED_PART.search(sel_body)
-            if pm and _RE_PERIOD.match(pm.group(1).strip()):
-                period = pm.group(1).strip()
+        pm = _RE_SELECTED_PART.search(sel_body)
+        if pm and _RE_PERIOD.match(pm.group(1).strip()):
+            # The selected section is authoritative for THIS game's
+            # period: ``text`` may have matched another listed game.
+            period = pm.group(1).strip()
+            qm = re.match(r"(\d)", period)
+            quarter = int(qm.group(1)) if qm else quarter
     if not (home_team and away_team):
         for k, l in enumerate(lines[:30]):
             if _RE_CLOCK.match(l):
