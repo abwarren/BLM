@@ -48,8 +48,12 @@ from blm_v4.execution.adapter import (
     SelectionResolver,
 )
 from blm_v4.execution.pokerbet.browser import CdpBrowser
+from blm_v4.execution.pokerbet import balance as _balance
 from blm_v4.execution.pokerbet import session as session_mod
 from blm_v4.execution.pokerbet.latency import LatencyTrace
+
+import logging as _logging
+logger = _logging.getLogger(__name__)
 
 # ── selectors (the ONLY DOM coupling in BLM) ──────────────────────────
 # READ-PATH selectors are LIVE-VERIFIED (2026-10-05) against a real
@@ -890,19 +894,55 @@ class PokerBetDomAdapter(SelectionResolver):
         self._pending_legs = []
 
     def read_balance(self) -> Optional[float]:
-        """The signed-in account balance shown in the header (decimal), or None
-        when it cannot be read.  R5 (operator directive 2026-10-06)."""
+        """The signed-in account balance, or None when it cannot be PROVEN.
+
+        R5 (operator directive 2026-10-06) lets the executor stake the whole
+        balance when it is below the unit, so a wrong number here is a real
+        stake: measured 2026-10-30 the header produced R0.06, R93.47, R125.89
+        and R150.57 within two hours with no settled bets, and a phantom R0.06
+        became a real R0.06 bet.
+
+        Three samples, ~250ms apart, and the decision is made by
+        ``balance.decide``: two agreeing reads, or three when the value moved
+        more than 50% away from the last good one.  Anything else returns None
+        and the caller refuses to size a bet on it.
+        """
         if self._page is None:
             return None
-        try:
-            el = self._page.locator(".balanceAmount")
-            if el.count() == 0:
-                return None
-            txt = (el.first.inner_text() or "").replace(" ", "").replace(",", "")
-            m = _FLOAT_RE.search(txt)
-            return float(m.group(0)) if m else None
-        except Exception:
-            return None
+        samples: list = []
+        texts: list = []
+        for _ in range(_balance.SUSPECT_SAMPLES):
+            txt = None
+            try:
+                el = self._page.locator(".balanceAmount")
+                if el.count() == 0:
+                    samples.append(None)
+                    texts.append("<no element>")
+                else:
+                    txt = el.first.inner_text() or ""
+                    texts.append(txt.strip())
+                    samples.append(_balance.parse_balance_text(txt))
+            except Exception as exc:                      # page changed mid-read
+                texts.append(f"<error: {exc}>")
+                samples.append(None)
+            if (len(samples) >= _balance.AGREE_SAMPLES
+                    and samples[-1] is not None
+                    and samples[-1] == samples[-2]):
+                break
+            try:
+                self._page.wait_for_timeout(250)
+            except Exception:
+                break
+
+        value, reason = _balance.decide(samples, getattr(self, "_last_good_balance", None))
+        if value is not None:
+            self._last_good_balance = value
+        elif reason not in ("unreadable", "disagreement",) or any(s is not None for s in samples):
+            # a disagreement or a suspect jump is worth a log line: it is the
+            # difference between "the page is slow" and "the selector is wrong"
+            logger.warning("balance read refused: %s samples=%s raw=%s",
+                           reason, _balance.describe(samples), texts[-1:])
+        return value
 
     def parse_betslip_text(self, text: Optional[str]) -> list[dict]:
         """Tolerant betslip parse → [{event, market, position, line,
