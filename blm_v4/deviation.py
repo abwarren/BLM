@@ -537,21 +537,46 @@ class DeviationEngine:
             "residual_calculations": residual_calculations,
         }
 
-    def refresh_all(self) -> dict[str, Any]:
+    def refresh_all(self, *, gap_s: float = 0.0, max_s: float = 0.0,
+                    progress: Optional[Any] = None) -> dict[str, Any]:
         """Backfill / reconcile every game that has trajectory rows
         (idempotent).  Called once at collector start so residuals for
         already-stored clean observations enter the benchmark
-        immediately; per-game refreshes keep it current afterwards."""
+        immediately; per-game refreshes keep it current afterwards.
+
+        ``gap_s`` sleeps between games and ``max_s`` bounds the pass — both
+        default to 0, which is the previous behaviour exactly.  PACING EXISTS
+        BECAUSE THIS PASS RE-RUNS AT EVERY COLLECTOR START: back-to-back
+        per-game reads hold the shared clean-metrics store continuously, and a
+        lock waiter (the fast tick's per-snapshot ``_last_valid``) can then be
+        starved past the watchdog deadline.  Measured 2026-11-01 20:45: the
+        tick hung 80 s inside ``_last_valid``, the watchdog tripped, systemd
+        restarted the unit, and the restart began the same pass again.
+        """
+        started = time.perf_counter()
         total_added = 0
         total_existing = 0
         games = 0
+        truncated = False
         for gid in self.store.game_ids_with_projections():
             stats = self.refresh_game(gid)
             games += 1
             total_added += stats["added"]
             total_existing += stats["existing"]
+            if progress is not None and games % 100 == 0:
+                try:
+                    progress(games, total_added, total_existing)
+                except Exception:
+                    pass
+            if max_s and (time.perf_counter() - started) >= max_s:
+                truncated = True
+                break
+            if gap_s:
+                time.sleep(gap_s)
         return {
             "games": games,
             "added": total_added,
             "existing": total_existing,
+            "truncated": truncated,
+            "elapsed_s": round(time.perf_counter() - started, 1),
         }
