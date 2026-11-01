@@ -60,8 +60,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
+from blm_v4.bet_result_priority import pending_bet_game_ids, priority_order_sql
 from blm_v4.results_fetcher import (
     PlaywrightResultsFetcher,
     ResultsFetcher,
@@ -404,6 +405,7 @@ class ResultReconciler:
                  max_attempts: int = 3,
                  batch_limit: int = 25,
                  feed_db_path: Optional[Path | str] = _FEED_UNSET,
+                 betting_db_path: Optional[Path | str] = None,
                  log: Optional[logging.Logger] = None):
         self._db_path = Path(db_path)
         # The COLLECTOR's own observations — the second witness that can
@@ -416,6 +418,9 @@ class ResultReconciler:
             # explicit None/"" DISABLES the guard (tests, no-feed deployments)
             self._feed_db = Path(feed_db_path) if feed_db_path else None
         self._fetcher = fetcher
+        #: the bet LEDGER — read-only, only to learn which games carry an open
+        #: bet so those candidates sort first (None = no priority, prior order).
+        self._betting_db = Path(betting_db_path) if betting_db_path else None
         # The authoritative result source (blm_v4.swarm_results): the feed
         # that BACKS the results page.  Preferred over any DOM path because
         # it matches game_id exactly and returns a structured score line.
@@ -480,7 +485,8 @@ class ResultReconciler:
         return n
 
     # ── candidates (directive §1) ─────────────────────────────────
-    def candidate_games(self, conn: sqlite3.Connection) -> list[dict]:
+    def candidate_games(self, conn: sqlite3.Connection,
+                        priority_ids: Optional[Sequence[str]] = None) -> list[dict]:
         """Games needing reconciliation — the directive's scan set.
 
         Candidates are games (any status) whose stored result is not
@@ -504,7 +510,16 @@ class ResultReconciler:
         either (directive 2026-10-12): its result is not yet knowable —
         the game may still be scoring — and it must not burn an attempt
         while live (see the terminal gate below).
+
+        ``priority_ids`` (game ids carrying a PLACED bet, from
+        ``blm_v4.bet_result_priority.pending_bet_game_ids``) sort FIRST, so the
+        fetch that recovers a bet's final is spent before the general backlog:
+        the win ladder cannot advance until that game carries an OK result.
+        Ordering only — the candidate predicate and the batch bound are
+        unchanged, and an empty list is byte-identical to the previous order.
         """
+        order_sql, order_params = priority_order_sql(
+            "g.source_game_id", "g.last_seen_at DESC", priority_ids or ())
         rows = conn.execute(
             """
             SELECT g.source_game_id,
@@ -546,10 +561,10 @@ class ResultReconciler:
                                 ('00:00', '0:00')))
                     AND (s2.home_score IS NOT NULL
                          OR s2.away_score IS NOT NULL))
-            ORDER BY g.last_seen_at DESC
+            ORDER BY __ORDER__
             LIMIT ?
-            """,
-            (self._max_attempts, self._batch_limit),
+            """.replace("__ORDER__", order_sql),
+            (self._max_attempts, *order_params, self._batch_limit),
         ).fetchall()
         # PREMATURE-SETTLEMENT GATE (directive 2026-10-12).  A game whose
         # snapshot stream is still FRESH is not even returned, so it is not
@@ -774,7 +789,9 @@ class ResultReconciler:
         try:
             conn = self._connect()
             try:
-                candidates = self.candidate_games(conn)
+                candidates = self.candidate_games(
+                    conn,
+                    pending_bet_game_ids(self._betting_db))
                 self._attach_history_bounds(conn, candidates)
             finally:
                 conn.close()
@@ -1503,7 +1520,8 @@ class ResultReconcilerWorker:
                  log: Optional[logging.Logger] = None,
                  fetcher: Optional[ResultsFetcher] = None,
                  swarm: Optional[Any] = None,
-                 use_swarm: bool = False):
+                 use_swarm: bool = False,
+                 betting_db_path: Optional[Path | str] = None):
         self._db_path = Path(db_path)
         self._interval_s = float(interval_s)
         self._mark_batch = int(mark_batch)
@@ -1525,7 +1543,8 @@ class ResultReconcilerWorker:
         self._swarm = swarm
         self._reconciler = ResultReconciler(
             self._db_path, fetcher=fetcher, swarm=swarm,
-            batch_limit=batch_limit, log=self._log)
+            batch_limit=batch_limit, log=self._log,
+            betting_db_path=betting_db_path)
 
     @property
     def reconciler(self) -> ResultReconciler:
