@@ -65,6 +65,19 @@ WAL_HYGIENE_INTERVAL_S = float(
 #: below it the default wal_autocheckpoint is managing fine alone.
 WAL_HYGIENE_THRESHOLD_MB = float(
     os.environ.get("BLM_WAL_HYGIENE_THRESHOLD_MB", "256"))
+#: above this the hygiene pass ESCALATES from PASSIVE to TRUNCATE — PASSIVE
+#: folds frames but NEVER gives the file back, so a PASSIVE-only janitor cannot
+#: bound the WAL by construction (2026-10-02: 30.8 GB; 2026-11-01: 157 MB was
+#: already enough to make a persistence burst cost 140 s and trip the collector
+#: watchdog).  2026-11-02: this wiring was LOST when the trunk's server.py won
+#: the merge and the janitor went back to PASSIVE-only — the WAL reached 233 MB
+#: with zero hygiene events in the journal.
+WAL_HYGIENE_HARD_CAP_MB = float(
+    os.environ.get("BLM_WAL_HYGIENE_HARD_CAP_MB", "2048"))
+#: HARD ALERT bound: a WAL past this logs ``wal_hygiene_alert`` with its size,
+#: far below the escalation cap, so growth is visible in the journal early.
+WAL_HYGIENE_ALERT_MB = float(
+    os.environ.get("BLM_WAL_HYGIENE_ALERT_MB", "256"))
 #: a live-flagged game with NO snapshot AND NO WS observation for this
 #: long has left the source's live board — its authoritative final state
 #: exists upstream, so reconcile it to ended.
@@ -449,12 +462,16 @@ def main() -> None:
             wal_hygiene_worker = WalHygieneWorker(
                 root / "blm_pokerbet.db",
                 interval_s=WAL_HYGIENE_INTERVAL_S,
-                threshold_mb=WAL_HYGIENE_THRESHOLD_MB)
+                threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
+                hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB,
+                alert_mb=WAL_HYGIENE_ALERT_MB)
             wal_hygiene_worker.start()
             app.state._wal_hygiene_worker = wal_hygiene_worker
             logger.info("wal_hygiene_worker_started",
                         interval_s=WAL_HYGIENE_INTERVAL_S,
-                        threshold_mb=WAL_HYGIENE_THRESHOLD_MB)
+                        threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
+                        hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB,
+                        alert_mb=WAL_HYGIENE_ALERT_MB)
 
         # ── PACE REFERENCE worker (empty-live-data fix) ───────────────
         # Started early: its FIRST scan is the expensive one (the Q3
