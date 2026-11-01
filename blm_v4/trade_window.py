@@ -658,3 +658,71 @@ TRADE_MIN_PACE_RATIO = _env_float("TRADE_MIN_PACE_RATIO", TRADE_MIN_PACE_RATIO)
 SHORTFALL_MARGIN = _env_float("TRADE_SHORTFALL_MARGIN", SHORTFALL_MARGIN)
 TRADE_MAX_PROGRESS_PCT = _env_float("TRADE_MAX_PROGRESS_PCT",
                                     TRADE_MAX_PROGRESS_PCT)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TRADE UNIVERSE — the REGION leg (which feed a game belongs to).
+# Operator directive 2026-10-31: keep the engine on the Betual VIRTUAL feed;
+# stop it trading real-league fixtures that share the same section name.
+# ═══════════════════════════════════════════════════════════════════════
+#
+# The Betual family arrives under ONE display name ("Betual NBA") but two
+# regions, and only the region separates them:
+#
+#   region = "Virtual Matches"                    43,061 games  SIMULATED feed
+#   region = South Korea / North America / China
+#            / Europe / World                       192 games   REAL fixtures
+#
+# The classifier cannot tell them apart (`classify_competition` matches the
+# display name "Betual NBA" -> BETUAL_NBA), so a real KBL fixture was armed and
+# submitted twice (R100 on 2026-10-29, R125 on 2026-10-31).  The team-name
+# "... Virtual" marker is NOT a usable test: it exists on 9,921 of 43,061
+# virtual-region games and NONE of the October ones.
+#
+# FAIL DIRECTION — INVERTED versus the competition EXCLUSION leg: this is a
+# positive membership requirement, so an UNKNOWN region is refused
+# (``region_not_traded``).  The collector always writes ``region`` for a game it
+# captures, so absence means the payload lost the field, and a lost universe
+# field must not license a trade.  (Contrast: an absent competition SLUG is not
+# evidence of exclusion, which is why that leg fails open.)
+#
+# Env: ``TRADE_ALLOWED_REGIONS`` (comma-separated; default "Virtual Matches").
+# Empty value = an empty set = every regionless game is still allowed, nothing
+# with a known region is — refuse-nothing is NOT expressible here by design.
+TRADE_ALLOWED_REGIONS_DEFAULT = "Virtual Matches"
+REGION_NOT_TRADED = "region_not_traded"
+
+
+def _normalise_region(value) -> str:
+    """``"Virtual%20Matches"`` / ``"virtual matches"`` -> ``"virtual matches"``."""
+    text = str(value or "").replace("%20", " ").replace("+", " ")
+    return " ".join(text.split()).lower()
+
+
+TRADE_ALLOWED_REGIONS = frozenset(
+    _normalise_region(part)
+    for part in _env_list("TRADE_ALLOWED_REGIONS", TRADE_ALLOWED_REGIONS_DEFAULT))
+
+
+def trade_region_reason(region) -> Optional[str]:
+    """``None`` when the game belongs to a traded region — else REGION_NOT_TRADED.
+
+    Normalises percent-encoding and case, so ``Virtual%20Matches`` (the value
+    the collector stores) and ``Virtual Matches`` agree.
+    """
+    normalised = _normalise_region(region)
+    if not normalised:
+        return REGION_NOT_TRADED
+    return None if normalised in TRADE_ALLOWED_REGIONS else REGION_NOT_TRADED
+
+
+def filter_tradeable_games(games) -> list:
+    """Drop every game whose region puts it outside the traded universe.
+
+    The ONE place the universe is enforced for the betting worker: the payload
+    it consumes is ``v4_live()["games"]``, so filtering here means a real-league
+    fixture can never be projected, armed or submitted — without touching the
+    six-leg chain or the dashboard surface.
+    """
+    return [game for game in games or []
+            if trade_region_reason((game or {}).get("region")) is None]
