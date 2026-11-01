@@ -510,6 +510,60 @@ def test_batch_limit_bounds_each_pass_and_backlog_drains(pipeline):
     assert len(_results(db)) == 7
 
 
+def test_lookback_window_keeps_a_stale_tail_from_jamming_the_slate(pipeline):
+    """A never-settleable old tail must not occupy the batch slots.
+
+    Production shape (2026-10-31): 30+ games from two months ago sit at
+    UNKNOWN/NEEDS_RECONCILIATION forever (3-snapshot histories can never
+    reach a final).  Oldest-first with `batch_limit=25` made every pass
+    serve those, so NO live game was ever reached — 2,941 verdicts in a
+    day, all for September, zero for the current slate, and the win
+    ladder could not advance because no OK result ever landed.
+
+    One recent game is enough to prove the discrimination: inside the
+    window it settles on the FIRST pass, and the 30 old ones stay
+    untouched.  Without the window this same call would burn all five
+    slots on the old tail and settle nothing.
+    """
+    db, snap, now, add = (pipeline["db"], pipeline["snap"],
+                          pipeline["now"], pipeline["add"])
+    old = now - timedelta(days=60)
+    for i in range(30):
+        gid = f"80{i:02d}"
+        add(gid, status="ended")
+        # three snapshots only -> _final_result can never reach OK
+        snap(gid, old - timedelta(minutes=30), 4, 2, 1, "05:00", 180.5)
+        snap(gid, old - timedelta(minutes=20), 30, 28, 2, "05:00", 180.5)
+        snap(gid, old - timedelta(minutes=10), 55, 52, 3, "05:00", 180.5)
+    # the stale tail is what `last_seen_at` orders on — age it explicitly
+    conn = sqlite3.connect(f"file:{db}", uri=True, timeout=30)
+    conn.execute(
+        "UPDATE games SET last_seen_at=? WHERE source_game_id LIKE '80%'",
+        (old.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),))
+    conn.commit()
+    conn.close()
+
+    # one recent game with a complete, provable history
+    add("9001", status="ended")
+    snap("9001", now - timedelta(minutes=55), 8, 6, 1, "09:00", 184.5)
+    snap("9001", now - timedelta(minutes=50), 20, 18, 1, "05:00", 184.5)
+    snap("9001", now - timedelta(minutes=40), 38, 36, 2, "05:00", TRIGGER)
+    snap("9001", now - timedelta(minutes=30), 55, 52, 3, "05:00", 189.5)
+    snap("9001", now - timedelta(minutes=10), 93, 93, 4, "00:00", 192.5)
+
+    stats = settle_once(db, batch_limit=5)
+    assert stats["checked"] == 1, stats          # the tail is out of window
+    assert stats["settled"] == 1, stats
+    res = _results(db)
+    assert set(res) == {"9001"}, sorted(res)     # old games never touched
+    assert res["9001"]["final_result_status"] == "OK"
+    assert res["9001"]["final_total"] == 186
+
+    # disabling the window restores the old (jam-prone) behaviour exactly
+    stats_off = settle_once(db, batch_limit=5, lookback_h=0)
+    assert stats_off["checked"] > 1, stats_off
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 9. THE 4-HOUR FULL-HISTORY SWEEP REMAINS UNCHANGED
 # ══════════════════════════════════════════════════════════════════════

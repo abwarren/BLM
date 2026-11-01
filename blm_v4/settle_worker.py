@@ -24,6 +24,15 @@ Conservation properties:
   * BOUNDED — at most ``batch_limit`` games per pass, oldest first; the
     pass is minutes-long-workload-free by construction (no scorecard,
     no model math), so the API event loop and the collector never starve.
+  * LIVE WINDOW — only games that ended within ``lookback_h`` hours
+    (default 48, env ``BLM_SETTLE_LOOKBACK_H``) are candidates.  This
+    worker's mandate is NEWLY finished games; the 4-hour full-history
+    sweep remains the owner of older history.  Without the window a
+    never-settleable tail (two-month-old rows whose history can never
+    reach OK) occupies every batch slot oldest-first and jams the queue
+    — measured 2026-10-31: 2,941 verdicts in one day, ALL of them for
+    September games, zero for the current slate, so live games never
+    reached game_results and the win ladder could not advance.
   * IDEMPOTENT — a game already holding an OK row is skipped; an
     INVALID verdict is final and never rescored (the sweep's own rule);
     the upsert targets the row's PRIMARY KEY (UNIQUE source_game_id), so
@@ -50,9 +59,10 @@ same batch limit — no unbounded fan-out.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -72,11 +82,26 @@ logger = logging.getLogger("blm_v4.settle_worker")
 DEFAULT_INTERVAL_S = 45.0
 #: per-pass game bound — the worker stays a small, read-mostly job
 DEFAULT_BATCH_LIMIT = 25
+#: candidate lookback window — only games that ENDED within this many hours
+#: are settled by the worker.  Its mandate is newly finished games; the
+#: 4-hour full-history sweep owns older history.  0 (or negative) disables
+#: the window and restores the unbounded oldest-first scan.
+DEFAULT_LOOKBACK_H = 48.0
+
+
+def _lookback_h() -> float:
+    """The candidate window in hours (env-overridable, fails back to 48)."""
+    try:
+        return float(os.environ.get("BLM_SETTLE_LOOKBACK_H",
+                                    DEFAULT_LOOKBACK_H))
+    except (TypeError, ValueError):
+        return DEFAULT_LOOKBACK_H
 
 
 def settle_once(db_path: Path | str, *,
                 log: logging.Logger | None = None,
-                batch_limit: int = DEFAULT_BATCH_LIMIT) -> dict:
+                batch_limit: int = DEFAULT_BATCH_LIMIT,
+                lookback_h: Optional[float] = None) -> dict:
     """One settlement pass over ``db_path`` — the worker's whole job.
 
     Returns ``{"checked": int, "settled": int, "unknown": int,
@@ -101,8 +126,10 @@ def settle_once(db_path: Path | str, *,
             conn.execute(
                 "ALTER TABLE game_results ADD COLUMN result_source TEXT")
         conn.commit()
-        # Candidates, bounded and oldest-first so a backlog drains
-        # predictably:
+        # Candidates, bounded, oldest-first so a backlog drains predictably,
+        # and WINDOWED to games that ended recently (see DEFAULT_LOOKBACK_H):
+        # an unbounded oldest-first scan lets a never-settleable tail occupy
+        # every slot forever and starves the live slate.
         #   (a) a newly ended game with NO game_results row at all,
         #   (b) an UNKNOWN row — re-verified every pass (the sweep's own
         #       M007-M8 rule), and
@@ -120,12 +147,17 @@ def settle_once(db_path: Path | str, *,
         #      the re-derivation then NULLed the verified final.  A
         #      disagreement is now flagged (see _settle_game), never
         #      settled over.
+        lookback = _lookback_h() if lookback_h is None else float(lookback_h)
+        cutoff = ("" if lookback <= 0 else
+                  (datetime.now(timezone.utc) - timedelta(hours=lookback))
+                  .strftime("%Y-%m-%dT%H:%M:%S"))
         rows = conn.execute(
             """SELECT g.id, g.source_game_id, g.classification
                FROM games g
                LEFT JOIN game_results r
                       ON r.source_game_id = g.source_game_id
                WHERE g.status = 'ended'
+                 AND (? <= 0 OR g.last_seen_at >= ?)
                  AND (r.source_game_id IS NULL
                       OR r.final_result_status = 'UNKNOWN'
                       OR r.final_result_status = 'NEEDS_RECONCILIATION'
@@ -138,7 +170,7 @@ def settle_once(db_path: Path | str, *,
                           AND COALESCE(r.final_result_status, '') = 'OK')
                ORDER BY g.last_seen_at ASC
                LIMIT ?""",
-            (batch_limit,)).fetchall()
+            (lookback, cutoff, batch_limit)).fetchall()
         stats = {"checked": 0, "settled": 0, "unknown": 0, "invalid": 0,
                  "skipped": 0}
         for g in rows:
