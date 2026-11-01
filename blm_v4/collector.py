@@ -3170,6 +3170,49 @@ class PokerBetCollector:
             page.wait_for_timeout(2000)
         except Exception:
             logger.error("expand sections failed:\n%s", traceback.format_exc())
+        self._log_panel_diag(page, None, "after_expand")
+
+    def _log_panel_diag(self, page, cls, where: str) -> None:
+        """Journal the panel tree's OWN labels (2026-10-31, throttled 60 s).
+
+        `_expand_target_sections` clicks headers by TEXT ('Basketball',
+        'World', 'Cyber Basketball', 'Virtual Matches', 'Betual NBA').  When
+        the site renames a node, nothing expands and the competition silently
+        vanishes from the board — which is exactly what the 2026-10-31
+        starvation looked like (board_diag: only CYBER_2K26 present, even
+        after navigating to the Betual competition URL).  This prints the
+        header texts and the section/row counts so the rename is visible
+        instead of inferred.  Read-only; `BLM_PANEL_DIAG=0` disables it.
+        """
+        try:
+            if os.environ.get("BLM_PANEL_DIAG", "1") == "0":
+                return
+            now = time.monotonic()
+            if now - getattr(self, "_panel_diag_at", 0.0) < 60.0:
+                return
+            self._panel_diag_at = now
+            diag = page.evaluate(
+                """() => {
+                    const clean = (s) => String(s || '')
+                        .split('\\n').join(' ').split('\\t').join(' ')
+                        .trim().slice(0, 40);
+                    return {
+                        heads: [...document.querySelectorAll('.sp-s-l-head-bc')]
+                            .map(h => clean(h.textContent)).slice(0, 25),
+                        titles: [...document.querySelectorAll('p.sp-s-l-h-title-bc')]
+                            .map(p => clean(p.textContent)).slice(0, 25),
+                        sections: document.querySelectorAll('.sp-sub-list-bc').length,
+                        rows: document.querySelectorAll('.market-game-section').length
+                    };
+                }""") or {}
+            logger.warning(
+                "panel_diag where=%s url=%s sections=%s rows=%s heads=[%s] titles=[%s]",
+                where, getattr(page, "url", "?"),
+                diag.get("sections"), diag.get("rows"),
+                " | ".join(diag.get("heads") or [])[:500] or "none",
+                " | ".join(diag.get("titles") or [])[:500] or "none")
+        except Exception:
+            logger.debug("panel_diag failed", exc_info=True)
 
     def _ensure_discovery_page(self, page: Page) -> None:
         """Land on a live page whose left panel renders all live games."""
@@ -3379,6 +3422,8 @@ class PokerBetCollector:
             comps = find_relevant_competitions(html)
         self._tick_stats["board_parse_ms"].append(
             time.monotonic() - t_board)
+        self._log_board_diag(comps)
+        self._maybe_rotate_for_missing_classes(page, comps)
         if not comps:
             logger.warning("no relevant competitions found — refreshing page")
             self._ensure_discovery_page(page)
@@ -4826,6 +4871,93 @@ class PokerBetCollector:
                     logger.error("slow return-to-lobby failed:\n%s",
                                  traceback.format_exc())
                     self._slow_page = None      # worker recreates it
+
+    def _log_board_diag(self, comps) -> None:
+        """Journal the PARSED board once a minute: what the panel really says.
+
+        2026-10-31: the collector sat at tracked=1 logging "BETUAL_NBA lobby
+        unreachable" with no way to see whether the section was missing from
+        the panel, parsed with zero games, or was filtered out by the parser.
+        One line a minute: competition, classification and game count each.
+        Read-only, throttled, `BLM_PANEL_DIAG=0` disables it.
+        """
+        try:
+            if os.environ.get("BLM_PANEL_DIAG", "1") == "0":
+                return
+            now = time.monotonic()
+            if now - getattr(self, "_board_diag_at", 0.0) < 60.0:
+                return
+            self._board_diag_at = now
+            parts = []
+            for c in comps or []:
+                cls = getattr(c, "classification", None)
+                parts.append(
+                    f"{getattr(cls, 'value', cls)}:"
+                    f"{(getattr(c, 'display_name', '') or '')[:28]}:"
+                    f"games={len(getattr(c, 'games', []) or [])}")
+            logger.warning("board_diag comps=%d [%s]", len(comps or []),
+                           " | ".join(parts)[:600] or "none")
+        except Exception:
+            logger.debug("board_diag failed", exc_info=True)
+
+    _ROTATE_COOLDOWN_S = 60.0
+
+    def _missing_discovery_classes(self, comps) -> list:
+        """Required classes with NO competition in the parsed board.
+
+        The parsed board is the universe the collector is supposed to trade.
+        A class that is absent from it is not "quiet" — it is unobserved.
+        The required list is the deployment's own (``DISCOVERY_COMPETITIONS``)
+        and falls back to the two basketball populations this pipeline exists
+        to collect, so the guard works on a tree that predates that attribute.
+        """
+        required = getattr(self, "DISCOVERY_COMPETITIONS", None) or (
+            Classification.CYBER_2K26, Classification.BETUAL_NBA)
+        return [c for c in required
+                if not any(getattr(x, "classification", None) is c
+                           for x in (comps or []))]
+
+    def _maybe_rotate_for_missing_classes(self, page, comps) -> list:
+        """Land on the lobby of a REQUIRED class that the board is missing.
+
+        2026-10-31 starvation: the board never went empty (Cyber always parsed
+        one game), so `_ensure_discovery_page()` — the only rotation, called
+        from the ``if not comps:`` branch — never ran.  The page stayed on the
+        Cyber event-view URL and the Betual section never rendered:
+        ``board_diag comps=1 [CYBER_2K26:…:games=1]``, ``tracked=1`` through
+        five restarts.
+
+        Delegating to `_ensure_discovery_page()` is NOT enough: it caches the
+        landing that carried ANY relevant competition (Cyber), so it re-picks
+        the same URL every time.  This navigates to the MISSING class's own
+        competition URL instead, which is the surface that renders its rows.
+
+        Cooldown per class (`_ROTATE_COOLDOWN_S`) so a genuinely dark
+        competition costs one navigation a minute, not one per tick, and a
+        failure is logged rather than raised into the tick.
+        """
+        missing = self._missing_discovery_classes(comps)
+        if not (comps and missing):
+            return missing
+        target_cls = missing[0]
+        now = time.monotonic()
+        cooldowns = getattr(self, "_rotate_at", None)
+        if cooldowns is None:
+            cooldowns = self._rotate_at = {}
+        if now - cooldowns.get(target_cls, 0.0) < self._ROTATE_COOLDOWN_S:
+            return missing
+        cooldowns[target_cls] = now
+        try:
+            url = competition_url(target_cls, self.comp_ids)
+            logger.warning(
+                "discovery rotation: board lacks %s — landing on %s",
+                getattr(target_cls, "value", target_cls), url)
+            if self._goto(page, url):
+                self._wait_panel(page)
+                self._expand_target_sections(page)
+        except Exception:
+            logger.warning("discovery rotation failed", exc_info=True)
+        return missing
 
     def _ensure_comp_lobby(self, page: Page, cls: Classification) -> bool:
         """Make sure ``page`` shows a live LOBBY containing rows for ``cls``.
