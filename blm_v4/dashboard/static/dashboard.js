@@ -2201,7 +2201,7 @@ function syncAudioButton() {
   btn.classList.toggle("on", on);
   btn.classList.toggle("locked", locked);
   btn.dataset.audio = on ? "on" : "off";
-  btn.textContent = on ? "AUDIO ON" : "AUDIO OFF";
+  btn.textContent = !on ? "AUDIO OFF" : (locked ? "AUDIO · CLICK" : "AUDIO ON");
   btn.setAttribute("aria-pressed", on ? "true" : "false");
   btn.title = !on ? "Alert audio off — click to enable"
     : locked ? "Alert audio on — click anywhere to activate sound"
@@ -3996,6 +3996,25 @@ $("audioToggle").addEventListener("click", () => {
     TRADABLE_ON = new Set();              // re-announce the current set
     TRADABLE_LAST = {};
     AB_SEEN_IDS = null;                   // re-seed silently (no ledger replay)
+    // CONFIRMATION TONE (operator report 2026-11-02: "I hear nothing").  The
+    // context resume() settles a tick after the gesture, so schedule just past
+    // it: one short tone proves the whole chain (gesture → resume → oscillator)
+    // works.  Without it, a silent dashboard is indistinguishable from a broken
+    // one until the next real alert — which can be hours away.
+    setTimeout(() => { if (audioEnabled()) playAlertCue("base"); }, 250);
+    // and if the browser still refuses, SAY so on the button instead of leaving
+    // the operator guessing at a silent page.
+    setTimeout(() => {
+      if (audioEnabled() && !audioReady) {
+        const b = $("audioToggle");
+        if (b) {
+          b.textContent = "AUDIO BLOCKED · CLICK";
+          b.classList.add("locked");
+          b.title = "The browser refused to start audio. Click the button again "
+            + "(a user gesture is required), and check the tab is not muted.";
+        }
+      }
+    }, 1500);
   }
   syncAudioButton();
 });
