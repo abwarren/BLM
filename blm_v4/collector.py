@@ -110,7 +110,7 @@ from blm_v4.discovery import (
     discover_competitions,
     find_relevant_competitions,
 )
-from blm_v4.event_parser import parse_event_view
+from blm_v4.event_parser import LADDER_MAX_ROW_GAP, parse_event_view
 from blm_v4.projection import clock_minutes, duration_for
 from blm_v4.models import (
     SOURCE_POKERBET,
@@ -809,6 +809,8 @@ class PokerBetCollector:
         # stable for the process lifetime.  Eliminates 25,000+ per-tick
         # SQL calls to get_game().
         self._game_id_cache: dict[str, int] = {}
+        #: per-game throttle for the REFUSED-ladder warning (2026-11-02)
+        self._ladder_split_warn: dict[str, float] = {}
         # Bounded per-cycle duration ring (fast-work / slow event-view /
         # WS-subscription pass + the explicit 5s-requirement metrics),
         # summarized into the state payload.  Lives here, not in start(),
@@ -4858,6 +4860,13 @@ class PokerBetCollector:
                     parsed.get("away_team"), self._event_view_failures,
                 )
                 return False
+            _tot = parsed.get("total") or {}
+            if _tot.get("selection_rule") == "ladder_split_ambiguous":
+                # operator directive 2026-11-02: the bookmaker left its opening
+                # line beneath the live line — no line is used, so no bet can be
+                # placed from this snapshot.  Journal it (throttled per game).
+                self._warn_ladder_split(game.source_game_id,
+                                        _tot.get("ladder_gap"))
             obs = MarketObservation(
                 source=SOURCE_POKERBET,
                 source_game_id=game.source_game_id,
@@ -5932,6 +5941,26 @@ class PokerBetCollector:
         if p in ("ended", "finished", "full time"):
             return "ended"
         return "live"
+
+    def _warn_ladder_split(self, source_game_id: str, gap) -> None:
+        """Journal a REFUSED total ladder once per game per 5 min.
+
+        Operator directive 2026-11-02: the bookmaker sometimes leaves the
+        opening line beneath the live line, and a reading whose rows are more
+        than LADDER_MAX_ROW_GAP apart must not produce a line at all.  The
+        refusal is silent by construction (no line → the gate refuses → no
+        bet), so this line is the only proof it happened — throttled because a
+        stale row can persist for most of a game.
+        """
+        now = time.monotonic()
+        last = self._ladder_split_warn.get(source_game_id, 0.0)
+        if now - last < 300.0:
+            return
+        self._ladder_split_warn[source_game_id] = now
+        logger.warning(
+            "total ladder SPLIT for %s: rows %s pts apart (> %.1f) — line "
+            "reading REFUSED, no bet can be placed on this snapshot",
+            source_game_id, gap, LADDER_MAX_ROW_GAP)
 
 
 def run_once(collector: PokerBetCollector, headless: bool = True, max_ticks: int = 1) -> dict:
