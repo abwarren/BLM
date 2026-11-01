@@ -255,6 +255,27 @@
     </details>
   </section>
 
+  <!-- ═══════════ AUTO-BET RESULTS — ONLY the candidates auto-bet FIRED on.
+       Directive 2026-11-01: this table shows the placed execution rows and nothing
+       else — not every fired alert, not every game.  The result is computed against
+       the LEDGER's own triggered line (the sealed line the bet was taken at, never
+       the live line).  Data comes from two EXISTING endpoints only:
+         GET /api/v4/betting/history   the executions
+         GET /api/v4/alert-outcomes    the settled final for each game id
+       No backend contract is added or changed. -->
+  <section class="alerts sec-collapsible" id="abResultsSection">
+    <details class="sec-details" open>
+    <summary class="alerts-head sec-summary">
+      <span class="alerts-title">AUTO-BET RESULTS</span>
+      <span class="muted alerts-sub" id="abResHead">placed candidates · UNDER / OVER / PUSH vs the sealed triggered line</span>
+    </summary>
+    <div class="sec-tools"><button id="abResRefresh" type="button">REFRESH</button></div>
+    <div class="alerts-body" id="abResList">
+      <div class="alerts-empty">No placed candidates yet</div>
+    </div>
+    </details>
+  </section>
+
   </div><!-- /#viewLive -->
 
   <!-- ═══════════ VIEW: EXPLORER — data/database visibility over the EXISTING
@@ -453,7 +474,7 @@
     </details>
   </footer>
 
-  <script src="/static/dashboard.js?v=6855974.11"></script>
+  <script src="/static/dashboard.js?v=6855974.12"></script>
   <script src="/static/stats.js?v=6855974.1"></script>
   <script src="/static/explorer.js?v=6855974.3"></script>
   <script src="/static/assistant.js?v=6855974.1"></script>

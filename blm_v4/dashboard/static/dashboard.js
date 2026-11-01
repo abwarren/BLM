@@ -4136,6 +4136,139 @@ function renderExecutionTrace() {
    entirely server-side.  Credential material never exists in this file. */
 const BETTING_API = "/api/v4/betting";
 
+/* ── AUTO-BET RESULTS (operator directive 2026-11-01) ────────────────────────
+   ONLY the candidates auto-bet actually FIRED on: execution rows the ledger holds
+   in a PLACED status.  FAILED / UNKNOWN / BLOCKED rows never moved money, so they
+   are excluded from the table (their count is named in the header, never mixed
+   into the totals).  This is deliberately NOT "every triggered alert" — the
+   operator asked for the bets and nothing else.
+
+   The RESULT is computed against the LEDGER's triggered line for that row — the
+   sealed line the bet was taken at — never the live line:
+       final <  line -> UNDER      final > line -> OVER
+       final == line -> PUSH       no settled final -> OPEN
+   Two EXISTING endpoints only, no backend change:
+       GET /api/v4/betting/history      the executions
+       GET /api/v4/alert-outcomes?ids=  the settled final per game (<=200 ids/call) */
+const AB_PLACED_STATUSES = new Set(["SUBMITTED", "ACCEPTED", "SETTLED", "PUSHED"]);
+const AB_FINAL_CACHE = new Map();          // game_id -> final_total (null = not settled)
+/* The ledger's `price` column sometimes carries the LINE instead of odds (documented
+   mapping defect: 55 of these rows all-time).  P&L on such a row would fabricate a
+   win of stake x (212.5 - 1), so any price outside a real decimal-odds window is
+   treated as UNKNOWN: the row still shows its RESULT, it just books no money. */
+const AB_PRICE_MIN = 1.0;
+const AB_PRICE_MAX = 5.0;
+
+function autoBetPriceOk(row) {
+  const p = Number(row && row.price);
+  return isFinite(p) && p > AB_PRICE_MIN && p <= AB_PRICE_MAX;
+}
+
+function autoBetResult(final, line) {
+  if (line == null || !isFinite(Number(line))) {
+    return { code: "NOLINE", word: "NO LINE", cls: "al-noline" };
+  }
+  if (final == null || !isFinite(Number(final))) {
+    return { code: "OPEN", word: "OPEN", cls: "al-pending" };
+  }
+  const f = Number(final); const l = Number(line);
+  if (f < l) return { code: "UNDER", word: "UNDER", cls: "al-under" };
+  if (f > l) return { code: "OVER", word: "OVER", cls: "al-over" };
+  return { code: "PUSH", word: "PUSH", cls: "al-push" };
+}
+
+function autoBetPnl(row, res) {
+  const stake = Number(row.stake_amount);
+  if (!isFinite(stake) || stake <= 0) return null;
+  if (res.code === "PUSH") return 0;
+  if (!autoBetPriceOk(row)) return null;      // price unreadable: no money booked
+  const price = Number(row.price);
+  if (res.code === "UNDER") return stake * (price - 1);
+  if (res.code === "OVER") return -stake;
+  return null;                        // OPEN / NO LINE: nothing to book yet
+}
+
+async function _abFinals(gameIds) {
+  const want = [...new Set(gameIds.map(String))].filter((g) => g && !AB_FINAL_CACHE.has(g));
+  for (let i = 0; i < want.length; i += 195) {
+    const chunk = want.slice(i, i + 195);
+    try {
+      const resp = await fetch(`/api/v4/alert-outcomes?ids=${encodeURIComponent(chunk.join(","))}`);
+      if (!resp.ok) continue;
+      const outs = ((await resp.json()) || {}).outcomes || {};
+      chunk.forEach((g) => {
+        const fin = outs[g] && outs[g].final_total != null ? Number(outs[g].final_total) : null;
+        AB_FINAL_CACHE.set(g, isFinite(fin) ? fin : null);
+      });
+    } catch (_) { /* a failed chunk leaves those rows OPEN — never invented */ }
+  }
+}
+
+async function loadAutoBetResults() {
+  const list = $("abResList");
+  const head = $("abResHead");
+  if (!list) return;
+  let execs = [];
+  try {
+    const resp = await fetch(`${BETTING_API}/history?limit=500`);
+    if (!resp.ok) return;
+    execs = ((await resp.json()) || {}).executions || [];
+  } catch (_) { return; }
+  const placed = execs.filter((r) =>
+    AB_PLACED_STATUSES.has(String(r.status || "").toUpperCase()));
+  const notPlaced = execs.length - placed.length;
+  if (!placed.length) {
+    if (head) head.textContent = "no placed candidates yet";
+    list.innerHTML = '<div class="alerts-empty">No placed candidates yet</div>';
+    return;
+  }
+  await _abFinals(placed.map((r) => r.game_id));
+  const rows = placed.map((r) => {
+    const fin = AB_FINAL_CACHE.has(String(r.game_id))
+      ? AB_FINAL_CACHE.get(String(r.game_id)) : null;
+    const res = autoBetResult(fin, r.line);
+    return { r, fin, res, pnl: autoBetPnl(r, res) };
+  });
+  const tally = { UNDER: 0, OVER: 0, PUSH: 0, OPEN: 0, NOLINE: 0 };
+  let net = 0; let staked = 0; let badprice = 0;
+  rows.forEach((x) => {
+    tally[x.res.code] = (tally[x.res.code] || 0) + 1;
+    if (x.pnl != null) { net += x.pnl; staked += Number(x.r.stake_amount) || 0; }
+    else if (x.res.code === "UNDER" || x.res.code === "OVER") {
+      if (!autoBetPriceOk(x.r)) badprice += 1;
+    }
+  });
+  if (head) {
+    head.textContent =
+      `${rows.length} fired · ${tally.OPEN} awaiting result`
+      + (tally.NOLINE ? ` · ${tally.NOLINE} unpriced (no triggered line)` : "")
+      + ` · ${tally.UNDER} UNDER · ${tally.OVER} OVER · ${tally.PUSH} PUSH · `
+      + `net ${net >= 0 ? "+" : "−"}R${Math.abs(net).toFixed(2)} on `
+      + `R${staked.toFixed(2)} staked`
+      + (badprice ? ` · ${badprice} settled row(s) with no readable price book no P&L` : "")
+      + (notPlaced ? ` · ${notPlaced} non-placed row(s) excluded` : "");
+  }
+  const t = (v) => (v == null || !isFinite(Number(v)) ? "–" : Number(v).toFixed(1));
+  list.innerHTML = rows.map(({ r, fin, res, pnl }) => {
+    const pnlTxt = pnl == null
+      ? "–" : `${pnl >= 0 ? "+" : "−"}R${Math.abs(pnl).toFixed(2)}`;
+    const priceTxt = autoBetPriceOk(r) ? Number(r.price).toFixed(2) : "?";
+    return `<div class="al-row ab-res ${res.cls}">
+      <div class="al-headline"><span class="al-outcome">${res.word}</span>
+        <span class="al-num">· final ${t(fin)} vs triggered ${t(r.line)}</span></div>
+      <div class="al-line">${esc(r.requested_at_utc || "")} · game ${esc(r.game_id)}`
+      + ` · cp ${esc(r.checkpoint || "–")} · ${esc(r.selection || "UNDER")} @ ${t(r.line)}`
+      + ` · price ${priceTxt}`
+      + ` · stake R${(Number(r.stake_amount) || 0).toFixed(2)}`
+      + ` · ${esc(r.status)} · ${pnlTxt}</div></div>`;
+  }).join("");
+}
+
+const _abResRefresh = $("abResRefresh");
+if (_abResRefresh) _abResRefresh.addEventListener("click", () => loadAutoBetResults());
+loadAutoBetResults();
+setInterval(loadAutoBetResults, 60000);
+
 function money(v) {
   return (v == null || !isFinite(v)) ? "–" : `R${Number(v).toFixed(2)}`;
 }
