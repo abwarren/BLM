@@ -88,6 +88,20 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 }
 .filter:hover { color: var(--text); border-color: var(--border2); }
 .filter.active { color: #04121a; background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
+/* IN WINDOW — the default board filter (operator directive 2026-11-01). Amber when
+   ON so an empty board reads as "nothing armed", not as a broken page. */
+.filter.filter-window { border-color: var(--amber); color: var(--amber); font-weight: 700; }
+.filter.filter-window.active { color: #1a1204; background: var(--amber); border-color: var(--amber); }
+/* STOP — persists the auto-bet kill switch. Solid red, unmissable, one click. */
+.ab-stop {
+  font-family: var(--mono); font-size: 12px; font-weight: 800; letter-spacing: 1px;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer;
+  color: #2b0505; background: var(--red); border: 1px solid var(--red);
+  box-shadow: 0 0 10px rgba(248, 113, 113, .45);
+}
+.ab-stop:hover:not(:disabled) { background: #ff8f8f; }
+.ab-stop:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
+.ab-stop.is-off { background: #2d0a0a; color: var(--red); border-color: #7f1d1d; box-shadow: none; }
 .filter-select { display:flex; align-items:center; gap:5px; color:var(--muted); font:10px var(--mono); letter-spacing:.6px; white-space:nowrap; }
 .filter-select select { background:var(--panel2); color:var(--text); border:1px solid var(--border2); border-radius:4px; padding:4px 6px; font:11px var(--mono); }
 

@@ -25,6 +25,11 @@
         <input type="checkbox" id="abSwitch" disabled>
         <span id="abSwitchLabel">AUTO BETTING: --</span>
       </label>
+      <!-- STOP: one click, persists the kill switch (betting_config.auto_betting_enabled
+           = false + a `kill_switch` bet_audit row), so it survives a server restart.
+           It does NOT stop the collector — capture keeps running. -->
+      <button class="ab-stop" id="abStop" type="button" disabled
+              title="STOP auto-betting — persists the kill switch (survives a restart). Capture keeps running.">&#9632; STOP</button>
       <span class="ab-top-sep" aria-hidden="true">|</span>
       <span class="ab-top-unit-wrap">
         <label class="ab-top-unit" for="abUnitPrice">UNIT:</label>
@@ -63,6 +68,11 @@
         <button class="filter" data-filter="cyber-basketball-2k26-matches">CYBER 2K26</button>
       </div>
       <div class="fgroup">
+        <!-- OPERATOR DIRECTIVE 2026-11-01: display ONLY games inside the execution
+             window — the set Auto-Bet can actually take.  Default ON, so the board
+             is empty between triggers; that is the honest state, not a fault. -->
+        <button class="filter filter-window active" id="windowToggle" data-window="on"
+                title="Display ONLY games inside the execution window (the live gate's armed band). Empty between triggers by design — click for ALL GAMES.">IN WINDOW</button>
         <button class="filter active" id="liveToggle" data-livefilter="live" title="Show ended/stale games too">SHOWING LIVE</button>
         <input type="search" id="globalSearch" class="global-search" placeholder="SEARCH teams · league · game id · exec / alert id" spellcheck="false" aria-label="Global search across live games">
       </div>
