@@ -7,7 +7,14 @@ and the dashboard's `tradable` + `bet placed` audio cues.
 Nothing here blocks trading. Each is either a decision owed by the operator or a
 guard that has not YET met its condition in production.
 
-## 1. "Only place bets of 1.7 or larger" — one reading needs confirming
+## 1. "Only place bets of 1.7 or larger" — RESOLVED as a flat floor
+
+Landed: the SIGNAL floor stays 1.60, every arm/place/re-validate seam requires
+1.70 (`TRADE_EXEC_MIN_PRICE`), and the default is now 1.70 itself so a deploy
+without the env var cannot trade lower.  The alternative reading ("take another
+rung at >= 1.70") was NOT built — it would change which line is bet.
+
+## 1b. "There will normally be more than 1 rung" — original note
 
 Implemented literally: a game priced 1.60-1.69 still ALERTS and shows on the
 board, and every execution seam (executor, fast lane, submission revalidation,
@@ -65,7 +72,22 @@ manual fold measured 157 MB → 0 MB in 0.0 s with `log=0 copied=0`. The automat
 path has not yet been observed crossing 128 MB since the restart; when it does,
 confirm the file falls rather than assuming the new cap works.
 
-## 6. Skill index is at its size limit
+## 6. Trunk reconciled — collector tree still diverged
+
+2026-11-02 `6a52c1c` merges production into `fix/price-mapping-2026-10-06` and is
+deployed: the trunk now carries the four re-landed legs (shortfall, competition
+exclusion, cohort naming, submission revalidation), the two-tier price floor and
+the dashboard cues, alongside the newer transport/board work.  The banded
+`min_price_for` is back to the measured table (1.48/1.39/1.28) and the price the
+trade uses is the operator's flat floor, not the band.
+
+STILL OPEN: the COLLECTOR tree (`/home/ubuntu/BLM`, branch `handoff-2026-09-07`)
+is a separate lineage and was 17 ahead / 10 behind at the same moment.  Its work
+is pushed to `ladder-split-2026-11-02` and running in production, but it has not
+been reconciled with `origin/handoff-2026-09-07`.  Reconcile it the same way
+before the next deploy of that tree.
+
+## 7. Skill index is at its size limit
 
 `blm-live-analytics-platform/SKILL.md` is 99,776 chars against a 100,000 hard
 limit, so a new reference (`references/total-line-and-price-floors.md`) could be
