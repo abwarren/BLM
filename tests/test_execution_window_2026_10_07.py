@@ -446,4 +446,4 @@ def test_the_changed_asset_is_cache_busted():
     """dashboard.js is served from disk; a stale browser copy would keep the
     old badge, so the ?v= must have moved with the file."""
     html = INDEX_HTML.read_text(encoding="utf-8")
-    assert "/static/dashboard.js?v=6855974.16" in html
+    assert "/static/dashboard.js?v=6855974.17" in html

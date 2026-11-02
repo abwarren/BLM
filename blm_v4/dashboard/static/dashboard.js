@@ -4239,6 +4239,17 @@ function abStatusHTML(st) {
   // nothing here can raise a limit or bypass a check.
   up.disabled = false;
   $("abSaveUnit").disabled = false;
+  // ── LADDER (win progression) ───────────────────────────────
+  // The select is a SERVER-OWNED value, so it is painted from this same status
+  // read and enabled under the SAME gate as the switch and the unit price.
+  // 2026-11-02 (operator: "why can't I switch my ladder on"): it shipped
+  // `disabled` in the markup with a change handler and NO paint at all, so it
+  // was permanently inert AND read "OFF" while the server had ladder_wins=4.
+  const lad = $("abLadder");
+  if (lad) {
+    if (document.activeElement !== lad) lad.value = String(st.ladder_wins ?? 0);
+    lad.disabled = false;
+  }
   const lim = [];
   if (st.max_stake_per_bet != null) lim.push(`max stake ${money(st.max_stake_per_bet)}`);
   if (st.max_bets_per_day != null) lim.push(`max ${st.max_bets_per_day} bets/day`);
@@ -4568,7 +4579,17 @@ if (_ladderSel) _ladderSel.addEventListener("change", async (ev) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ladder_wins: v }),
     });
-    if (!resp.ok) console.warn("ladder selection refused", resp.status);
+    if (!resp.ok) {
+      // never fail silently on a money control: say it, then let the repaint
+      // restore the server's value
+      console.warn("ladder selection refused", resp.status);
+      const st = $("abLadderState");
+      if (st) {
+        const prev = st.textContent;
+        st.textContent = `refused (HTTP ${resp.status})`;
+        setTimeout(() => { if (st.isConnected) st.textContent = prev; }, 4000);
+      }
+    }
   } catch (_) {}
   refreshBettingStatus();
 });
