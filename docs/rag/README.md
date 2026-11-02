@@ -16,6 +16,9 @@ This directory contains the canonical project and agent operating references.
 11. [Auto-Bet safety](10_AUTOBET_SAFETY.md)
 12. [RAG retrieval rules](11_RAG_RETRIEVAL_RULES.md)
 
+## Active research task
+- [Existing-strategy OVER cohort database research](../OVER_COHORT_DATABASE_RESEARCH.md) — read-only TEST analysis; no strategy retuning or production changes.
+
 ## Authority
 These documents define operating policy. They do not replace inspection of current code, configuration, schemas, runtime state or operator instructions. If a technical detail is unknown or may have changed, verify it in the repository and running environment.
 
