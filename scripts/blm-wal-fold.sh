@@ -92,6 +92,12 @@ if [ "$l1" -eq 0 ]; then
 fi
 
 # ── LEVEL 2: only for a WAL that is genuinely large — stop, retry, restart ───
+# A host without the collector (the EC2 test box runs BLM_DISABLE_COLLECTOR=1)
+# has nothing to pause, so level 2 is a no-op there rather than a failed stop.
+if ! systemctl --user cat "$UNIT" >/dev/null 2>&1; then
+  log "level 2 skipped — $UNIT is not installed on this host"
+  exit 0
+fi
 if [ "$(size_mb)" -lt "$FORCE_MB" ]; then
   log "level 1 lost the lock; wal $(size_mb)MB < force ${FORCE_MB}MB — leaving it, next tick retries"
   exit 0
