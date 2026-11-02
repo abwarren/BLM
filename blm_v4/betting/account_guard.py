@@ -23,22 +23,38 @@ from typing import Optional
 BLOCKED_REASON = "ACCOUNT_MISMATCH"
 
 
+def _configured_ids(provider) -> set:
+    """Every account id the operator permits (never the values of a secret)."""
+    ids = getattr(provider, "configured_account_ids", None)
+    if ids:
+        out = {str(v).strip() for v in ids if str(v).strip()}
+        if out:
+            return out
+    single = getattr(provider, "configured_account_id", None)
+    single = str(single).strip() if single is not None else ""
+    return {single} if single else set()
+
+
 def verify_account(provider) -> Optional[str]:
     """``None`` when the bet may proceed; a reason string when blocked.
 
-    Applies to any provider object.  Identity-requiring providers must
-    expose ``authenticated_account_id`` and ``configured_account_id``
-    (both non-empty and equal) or the bet is refused.
+    The operator may permit SEVERAL accounts (``BLM_EXPECTED_ACCOUNT_ID``
+    accepts a comma/space separated list): whichever account the browser is
+    signed into must be one of them.  Everything else about the guard is
+    unchanged and fail-closed — an unreadable authenticated id, or an empty
+    permitted set on an identity-requiring provider, blocks the bet.
     """
     if not getattr(provider, "requires_account_identity", False):
         return None
     auth = (getattr(provider, "authenticated_account_id", None) or "")
-    configured = (getattr(provider, "configured_account_id", None) or "")
-    auth, configured = str(auth).strip(), str(configured).strip()
-    if not auth or not configured:
+    auth = str(auth).strip()
+    permitted = _configured_ids(provider)
+    if not auth or not permitted:
         return ("account identity unverifiable: "
                 "authenticated or configured account missing")
-    if auth != configured:
-        return (f"authenticated account {auth!r} != "
-                f"configured account {configured!r}")
+    if auth not in permitted:
+        shown = ", ".join(sorted(permitted)) if len(permitted) <= 3 else \
+            f"{len(permitted)} permitted accounts"
+        return (f"authenticated account {auth!r} is not a configured "
+                f"account ({shown})")
     return None

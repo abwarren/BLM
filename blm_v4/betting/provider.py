@@ -413,8 +413,24 @@ class PokerBetBrowserProvider(BetProvider):
     ACCOUNT_ENV = "BLM_EXPECTED_ACCOUNT_ID"
 
     @property
+    def configured_account_ids(self) -> frozenset:
+        """EVERY permitted account id (operator may run more than one).
+
+        ``BLM_EXPECTED_ACCOUNT_ID`` accepts a comma/space/semicolon separated
+        list — "use either of my accounts".  The browser must be signed into
+        one of them; anything else still blocks the bet.  Empty when the
+        operator has declared nothing.
+        """
+        raw = os.environ.get(self.ACCOUNT_ENV) or ""
+        for sep in (",", ";", " "):
+            raw = raw.replace(sep, " ")
+        return frozenset(v for v in raw.split() if v)
+
+    @property
     def configured_account_id(self) -> Optional[str]:
-        return (os.environ.get(self.ACCOUNT_ENV) or "").strip() or None
+        """The FIRST permitted id (back-compat for single-account callers)."""
+        ids = sorted(self.configured_account_ids)
+        return ids[0] if ids else None
 
     @property
     def requires_account_identity(self) -> bool:
