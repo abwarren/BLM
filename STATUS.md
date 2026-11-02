@@ -3825,3 +3825,56 @@ ALSO NOTICED (pre-existing, needs an operator decision):
     kept submitting anyway.
   * `fast_lane_ready` logged `balance: null`, so the R5 whole-balance stake
     cap could not be verified at startup.
+
+## 2026-11-02 21:33 SAST — QUALIFYING-BET LEDGER LIVE + BALANCE CONFIRMED (runtime branch)
+
+Operator: "make sure autobet is ready to fire, confirm the account balance …
+that UI page can be replaced with the new executions going forward — each bet
+that qualifies should be listed in the UI whether a bet was placed or not."
+
+AUTOBET READINESS (verified live, 21:33 SAST):
+  auto_betting_enabled = true · unit_price = 50.0 · ladder_wins = 5 ·
+  dry_run = false (LIVE money) · BETTING_BROWSER_SUBMIT = true ·
+  gate: pace > 1.04 (strict) · shortfall >= 0.50 · price >= 1.60 ·
+  progress 75-92 · points >= 70 · cyber-2k26 excluded ·
+  betting_worker_started · fast_lane_started (3 s) · pipeline_started ·
+  /healthz 200 · zero tracebacks.  Lane passes right now: armed=0,
+  refused_top=pace (every live game is below the pace bar), i.e. it is armed
+  and waiting, not broken.
+
+ACCOUNT BALANCE — CONFIRMED: **R100.63**.
+  `fast_lane_ready {"provider":"pokerbet_browser","balance":100.63}` and the
+  follow-up `fast_lane_pass` lines carry the same value.  The earlier
+  `balance: null` was the PREVIOUS process (before the tab-selection fix in
+  provider._wire ran on a fresh browser); the current process reads it live.
+  Historic reference: the 20:16 betslip dump showed 78.83 / 58.83.
+
+QUALIFYING-BET LEDGER (new, on branch fix/price-mapping-2026-10-06, pushed):
+  * `bet_candidates` table (store.py) — one row per qualifying game moment
+    (dedupe: game + 5-point progress band + attempt), separate from
+    bet_executions, claims no idempotency key, authorises nothing.
+  * fast_lane records every armed game with outcome PLACED / NOT_PLACED and
+    the reason (already_placed, limit, dry_run, executor refusal, provider
+    error).  Fail-soft: a record error never stops the lane.
+  * `GET /api/v4/betting/candidates` (betting/api.py) serves them.
+  * status now carries `provider_balance` through a read-only accessor the
+    server wires to the lane (Playwright is thread-affine, so the API must
+    never build a second provider).
+  * dashboard: new QUALIFYING BETS section + ACCOUNT BALANCE row
+    (index.html, dashboard.js).
+  Tests: tests/test_bet_candidates_2026_11_02.py (5) + test_fast_lane +
+  test_fixture_context -> 23 passed.  Server restarted to load it; healthz 200.
+
+COMMIT / PUSH:
+  runtime worktree branch fix/price-mapping-2026-10-06 (shared .git with this
+  repo) — commit c9b4b8b-ish "Record every qualifying bet…", pushed to origin.
+  DELIBERATELY NOT COMMITTED: blm_v4/dashboard/static/index.html and
+  server.py, because they already carried ANOTHER session's uncommitted
+  health-monitor work (HEALTH tab, blm_v4/monitoring/, scripts/blm_health_monitor.py).
+  My hunks in those two files are on disk and live, and are the only reason
+  the balance row and the QUALIFYING BETS panel render — the next agent must
+  commit them together with that health work, not revert them.
+
+OPEN RISK unchanged: blm_pokerbet.db-wal ~935 MB (hard cap 128 MB), the
+pinning reader is the server process itself; a restart is the only thing that
+truncates it and each restart is I/O-slow because of it.
