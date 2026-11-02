@@ -20,6 +20,11 @@ set -uo pipefail
 THRESHOLD_MB="${BLM_WAL_FOLD_THRESHOLD_MB:-192}"
 DB="${BLM_WAL_FOLD_DB:-/home/ubuntu/BLM/blm_pokerbet.db}"
 BUSY_MS="${BLM_WAL_FOLD_BUSY_MS:-6000}"
+#: Level 1 is FREE or nothing: it either wins at once (measured 1 s) or it does
+#: not win at all, and a long wait there only widens the window in which the
+#: scorecard/settle writes can see `database is locked` (observed 2026-11-02
+#: 02:24: scorecard_run_failed at result_policy.flag_conflict).
+BUSY_MS_L1="${BLM_WAL_FOLD_BUSY_MS_L1:-2000}"
 ATTEMPTS="${BLM_WAL_FOLD_ATTEMPTS:-3}"
 #: Only above this size is a capture gap spent on the fold.  Below it the free
 #: attempt is repeated every tick instead (the scans give gaps often enough).
@@ -65,8 +70,8 @@ trap restore TERM INT
 # why the very same pass once succeeded in 0.0 s with the collector RUNNING.
 # So the cheap attempt is also the correct first one: it costs no capture at all
 # and wins whenever the box happens to be between scans.
-log "level 1 — single pass, nothing stopped"
-/usr/bin/python3 - "$DB" "$BUSY_MS" <<'PY'
+log "level 1 — single pass, nothing stopped (${BUSY_MS_L1}ms wait)"
+/usr/bin/python3 - "$DB" "$BUSY_MS_L1" <<'PY'
 import sys
 sys.path.insert(0, "/home/ubuntu/blm-fix-price-mapping")
 from blm_v4 import wal_hygiene as W
