@@ -6,24 +6,6 @@
   <title>BLM Command Center — PokerBet Live Analytics</title>
   <link rel="stylesheet" href="/static/styles.css?v=6855974.3">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-  <!-- SLATE view styles (additive; see /static/slate.js) -->
-  <style>
-    #viewSlate .sl-l { text-align: left; }
-    #viewSlate .sl-team { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #viewSlate .sl-bar { position: relative; width: 92px; height: 7px; border-radius: 4px;
-      background: rgba(255,255,255,.10); overflow: hidden; display: inline-block; vertical-align: middle; }
-    #viewSlate .sl-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 4px; }
-    #viewSlate .sl-bar span { position: absolute; top: -2px; bottom: -2px; width: 1.5px; background: rgba(255,255,255,.55); }
-    #viewSlate .sl-pill { font-size: 10.5px; font-weight: 650; padding: 1px 7px; border-radius: 999px;
-      letter-spacing: .04em; white-space: nowrap; }
-    #viewSlate .sl-armed { background: rgba(57,208,166,.22); color: #39d0a6; }
-    #viewSlate .sl-bad   { background: rgba(239,95,107,.18); color: #ef5f6b; }
-    #viewSlate .sl-wait  { background: rgba(242,181,68,.18); color: #f2b544; }
-    #viewSlate .sl-ok    { color: #39d0a6; }
-    #viewSlate tr.sl-hit td { background: rgba(57,208,166,.09); }
-    #viewSlate tr.sl-sep td { padding-top: 14px; font-size: 10.5px; letter-spacing: .11em;
-      text-transform: uppercase; color: rgba(255,255,255,.45); }
-  </style>
 </head>
 <body>
   <!-- ═══════════ HEADER ═══════════ -->
@@ -143,25 +125,12 @@
        stats. Every verdict here is the SERVED one (under_alert_exec_armed),
        composed by the same trade_window legs the executor enforces. -->
   <div class="view" id="viewSlate" hidden>
-    <section class="alerts">
-      <div class="st-head" style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">
-        <span class="st-title">AUTO-BET CANDIDATES</span>
-        <span class="muted" id="slateCounts">–</span>
-        <span class="tab-note muted" id="slateGate" style="margin-left:auto"></span>
-      </div>
-      <div class="st-scroll">
-        <table class="st-table" id="slateTable">
-          <thead><tr>
-            <th class="sl-l">game</th><th>prog</th><th class="sl-l">pace vs rung</th>
-            <th>ratio</th><th>short</th><th>price</th><th>cohort</th>
-            <th class="sl-l">verdict</th>
-          </tr></thead>
-          <tbody id="slateRows">
-            <tr><td class="sl-l muted" colspan="8" style="padding:16px 8px">loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <!-- The slate IS the page the operator asked for: the full table of live
+         games with every gate leg and its verdict.  Rendered from
+         /static/slate.html in an iframe so it keeps its own poll loop and
+         cannot be broken by the dashboard's render cycle. -->
+    <iframe id="slateFrame" src="/static/slate.html" title="Live slate"
+            style="width:100%;height:calc(100vh - 150px);min-height:620px;border:0;display:block;background:#0b0f14"></iframe>
   </div>
 
   <!-- ═══════════ VIEW: LIVE ═══════════ -->
@@ -527,7 +496,6 @@
   <script src="/static/stats.js?v=6855974.1"></script>
   <script src="/static/explorer.js?v=6855974.3"></script>
   <script src="/static/assistant.js?v=6855974.1"></script>
-  <script src="/static/slate.js?v=20261102.1"></script>
 </body>
 </html>
 

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BLM · LIVE SLATE → GATE</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#111823; --panel2:#0e141d; --line:#1e2a38;
+    --txt:#d7e3ef; --muted:#7c8fa5; --accent:#39d0a6; --amber:#f2b544;
+    --red:#ef5f6b; --blue:#4aa8ff; --grey:#55657a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{padding:14px 18px 10px;border-bottom:1px solid var(--line);
+         display:flex;flex-wrap:wrap;gap:14px;align-items:baseline}
+  h1{font-size:15px;margin:0;letter-spacing:.14em;font-weight:600}
+  .sub{color:var(--muted);font-size:11px;letter-spacing:.08em}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+  .chip{border:1px solid var(--line);background:var(--panel2);color:var(--muted);
+        padding:3px 8px;border-radius:3px;font-size:11px;letter-spacing:.05em}
+  .chip b{color:var(--txt);font-weight:600}
+  main{padding:12px 18px 40px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  thead th{position:sticky;top:0;background:var(--bg);color:var(--muted);
+           font-weight:500;text-align:right;padding:6px 8px;
+           border-bottom:1px solid var(--line);letter-spacing:.06em;font-size:10.5px;
+           text-transform:uppercase;white-space:nowrap}
+  thead th.l{text-align:left}
+  tbody td{padding:7px 8px;border-bottom:1px solid #131c27;text-align:right;
+           white-space:nowrap}
+  tbody td.l{text-align:left}
+  tbody tr:hover{background:#0f1722}
+  .team{color:var(--txt)}
+  .comp{color:var(--muted);font-size:10.5px}
+  .gid{color:var(--grey);font-size:10.5px}
+  .muted{color:var(--muted)}
+  .num{font-variant-numeric:tabular-nums}
+  /* band meter */
+  .meter{position:relative;height:14px;width:150px;background:#0a1017;
+         border:1px solid var(--line);border-radius:2px;overflow:hidden}
+  .meter .band{position:absolute;top:0;bottom:0;background:rgba(57,208,166,.14);
+               border-left:1px solid rgba(57,208,166,.35);
+               border-right:1px solid rgba(57,208,166,.35)}
+  .meter .fill{position:absolute;left:0;top:0;bottom:0;background:#24435b}
+  .meter .mark{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--accent)}
+  .meter .label{position:absolute;inset:0;display:flex;align-items:center;
+                justify-content:center;font-size:10px;color:#cfe0ee}
+  /* verdicts */
+  .pill{display:inline-block;padding:2px 7px;border-radius:3px;font-size:10.5px;
+        letter-spacing:.05em;border:1px solid transparent}
+  .p-armed{background:rgba(57,208,166,.16);color:var(--accent);border-color:rgba(57,208,166,.5)}
+  .p-close{background:rgba(242,181,68,.14);color:var(--amber);border-color:rgba(242,181,68,.45)}
+  .p-refuse{background:rgba(85,101,122,.14);color:var(--muted);border-color:var(--line)}
+  .p-excl{background:rgba(239,95,107,.10);color:#c98a92;border-color:rgba(239,95,107,.3)}
+  .p-below{background:rgba(74,168,255,.10);color:var(--blue);border-color:rgba(74,168,255,.3)}
+  tr.in-band td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+  tr.approach td:first-child{box-shadow:inset 3px 0 0 var(--blue)}
+  .empty{padding:22px;color:var(--muted);text-align:center}
+  .foot{margin-top:10px;color:var(--grey);font-size:10.5px}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+       background:var(--accent);margin-right:6px;vertical-align:middle}
+  .dot.stale{background:var(--amber)}
+  .dot.dead{background:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1><span class="dot" id="liveDot"></span>LIVE SLATE → AUTO-BET GATE</h1>
+    <div class="sub" id="stamp">connecting…</div>
+  </div>
+  <div class="chips" id="gateChips"></div>
+  <div class="chips" id="counts"></div>
+</header>
+<main>
+  <table>
+    <thead>
+      <tr>
+        <th class="l">Game</th>
+        <th>Band</th>
+        <th>Prog %</th>
+        <th>Pts</th>
+        <th>Req</th>
+        <th>Act</th>
+        <th>Ratio</th>
+        <th title="pace ratio minus the rung: negative = still short">To rung</th>
+        <th title="required pace minus actual pace; the gate wants >= +0.50">Gap</th>
+        <th>Price</th>
+        <th>Left m</th>
+        <th class="l">Verdict</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="foot" id="foot"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const fmt = (v, d = 2) => (v === null || v === undefined) ? "–" : Number(v).toFixed(d);
+
+function meter(progress, band){
+  const lo = band[0], hi = band[1];
+  const p = Math.max(0, Math.min(100, progress ?? 0));
+  return `<div class="meter" title="band ${lo}–${hi}%">
+    <div class="band" style="left:${lo}%;width:${hi-lo}%"></div>
+    <div class="fill" style="width:${p}%"></div>
+    <div class="mark" style="left:calc(${p}% - 1px)"></div>
+    <div class="label">${fmt(progress,1)}%</div>
+  </div>`;
+}
+
+function verdict(g, gate){
+  if (g.armed) return `<span class="pill p-armed">ARMED</span>`;
+  const legs = g.legs || {};
+  const excl = legs.competition && /excluded/i.test(legs.competition);
+  if (excl) return `<span class="pill p-excl">EXCLUDED</span>
+                    <span class="muted"> ${String(legs.competition).replace(/_/g,' ')}</span>`;
+  if (g.band === "below"){
+    const eta = fmt(g.eta_band_min,1);
+    if (g.on_track)
+      return `<span class="pill p-armed">ON TRACK</span>
+              <span class="muted"> pace clears — enters band in ${eta} min</span>`;
+    return `<span class="pill p-below">BELOW BAND</span>
+            <span class="muted"> in ${eta} min · pace ${fmt(g.ratio,2)} / needs ${(gate.pace_ratio).toFixed(2)}</span>`;
+  }
+  if (g.band === "above") return `<span class="pill p-refuse">PAST BAND</span>`;
+  const close = g.need !== null && g.need <= 0.10;
+  const pill = close ? `<span class="pill p-close">CLOSE</span>`
+                     : `<span class="pill p-refuse">REFUSED</span>`;
+  const why = Object.entries(legs)
+      .filter(([,v]) => v)
+      .map(([k,v]) => `${k}: ${String(v).replace(/_/g,' ')}`)
+      .join(" · ");
+  return pill + ` <span class="muted">${why}</span>`;
+}
+
+async function tick(){
+  try {
+    const r = await fetch(`/api/slate?lookback_s=120`, {cache:"no-store"});
+    const d = await r.json();
+    if (d.error){ $("#stamp").textContent = "ERROR " + d.error; return; }
+    const g0 = d.gate;
+    $("#gateChips").innerHTML = [
+      `BAND <b>${g0.band[0]}–${g0.band[1]}%</b>`,
+      `PACE <b>&gt;${g0.pace_ratio}</b>`,
+      `SHORTFALL <b>≥${g0.shortfall_margin}</b>`,
+      `PRICE <b>≥${g0.price_floor}</b>`,
+      `PTS <b>≥${g0.min_points}</b>`,
+      `EXCL <b>${(g0.excluded_competitions||[]).join(", ") || "–"}</b>`,
+    ].map(t => `<span class="chip">${t}</span>`).join("");
+    const c = d.counts;
+    $("#counts").innerHTML = [
+      `GAMES <b>${c.games}</b>`, `IN BAND <b>${c.in_band}</b>`,
+      `BELOW <b>${c.below}</b>`, `ABOVE <b>${c.above}</b>`,
+      `ARMED <b>${c.armed}</b>`,
+    ].map(t => `<span class="chip">${t}</span>`).join("");
+
+    const newest = d.games.reduce((m,g)=> Math.max(m, g.age_s), 0);
+    const dot = $("#liveDot");
+    dot.className = "dot" + (newest > 90 ? " dead" : newest > 30 ? " stale" : "");
+    $("#stamp").textContent = `updated ${new Date().toLocaleTimeString()}  ·  `
+      + `${d.games.length} live games  ·  newest capture ${fmt(newest,0)}s old`;
+
+    if (!d.games.length){
+      $("#rows").innerHTML = `<tr><td colspan="12" class="empty">no live captures in the last ${d.lookback_s}s</td></tr>`;
+      return;
+    }
+    $("#rows").innerHTML = d.games.map(g => {
+      const cls = g.armed ? "in-band" : (g.band === "below" ? (g.on_track ? "in-band" : "approach") : (g.band === "in" ? "in-band" : ""));
+      const need = g.need === null ? "–" : (g.need <= 0 ? "+" + fmt(-g.need,3) : "−" + fmt(g.need,3));
+      const needColor = g.need !== null && g.need <= 0 ? "var(--accent)" : (g.need !== null && g.need <= 0.10 ? "var(--amber)" : "inherit");
+      return `<tr class="${cls}">
+        <td class="l">
+          <div class="team">${g.home ?? "?"} <span class="muted">v</span> ${g.away ?? "?"}</div>
+          <div class="comp">${g.competition ?? "?"} · <span class="gid">${g.game_id}</span></div>
+        </td>
+        <td>${meter(g.progress_pct, [d.gate.band[0], d.gate.band[1]])}</td>
+        <td class="num">${fmt(g.progress_pct,1)}</td>
+        <td class="num">${g.total_points ?? "–"}</td>
+        <td class="num">${fmt(g.required_pace,2)}</td>
+        <td class="num">${fmt(g.actual_pace,2)}</td>
+        <td class="num"><b>${fmt(g.ratio,3)}</b></td>
+        <td class="num" style="color:${needColor}">${need}</td>
+        <td class="num">${fmt(g.shortfall,2)}</td>
+        <td class="num">${fmt(g.price,2)}</td>
+        <td class="num">${fmt(g.left_min,1)}</td>
+        <td class="l">${verdict(g, d.gate)}</td>
+      </tr>`;
+    }).join("");
+  } catch (e) {
+    $("#stamp").textContent = "fetch failed: " + e;
+  }
+}
+tick(); setInterval(tick, 3000);
+</script>
+</body>
+</html>

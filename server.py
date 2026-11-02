@@ -359,6 +359,73 @@ def main() -> None:
     from blm_v4.assistant.api import router as assistant_router
     app.include_router(assistant_router)
 
+    # ── LIVE SLATE + stake view (operator directive 2026-11-02) ───────
+    # The dashboard's SLATE tab renders /static/candidates.html, which reads
+    # these two routes.  Both are read-only and both report the ENGINE's own
+    # numbers: every leg comes from blm_v4.betting.fast_lane.legs, the same
+    # function the served under_alert_exec_armed flag composes, so the board
+    # cannot drift from what the executor enforces.
+    from blm_v4.betting.slate import cached_slate
+
+    @app.get("/api/slate", include_in_schema=False)
+    def api_slate(lookback_s: float = 120.0):
+        try:
+            return cached_slate(root / "blm_pokerbet.db",
+                                root / "blm_metrics_clean.db",
+                                lookback_s=lookback_s)
+        except Exception as exc:                  # never 500 the poll loop
+            return {"error": f"{type(exc).__name__}: {exc}"[:300]}
+
+    @app.get("/api/betting", include_in_schema=False)
+    def api_betting():
+        """Unit, ladder rung and the stake it implies, plus the last ledger row."""
+        import sqlite3 as _sqlite3
+        from blm_v4.betting import ladder as _ladder
+        from blm_v4.betting import settlement as _settle
+        out: dict = {"ok": False}
+        try:
+            unit = betting_store.get_unit_price()
+            depth = _ladder.depth(betting_store.get_config("ladder_wins", "0"))
+            rung = _settle.current_rung(betting_store.db_path, depth,
+                                        unit_price=unit) if depth else 1
+            units = _ladder.stake_units(rung, 1.0)
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+        last = None
+        today = {"bets": 0, "staked": 0.0}
+        try:
+            c = _sqlite3.connect(f"file:{root / 'blm_betting.db'}?mode=ro",
+                                 uri=True, timeout=10)
+            c.row_factory = _sqlite3.Row
+            try:
+                row = c.execute(
+                    "SELECT id, game_id, status, stake_amount, price, created_at,"
+                    "       provider_ref, error_code FROM bet_executions"
+                    " ORDER BY id DESC LIMIT 1").fetchone()
+                last = dict(row) if row is not None else None
+                t = c.execute(
+                    "SELECT COUNT(*) n, COALESCE(SUM(stake_amount),0) amt"
+                    "  FROM bet_executions WHERE day_utc = date('now')").fetchone()
+                today = {"bets": int(t["n"]), "staked": round(float(t["amt"]), 2)}
+            finally:
+                c.close()
+        except _sqlite3.Error:
+            pass
+        return {
+            "ok": True,
+            "auto_bet": betting_store.is_enabled(),
+            "unit_price": unit,
+            "ladder_depth": depth,
+            "ladder_mode": _ladder.mode(),
+            "ladder_factor": _ladder.factor(),
+            "rung": rung,
+            "stake_units": units,
+            "next_stake": round(units * unit, 2) if (units and unit) else None,
+            "max_stake_per_bet": betting_cfg.max_stake_per_bet,
+            "today": today,
+            "last": last,
+        }
+
 
     # ── Operator dashboard at the root ───────────────────────
     # http://<host>:2262/ is the live analytics terminal;
