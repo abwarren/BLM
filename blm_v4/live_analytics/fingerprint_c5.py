@@ -164,26 +164,30 @@ def q3_pace_reference(conn: sqlite3.Connection) -> dict[str, dict]:
 
     # The Q3 segment needs BOTH boundary cumulatives; a game missing
     # either quarter label contributes nothing (fail closed, not guessed).
+    # DRIVEN FROM game_results, not from a full-table GROUP BY over snapshots.
+    # The old plan aggregated EVERY snapshot row (millions) before joining, so
+    # the scan never finished inside the stats worker's budget on the live
+    # database (>5 min measured 2026-11-02).  Settled OK finals are a far
+    # smaller driver, and idx_snapshots_game_captured serves the per-game
+    # lookup, so the same numbers come out of an indexed plan.  The per-game
+    # MAX() is kept verbatim: within a segment the cumulative score only
+    # rises, so the segment maximum IS its end state.
     try:
         rows = conn.execute(
             "SELECT g.competition_slug AS competition, "
             "       g.classification   AS classification, "
-            "       s.q3_end           AS q3_end, "
-            "       s.q2_end           AS q2_end "
-            "FROM ("
-            "  SELECT source_game_id, "
-            "  MAX(CASE WHEN period_label='3rd Quarter' "
-            "      THEN home_score+away_score END) AS q3_end, "
-            "  MAX(CASE WHEN period_label='2nd Quarter' "
-            "      THEN home_score+away_score END) AS q2_end "
-            "  FROM snapshots GROUP BY source_game_id"
-            ") AS s "
-            "JOIN games g ON g.source_game_id = s.source_game_id "
-            "JOIN game_results gr ON gr.source_game_id = s.source_game_id "
+            "       MAX(CASE WHEN s.period_label='3rd Quarter' "
+            "           THEN s.home_score+s.away_score END) AS q3_end, "
+            "       MAX(CASE WHEN s.period_label='2nd Quarter' "
+            "           THEN s.home_score+s.away_score END) AS q2_end "
+            "FROM game_results gr "
+            "JOIN games g ON g.source_game_id = gr.source_game_id "
+            "JOIN snapshots s ON s.source_game_id = gr.source_game_id "
             "WHERE gr.final_result_status = 'OK' "
             "  AND gr.final_total IS NOT NULL AND gr.final_total > 0 "
             "  AND g.competition_slug IS NOT NULL "
-            "  AND g.competition_slug <> ''"
+            "  AND g.competition_slug <> '' "
+            "GROUP BY gr.source_game_id"
         ).fetchall()
     except sqlite3.Error:
         return {}

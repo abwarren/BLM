@@ -277,6 +277,10 @@ def main() -> None:
             root / "blm_metrics_clean.db",
             interval_s=STATS_INTERVAL_S,
             max_age_s=STATS_MAX_AGE_S,
+            # cohort = the LIVE TRADEABLE set (the engine's own legs), per the
+            # operator directive 2026-11-02.  Pass bet_path=... as well to
+            # narrow it further to games autobet actually fired on.
+            bet_path=None,
             log=logger)
         configure_stats(stats_worker)
         app.state._stats_worker = stats_worker

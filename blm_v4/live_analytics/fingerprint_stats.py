@@ -95,7 +95,9 @@ from blm_v4.live_analytics.under_fingerprints import (  # noqa: E402
 from blm_v4.projection import duration_for  # noqa: E402
 from blm_v4.trade_window import (  # noqa: E402
     EXEC_MIN_PROGRESS_PCT, EXEC_MAX_PROGRESS_PCT, MIN_SCORED_POINTS,
-    EXEC_MIN_PACE_RATIO, min_price_for)
+    EXEC_MIN_PACE_RATIO, min_price_for, exec_alert_reason,
+    exec_shortfall_reason, execution_window_reason, score_reason,
+    exec_price_reason, trade_competition_reason)
 
 #: The observation window the historical sweep used.  The single observation
 #: per game is the one CLOSEST to ALERT_PROGRESS_PCT inside it.  Kept at
@@ -379,6 +381,31 @@ def _dirty_key(prod_path: Path) -> tuple:
         conn.close()
 
 
+def _under_price_at(conn_c: sqlite3.Connection, gid: str,
+                    cap: Optional[str]) -> Optional[float]:
+    """The UNDER price recorded at the cohort observation (base or ``#iN`` id)."""
+    if cap is None:
+        return None
+    for pat in (gid, gid + "#%"):
+        try:
+            if pat.endswith("%"):
+                row = conn_c.execute(
+                    "SELECT under_price FROM clean_observations "
+                    " WHERE source_game_id LIKE ? AND captured_at = ? "
+                    " ORDER BY id LIMIT 1", (pat, cap)).fetchone()
+            else:
+                row = conn_c.execute(
+                    "SELECT under_price FROM clean_observations "
+                    " WHERE source_game_id = ? AND captured_at = ? LIMIT 1",
+                    (pat, cap)).fetchone()
+        except sqlite3.Error:
+            return None
+        price = _fin(row[0]) if row else None
+        if price is not None:
+            return price
+    return None
+
+
 def _under_price_ok(conn_c: sqlite3.Connection, gid: str, cap: Optional[str],
                     prog: Optional[float]) -> bool:
     """The traded class's PRICE FLOOR: the UNDER price at the cohort observation
@@ -416,8 +443,70 @@ def _under_price_ok(conn_c: sqlite3.Connection, gid: str, cap: Optional[str],
     return False
 
 
-def compute_stats(prod_path: Path, clean_path: Path) -> dict:
+def tradeable_refusal(slug, required, avg, actual, prog, points,
+                      price) -> Optional[str]:
+    """The first failing leg of the LIVE TRADEABLE set — the engine's own legs.
+
+    Operator directive 2026-11-02: "I want all the data on the stats to relate
+    to my live tradeable cohort."  These are the SAME functions the executor and
+    the fast lane AND together (``blm_v4.trade_window``), never a second
+    definition, so this cohort cannot drift from what can actually be bet:
+
+      competition exclusion · pace · shortfall · execution window · score ·
+      price floor
+
+    The move leg is omitted deliberately: it is off in production
+    (``TRADE_MOVE_FILTER_ENABLED=0``) and needs an open/league line this
+    per-observation record does not carry.
+
+    Returns ``None`` when the game is tradeable; otherwise the leg's reason.
+    """
+    checks = (
+        ("competition", trade_competition_reason(slug)),
+        ("pace", exec_alert_reason(required, avg, prog)),
+        ("shortfall", exec_shortfall_reason(required, actual)),
+        ("window", execution_window_reason(prog)),
+        ("score", score_reason(points)),
+        ("price", exec_price_reason(price)),
+    )
+    for name, reason in checks:
+        if reason is not None:
+            return f"{name}:{reason}"
+    return None
+
+
+def autobet_game_ids(bet_path: Path) -> set[str]:
+    """Base game ids that have an ``bet_executions`` row (an autobet fire).
+
+    The ledger stores BASE ids; the clean layer may carry instance siblings
+    (``31429632#i1``), so callers strip the suffix on their side too.  A
+    missing file or table yields an EMPTY set — the cohort then reads as empty
+    rather than falling back to the alert population, which would silently
+    answer a different question.
+    """
+    ids: set[str] = set()
+    try:
+        conn = _ro(bet_path)
+        try:
+            for r in conn.execute("SELECT DISTINCT game_id FROM bet_executions"):
+                gid = str(r[0] or "").split("#")[0]
+                if gid:
+                    ids.add(gid)
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return set()
+    return ids
+
+
+def compute_stats(prod_path: Path, clean_path: Path,
+                  bet_path: Optional[Path] = None) -> dict:
     """Build the whole stats payload.  Read-only; no gate is touched.
+
+    ``bet_path`` (the betting ledger, ``blm_betting.db``) narrows the cohort to
+    games AUTO-BET actually fired on — a game with no ``bet_executions`` row is
+    excluded.  ``None`` keeps the historical fired-ALERT cohort, so every
+    existing caller and test sees the old numbers.
 
     Raises ``sqlite3.Error`` if a database is unreadable — the caller decides
     how to degrade.  A game missing an operand is EXCLUDED and counted, never
@@ -425,6 +514,8 @@ def compute_stats(prod_path: Path, clean_path: Path) -> dict:
     """
     t0 = time.monotonic()
     conn_p, conn_c = _ro(prod_path), _ro(clean_path)
+    autobet: Optional[set[str]] = None if bet_path is None else \
+        autobet_game_ids(bet_path)
     try:
         # ── 1. settled finals (the authoritative outcome side) ──────────
         settled: dict[str, tuple] = {}
@@ -504,6 +595,8 @@ def compute_stats(prod_path: Path, clean_path: Path) -> dict:
         universe: dict[str, dict] = {}
         cohort: list[dict] = []
         for gid, (d, prog, el, tot, rem, line, r3, act, mkt, age, cap) in best.items():
+            if autobet is not None and str(gid).split("#")[0] not in autobet:
+                continue                 # not an auto-bet fire -> outside the cohort
             meta = settled.get(gid)
             if meta is None:
                 continue                 # unsettled -> cannot be scored
@@ -531,15 +624,11 @@ def compute_stats(prod_path: Path, clean_path: Path) -> dict:
                    "ceiling_min": ceiling,
                    "ratio": (req / (avg * REQUIRED_MARGIN) if avg else None)}
             universe[gid] = rec
-            # COHORT = the trigger CONDITION alone (progress + required-pace),
-            # deliberately WITHOUT the live-market eligibility gate — this is
-            # the population the audited parity artifact measured, so the
-            # headline rate ties back to it.  The actionable (LIVE-market)
-            # subset is reported separately in `actionable`.
-            if (prog >= EXEC_MIN_PROGRESS_PCT and prog <= EXEC_MAX_PROGRESS_PCT
-                    and tot >= MIN_SCORED_POINTS
-                    and req > avg * EXEC_MIN_PACE_RATIO
-                    and _under_price_ok(conn_c, gid, cap, prog)):
+            # COHORT = the LIVE TRADEABLE set (operator directive 2026-11-02):
+            # the engine's own legs, evaluated by its own functions.  The
+            # actionable (LIVE-market) subset is still reported separately.
+            if tradeable_refusal(slug, req, avg, act, prog, tot,
+                                 _under_price_at(conn_c, gid, cap)) is None:
                 cohort.append(rec)
 
         # ── 5. outcome + fingerprints for every cohort member ───────────
@@ -796,6 +885,8 @@ def compute_stats(prod_path: Path, clean_path: Path) -> dict:
             "as_of": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "computed_in_s": round(time.monotonic() - t0, 2),
             "window_rows_scanned": n_window_rows,
+            "cohort_source": ("tradeable" + ("+autobet" if autobet is not None
+                                              else "")),
             "cohort": {**overall,
                        "universe_settled": len(universe),
                        "settled_games_total": len(settled)},
@@ -877,7 +968,8 @@ _STATS_LOCK = threading.Lock()
 
 
 def get_stats(prod_path: Path, clean_path: Path, ttl_s: float = _STATS_TTL_S,
-              force: bool = False) -> dict:
+              force: bool = False,
+              bet_path: Optional[Path] = None) -> dict:
     """``compute_stats`` behind a TTL cache (SYNCHRONOUS).
 
     For tests and CLI use.  HTTP callers must use :class:`StatsWorker` instead:
@@ -886,9 +978,11 @@ def get_stats(prod_path: Path, clean_path: Path, ttl_s: float = _STATS_TTL_S,
 
     Concurrent first-callers are serialised by the lock so a burst of polls
     triggers ONE scan, not N.  A failed scan is NOT cached — the next call
-    retries rather than serving a stale error forever.
+    retries rather than serving a stale error forever.  ``bet_path`` is part of
+    the cache key: the autobet cohort and the alert cohort are different
+    payloads and must never be served from each other's entry.
     """
-    key = f"{prod_path}|{clean_path}"
+    key = f"{prod_path}|{clean_path}|{bet_path or '-'}"
     now = time.monotonic()
     hit = _STATS_CACHE.get(key)
     if hit and not force and (now - hit[0]) < ttl_s:
@@ -897,7 +991,7 @@ def get_stats(prod_path: Path, clean_path: Path, ttl_s: float = _STATS_TTL_S,
         hit = _STATS_CACHE.get(key)
         if hit and not force and (time.monotonic() - hit[0]) < ttl_s:
             return hit[1]                # another thread just computed it
-        stats = compute_stats(prod_path, clean_path)
+        stats = compute_stats(prod_path, clean_path, bet_path=bet_path)
         _STATS_CACHE[key] = (time.monotonic(), stats)
         return stats
 
@@ -927,9 +1021,13 @@ class StatsWorker:
 
     def __init__(self, prod_path: Path, clean_path: Path,
                  interval_s: float = 60.0, log: Any = None,
-                 max_age_s: float = 900.0) -> None:
+                 max_age_s: float = 900.0,
+                 bet_path: Optional[Path] = None) -> None:
         self._prod = prod_path
         self._clean = clean_path
+        #: the betting ledger.  When given, the cohort is the games AUTOBET
+        #: fired on (a bet_executions row), not the fired-alert population.
+        self._bet = bet_path
         self._interval_s = max(5.0, float(interval_s))
         #: Backstop: rescan anyway once the payload is this old, even if the
         #: dirty key has not moved.  Guarantees the tab can never sit on a
@@ -1004,7 +1102,8 @@ class StatsWorker:
         except sqlite3.Error:
             key = None
         try:
-            stats = compute_stats(self._prod, self._clean)
+            stats = compute_stats(self._prod, self._clean,
+                                  bet_path=self._bet)
         except Exception as exc:                      # noqa: BLE001
             self._failures += 1
             self._last_error = f"{type(exc).__name__}: {exc}"
