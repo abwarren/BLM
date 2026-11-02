@@ -2,6 +2,10 @@
 
 **MANDATORY: read docs/ENVIRONMENT_BOUNDARIES.md before doing any work.**
 
+**Step-by-step execution plan:** [docs/AGENT_WORKFLOW_TC_COHORT_STATS_AND_UI.md](AGENT_WORKFLOW_TC_COHORT_STATS_AND_UI.md). This workflow is mandatory for the cohort-statistics rebuild and dashboard cleanup; it defines phase gates, data lineage, denominator rules, UI filter/tab/spacing/scroll requirements, tests, and test-only deployment evidence.
+
+**MANDATORY commit/deploy cadence:** work in the verified EC2 test checkout only. Commit each coherent work unit after relevant tests pass, then deploy that exact validated commit to the isolated parallel test instance at `127.0.0.1:2263` and run smoke checks. Re-verify target identity before every deploy. Never deploy to production; do not replace the existing `:2262`/`:80` mirror. If a build is broken or unvalidated, fix/test before deploying it. Follow the detailed cadence in the workflow.
+
 ## Target environment order
 
 1. Implement and test this refactor on the designated EC2 test environment: http://13.247.58.81/login?next=/
@@ -33,13 +37,13 @@ Calculate all cohort memberships at the recorded firing time using only data ava
 - Add a fired-alert ledger showing firing-time inputs, tightest cohort, all qualifying cohorts, triggering line/price and final outcome.
 - Add cohort comparisons by actual competition, price, pace ratio, shortfall and progress.
 - Move C1/C2/C3/C5/R2 fingerprint output to collapsed Legacy Diagnostics; preserve legacy data.
-- Show Auto-Bet configuration read-only, including persisted selected cohort (currently reported as TC-X), enabled/dry-run/submission authorization state and missing risk limits. Do not mutate any of these values.
+- Add a one-click Auto-Bet cohort selector for all seven TC cohorts, persisted only in the isolated TEST configuration. Selection must never enable execution or change stakes/limits, kill switch, dry-run, or browser-submit authorization. Keep execution fail-closed and production untouched. See the mandatory UI workflow for acceptance tests.
 - Keep business logic in the backend; the frontend renders API output only.
 - Preserve the repository's frozen research and prospective-confirmation firewall.
 
 ## Hard prohibitions
 
-No production changes, deployment, service restart, migration, backfill, rescore writes, Auto-Bet changes, stake changes, kill-switch changes, browser submission, or live bets. Do not point test jobs at production DBs or services. Do not put secrets or production data into Git.
+No production changes, deployment, service restart, migration, backfill, or rescore writes. The explicitly scoped test-only Auto-Bet cohort-selector UI/config selection may be implemented and tested on EC2 test only; do not enable execution or change stakes/limits, kill switch, dry-run, browser-submit authorization, browser submission, or live bets. Do not point test jobs at production DBs or services. Do not put secrets or production data into Git.
 
 ## Required completion evidence
 
