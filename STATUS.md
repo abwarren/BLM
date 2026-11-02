@@ -3867,7 +3867,8 @@ QUALIFYING-BET LEDGER (new, on branch fix/price-mapping-2026-10-06, pushed):
 
 COMMIT / PUSH:
   runtime worktree branch fix/price-mapping-2026-10-06 (shared .git with this
-  repo) — commit c9b4b8b-ish "Record every qualifying bet…", pushed to origin.
+  repo) — commit 4190c8b "Record every qualifying bet, not only the placed ones",
+  pushed to origin (6414cf8..4190c8b).
   DELIBERATELY NOT COMMITTED: blm_v4/dashboard/static/index.html and
   server.py, because they already carried ANOTHER session's uncommitted
   health-monitor work (HEALTH tab, blm_v4/monitoring/, scripts/blm_health_monitor.py).
