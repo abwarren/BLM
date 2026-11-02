@@ -574,6 +574,42 @@ def main() -> None:
                     dry_run=betting_cfg.dry_run,
                     enabled=betting_store.is_enabled())
 
+        # ── FAST LANE: decide on FRESH rows, not the 90-190 s payload ──
+        # The poll worker above reads _live_games_for_betting(), whose build is
+        # cached (BLM_LIVE_CACHE_TTL_S), so a qualifying state that lasts a few
+        # seconds is invisible to it.  This lane re-applies the SAME trade legs
+        # to the newest clean_observations rows and hands the result to the
+        # SAME executor/store, so the gates, limits and one-bet-per-game rule
+        # are unchanged.  It builds its OWN provider on its own thread because
+        # Playwright sync objects are thread-affine.  FAST_LANE_ENABLED=0 off.
+        # Restored 2026-11-02: the trunk merge 6a52c1c took server.py from the
+        # production side and silently dropped this wiring; the worker module
+        # stayed on disk and never started.
+        if str(os.environ.get("FAST_LANE_ENABLED", "1")).strip().lower() \
+                not in ("0", "false", "no", "off", ""):
+            try:
+                from blm_v4.betting.fast_lane import FastLaneWorker
+                fast_lane = FastLaneWorker(
+                    prod_db_path=root / "blm_pokerbet.db",
+                    clean_db_path=root / "blm_metrics_clean.db",
+                    cfg=betting_cfg, store=betting_store,
+                    interval_s=float(
+                        os.environ.get("FAST_LANE_INTERVAL_S", "3")),
+                    lookback_s=float(
+                        os.environ.get("FAST_LANE_LOOKBACK_S", "120")),
+                    stale_attempts=int(
+                        os.environ.get("FAST_LANE_STALE_ATTEMPTS", "3")),
+                    log=logger.info)
+                fast_lane.start()
+                app.state._fast_lane = fast_lane
+                logger.info("fast_lane_started",
+                            interval_s=fast_lane.interval_s,
+                            lookback_s=fast_lane.lookback_s,
+                            stale_attempts=fast_lane.stale_attempts,
+                            dry_run=betting_cfg.dry_run)
+            except Exception:
+                logger.exception("fast_lane_start_failed")
+
         # ── LIVE ALERT STATS worker ───────────────────────────────────
         # Started LAST of the workers: it is read-only and its first scan is
         # a ~10 s full-history read, so it must never delay the pipeline
@@ -609,6 +645,9 @@ def main() -> None:
                 result_reconciler.reconciler._fetcher.close()
             except Exception:
                 pass
+        fast_lane = getattr(app.state, "_fast_lane", None)
+        if fast_lane is not None:
+            fast_lane.stop(timeout=2)
         betting_worker = getattr(app.state, "_betting_worker", None)
         if betting_worker is not None:
             betting_worker.stop(timeout=2)
