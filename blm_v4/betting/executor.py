@@ -333,6 +333,27 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     }
 
 
+def _accepted_price(result: dict) -> Optional[float]:
+    """The odds the platform ACTUALLY took, in order of authority.
+
+    ``odds_accepted`` is what the slip echoed back after an "accept odds
+    changes" resubmit — the number the bet is settled on, so it wins.  When
+    there is no echo, ``observed_odds`` (what the slip showed at read time) is
+    the honest fallback.  The REQUESTED price is never used here: persisting it
+    is how a ledger drifts away from the account it claims to describe.
+    """
+    for row in reversed(list(result.get("odds_accepted") or [])):
+        cand = row.get("accepted") if isinstance(row, dict) else None
+        if not isinstance(cand, (int, float)):
+            continue
+        if float(cand) > 1.0:
+            return float(cand)
+    observed = result.get("observed_odds")
+    if not isinstance(observed, (int, float)):
+        return None
+    return float(observed) if float(observed) > 1.0 else None
+
+
 def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
             provider, authorization: Optional[str] = None) -> dict:
     """Submit one claimed candidate to the provider and record the HONEST
@@ -445,11 +466,27 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                             error_message=f"unmapped status {status!r}")
         return {"status": STATUS_UNKNOWN,
                 "error_code": "PROVIDER_RESPONSE_INVALID"}
+    # ── the price the bet was ACTUALLY taken at (2026-11-02) ──────────
+    # The claim wrote the REQUESTED price.  If the platform re-priced on the
+    # "accept odds changes" path, an ACCEPTED row that keeps the requested
+    # price mis-states every P&L number derived from it.  The provider echoes
+    # what the slip took (``odds_accepted``) or, failing that, what the slip
+    # showed (``observed_odds``); persist that and record the drift.
+    accepted_price = (_accepted_price(result)
+                      if status == STATUS_ACCEPTED else None)
+    requested_price = candidate.get("price")
+    drift = None
+    if accepted_price is not None and requested_price is not None:
+        try:
+            drift = round(float(accepted_price) - float(requested_price), 4)
+        except (TypeError, ValueError):
+            drift = None
     store.update_status(execution_id, status,
                         provider_ref=result.get("provider_ref"),
                         error_code=result.get("error_code"),
                         error_message=result.get("error_message"),
                         accepted_amount=result.get("accepted_amount"),
+                        price=accepted_price,
                         simulated_amount=(candidate.get("stake_amount")
                                           if cfg.dry_run and status == STATUS_ACCEPTED
                                           else None),
@@ -462,8 +499,12 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                 reason=result.get("error_message") or status,
                 details={"result": status,
                          "provider": getattr(provider, "name", "?"),
-                         "provider_ref": result.get("provider_ref")})
-    return {"status": status, "provider_ref": result.get("provider_ref")}
+                         "provider_ref": result.get("provider_ref"),
+                         "price_requested": requested_price,
+                         "price_accepted": accepted_price,
+                         "price_drift": drift})
+    return {"status": status, "provider_ref": result.get("provider_ref"),
+            "price": accepted_price}
 
 
 def _no(reason: str, ik: Optional[str]) -> dict:
