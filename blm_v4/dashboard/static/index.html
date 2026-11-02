@@ -6,6 +6,24 @@
   <title>BLM Command Center — PokerBet Live Analytics</title>
   <link rel="stylesheet" href="/static/styles.css?v=6855974.3">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <!-- SLATE view styles (additive; see /static/slate.js) -->
+  <style>
+    #viewSlate .sl-l { text-align: left; }
+    #viewSlate .sl-team { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #viewSlate .sl-bar { position: relative; width: 92px; height: 7px; border-radius: 4px;
+      background: rgba(255,255,255,.10); overflow: hidden; display: inline-block; vertical-align: middle; }
+    #viewSlate .sl-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 4px; }
+    #viewSlate .sl-bar span { position: absolute; top: -2px; bottom: -2px; width: 1.5px; background: rgba(255,255,255,.55); }
+    #viewSlate .sl-pill { font-size: 10.5px; font-weight: 650; padding: 1px 7px; border-radius: 999px;
+      letter-spacing: .04em; white-space: nowrap; }
+    #viewSlate .sl-armed { background: rgba(57,208,166,.22); color: #39d0a6; }
+    #viewSlate .sl-bad   { background: rgba(239,95,107,.18); color: #ef5f6b; }
+    #viewSlate .sl-wait  { background: rgba(242,181,68,.18); color: #f2b544; }
+    #viewSlate .sl-ok    { color: #39d0a6; }
+    #viewSlate tr.sl-hit td { background: rgba(57,208,166,.09); }
+    #viewSlate tr.sl-sep td { padding-top: 14px; font-size: 10.5px; letter-spacing: .11em;
+      text-transform: uppercase; color: rgba(255,255,255,.45); }
+  </style>
 </head>
 <body>
   <!-- ═══════════ HEADER ═══════════ -->
@@ -108,12 +126,43 @@
   <nav class="tabs" id="tabs" role="tablist" aria-label="Dashboard views">
     <button class="tab active" role="tab" id="tabLive" data-view="live"
             aria-selected="true">LIVE</button>
+    <button class="tab" role="tab" id="tabSlate" data-view="slate"
+            aria-selected="false">SLATE</button>
+    <!-- STATS is retired (operator 2026-11-02: "remove the other stats").
+         Kept in the DOM, hidden, so the existing tab wiring that references
+         #tabStats cannot throw; it is unreachable from the UI. -->
     <button class="tab" role="tab" id="tabStats" data-view="stats"
-            aria-selected="false">STATS</button>
+            aria-selected="false" style="display:none">STATS</button>
     <button class="tab" role="tab" id="tabExplorer" data-view="explorer"
             aria-selected="false">DB EXPLORER</button>
     <span class="tab-note muted" id="tabNote">live games + alerts</span>
   </nav>
+
+  <!-- ═══════════ VIEW: SLATE — the auto-bet CANDIDATE board ═══════════
+       Operator 2026-11-02: the UI now revolves around the candidates, not the
+       stats. Every verdict here is the SERVED one (under_alert_exec_armed),
+       composed by the same trade_window legs the executor enforces. -->
+  <div class="view" id="viewSlate" hidden>
+    <section class="alerts">
+      <div class="st-head" style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">
+        <span class="st-title">AUTO-BET CANDIDATES</span>
+        <span class="muted" id="slateCounts">–</span>
+        <span class="tab-note muted" id="slateGate" style="margin-left:auto"></span>
+      </div>
+      <div class="st-scroll">
+        <table class="st-table" id="slateTable">
+          <thead><tr>
+            <th class="sl-l">game</th><th>prog</th><th class="sl-l">pace vs rung</th>
+            <th>ratio</th><th>short</th><th>price</th><th>cohort</th>
+            <th class="sl-l">verdict</th>
+          </tr></thead>
+          <tbody id="slateRows">
+            <tr><td class="sl-l muted" colspan="8" style="padding:16px 8px">loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
 
   <!-- ═══════════ VIEW: LIVE ═══════════ -->
   <div class="view" id="viewLive">
@@ -478,6 +527,7 @@
   <script src="/static/stats.js?v=6855974.1"></script>
   <script src="/static/explorer.js?v=6855974.3"></script>
   <script src="/static/assistant.js?v=6855974.1"></script>
+  <script src="/static/slate.js?v=20261102.1"></script>
 </body>
 </html>
 
