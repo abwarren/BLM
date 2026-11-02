@@ -125,6 +125,18 @@ PACE_REF_INTERVAL_S = float(os.environ.get("BLM_PACE_REF_INTERVAL_S", "60"))
 #: Backstop age for the pace-reference payload (same rationale as
 #: STATS_MAX_AGE_S).
 PACE_REF_MAX_AGE_S = float(os.environ.get("BLM_PACE_REF_MAX_AGE_S", "900"))
+#: LEAGUE AVERAGE LINE + per-game FIRST LINE (the trade's open_line).
+#: Same shape as the pace references and for the same reason, measured
+#: 2026-11-02: the inline computation is a ROW_NUMBER() window over every
+#: row of ``clean_observations`` (5,227,704 rows on prod, 93.5 s measured),
+#: and v4_live ran it on EVERY cache-miss build.  That payload is the
+#: betting worker's ONLY input, so after a restart — cold cache — every
+#: fast-lane pass timed out with ``rows: 0`` and auto-bet was blind for as
+#: long as the cache could not warm (25 min observed).  Precomputing it off
+#: the request path is the fix; 0 disables the worker (inline fallback).
+LINE_REF_INTERVAL_S = float(os.environ.get("BLM_LINE_REF_INTERVAL_S", "60"))
+#: Backstop age for the line-reference payload (same rationale as above).
+LINE_REF_MAX_AGE_S = float(os.environ.get("BLM_LINE_REF_MAX_AGE_S", "900"))
 #: Use the swarm feed that BACKS the PokerBet results page as the
 #: authoritative result source (directive 2026-09-24).  The page renders a
 #: list of games and carries no game id at all, so a DOM read can only guess
@@ -233,7 +245,8 @@ def main() -> None:
 
     # ── BLM V4 PokerBet pipeline API (classification-aware) ──
     from blm_v4.api import router as v4_router
-    from blm_v4.api import configure_stats, configure_pace_reference_worker
+    from blm_v4.api import (configure_stats, configure_pace_reference_worker,
+                            configure_line_reference_worker)
     app.include_router(v4_router)
 
     # ── PACE REFERENCE worker (empty-live-data fix, diagnostic
@@ -262,6 +275,31 @@ def main() -> None:
             consumer=_publish_pace_references)
         configure_pace_reference_worker(pace_ref_worker)
         app.state._pace_ref_worker = pace_ref_worker
+
+    # ── LEAGUE AVERAGE LINE + FIRST-LINE worker ─────────────────────
+    # v4_live also needs, per served game, its FIRST-captured live total line
+    # and the competition's mean of those (the trade's open_line /
+    # league_avg_line).  That inline computation is a ROW_NUMBER() window
+    # over all 5.2M clean_observations — 93.5 s measured 2026-11-02 — and it
+    # ran on EVERY payload build.  Because that payload is the betting
+    # worker's ONLY input, a cold cache left the fast lane timing out
+    # (``rows: 0``) indefinitely.  Same fix as the pace references: compute
+    # off the request path, publish the last completed pair, fail CLOSED
+    # (empty) while warming.  Read-only; 0 disables it.
+    line_ref_worker = None
+    if LINE_REF_INTERVAL_S > 0:
+        from blm_v4.api import _publish_line_reference
+        from blm_v4.live_analytics.line_reference_worker import (
+            LineReferenceWorker)
+        line_ref_worker = LineReferenceWorker(
+            root / "blm_metrics_clean.db",
+            root / "blm_pokerbet.db",
+            interval_s=LINE_REF_INTERVAL_S,
+            max_age_s=LINE_REF_MAX_AGE_S,
+            log=logger,
+            consumer=_publish_line_reference).start()
+        configure_line_reference_worker(line_ref_worker)
+        app.state._line_ref_worker = line_ref_worker
 
     # ── LIVE ALERT STATS worker (operator stats tab) ─────────
     # Recomputes the stats payload on its own daemon thread so the
@@ -711,6 +749,9 @@ def main() -> None:
         pace_ref_worker = getattr(app.state, "_pace_ref_worker", None)
         if pace_ref_worker is not None:
             pace_ref_worker.stop(timeout=2)
+        line_ref_worker_obj = getattr(app.state, "_line_ref_worker", None)
+        if line_ref_worker_obj is not None:
+            line_ref_worker_obj.stop(timeout=2)
         sct = getattr(app.state, "_scorecard_task", None)
         if sct and not sct.done():
             sct.cancel()
