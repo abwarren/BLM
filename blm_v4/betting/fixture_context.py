@@ -24,9 +24,15 @@ CONTEXT_FIELDS = (
     "home_team", "away_team", "competition",
     "fixture_start_utc", "fixture_start_source",
     "final_home", "final_away", "final_total", "final_result_status",
+    "final_result_at",
 )
 
 _CHUNK = 400          # stay well below SQLite's bound-parameter limit
+
+#: A market line older than this is NOT the line the bet was placed at —
+#: the scorecard's own LIVE/STALE boundary (contract 15).  Beyond it the
+#: ledger's frozen trigger line is reported instead, labelled as such.
+MARKET_LINE_LIVE_S = 300.0
 
 
 def base_game_id(game_id) -> str:
@@ -203,6 +209,62 @@ def fixture_context(root, game_ids: Iterable[Optional[str]]) -> dict[str, dict]:
             "final_total": final_total,
             "final_result_status": (res.get("final_result_status")
                                     or g.get("final_result_status")),
+            "final_result_at": res.get("result_at"),
         }
     return {gid: base_ctx.get(base_game_id(gid), dict.fromkeys(CONTEXT_FIELDS))
             for gid in requested}
+
+
+def bet_line_context(root, pairs: Iterable[tuple[Optional[str], Optional[str]]]) -> dict:
+    """The MARKET total line in force at each bet, and whether it was live.
+
+    ``pairs`` is ``(game_id, requested_at_utc)`` per ledger row.  Result maps
+    that pair to ``{"line_at_bet", "line_age_s", "line_status"}`` where status
+    is LIVE (observation at most ``MARKET_LINE_LIVE_S`` old), STALE (older)
+    or MISSING (no observation at/before the bet).
+
+    The ledger's own ``triggered_line`` is the FROZEN alert line — a different
+    value by contract, and the one that can sit unchanged while the board
+    moves.  This function answers the other question: what did the market
+    actually have on the board when the bet was submitted.
+    """
+    root = Path(root)
+    clean_db = root / "blm_metrics_clean.db"
+    conn = _connect(clean_db)
+    out: dict = {}
+    if conn is None:
+        return out
+    try:
+        for gid, ts in pairs:
+            base = base_game_id(gid)
+            key = (str(gid), str(ts))
+            row = None
+            if base and ts:
+                row = conn.execute(
+                    "SELECT line_value, captured_at FROM clean_market_observations "
+                    "WHERE source_game_id = ? AND line_value IS NOT NULL "
+                    "AND captured_at <= ? ORDER BY captured_at DESC LIMIT 1",
+                    (base, str(ts))).fetchone()
+            if row is None:
+                out[key] = {"line_at_bet": None, "line_age_s": None,
+                            "line_status": "MISSING"}
+                continue
+            age = None
+            try:
+                age = (datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                       - datetime.fromisoformat(
+                           str(row["captured_at"]).replace("Z", "+00:00"))
+                       ).total_seconds()
+            except (TypeError, ValueError):
+                age = None
+            out[key] = {
+                "line_at_bet": row["line_value"],
+                "line_age_s": None if age is None else round(age, 1),
+                "line_status": ("LIVE" if age is not None
+                                and age <= MARKET_LINE_LIVE_S else "STALE"),
+            }
+    except sqlite3.Error:
+        return out
+    finally:
+        conn.close()
+    return out

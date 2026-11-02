@@ -18,7 +18,8 @@ from fastapi import APIRouter, HTTPException
 from blm_v4.betting.config import BettingConfig, credentials_present
 from blm_v4.betting import ladder as _ladder
 from blm_v4.betting.executor import evaluate, execute
-from blm_v4.betting.fixture_context import CONTEXT_FIELDS, fixture_context
+from blm_v4.betting.fixture_context import (CONTEXT_FIELDS, bet_line_context,
+                                            fixture_context)
 from blm_v4.betting.provider import (
     browser_submit_authorized,
     provider_from_config,
@@ -228,24 +229,54 @@ def set_game_auto_bet(game_id: str, payload: dict) -> dict:
 
 
 def _attach_fixture_context(rows: list[dict], cfg: BettingConfig) -> None:
-    """Join teams / tip-off / recorded final onto ledger rows (read-only).
+    """Join teams / tip-off / recorded final / line-at-bet onto ledger rows.
 
-    ``line_minus_final`` is the settlement view: positive = the total
-    finished UNDER the line (an UNDER won), negative = over.  It stays
-    None while the game has no recorded final — never a guess.
+    THE LINE THE MARGIN USES IS THE MARKET LINE AT SUBMISSION, not the
+    ledger's ``triggered_line``: that one is the FROZEN alert line and can
+    sit unchanged for tens of minutes while the board moves.  When no
+    observation within ``MARKET_LINE_LIVE_S`` exists the frozen trigger line
+    is used and labelled ``TRIGGER`` — never silently substituted.
+
+    ``line_minus_final`` is that chosen line − final: positive = the total
+    finished UNDER the line (an UNDER won), negative = over.  It is None
+    when either side is unknown, and also when the stored final was
+    recorded BEFORE the bet (a different replay instance of the same game
+    id) — that margin would be meaningless.
     """
     if not rows or not cfg.db_path:
         return
-    ctx = fixture_context(Path(cfg.db_path).parent,
-                          [r.get("game_id") for r in rows])
+    root = Path(cfg.db_path).parent
+    ctx = fixture_context(root, [r.get("game_id") for r in rows])
+    lines = bet_line_context(root, [(r.get("game_id"), r.get("requested_at_utc"))
+                                    for r in rows])
     for row in rows:
         context = ctx.get(str(row.get("game_id"))) or {}
         for key in CONTEXT_FIELDS:
             row[key] = context.get(key)
-        line, final = row.get("line"), context.get("final_total")
+        at_bet = lines.get((str(row.get("game_id")), str(row.get("requested_at_utc"))))
+        at_bet = at_bet or {"line_at_bet": None, "line_age_s": None,
+                            "line_status": "MISSING"}
+        row["line_at_bet"] = at_bet["line_at_bet"]
+        row["line_age_s"] = at_bet["line_age_s"]
+        row["line_status"] = at_bet["line_status"]
+        row["trigger_line"] = row.get("line")
+
+        if at_bet["line_status"] == "LIVE" and at_bet["line_at_bet"] is not None:
+            row["line"] = at_bet["line_at_bet"]
+            row["line_source"] = "MARKET@BET"
+        else:
+            row["line_source"] = "TRIGGER"
+
+        final = context.get("final_total")
+        result_at = context.get("final_result_at")
+        settled_before_bet = bool(
+            result_at and row.get("requested_at_utc")
+            and str(result_at) < str(row.get("requested_at_utc")))
+        row["final_before_bet"] = settled_before_bet
         row["line_minus_final"] = (
-            round(float(line) - float(final), 1)
-            if line is not None and final is not None else None)
+            round(float(row["line"]) - float(final), 1)
+            if row.get("line") is not None and final is not None
+            and not settled_before_bet else None)
 
 
 @router.get("/history")

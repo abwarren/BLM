@@ -104,9 +104,14 @@
         alert_id: r.alert_id, checkpoint: r.checkpoint,
         market: r.market, selection: r.selection,
         line: r.line,
+        line_tag: r.line_source === "MARKET@BET" ? "MKT"
+          : (r.line_source ? "TRIG" : null),
+        line_age_s: r.line_age_s,
+        trigger_line: r.trigger_line,
         final_score: (r.final_home != null || r.final_away != null)
           ? `${r.final_home ?? "–"}–${r.final_away ?? "–"}` : null,
         line_minus_final: r.line_minus_final,
+        final_before_bet: r.final_before_bet,
         stake_amount: r.stake_amount,
         status: r.status, execution_state: r.execution_state,
         provider_ref: r.provider_ref,
@@ -187,10 +192,21 @@
           ? ` class="ex-st ex-st-${esc(String(v || "").toLowerCase())}"`
         : delta != null && delta > 0 ? ' class="ex-pos"'
         : delta != null && delta < 0 ? ' class="ex-neg"'
+        : c === "line_minus_final" && r.final_before_bet ? ' class="muted"'
         : "";
-      const text = delta != null
-        ? (delta > 0 ? `+${delta}` : String(delta))
-        : (v == null ? "–" : esc(v));
+      let text;
+      if (c === "line" && v != null) {
+        // the tag names the line the margin was computed on: MKT = the
+        // market line observed within 300 s of submission, TRIG = no fresh
+        // observation existed, so the ledger's FROZEN trigger line is shown
+        text = `${esc(v)} <span class="muted">${esc(r.line_tag || "")}</span>`;
+      } else if (c === "line_minus_final" && v == null && r.final_before_bet) {
+        text = `<span title="the stored final was recorded before this bet — a different replay instance of the same game id">n/a†</span>`;
+      } else if (delta != null) {
+        text = delta > 0 ? `+${delta}` : String(delta);
+      } else {
+        text = v == null ? "–" : esc(v);
+      }
       return `<td${cls}>${text}</td>`;
     };
     table.innerHTML = `<thead><tr>${th}</tr></thead><tbody>`
@@ -266,7 +282,7 @@
         note.textContent = {
           games: "GET /api/v4/games — recent games with the CLEAN/LEGACY data-quality partition.",
           checkpoints: "GET /api/v4/scorecard/events — one row per (game, checkpoint): observed line, reference value, signed diff, settlement.",
-          executions: "GET /api/v4/betting/history — the execution ledger. status describes the provider response; execution_state is the ledger state. fixture/start/final are joined read-only from clean_games + game_results + the BETUAL timer; line−final > 0 means the total finished under the line.",
+          executions: "GET /api/v4/betting/history — the execution ledger. status describes the provider response; execution_state is the ledger state. fixture/start/final are joined read-only from clean_games + game_results + the BETUAL timer. LINE is the market total observed within 300 s of submission (MKT) or, when no fresh observation exists, the ledger’s frozen trigger line (TRIG). LINE−FINAL > 0 = total finished under the line (UNDER won). n/a† = the stored final predates the bet (different replay instance).",
           quarters: "GET /api/v4/collection/quarters — quarter-specific collection observability (coverage, parse failures, anomalies).",
           integrity: "GET /api/v4/results/integrity — result reconciliation audit. A missing result is an outstanding job, never a completed outcome.",
         }[dataset] || "";
