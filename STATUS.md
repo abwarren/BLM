@@ -3781,3 +3781,47 @@ Next agent should start from: `git log -1` = this commit; the open question is
   test_total_ladder_split + test_fixture_context -> 46 passed in 44 s.
   The full suite was NOT run (10 min, and the conftest refuses unflagged runs
   while the production collector is live).
+
+## 2026-11-02 21:17 SAST — SERVER RESTARTED (operator-authorized) + post-restart verification
+
+`systemctl --user restart blm-server.service` — operator explicitly asked for the
+restart.  Runtime tree is /home/ubuntu/blm-fix-price-mapping (drop-in
+70-runtime-tree.conf), so the restart loaded THAT worktree, including its
+uncommitted blm_v4/api.py, index.html, slate.html, server.py, and the untracked
+blm_v4/monitoring/ + scripts/blm_health_monitor.py.  None of this session's
+analysis work is runtime code.
+
+RESULT — CLEAN, but slow to bind:
+  PID 716130 · started 21:17:06 · port 2262 bound ~21:19 (≈2 min) ·
+  /healthz 200 ({"status":"ok","service":"blm","auth":true,"users":3}) ·
+  / 303 · /api/v4/status, /api/v4/live, /api/v4/betting/status 401 (auth, as
+  designed) · zero tracebacks / level=error lines since start · collector
+  service active throughout, 0 tracebacks in the window.
+  Workers: betting_worker_started (dry_run=false, enabled=true) ·
+  fast_lane_started (interval 3 s, stale_attempts 3, dry_run=false) ·
+  fast_lane_ready · result_reconciler_started · stats_worker_started ·
+  fast_lane_pass armed=0 executed=0 refused_top=pace=5.
+  Betting config unchanged across the restart: auto_betting_enabled=true,
+  unit_price=50.0, ladder_wins=5.  Ledger: max id 3695, 10 executions today,
+  NO new row created by the restart.
+
+WHY IT TOOK TWO MINUTES (new finding, unresolved):
+  the process sat in state D (uninterruptible I/O) while
+  `wal_hygiene_alert wal_bytes=695,546,672 alert_mb=256 hard_cap_mb=128`
+  fired, then `wal_hygiene_checkpoint mode=truncate checkpointed_frames=163317
+  held_back=5505 busy_flag=1`.  blm_pokerbet.db-wal is STILL ~707 MB on disk
+  (server process itself is the pinning reader), host I/O pressure
+  PSI some avg10 ≈ 48, disk 165G/233G (75%).  The WAL hard cap is 128 MB, so
+  the file is ~5.5x its own bound — this is the same WAL-pin class as the
+  2026-09-29 incident and it is the reason a restart is not a 10-second
+  operation here.  NOT remediated: a truncate checkpoint needs the pinning
+  reader gone, i.e. another restart cycle, and that is a separate decision.
+
+ALSO NOTICED (pre-existing, needs an operator decision):
+  * 78 executions are UNKNOWN and 321 SUBMITTED with provider_ref NULL — none
+    of today's 10 rows has a provider reference, and one (id 3681, game
+    31429632, 220.0 stake) has been UNKNOWN since 02:13.  §2.3 requires
+    reconciliation before another submission; the ledger shows the engine has
+    kept submitting anyway.
+  * `fast_lane_ready` logged `balance: null`, so the R5 whole-balance stake
+    cap could not be verified at startup.
