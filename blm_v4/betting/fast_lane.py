@@ -365,6 +365,14 @@ class FastLaneWorker:
         stats = self.store.today_stats()
         unit_price = self.store.get_unit_price()
         balance = self._balance()
+        summary["balance"] = (round(balance, 2)
+                               if isinstance(balance, (int, float))
+                               else None)
+        try:
+            from blm_v4.betting.api import set_balance as _set_balance
+            _set_balance(balance)
+        except Exception:
+            pass
         now = time.time()
         seen: set[str] = set()
         for row in rows:

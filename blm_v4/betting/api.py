@@ -290,8 +290,32 @@ def _attach_fixture_context(rows: list[dict], cfg: BettingConfig) -> None:
             and not settled_before_bet else None)
 
 
+_BALANCE_CACHE = {"value": None, "at_utc": None}
+
+
+def set_balance(value) -> None:
+    """The FAST LANE's last provider read (called from ITS thread).
+
+    Playwright is thread-affine, so the API never reads the balance itself:
+    the lane publishes what it read and the status surface serves that.  A
+    non-finite / unparsable value publishes None — UNKNOWN, never a guess.
+    """
+    import datetime as _dt
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = None
+    if value is not None and not (value == value and abs(value) != float("inf")):
+        value = None
+    _BALANCE_CACHE["value"] = round(value, 2) if value is not None else None
+    _BALANCE_CACHE["at_utc"] = _dt.datetime.now(_dt.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
 def _balance_now():
-    """The lane's live balance read, or None.  Never raises into the status."""
+    """The lane's last balance read, or None.  Never raises into the status."""
+    if _BALANCE_CACHE["value"] is not None:
+        return _BALANCE_CACHE["value"]
     fn = _balance_fn
     if not callable(fn):
         return None
