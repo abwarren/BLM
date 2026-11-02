@@ -632,6 +632,63 @@ class BettingStore:
         return {"day": day, "bets": int(n), "amount": float(amt or 0.0),
                 "verifiable": True}
 
+    # ── restart hygiene: orphan reap ───────────────────────────────────
+    #: states a live process can be in — anything here that PREDATES this
+    #: process belongs to a process that is gone.
+    NONTERMINAL = ("SUBMITTING", "PENDING", "RECONCILING")
+
+    def reap_orphans(self, *, started_at_utc: str,
+                     error_code: str = "ORPHANED_BY_RESTART") -> list[dict]:
+        """Flip non-terminal rows left by a PREVIOUS process to UNKNOWN.
+
+        The claim row is written before the provider call, so a process that
+        dies between claim and result leaves SUBMITTING/PENDING/RECONCILING
+        forever.  Measured 2026-11-02: a systemd restart SIGKILLed the server
+        10 s after a claim (TimeoutStopSec 15 < a 25 s shutdown join) and left
+        execution 3681 stuck in SUBMITTING with no result row — the account
+        showed no bet and an unchanged balance, so it was never in flight.
+
+        Only rows created before ``started_at_utc`` are touched; one
+        transaction; one ``bet_audit`` result row per execution so the
+        provenance survives.  Returns the rows it changed.
+        """
+        out: list[dict] = []
+        marks = ",".join("?" * len(self.NONTERMINAL))
+        with self._lock, self._conn() as c:
+            rows = c.execute(
+                f"""SELECT id, execution_id, idempotency_key, game_id,
+                           status, stake_amount, created_at
+                      FROM bet_executions
+                     WHERE status IN ({marks}) AND created_at < ?""",
+                (*self.NONTERMINAL, started_at_utc)).fetchall()
+            if not rows:
+                return []
+            now = _now()
+            for r in rows:
+                c.execute(
+                    """UPDATE bet_executions
+                          SET status='UNKNOWN', execution_state='UNKNOWN',
+                              error_code=?, error_message=?,
+                              resolved_at_utc=?
+                        WHERE id=? AND status=?""",
+                    (error_code,
+                     "process ended before a result was recorded; no fill "
+                     "proven — check the bookmaker history for this stake",
+                     now, r["id"], r["status"]))
+                c.execute(
+                    """INSERT INTO bet_audit
+                       (execution_id, idempotency_key, event, reason, details)
+                       VALUES (?,?,?,?,?)""",
+                    (r["execution_id"], r["idempotency_key"], "result",
+                     "reaped: non-terminal row from a previous process",
+                     _safe_json({"result": "UNKNOWN",
+                                 "guard": "orphan_reap",
+                                 "previous_status": r["status"],
+                                 "error_code": error_code})))
+                out.append(dict(r))
+            c.commit()
+        return out
+
     # ── audit (credential-free by construction) ────────────────────────
     def audit(self, event: str, idempotency_key: Optional[str] = None,
               execution_id: Optional[str] = None,

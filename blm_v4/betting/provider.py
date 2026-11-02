@@ -407,6 +407,46 @@ class PokerBetBrowserProvider(BetProvider):
         except Exception:
             return None
 
+    # ── ACCOUNT IDENTITY (directive GATE 8) ──────────────────────────
+    #: env var naming the account the operator CONFIGURED — a non-secret
+    #: id (PokerBet renders it as the profile's account number).
+    ACCOUNT_ENV = "BLM_EXPECTED_ACCOUNT_ID"
+
+    @property
+    def configured_account_id(self) -> Optional[str]:
+        return (os.environ.get(self.ACCOUNT_ENV) or "").strip() or None
+
+    @property
+    def requires_account_identity(self) -> bool:
+        """ON only once the operator has declared the expected account.
+
+        With no configured id there is nothing to compare against and the
+        guard would refuse EVERY bet on a rule nobody set; with one set,
+        the guard is fail-closed: an unreadable page id blocks the bet
+        (BLOCKED / ACCOUNT_MISMATCH) instead of betting blind.
+        """
+        return bool(self.configured_account_id)
+
+    @property
+    def authenticated_account_id(self) -> Optional[str]:
+        """The account the BROWSER is signed into, read live (never cached).
+
+        Read from the page's own session storage — the same number the
+        profile panel renders.  None means unprovable, which the guard
+        treats as a refusal, never as a match.
+        """
+        try:
+            self._wire()
+        except Exception:
+            return None
+        rd = getattr(self._adapter, "read_account_id", None)
+        if not callable(rd):
+            return None
+        try:
+            return rd()
+        except Exception:
+            return None
+
     def _gate(self, command: dict, stake_amount: float) -> dict:
         """Resolve → select → verify the betslip → PRICE/STAKE gate, then STOP.
         Never submits.  Returns {ready, reason, ...}."""

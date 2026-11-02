@@ -559,6 +559,16 @@ class PokerBetStore:
         conn = sqlite3.connect(uri, timeout=90)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        # WAL + NORMAL: no fsync per commit.  Measured 2026-11-02: the
+        # collector's write threads sat in storage.py upserts/inserts while
+        # /proc/pressure/io showed full=36% and fast ticks blew past the 80 s
+        # watchdog (one tick 214 s) — every observation was paying a durability
+        # fsync on a disk shared with the 79 GB pokerbet DB and a headless
+        # Chrome writing its profile.  WAL+NORMAL cannot corrupt; the worst
+        # case on an OS crash is losing the last transactions, which for live
+        # snapshots is acceptable and is NOT acceptable to trade for a stalled
+        # capture pipeline (a stale capture fails revalidation and voids the bet).
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 

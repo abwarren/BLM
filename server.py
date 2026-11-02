@@ -168,6 +168,38 @@ def main() -> None:
     engine_adapter = BlmEngineAdapter(core_engine)
     collector = V1CollectorAdapter(headless=True)
 
+    # ── LEGACY IN-SERVER COLLECTOR: honour the deployment switch ───────
+    # 60-v1-collector-off.conf sets BLM_V1_COLLECTOR=0 because the standalone
+    # blm-collector.service owns capture.  Nothing READ that variable, so the
+    # legacy Playwright collector started anyway: its restart loop
+    # ("Collector session ended unexpectedly — restarting in 5.0s") and its
+    # browser teardown are what blocked every shutdown past TimeoutStopSec and
+    # got the process SIGKILLed — which orphaned a claimed 220 R bet on
+    # 2026-11-02.  The adapter object is still constructed (the scheduler
+    # holds it) but it is neither started nor stopped when the switch is off.
+    V1_COLLECTOR_ENABLED = (os.environ.get("BLM_V1_COLLECTOR", "1")
+                            .strip().lower() not in ("0", "false", "no", "off"))
+
+    class _NoLegacyCollector:
+        """Stand-in used when the legacy collector is switched off.
+
+        The scheduler's tick calls ``collector.start()`` whenever
+        ``is_running`` is False, so skipping the server-side start() is not
+        enough — the first tick launches the browser anyway, its session loop
+        then restarts itself every 5 s, and the shutdown joins can never
+        finish inside TimeoutStopSec.  Reporting running-with-no-snapshot is
+        the switch's intent: capture belongs to blm-collector.service.
+        """
+
+        is_running = True
+        latest_snapshot = None
+
+        def start(self) -> None:
+            return None
+
+        def stop(self, timeout=None) -> bool:
+            return True
+
     # ── OLV/CLV + Historical + UNDER timing ──────────────────────
     line_tracker = LineTracker()
     historical_engine = HistoricalEngine(db_path=root / "blm_ts.db")
@@ -179,7 +211,7 @@ def main() -> None:
             logger.debug("scheduler_event", type=event_type)
 
     scheduler = SnapshotScheduler(
-        collector=collector,
+        collector=(collector if V1_COLLECTOR_ENABLED else _NoLegacyCollector()),
         ts_db=ts,
         engine=engine_adapter,
         event_bus=_SchedulerEventBus(),
@@ -261,6 +293,24 @@ def main() -> None:
     from blm_v4.betting.worker import BettingWorker
     betting_cfg = BettingConfig.from_env(root)
     betting_store = BettingStore(betting_cfg.db_path)
+    # ── STARTUP HYGIENE (2026-11-02) ─────────────────────────────────
+    # A claim row is written BEFORE the provider call, so a process killed
+    # between claim and result leaves SUBMITTING/PENDING/RECONCILING forever.
+    # Measured: systemd's 15 s TimeoutStopSec SIGKILLed a restart 10 s after a
+    # 220 R claim (tick error in the legacy in-server collector blocked the
+    # shutdown joins), and the row sat in SUBMITTING with no result.  Nothing
+    # owns those rows now, so reap them at startup — before any worker can
+    # read them as "money in play".
+    try:
+        _started_utc = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        _reaped = betting_store.reap_orphans(started_at_utc=_started_utc)
+        if _reaped:
+            logger.warning(
+                "bet_orphans_reaped count=%d executions=%s",
+                len(_reaped), [r["execution_id"] for r in _reaped])
+    except Exception:
+        logger.exception("bet_orphan_reap_failed")
     configure_betting(betting_store, betting_cfg)
     app.include_router(betting_router)
 
@@ -324,8 +374,12 @@ def main() -> None:
     # ── Lifespan handlers ────────────────────────────────────
     @app.on_event("startup")
     async def start_pipeline():
-        logger.info("collector_starting")
-        collector.start()
+        if V1_COLLECTOR_ENABLED:
+            logger.info("collector_starting")
+            collector.start()
+        else:
+            logger.info("collector_skipped_legacy_v1 "
+                        "(BLM_V1_COLLECTOR=0 — blm-collector.service owns capture)")
         logger.info("scheduler_starting")
         # The scheduler's ticks are LONG SYNCHRONOUS work (SQLite reads,
         # json_extract scans in the historical layer).  Running that
@@ -662,9 +716,9 @@ def main() -> None:
             sct.cancel()
             try: await sct
             except asyncio.CancelledError: pass
-        collector.stop()
+        if V1_COLLECTOR_ENABLED:
+            collector.stop()
         logger.info("pipeline_stopped")
-
     # ── Start uvicorn ────────────────────────────────────────
     import uvicorn
     uvicorn.run(

@@ -37,6 +37,7 @@ without touching the engine.
 from __future__ import annotations
 
 import re
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -927,7 +928,13 @@ class PokerBetDomAdapter(SelectionResolver):
                 samples.append(None)
             if (len(samples) >= _balance.AGREE_SAMPLES
                     and samples[-1] is not None
-                    and samples[-1] == samples[-2]):
+                    and samples[-1] == samples[-2]
+                    and not _balance.is_suspicious(
+                        samples[-1], getattr(self, "_last_good_balance", None))):
+                # two agreeing reads confirm ONLY an unsurprising value.  A
+                # jump needs three (decide() asks for SUSPECT_SAMPLES) — the
+                # old early exit here handed decide() two samples for a real
+                # deposit/payout and pinned the balance to None forever.
                 break
             try:
                 self._page.wait_for_timeout(250)
@@ -943,6 +950,36 @@ class PokerBetDomAdapter(SelectionResolver):
             logger.warning("balance read refused: %s samples=%s raw=%s",
                            reason, _balance.describe(samples), texts[-1:])
         return value
+
+    #: localStorage key the PokerBet SPA keeps the signed-in session in
+    AUTH_DATA_KEY = "__18751019-web__AUTH_DATA"
+
+    def read_account_id(self) -> Optional[str]:
+        """The signed-in account number, or None when unprovable.
+
+        PokerBet keeps the authenticated user in localStorage under
+        ``…__AUTH_DATA`` → ``data.user_id`` — observed live 233997789, the
+        same number its profile panel renders.  Read-only, and only the id
+        is extracted: no token ever leaves the page or reaches a log.
+        """
+        if self._page is None or not hasattr(self._page, "evaluate"):
+            return None
+        try:
+            uid = self._page.evaluate(
+                """(key) => {
+                       try {
+                           const raw = localStorage.getItem(key);
+                           if (!raw) return null;
+                           const d = JSON.parse(raw);
+                           const id = d && d.data && d.data.user_id;
+                           return id == null ? null : String(id);
+                       } catch (e) { return null; }
+                   }""",
+                self.AUTH_DATA_KEY)
+        except Exception:
+            return None
+        uid = str(uid or "").strip()
+        return uid or None
 
     def parse_betslip_text(self, text: Optional[str]) -> list[dict]:
         """Tolerant betslip parse → [{event, market, position, line,
@@ -1218,6 +1255,7 @@ class PokerBetDomAdapter(SelectionResolver):
                                       or "submit_gate_refused").upper(),
                     "error_message": f"submit gate refused: {gate}"}
         try:
+            before_ids = self._open_bet_ids()
             self._submit_button.click(timeout=4_000)
             self._mark("submit_clicked")
         except Exception as e:
@@ -1227,7 +1265,7 @@ class PokerBetDomAdapter(SelectionResolver):
             self._submit_button = None
         self._pending_legs = []
         # ── H: the bookmaker's own confirmation ───────────────────────
-        conf = self.read_order_confirmation()
+        conf = self.read_order_confirmation(before_ids)
         if conf:
             return {"status": "ACCEPTED",
                     "provider_ref": conf.get("reference"),
@@ -1235,19 +1273,115 @@ class PokerBetDomAdapter(SelectionResolver):
         return {"status": "SUBMITTED", "provider_ref": None,
                 "odds_accepted": odds_accepted}
 
-    def read_order_confirmation(self) -> Optional[dict]:
+    #: a PokerBet ticket id is a long digit run (observed 10 digits,
+    #: e.g. 6805870840).  Deliberately narrow: stakes/prices/lines are
+    #: short numbers and must never be mistaken for a ticket.
+    _BET_ID_RE = re.compile(r"\b(\d{9,12})\b")
+    #: how long to wait for the ticket to appear after BET NOW
+    RECEIPT_WAIT_S = 8.0
+
+    def _open_bet_ids(self) -> set:
+        """Ticket ids currently visible in the OPEN BETS container.
+
+        Empty set when the container is absent or unreadable — callers
+        treat that as "no evidence", never as "no bet".
+        """
+        if self._page is None:
+            return set()
+        try:
+            loc = self._page.locator(SEL_OPEN_BETS)
+            if loc.count() == 0:
+                return set()
+            text = loc.first.inner_text() or ""
+        except Exception:
+            return set()
+        return set(self._BET_ID_RE.findall(text))
+
+    def read_order_confirmation(self, before_ids=None) -> Optional[dict]:
+        """The bookmaker's OWN ticket reference, or None (→ SUBMITTED).
+
+        Two independent sources, both fail-closed:
+
+        1. an explicit receipt/confirmation element, if this layout ever
+           renders one;
+        2. the ticket that APPEARED in OPEN BETS since ``before_ids`` was
+           snapshotted immediately before the click — exactly one new id is
+           evidence, two or more is ambiguous and returns None.
+
+        The old implementation read the receipt element once, immediately
+        after the click, with no wait and a selector that matches nothing
+        on the live site — which is why every real bet is recorded as
+        SUBMITTED with a NULL provider_ref.
+        """
         if self._page is None:
             return None
+
+        def _receipt() -> Optional[dict]:
+            try:
+                loc = self._page.locator(SEL_RECEIPT)
+                for i in range(min(loc.count(), 5)):
+                    text = loc.first.inner_text() or ""
+                    m = re.search(r"\b([A-Z0-9]{6,})\b", text)
+                    if m:
+                        # an explicit receipt element is authoritative by
+                        # construction; when it carries a PokerBet-style
+                        # long digit id, prefer that
+                        ids = self._BET_ID_RE.findall(text)
+                        return {"reference": ids[0] if ids else m.group(1),
+                                "source": "receipt"}
+            except Exception:
+                return None
+            return None
+
+        def _new_ticket() -> Optional[dict]:
+            if before_ids is None:
+                return None
+            now_ids = self._open_bet_ids()
+            new = now_ids - set(before_ids)
+            if len(new) == 1:
+                return {"reference": next(iter(new)), "source": "open_bets"}
+            return None
+
+        # bounded poll: RECEIPT_WAIT_S at 250 ms, and an iteration cap so a
+        # test double whose wait_for_timeout is a no-op cannot spin
+        attempts = max(1, int(self.RECEIPT_WAIT_S / 0.25))
+        deadline = time.time() + self.RECEIPT_WAIT_S
+        ambiguous = False
+        for _ in range(attempts):
+            got = _receipt()
+            if got:
+                return got
+            got = _new_ticket()
+            if got:
+                return got
+            if before_ids is not None and len(self._open_bet_ids() - set(before_ids)) > 1:
+                ambiguous = True
+                break
+            if time.time() >= deadline:
+                break
+            try:
+                self._page.wait_for_timeout(250)
+            except Exception:
+                break
+
+        self._dump_submit_dom(reason="ambiguous_ticket" if ambiguous
+                              else "no_ticket_observed")
+        return None
+
+    def _dump_submit_dom(self, reason: str) -> None:
+        """Diagnostics only: write the post-submit DOM to
+        ``$BLM_BETSLIP_DUMP`` (never enabled by default) so the real ticket
+        markup can be discovered from a genuine placement.  Never raises."""
+        path = os.environ.get("BLM_BETSLIP_DUMP")
+        if not path or self._page is None:
+            return
         try:
-            loc = self._page.locator(SEL_RECEIPT)
-            for i in range(min(loc.count(), 5)):
-                text = loc.first.inner_text()
-                m = re.search(r"\b([A-Z0-9]{6,})\b", text or "")
-                if m:
-                    return {"reference": m.group(1)}
+            html = self._page.content() or ""
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n<!-- {reason} {time.time()} -->\n")
+                fh.write(html[:400_000])
         except Exception:
             pass
-        return None
 
 
 def pokerbet_adapter_factory(cfg, games: list[dict]):

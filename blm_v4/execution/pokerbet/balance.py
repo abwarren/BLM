@@ -67,6 +67,15 @@ def _suspicious(candidate: float, last_good: Optional[float]) -> bool:
     return abs(candidate - last_good) > last_good * SUSPECT_RATIO
 
 
+def is_suspicious(candidate: Optional[float],
+                  last_good: Optional[float]) -> bool:
+    """Public form of the jump test — the DOM sampler needs it to decide
+    whether two agreeing reads are evidence or a repeated render glitch."""
+    if candidate is None:
+        return False
+    return _suspicious(candidate, last_good)
+
+
 def decide(samples: Sequence[Optional[float]],
            last_good: Optional[float] = None) -> Tuple[Optional[float], str]:
     """(balance, reason).  ``balance`` is None whenever it cannot be proven.
