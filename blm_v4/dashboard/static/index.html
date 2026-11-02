@@ -6,6 +6,13 @@
   <title>BLM Command Center — PokerBet Live Analytics</title>
   <link rel="stylesheet" href="/static/styles.css?v=6855974.3">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <style>
+    /* SLATE mode: stats.js's switcher re-asserts viewLive/viewStats on its own
+       render cycle, so the slate cannot rely on the .hidden property alone. */
+    body.slate-mode #viewLive,
+    body.slate-mode #viewStats,
+    body.slate-mode #viewExplorer { display: none !important; }
+  </style>
 </head>
 <body>
   <!-- ═══════════ HEADER ═══════════ -->
@@ -496,6 +503,43 @@
   <script src="/static/stats.js?v=6855974.1"></script>
   <script src="/static/explorer.js?v=6855974.3"></script>
   <script src="/static/assistant.js?v=6855974.1"></script>
+  <script>
+    /* SLATE tab wiring.  It has to live here: when the view became an iframe
+       the file that used to own this click was deleted, so the tab did
+       nothing.  DOM-only — it touches no dashboard state. */
+    (function () {
+      var tab = document.getElementById("tabSlate");
+      var view = document.getElementById("viewSlate");
+      if (!tab || !view) return;
+      var others = ["viewLive", "viewStats", "viewExplorer"];
+      var otherTabs = ["tabLive", "tabStats", "tabExplorer"];
+      tab.addEventListener("click", function (e) {
+        e.preventDefault();
+        others.forEach(function (id) {
+          var el = document.getElementById(id); if (el) el.hidden = true;
+        });
+        otherTabs.forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el) { el.classList.remove("active"); el.setAttribute("aria-selected", "false"); }
+        });
+        document.body.classList.add("slate-mode");
+        view.hidden = false;
+        tab.classList.add("active");
+        tab.setAttribute("aria-selected", "true");
+        var note = document.getElementById("tabNote");
+        if (note) note.textContent = "live slate · every leg, every verdict";
+      });
+      document.querySelectorAll(".tab").forEach(function (t) {
+        if (t === tab) return;
+        t.addEventListener("click", function () {
+          document.body.classList.remove("slate-mode");
+          view.hidden = true;
+          tab.classList.remove("active");
+          tab.setAttribute("aria-selected", "false");
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
 
