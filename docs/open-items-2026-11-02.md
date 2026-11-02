@@ -104,11 +104,23 @@ the dashboard cues, alongside the newer transport/board work.  The banded
 `min_price_for` is back to the measured table (1.48/1.39/1.28) and the price the
 trade uses is the operator's flat floor, not the band.
 
-STILL OPEN: the COLLECTOR tree (`/home/ubuntu/BLM`, branch `handoff-2026-09-07`)
-is a separate lineage and was 17 ahead / 10 behind at the same moment.  Its work
-is pushed to `ladder-split-2026-11-02` and running in production, but it has not
-been reconciled with `origin/handoff-2026-09-07`.  Reconcile it the same way
-before the next deploy of that tree.
+COLLECTOR tree (`/home/ubuntu/BLM`, branch `handoff-2026-09-07`) — RECONCILED
+2026-11-02 on a review branch, production untouched.  It was 17 ahead / 10 behind;
+six of the "local" commits were already on origin under rewritten SHAs, and 11 were
+genuinely unique.  Method that worked (and is worth reusing): probe each local-only
+commit by grepping a handful of its ADDED lines against the origin tree — commits
+whose probes are present have been rewritten, the rest are real.  The 11 real ones
+cherry-picked onto origin's tip with ZERO conflicts:
+  d864988 a2e9514 08895e5 9432aa6 f6a0c38 cfcd460 3f466cd eaaa73f bff3ae4
+  e65871b 4abbd1f
+pushed as `review/handoff-reconciled-2026-11-02`.  It carries the origin line's
+result-reconciler starvation fix + deterministic-test work AND this line's ladder
+split, backfill pacing, clean_metrics index, WAL housekeeping, liveness deadline,
+C2 fingerprint, multi-row panel discovery, rung wiring and RAG packs.
+
+STILL OPEN: that review branch is not the deployed branch.  The live collector
+still runs the old line, and moving it means a collector restart — deferred while
+production is frozen.
 
 ## 7. Skill index is at its size limit
 
