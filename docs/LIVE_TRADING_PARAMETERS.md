@@ -20,6 +20,8 @@ change on the box, and the test will fail until the two agree.
 | `BET_REVALIDATE` / `BET_REVALIDATE_MAX_AGE_S` | **1 / 120** | the gate is re-run at the submission boundary against a capture no older than 120 s; fails closed |
 | excluded competitions | `cyber-basketball-2k26-matches` | never traded (code constant) |
 | `BETTING_DRY_RUN` / `BETTING_BROWSER_SUBMIT` | **false / true** | real submission through the PokerBet DOM transport |
+| `BETTING_MAX_STAKE_PER_BET` | **2000.00** | hard per-bet cap the executor refuses above — sized so ladder rung 6 (1889.57) fits |
+| `BETTING_MAX_BETS_PER_DAY` | **200** | daily bet-count cap; the daily exposure ceiling is deliberately unset |
 | `BLM_EXPECTED_ACCOUNT_ID` | **233997789** | account-identity guard, checked at the submission boundary |
 
 These values are exactly `TC-C` in `blm_v4/trade_cohorts.py`:
@@ -69,6 +71,12 @@ start-up) and from `blm_betting.db`, not from memory.
 - **2026-11-02 06:23Z (13 minutes)** — a `TC-S` experiment (`pace 1.08`) was
   applied and reverted at the operator's "Nop"; no bet was placed in that
   window. The measured comparison is kept in the drop-in's comment.
+- **2026-11-02 08:38** — `BETTING_MAX_STAKE_PER_BET` raised **1000 → 2000** on
+  the operator's instruction. The ladder (depth 6, ×1.8, unit 100) prices rung 5
+  at 1049.76 and rung 6 at 1889.57, both above the old cap, so two more wins
+  would have had every candidate refused by `max_stake` and the ladder would
+  have stranded itself. All rungs 1–6 now clear the cap; depth 6 banks before
+  rung 7 (3401) can exist.
 - **2026-11-02** — `bet: persist the odds the bet was TAKEN at` (`12db2cc`) and
   `live: run the first-line scan OFF the request path` (`2c42c11`) are both
   deployed. The second one matters here: the line-reference scan (93.5 s over
