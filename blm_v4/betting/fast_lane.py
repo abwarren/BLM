@@ -404,6 +404,9 @@ class FastLaneWorker:
                 summary["retries"] = summary.get("retries", 0) + 1
             try:
                 if self.store.has_placed_bet(base):
+                    self._record_candidate(row, base, avg, attempt,
+                                           outcome="NOT_PLACED",
+                                           reason="already_placed")
                     continue
             except Exception:
                 continue
@@ -416,6 +419,8 @@ class FastLaneWorker:
             if res["decision"] == "NO_BET":
                 key = str(res.get("reason") or "unspecified")
                 summary["refused"][key] = summary["refused"].get(key, 0) + 1
+                self._record_candidate(row, base, avg, attempt,
+                                       outcome="NOT_PLACED", reason=key)
                 continue
             if res["decision"] == "WOULD_BET":       # dry run only
                 summary["would_bet"] += 1
@@ -436,8 +441,21 @@ class FastLaneWorker:
                 continue
             out = execute(res["candidate"], cfg=self.cfg,
                           store=self.store, provider=self._provider())
-            if out.get("status") in ("ACCEPTED", "SUBMITTED"):
+            placed = out.get("status") in ("ACCEPTED", "SUBMITTED")
+            if placed:
                 summary["executed"] += 1
+            _cand = res["candidate"]
+            self._record_candidate(
+                row, base, avg, attempt,
+                outcome="PLACED" if placed else "NOT_PLACED",
+                reason=None if placed else (out.get("error_code")
+                                            or (out.get("error_message") or "")[:160]
+                                            or out.get("status")),
+                checkpoint=_cand.get("checkpoint"),
+                execution_id=_cand.get("execution_id"),
+                execution_state=out.get("status"),
+                stake_units=_cand.get("stake_units"),
+                stake_amount=_cand.get("stake_amount"))
             self._log("fast_lane_execute", game_id=base,
                       line=row["live_total_line"], price=row["under_price"],
                       progress=row["progress_pct"], retry=attempt,
@@ -545,6 +563,58 @@ class FastLaneWorker:
             self.provider = provider_from_config(self.cfg)
         return self.provider
 
+    # ── qualifying-bet ledger (operator directive 2026-11-02) ─────────
+    @staticmethod
+    def _progress_band(progress) -> int:
+        """The 5-point progress band a candidate belongs to (75, 80, 85, 90)."""
+        try:
+            return int(float(progress) // 5 * 5)
+        except (TypeError, ValueError):
+            return -1
+
+    def _record_candidate(self, row, game_id: str, avg_pace, attempt,
+                          *, outcome: str, reason=None, checkpoint=None,
+                          execution_id=None, execution_state=None,
+                          stake_units=None, stake_amount=None) -> None:
+        """Write ONE qualifying-bet row — placed or NOT placed.
+
+        The operator's directive (2026-11-02): every bet the gate qualifies
+        must be visible in the UI whether or not a slip was placed, because
+        "no bet" and "bet the gate refused" are different facts and the
+        execution ledger only ever holds the first.  This writes NOTHING to
+        ``bet_executions``, claims no idempotency key and can never authorise
+        a submission; it is a record of the decision the lane actually took.
+        """
+        req = row["required_pts_per_min"]
+        act = row["actual_pts_per_min"]
+        ratio = (req / avg_pace) if avg_pace else None
+        self.store.record_candidate(dict(
+            dedupe_key=(f"{game_id}:{self._progress_band(row['progress_pct'])}"
+                        f":{int(attempt or 0)}"),
+            at_utc=str(row["captured_at"]).replace(" ", "T"),
+            game_id=game_id,
+            checkpoint=checkpoint,
+            line=row["live_total_line"],
+            price=row["under_price"],
+            progress_pct=row["progress_pct"],
+            total_points=row["total_points"],
+            required_pace=req,
+            actual_pace=act,
+            pace_ratio=ratio,
+            shortfall=(req - act) if (req is not None and act is not None) else None,
+            attempt=int(attempt or 0),
+            outcome=outcome,
+            reason=reason,
+            execution_id=execution_id,
+            execution_state=execution_state,
+            stake_units=stake_units,
+            stake_amount=stake_amount,
+        ))
+
+    def balance(self):
+        """The provider balance this lane can read (None when unreadable)."""
+        return self._balance()
+
     def _balance(self):
         try:
             fn = getattr(self._provider(), "account_balance", None)
@@ -574,4 +644,5 @@ class FastLaneWorker:
                   executed=summary.get("executed"),
                   would_bet=summary.get("would_bet"),
                   gaps=summary.get("gaps"),
+                  balance=summary.get("balance"),
                   refused_top=top or None)

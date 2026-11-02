@@ -33,16 +33,24 @@ router = APIRouter(prefix="/api/v4/betting", tags=["blm-v4-betting"])
 _store: Optional[BettingStore] = None
 _cfg: Optional[BettingConfig] = None
 _live_payload_fn = None
+_balance_fn = None
 
 
 def configure_betting(store: BettingStore, cfg: BettingConfig,
-                      live_payload_fn=None) -> None:
-    """Wire the process-wide store/config (called from server.py)."""
-    global _store, _cfg, _live_payload_fn
+                      live_payload_fn=None, balance_fn=None) -> None:
+    """Wire the process-wide store/config (called from server.py).
+
+    ``balance_fn`` is the FAST LANE's own provider read: the provider is
+    thread-affine (Playwright), so the API must never build a second one.  A
+    missing callable simply reports ``provider_balance: None``.
+    """
+    global _store, _cfg, _live_payload_fn, _balance_fn
     _store = store
     _cfg = cfg
     if live_payload_fn is not None:
         _live_payload_fn = live_payload_fn
+    if balance_fn is not None:
+        _balance_fn = balance_fn
 
 
 def _require() -> tuple[BettingStore, BettingConfig]:
@@ -124,6 +132,9 @@ def betting_status() -> dict:
         "max_bets_per_day": cfg.max_bets_per_day,
         "max_daily_exposure": limit,
         "game_controls": store.game_controls(),
+        # the SIGNED-IN account balance as the lane last read it.  None means
+        # UNREADABLE — never a guessed or cached number (R5 depends on it).
+        "provider_balance": _balance_now(),
         "today": today_block,
         "credentials": credentials_present(),   # booleans ONLY
         "recent": [_public_execution(r) for r in store.recent(25)],
@@ -277,6 +288,46 @@ def _attach_fixture_context(rows: list[dict], cfg: BettingConfig) -> None:
             round(float(row["line"]) - float(final), 1)
             if row.get("line") is not None and final is not None
             and not settled_before_bet else None)
+
+
+def _balance_now():
+    """The lane's live balance read, or None.  Never raises into the status."""
+    fn = _balance_fn
+    if not callable(fn):
+        return None
+    try:
+        value = fn()
+    except Exception:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(value, 2) if value == value else None
+
+
+@router.get("/candidates")
+def betting_candidates(limit: int = 50) -> dict:
+    """Every QUALIFYING bet, placed or not (operator directive 2026-11-02).
+
+    This is the decision ledger the fast lane writes: a game that cleared
+    every trade leg appears here even when the slip was refused, the limit
+    blocked it, or the game had already been bet.  Execution rows stay in
+    ``/history``; this endpoint never mixes the two.
+    """
+    store, _cfg = _require()
+    rows = store.candidates_recent(limit=max(1, min(int(limit), 500)))
+    return {
+        "candidates": rows,
+        "limit": max(1, min(int(limit), 500)),
+        "today": store.candidates_recent(limit=500,
+                                         day=_utc_day()),
+    }
+
+
+def _utc_day() -> str:
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
 
 
 @router.get("/history")

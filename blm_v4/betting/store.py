@@ -107,6 +107,42 @@ CREATE TABLE IF NOT EXISTS bet_manual_authorizations (
 
 CREATE INDEX IF NOT EXISTS idx_bet_manual_auth_live
     ON bet_manual_authorizations(status, expires_at_utc);
+
+-- QUALIFYING-BET LEDGER (operator directive 2026-11-02: "each bet that
+-- qualifies should be listed in the UI whether a bet was placed or not").
+-- One row per qualifying game moment.  This is a record of the DECISION the
+-- fast lane took, never an execution and never an idempotency claim: it can
+-- neither authorise nor block a submission.  ``outcome`` is PLACED only when
+-- the provider actually accepted/submitted a slip for that row.
+CREATE TABLE IF NOT EXISTS bet_candidates (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedupe_key        TEXT NOT NULL UNIQUE,
+    at_utc            TEXT NOT NULL,
+    day_utc           TEXT NOT NULL,
+    game_id           TEXT NOT NULL,
+    checkpoint        TEXT,
+    market            TEXT NOT NULL DEFAULT 'TOTAL',
+    selection         TEXT NOT NULL DEFAULT 'UNDER',
+    line              REAL,
+    price             REAL,
+    progress_pct      REAL,
+    total_points      REAL,
+    required_pace     REAL,
+    actual_pace       REAL,
+    pace_ratio        REAL,
+    shortfall         REAL,
+    attempt           INTEGER NOT NULL DEFAULT 0,
+    outcome           TEXT NOT NULL,
+    reason            TEXT,
+    execution_id      TEXT,
+    execution_state   TEXT,
+    stake_units       REAL,
+    stake_amount      REAL,
+    updated_at_utc    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bet_candidates_day
+    ON bet_candidates(day_utc, id DESC);
 """
 
 # Kill-switch keys (betting_config).  Anything absent/corrupt reads OFF.
@@ -494,6 +530,84 @@ class BettingStore:
             c.execute(f"UPDATE bet_executions SET {', '.join(sets)} "
                       "WHERE execution_id=?", args)
             c.commit()
+
+    # ── qualifying-bet ledger (decisions, not submissions) ─────────────
+    def record_candidate(self, rec: dict) -> Optional[int]:
+        """Upsert ONE qualifying-bet row and return its id.
+
+        Keyed by ``dedupe_key`` (game + progress band + attempt), so the
+        lane's 3-second passes refresh one row instead of filling the table.
+        Every field is overwritten on refresh — the row is the LATEST
+        decision for that moment, which is what the UI needs.  Fail-soft:
+        a broken record never stops the lane.
+        """
+        key = rec.get("dedupe_key")
+        if not key:
+            return None
+        now = _now()
+        try:
+            with self._lock, self._conn() as c:
+                c.execute(
+                    """INSERT INTO bet_candidates
+                       (dedupe_key, at_utc, day_utc, game_id, checkpoint,
+                        market, selection, line, price, progress_pct,
+                        total_points, required_pace, actual_pace, pace_ratio,
+                        shortfall, attempt, outcome, reason, execution_id,
+                        execution_state, stake_units, stake_amount,
+                        updated_at_utc)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(dedupe_key) DO UPDATE SET
+                        at_utc=excluded.at_utc,
+                        checkpoint=excluded.checkpoint,
+                        line=excluded.line,
+                        price=excluded.price,
+                        progress_pct=excluded.progress_pct,
+                        total_points=excluded.total_points,
+                        required_pace=excluded.required_pace,
+                        actual_pace=excluded.actual_pace,
+                        pace_ratio=excluded.pace_ratio,
+                        shortfall=excluded.shortfall,
+                        outcome=excluded.outcome,
+                        reason=excluded.reason,
+                        execution_id=COALESCE(excluded.execution_id,
+                                              bet_candidates.execution_id),
+                        execution_state=COALESCE(excluded.execution_state,
+                                                 bet_candidates.execution_state),
+                        stake_units=COALESCE(excluded.stake_units,
+                                             bet_candidates.stake_units),
+                        stake_amount=COALESCE(excluded.stake_amount,
+                                              bet_candidates.stake_amount),
+                        updated_at_utc=excluded.updated_at_utc""",
+                    (key, rec.get("at_utc") or now, rec.get("day_utc") or _day(),
+                     str(rec.get("game_id")), rec.get("checkpoint"),
+                     rec.get("market") or "TOTAL",
+                     rec.get("selection") or "UNDER", rec.get("line"),
+                     rec.get("price"), rec.get("progress_pct"),
+                     rec.get("total_points"), rec.get("required_pace"),
+                     rec.get("actual_pace"), rec.get("pace_ratio"),
+                     rec.get("shortfall"), int(rec.get("attempt") or 0),
+                     rec.get("outcome") or "NOT_PLACED", rec.get("reason"),
+                     rec.get("execution_id"), rec.get("execution_state"),
+                     rec.get("stake_units"), rec.get("stake_amount"), now))
+                row = c.execute(
+                    "SELECT id FROM bet_candidates WHERE dedupe_key=?",
+                    (key,)).fetchone()
+            return row["id"] if row else None
+        except sqlite3.Error:
+            return None
+
+    def candidates_recent(self, *, limit: int = 50, day: str = "") -> list[dict]:
+        """Newest qualifying-bet rows first (optionally one day only)."""
+        where, args = ("WHERE day_utc=?", [day]) if day else ("", [])
+        try:
+            with self._conn() as c:
+                rows = c.execute(
+                    f"SELECT * FROM bet_candidates {where} "
+                    "ORDER BY id DESC LIMIT ?",
+                    (*args, max(1, min(int(limit), 500)))).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.Error:
+            return []
 
     def get_execution(self, execution_id: str) -> Optional[dict]:
         with self._conn() as c:

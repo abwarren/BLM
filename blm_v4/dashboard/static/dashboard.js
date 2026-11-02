@@ -4258,6 +4258,14 @@ function abStatusHTML(st) {
     "limits: " + (lim.length ? lim.join(" · ") : "NOT CONFIGURED — betting blocked (set BETTING_* env vars)");
   // ── Today stats ───────────────────────────────────────────
   const t = st.today || {};
+  // the SIGNED-IN balance as the lane last read it; UNREADABLE is stated,
+  // never faked (R5 stakes the whole balance below one unit).
+  const bal = $("abBalance");
+  if (bal) {
+    bal.textContent = st.provider_balance != null ? money(st.provider_balance)
+                                                 : "UNREADABLE";
+    bal.classList.toggle("neg", st.provider_balance == null);
+  }
   $("abTodayBets").textContent = t.bets ?? "–";
   $("abTodayUnits").textContent = t.units ?? "–";
   // §8: DRY_RUN shows simulated exposure (no real money moved); LIVE shows
@@ -4358,9 +4366,50 @@ async function refreshBettingStatus() {
     state.betting = await resp.json();
     abStatusHTML(state.betting);
     alertBetPlaced(state.betting.recent || []);
+    loadCandidates();
     if (state.lastPayload) renderCards(state.lastPayload);
   } catch (_) { /* betting panel is best-effort; never breaks the board */ }
 }
+
+/* ── QUALIFYING BETS (operator directive 2026-11-02) ─────────────────────
+   Every game that cleared ALL the trade legs, placed or not.  The row's
+   `outcome` is PLACED only when the provider accepted a slip; anything else
+   carries the refusal that stopped it.  This never invents state: it renders
+   /api/v4/betting/candidates verbatim. */
+async function loadCandidates() {
+  const list = $("abCandList");
+  if (!list) return;
+  try {
+    const resp = await fetch(`${BETTING_API}/candidates?limit=40`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const body = await resp.json();
+    const rows = body.candidates || [];
+    const today = body.today || [];
+    const head = $("abCandHead");
+    if (head) {
+      head.textContent = `${rows.length} shown · ${today.length} today · ` +
+        `${today.filter((r) => String(r.outcome).toUpperCase() === "PLACED").length} placed`;
+    }
+    list.innerHTML = rows.length ? rows.map((r) => {
+      const placed = String(r.outcome || "").toUpperCase() === "PLACED";
+      return `<li class="ab-exec ${placed ? "st-accepted" : "st-blocked"}">
+        <span class="ab-game" title="game ID">${esc(r.game_id || "")}</span>
+        <span class="ab-status">${placed ? "PLACED" : "NOT PLACED"}</span>
+        <span class="al-num" title="UNDER price">${r.price != null ? num1(r.price) : "–"}</span>
+        <span class="al-num" title="line">${r.line != null ? num1(r.line) : "–"}</span>
+        <span class="muted" title="progress">${r.progress_pct != null ? num1(r.progress_pct) + "%" : ""}</span>
+        <span class="al-num" title="stake">${r.stake_amount != null ? money(r.stake_amount) : "–"}</span>
+        <span class="muted ab-reason" title="reason">${esc(r.reason || "")}</span>
+        <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(0, 19))}</span>
+      </li>`;
+    }).join("") : '<li class="alerts-empty">No qualifying bets yet</li>';
+  } catch (err) {
+    list.innerHTML = `<li class="alerts-empty">Candidates unavailable: ${esc(err.message)}</li>`;
+  }
+}
+
+const _abCandRefresh = $("abCandRefresh");
+if (_abCandRefresh) _abCandRefresh.addEventListener("click", loadCandidates);
 
 async function loadBettingHistory() {
   const q = encodeURIComponent($("abHistoryQuery").value.trim());
