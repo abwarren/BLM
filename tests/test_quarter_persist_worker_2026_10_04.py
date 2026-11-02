@@ -219,7 +219,14 @@ def test_quarter_persistence_failure_is_observable(caplog):
     store.insert_quarter_market_observation = boom
     with caplog.at_level(logging.ERROR):
         c._enqueue_quarter_observation(game, _qobs(), "Q1", 1)
-        assert _wait(lambda: c.betual_line_worker_stats()["failed"] == 1)
+        # Wait for BOTH the failure counter AND the ERROR record.  The worker
+        # increments ``failed`` BEFORE it emits the log line, so waiting on the
+        # counter alone races the emitter and the caplog read below (measured
+        # 6/15 failures in isolation on the code under review).
+        assert _wait(
+            lambda: c.betual_line_worker_stats()["failed"] == 1
+            and any("quarter market observation persist failed" in r.message
+                    for r in caplog.records))
     st = c.betual_line_worker_stats()
     assert st["persisted"] == 0
     assert any("quarter market observation persist failed" in r.message
