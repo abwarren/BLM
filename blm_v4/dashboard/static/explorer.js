@@ -98,9 +98,16 @@
     if (dataset === "executions") {
       return (body.executions || []).map((r) => ({
         execution_id: r.execution_id, game_id: r.game_id,
+        fixture: (r.home_team || r.away_team)
+          ? `${r.home_team || "?"} v ${r.away_team || "?"}` : null,
+        fixture_start_utc: r.fixture_start_utc,
         alert_id: r.alert_id, checkpoint: r.checkpoint,
         market: r.market, selection: r.selection,
-        line: r.line, stake_amount: r.stake_amount,
+        line: r.line,
+        final_score: (r.final_home != null || r.final_away != null)
+          ? `${r.final_home ?? "–"}–${r.final_away ?? "–"}` : null,
+        line_minus_final: r.line_minus_final,
+        stake_amount: r.stake_amount,
         status: r.status, execution_state: r.execution_state,
         provider_ref: r.provider_ref,
         error_code: r.error_code, error_message: r.error_message,
@@ -122,8 +129,9 @@
       checkpoints: ["game_id", "game", "checkpoint_pct", "market_line",
         "blm_fair_value", "diff", "direction", "market_status",
         "settlement", "terminal", "captured_at"],
-      executions: ["execution_id", "game_id", "alert_id", "checkpoint",
-        "selection", "line", "stake_amount", "status",
+      executions: ["execution_id", "game_id", "fixture", "fixture_start_utc",
+        "alert_id", "checkpoint", "selection", "line", "final_score",
+        "line_minus_final", "stake_amount", "status",
         "execution_state", "provider_ref", "error_message",
         "requested_at_utc", "elapsed_ms"],
     }[dataset];
@@ -171,10 +179,19 @@
       `<th>${esc(c.replace(/_/g, " ").toUpperCase())}</th>`).join("");
     const td = (r, c) => {
       const v = r[c];
+      // line_minus_final: positive = total finished under the line (UNDER
+      // won) → green; negative = over → red.  Zero is the push, uncoloured.
+      const delta = c === "line_minus_final" && v != null ? Number(v) : null;
       const cls = c === "data_quality" && v === "LEGACY" ? ' class="muted"'
-        : c === "status" || c === "execution_state" ? ` class="ex-st ex-st-${esc(String(v || "").toLowerCase())}"`
+        : (c === "status" || c === "execution_state")
+          ? ` class="ex-st ex-st-${esc(String(v || "").toLowerCase())}"`
+        : delta != null && delta > 0 ? ' class="ex-pos"'
+        : delta != null && delta < 0 ? ' class="ex-neg"'
         : "";
-      return `<td${cls}>${v == null ? "–" : esc(v)}</td>`;
+      const text = delta != null
+        ? (delta > 0 ? `+${delta}` : String(delta))
+        : (v == null ? "–" : esc(v));
+      return `<td${cls}>${text}</td>`;
     };
     table.innerHTML = `<thead><tr>${th}</tr></thead><tbody>`
       + (rows.length
@@ -249,7 +266,7 @@
         note.textContent = {
           games: "GET /api/v4/games — recent games with the CLEAN/LEGACY data-quality partition.",
           checkpoints: "GET /api/v4/scorecard/events — one row per (game, checkpoint): observed line, reference value, signed diff, settlement.",
-          executions: "GET /api/v4/betting/history — the execution ledger. status describes the provider response; execution_state is the ledger state.",
+          executions: "GET /api/v4/betting/history — the execution ledger. status describes the provider response; execution_state is the ledger state. fixture/start/final are joined read-only from clean_games + game_results + the BETUAL timer; line−final > 0 means the total finished under the line.",
           quarters: "GET /api/v4/collection/quarters — quarter-specific collection observability (coverage, parse failures, anomalies).",
           integrity: "GET /api/v4/results/integrity — result reconciliation audit. A missing result is an outstanding job, never a completed outcome.",
         }[dataset] || "";

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -17,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from blm_v4.betting.config import BettingConfig, credentials_present
 from blm_v4.betting import ladder as _ladder
 from blm_v4.betting.executor import evaluate, execute
+from blm_v4.betting.fixture_context import CONTEXT_FIELDS, fixture_context
 from blm_v4.betting.provider import (
     browser_submit_authorized,
     provider_from_config,
@@ -225,13 +227,41 @@ def set_game_auto_bet(game_id: str, payload: dict) -> dict:
             "global_auto_bet_enabled": store.is_enabled()}
 
 
+def _attach_fixture_context(rows: list[dict], cfg: BettingConfig) -> None:
+    """Join teams / tip-off / recorded final onto ledger rows (read-only).
+
+    ``line_minus_final`` is the settlement view: positive = the total
+    finished UNDER the line (an UNDER won), negative = over.  It stays
+    None while the game has no recorded final — never a guess.
+    """
+    if not rows or not cfg.db_path:
+        return
+    ctx = fixture_context(Path(cfg.db_path).parent,
+                          [r.get("game_id") for r in rows])
+    for row in rows:
+        context = ctx.get(str(row.get("game_id"))) or {}
+        for key in CONTEXT_FIELDS:
+            row[key] = context.get(key)
+        line, final = row.get("line"), context.get("final_total")
+        row["line_minus_final"] = (
+            round(float(line) - float(final), 1)
+            if line is not None and final is not None else None)
+
+
 @router.get("/history")
 def betting_history(q: str = "", status: str = "", game_id: str = "",
                    limit: int = 100) -> dict:
-    """Searchable execution ledger and audit trail; credential-free only."""
-    store, _cfg = _require()
+    """Searchable execution ledger and audit trail; credential-free only.
+
+    Rows carry read-only fixture context (teams, tip-off, recorded final
+    and the line-vs-final difference) so the explorer needs no second
+    lookup per row.
+    """
+    store, cfg = _require()
     executions = store.history(query=q, status=status, game_id=game_id,
                                limit=limit)
+    rows = [_public_execution(r) for r in executions]
+    _attach_fixture_context(rows, cfg)
     execution_ids = [r["execution_id"] for r in executions]
     audit = []
     for execution_id in execution_ids:
@@ -239,7 +269,7 @@ def betting_history(q: str = "", status: str = "", game_id: str = "",
     audit.sort(key=lambda r: (r.get("at_utc") or "", r.get("id", 0)),
                reverse=True)
     return {
-        "executions": [_public_execution(r) for r in executions],
+        "executions": rows,
         "audit": audit[:max(1, min(int(limit), 500))],
         "limit": max(1, min(int(limit), 500)),
     }
