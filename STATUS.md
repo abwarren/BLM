@@ -3879,3 +3879,38 @@ COMMIT / PUSH:
 OPEN RISK unchanged: blm_pokerbet.db-wal ~935 MB (hard cap 128 MB), the
 pinning reader is the server process itself; a restart is the only thing that
 truncates it and each restart is I/O-slow because of it.
+
+## 2026-11-02 21:37 SAST — AUTOBET FIRED AND WAS BLOCKED: ACCOUNT IDENTITY MISMATCH
+
+The qualifying-bet ledger works end-to-end.  Live evidence (11 s after the
+restart, game 31437385 Changwon LG Sakers v Wonju Db Promy, progress 85.0,
+pace ratio 1.434, shortfall +2.289, line 145.5, price 1.80, 1.0 unit = R50):
+
+  bet_executions 3696 / 3697 / 3698 — ALL **BLOCKED**, error_code
+  **ACCOUNT_MISMATCH**: "authenticated account '1956500422' != configured
+  account '23…'".  provider_ref NULL, nothing submitted, balance unchanged
+  at R100.63.  The three rows are the stale-line retries (#r1..#r3) on the
+  same game, each refused before any slip was built.
+
+  bet_candidates recorded all three as NOT_PLACED / ACCOUNT_MISMATCH with
+  the pace ratio, shortfall, price and stake — exactly what the new panel is
+  for (and the first live proof that the panel's data path works).
+
+READINESS — the pipeline is ready; ONE config gate refuses every bet:
+  kill switch on · dry_run false · unit R50 · ladder depth 5 (next rung 1) ·
+  balance R100.63 readable · browser logged in · gate passes games
+  (1 of 9 in band at 21:38, the rest fail pace) · provider submit and the
+  full executor run, then GATE 8 stops it on account identity.
+  Env in the running process: BLM_EXPECTED_ACCOUNT_ID starts with "23…",
+  the signed-in PokerBet account is 1956500422.  Until those agree, EVERY
+  bet is BLOCKED by design — this is the safety gate doing its job, not a
+  bug.  Changing it is an operator decision (it authorises a different
+  account to receive money); NOT changed here.
+  Fix, when confirmed: set BLM_EXPECTED_ACCOUNT_ID=1956500422 in
+  91-account-identity.conf and restart blm-server.
+
+QUALIFYING BETS UI is live (served dashboard.js/index.html verified, 4 and 3
+matches respectively).  The panel shows the three rows above as NOT PLACED
+with their refusal; new qualifying moments appear within one 3-second pass.
+
+COMMIT: runtime branch fix/price-mapping-2026-10-06 -> 3403fdb (pushed).
