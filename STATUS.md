@@ -3744,3 +3744,40 @@ imports was touched, so a restart would load no change from this session.
 The restart was NOT performed: the working tree still carries another
 session's uncommitted blm_v4/betting/api.py, explorer.js, styles.css and the
 new fixture_context.py, and a restart loads the working tree, not HEAD.
+
+## Git State
+Branch: handoff-2026-09-07
+Commit: 5c33ffd — merge of origin/handoff-2026-09-07 (17 ahead / 10 behind at
+  start; merged, not rebased, not force-pushed).  Content commit before the
+  merge: 941427d (ladder shortfall evidence + 0.25 rung + this status entry).
+Remote: git@github.com:abwarren/BLM.git (SSH)
+Push status: PUSHED — `f912665..5c33ffd handoff-2026-09-07 -> handoff-2026-09-07`
+Working tree: dirty with ANOTHER session's work, deliberately untouched and
+  uncommitted: blm_v4/betting/api.py, blm_v4/dashboard/static/explorer.js,
+  blm_v4/dashboard/static/styles.css, blm_v4/betting/fixture_context.py,
+  tests/test_fixture_context.py, prospective_health_history.jsonl, plus the
+  untracked betslip_dump.html, health/, reconcile_verify_report.json,
+  blm_betting.db.bak-orphanfix-20261102T030342Z, blm-dev/.
+Uncommitted files (this session): none — all six files are in 941427d.
+Next agent should start from: `git log -1` = this commit; the open question is
+  whether to move the TRADE pace rung from TC-C (1.04) to TC-S (1.08) — with
+  shortfall >= 0.50 the ladder is +210.60u / 93.9% / 114 bets at 1.08 against
+  +204.55u / 86.1% / 137 bets at 1.04, and at 0.25 the gap widens further
+  (+229.40u vs +216.05u).  Nothing in production was restarted or reconfigured;
+  the live drop-ins still read TRADE_MIN_PACE_RATIO=1.04,
+  TRADE_SHORTFALL_MARGIN=0.50, TRADE_EXEC_MIN_PRICE=1.60.
+
+### Merge resolution record (do not re-litigate blindly)
+  4 hunks in blm_v4/collector.py kept THIS branch's side — the origin side of
+  each hunk was empty (the merge base has none of `_start_deviation_worker`,
+  `_start_finalize_worker`, `_stop_deviation_worker`, `DISCOVERY_COMPETITIONS`
+  or `_discovery_candidates`), so nothing from origin was dropped; origin only
+  reads DISCOVERY_COMPETITIONS defensively via getattr at line ~4910.
+  3 add/add test conflicts (test_betual_line_worker / test_betual_residual_worker
+  / test_quarter_persist_worker, all 2026-10-04) took ORIGIN's race-fixed
+  version — it waits on the counter AND the caplog record.
+  Verified: `python3 -m py_compile blm_v4/collector.py` OK; targeted suite
+  `BLM_ALLOW_HEAVY_TESTS=1 pytest -q` on the three merged worker tests +
+  test_total_ladder_split + test_fixture_context -> 46 passed in 44 s.
+  The full suite was NOT run (10 min, and the conftest refuses unflagged runs
+  while the production collector is live).
