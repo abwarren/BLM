@@ -191,15 +191,34 @@ def _chain_snapshots(conn: sqlite3.Connection, base_id: str) -> list[dict]:
     the BASE id first, so a chained history can never be rejected as
     cross-event contamination for carrying sibling ids)."""
     rows: list[dict] = []
-    for r in conn.execute(
-            """SELECT s.* FROM snapshots s
-               WHERE s.source_game_id = ?
-                  OR s.source_game_id LIKE ?
-               ORDER BY s.captured_at ASC, s.id ASC""",
-            (base_id, base_id + "#i%")):
-        d = dict(r)
-        d["source_game_id"] = base_id      # bridge: one identity for the gate
-        rows.append(d)
+    # TWO indexed reads, merged here — never the OR.
+    #
+    # 2026-11-02: the single `source_game_id = ? OR source_game_id LIKE ?`
+    # statement planned as `SCAN snapshots` + `USE TEMP B-TREE FOR ORDER BY`
+    # (verified with EXPLAIN QUERY PLAN), i.e. a WHOLE-TABLE scan and sort PER
+    # GAME.  It pinned a read snapshot for minutes at a time, so the WAL could
+    # never checkpoint past it: `checkpointed_frames` froze at 62,529 while
+    # held_back climbed 2k -> 7k and the file went 254 -> 289 MB, with every
+    # TRUNCATE pass losing the lock.  Split, each statement is an index seek on
+    # idx_snapshots_source_ts(source_game_id, captured_at).
+    #
+    # The sibling bound is a RANGE, not a LIKE: `>= base||'#i'` .. `< base||'#j'`
+    # is sargable, whereas LIKE 'prefix%' only uses an index under
+    # case_sensitive_like and a BINARY column — the exact kind of "it has an
+    # index" assumption that hides a scan.
+    statements = (
+        ("SELECT * FROM snapshots WHERE source_game_id = ?"
+         " ORDER BY captured_at ASC, id ASC", (base_id,)),
+        ("SELECT * FROM snapshots WHERE source_game_id >= ? AND source_game_id < ?"
+         " ORDER BY captured_at ASC, id ASC",
+         (base_id + "#i", base_id + "#j")),
+    )
+    for sql, params in statements:
+        for r in conn.execute(sql, params):
+            d = dict(r)
+            d["source_game_id"] = base_id  # bridge: one identity for the gate
+            rows.append(d)
+    rows.sort(key=lambda d: (d.get("captured_at") or "", d.get("id") or 0))
     return rows
 
 
