@@ -65,7 +65,30 @@ is not a fault, and there is no server-side way around it.
 Cues: alert rises (1/2/3/4-tone by level) · `tradable` (high two-note, on entry
 into the tradable set) · `bet placed` (low rising triad).
 
-## 5. WAL — watch the first automatic truncate
+## 5. WAL — bounded by a free-then-forced fold, and the real pin is a SCAN
+
+Resolved 2026-11-02.  The measured facts, in order:
+
+- the merge had silently dropped the janitor's TRUNCATE escalation (PASSIVE-only);
+  restored.
+- the biggest pin was `settle_worker._chain_snapshots` planning as
+  `SCAN snapshots` + temp b-tree PER GAME (no index through the OR); split into two
+  index seeks — 0.001 s for 5 rows where it had run for minutes.
+- even then, TRUNCATE cannot win while a READER holds a snapshot: the pace/stats
+  scans run 282-579 s out of every 1800 s.  Stopping the collector does not help
+  (three attempts, `busy=1 copied=198 held_back=21231`, identical each time).
+- but with nothing stopped it succeeds instantly when no scan is in flight
+  (measured: 109 MB -> 0 MB in ~1 s).
+
+So `scripts/blm-wal-fold.sh` runs every 10 min from `blm-wal-fold.timer`:
+level 1 is a FREE single truncate attempt (no capture gap) and wins whenever the
+box is between scans; level 2 — stop the collector, retry 3x, restart, then prove
+a fresh fast cycle — only runs above `BLM_WAL_FOLD_FORCE_MB` (320 MB).
+
+The durable fix is still the scans: bounding them (snapshot to a temp table, raise
+the cadence further) is what stops the file growing at all.
+
+## 5b. (superseded) WAL — watch the first automatic truncate
 
 `96-wal-hygiene-tuning.conf` now truncates at 128 MB (gate 64 MB, 60 s). The
 manual fold measured 157 MB → 0 MB in 0.0 s with `log=0 copied=0`. The automatic

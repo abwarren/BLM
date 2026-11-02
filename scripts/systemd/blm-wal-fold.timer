@@ -1,0 +1,15 @@
+[Unit]
+Description=Hourly BLM WAL fold check (exits immediately below the threshold)
+
+[Timer]
+# Every 10 minutes.  The first attempt is FREE (a single truncate with nothing
+# stopped — measured 2026-11-02: 109 MB -> 0 MB in ~1 s once no scan pinned the
+# tail), so polling often is what keeps the file small without ever costing a
+# capture gap; the gap path only runs above BLM_WAL_FOLD_FORCE_MB.
+OnCalendar=*:05/10
+RandomizedDelaySec=45
+Persistent=true
+Unit=blm-wal-fold.service
+
+[Install]
+WantedBy=timers.target

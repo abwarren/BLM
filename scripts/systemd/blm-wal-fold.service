@@ -1,0 +1,13 @@
+[Unit]
+Description=BLM WAL fold — reclaim blm_pokerbet.db-wal at a quiet window (stops the collector briefly)
+Documentation=file:///home/ubuntu/blm-fix-price-mapping/scripts/blm-wal-fold.sh
+
+[Service]
+Type=oneshot
+# Never run two folds at once, and never start one while the collector is
+# already down for another reason — the script assumes it owns that stop.
+ExecStart=/usr/bin/flock -n /tmp/blm-wal-fold.lock /home/ubuntu/blm-fix-price-mapping/scripts/blm-wal-fold.sh
+# The fold itself is a couple of seconds; the rest is stop/start + the proof
+# that a fresh fast cycle completed.
+TimeoutStartSec=300
+Environment=BLM_WAL_FOLD_THRESHOLD_MB=192
