@@ -1,0 +1,94 @@
+LADDER CURVE WITH THE SHORTFALL LEG — 2026-11-02 (read-only evidence)
+=====================================================================
+Scripts: scripts/analysis_ladder_daily_shortfall_2026-11-02.py
+         scripts/analysis_ladder_gate_sweep_2026-11-02.py
+Data:    blm_pokerbet.db (games, game_results) + blm_metrics_clean.db
+         (clean_observations), both opened mode=ro.
+Ladder:  operator directive 2026-10-30 — depth 4, factor 1.8,
+         stakes 1.00 / 1.80 / 3.24 / 5.83 units; WIN advances, LOSS resets,
+         at depth the ladder banks and resets.  Curve starts at 1.00u.
+Population: the FIRST moment in a game the gate's non-shortfall legs hold —
+         status VALID · progress 75-92 · points >= 70 · pace ratio > 1.04
+         (strict) · under_price >= 1.60 · cyber-2k26 excluded · settled final
+         (final_result_status = 'OK'); a game whose captured peak already
+         passed the line is a decided LOSS.
+
+1. THE SHORTFALL SWEEP (2026-10-01 → 2026-10-30, everything else fixed)
+------------------------------------------------------------------------
+  shortfall      bets    W    L   win%   ladder net   flat net   top   banks  brk
+  off            1385  833  552   60.1     +296.54u   +135.10u  5.83u    84   552
+  >= 0.00         309  229   80   74.1     +244.02u   +101.72u  5.83u    34    80
+  >= 0.25         192  154   38   80.2     +216.05u    +82.61u  5.83u    27    38
+  >= 0.50 (live)  137  118   19   86.1     +204.55u    +71.91u  5.83u    24    19
+
+  The leg costs 90% of the volume and 31% of the ladder net, and buys
+  26 points of win rate and 533 fewer breakers.
+
+2. THE LIVE-GATE DAILY LADDER (shortfall >= 0.50, 1u start)
+-----------------------------------------------------------
+  day          bets   W   L   win%    ladder net   flat net   capital  top  banks brk
+  2026-10-02      1   0   1    0.0       -1.00       -1.00      0.00  1.00    0   1
+  2026-10-03      1   1   0  100.0       +0.65       +0.65      0.65  1.00    0   0
+  2026-10-04      1   1   0  100.0       +1.35       +0.75      2.00  1.80    0   0
+  2026-10-05     18  15   3   83.3      +24.00       +8.95     26.00  5.83    3   3
+  2026-10-06      6   4   2   66.7       +6.40       +1.55     32.41  5.83    1   2
+  2026-10-07      8   6   2   75.0       +8.51       +2.80     40.92  5.83    1   2
+  2026-10-08      6   6   0  100.0      +13.32       +4.65     54.24  5.83    1   0
+  2026-10-09      7   6   1   85.7      +12.41       +3.50     66.65  5.83    2   1
+  2026-10-10      2   2   0  100.0       +1.73       +1.25     68.38  1.80    0   0
+  2026-10-11      3   2   1   66.7       -0.93       +0.55     67.45  3.24    0   1
+  2026-10-12      8   7   1   87.5      +17.68       +4.96     85.13  5.83    2   1
+  2026-10-13      8   8   0  100.0      +15.34       +5.20    100.47  5.83    2   0
+  2026-10-14      5   4   1   80.0       +2.87       +1.85    103.34  3.24    0   1
+  2026-10-15      1   1   0  100.0       +4.67       +0.80    108.01  5.83    1   0
+  2026-10-22      3   3   0  100.0       +4.81       +2.30    112.82  3.24    0   0
+  2026-10-23      4   4   0  100.0       +9.53       +3.25    122.35  5.83    1   0
+  2026-10-24      6   6   0  100.0      +15.50       +4.75    137.85  5.83    2   0
+  2026-10-25      9   7   2   77.8       +7.77       +4.03    145.62  5.83    1   2
+  2026-10-26      6   5   1   83.3       +9.34       +2.70    154.96  5.83    1   1
+  2026-10-27      4   4   0  100.0       +8.31       +2.90    163.27  5.83    1   0
+  2026-10-28      9   8   1   88.9      +12.67       +5.35    175.95  5.83    1   1
+  2026-10-29      9   7   2   77.8      +11.66       +2.90    187.60  5.83    2   2
+  2026-10-30     12  11   1   91.7      +17.94       +7.27    205.55  5.83    2   1
+  TOTAL         137 118  19   86.1     +204.55      +71.91    205.55  5.83   24  19
+  23 trading days (no captures 10-16..10-21) · 21 up · 2 down ·
+  best +24.00u · worst -1.00u · top stake never exceeded 5.83u ·
+  banks 24 / breaks 19 · 40 candidates with no decidable result excluded.
+
+3. IDENTIFYING THE OPERATOR'S PICTURED TABLE
+---------------------------------------------
+Target: 145 bets · 124 W · 21 L · 85.5% · +203.22u ladder · +74.76u flat ·
+24 days · top 5.83u · banks 24 · breaks 21 · best +24.81u · worst -1.00u.
+
+Swept pace 1.04/1.08/1.12/1.16 x shortfall off/0.00/0.25/0.50 x price
+1.60/1.70 (32 combinations).  NO shortfall-off combination reaches 85.5%
+(best: pace 1.16 off -> 78.2%; pace 1.04 off -> 60.1%).  Only the
+shortfall-on rows land at 85-96%, and the one that matches the picture's
+shape is pace > 1.04, shortfall >= 0.50, price >= 1.60 -> 86.1%.
+
+The remaining 8-bet gap is run-to-run attribution, not a different gate:
+settlement is taken from final_result_status = 'OK' alone.  Widening to any
+final_total adds 27 INVALID finals and moves the same population to 163
+bets / 88.3% / +254.66u — further away, so 'OK only' is the correct reading.
+
+4. CONSEQUENCE: WITH SHORTFALL ON, THE PACE RUNG BARELY BITES
+-------------------------------------------------------------
+  pace bar   shortfall   bets   win%    ladder net
+  1.04       0.50         137   86.1     +204.55u
+  1.08       0.50         114   93.9     +210.60u
+  1.12       0.50         105   93.3     +196.40u
+  1.16       0.50          91   95.6     +184.09u
+
+  TC-S (1.08) with the shortfall leg on is the better point on the ladder:
+  five more units of net than the live 1.04 rung, 7.8 points higher win
+  rate, 23 fewer bets, and 19 breaks against 24 banks.  TC-C (1.04) is
+  carried by volume, not by edge.
+
+CAVEATS
+  * In-sample, one 30-day window; the 10-16..10-21 capture gap is included
+    as zero-trade days in the run totals.
+  * Ladder net is stake-multiplied P&L in units and ignores the production
+    balance cap (R5 whole-balance rule); at a 1u start the 'shortfall off'
+    curve goes negative on day 1, which no real account could fund.
+  * Only settled finals count; 40 candidates have no decidable result and
+    are excluded from every row above.

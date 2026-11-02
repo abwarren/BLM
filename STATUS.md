@@ -3667,3 +3667,80 @@ result: the forensic follow-up (§8 of the 2026-09-29 watchdog forensic report) 
        hardening.
     Uncommitted: the 3 changed files are working-tree only; HEAD is still
     d864988 (push remains the operator's separate decision).
+
+## 2026-11-02 — LADDER CURVE RE-DERIVED WITH THE SHORTFALL LEG (analysis only; no code, no restart)
+
+Question: the operator's daily ladder table (145 bets · 124-21 · 85.5% ·
++203.22u ladder · +74.76u flat · 24 days · banks 24 / breakers 21 · best
++24.81u · worst -1.00u) — does it carry the shortfall leg, and what does the
+ladder look like with it on?
+
+Answer, measured (read-only, both DBs mode=ro):
+
+- The pictured table DOES carry the leg.  A 32-combination sweep (pace
+  1.04/1.08/1.12/1.16 x shortfall off/0.00/0.25/0.50 x price 1.60/1.70)
+  shows NO shortfall-off gate reaching 85.5%: pace 1.04 off = 60.1%
+  (1,385 bets), pace 1.16 off = 78.2%.  Only shortfall-on rows land at
+  85-96%.
+- Live gate (pace > 1.04, shortfall >= 0.50, price >= 1.60, progress
+  75-92, points >= 70, cyber-2k26 out, settled OK finals, first qualifying
+  row per game), 2026-10-01 → 10-30: 137 bets · 118 W 19 L · 86.1% ·
+  ladder +204.55u from a 1.00u start · flat +71.91u · 23 trading days
+  (no captures 10-16..10-21) · 21 up / 2 down · best +24.00u · worst
+  -1.00u · top stake 5.83u · banks 24 / breaks 19 · 40 undecidable excluded.
+  The 8-bet gap to the operator's table is attribution, not a different
+  gate — widening settlement past final_result_status='OK' (27 INVALID
+  finals) moves it to 163 / 88.3% / +254.66u, i.e. further away.
+- Shortfall sweep (pace 1.04, price 1.60): off 1,385 @ 60.1% (+296.54u,
+  552 breaks, worst day -16.55u, capital negative on day 1); >= 0.00 309 @
+  74.1%; >= 0.25 192 @ 80.2%; >= 0.50 137 @ 86.1% (+204.55u, 19 breaks).
+- With the leg ON the pace rung barely bites: 1.04 -> 137 @ 86.1%
+  (+204.55u); 1.08 -> 114 @ 93.9% (+210.60u); 1.12 -> 105 @ 93.3%
+  (+196.40u); 1.16 -> 91 @ 95.6% (+184.09u).  TC-S (1.08) is the better
+  ladder point than the live TC-C (1.04); 1.04 is carried by volume.
+
+Files (analysis artifacts only, uncommitted):
+  scripts/analysis_ladder_daily_shortfall_2026-11-02.py
+  scripts/analysis_ladder_gate_sweep_2026-11-02.py
+  analysis_ladder_daily_shortfall_2026-11-02.txt
+
+No production code, config, service or DB was modified; no restart.
+IPC (for the next agent): the ladder arithmetic used here is
+blm_v4/betting/ladder.py (depth 4, factor 1.8) — the same module the
+executor uses, re-implemented only in the throwaway curve builder.
+
+
+### Addendum — the 0.25 rung, tabulated (same session)
+
+Asked for the ladder at shortfall >= 0.25 specifically.  Canonical run
+(bet order pinned to (captured_at, game_id); unpinned ordering moved the
+0.25 total by only +-0.3u but the 1,384-bet shortfall-off curve by ~22u):
+
+  shortfall  bets    W    L   win%   ladder net  flat net  banks  brk  worst day
+  off        1384  833  551   60.2    +297.54u  +136.10u     84  551   -16.55u
+  0.00        309  229   80   74.1    +244.02u  +101.72u     34   80    -9.55u
+  0.25        192  154   38   80.2    +216.05u   +82.61u     27   38    -2.13u
+  0.50 (live) 137  118   19   86.1    +204.55u   +71.91u     24   19    -1.00u
+
+  0.25 daily: 23 trading days, 19 up / 4 down, best +23.41u, worst -2.13u,
+  top stake 5.83u (rung 4, never exceeded), banks 27 / breaks 38,
+  capital 1.00u -> 217.05u.  Full table:
+  analysis_ladder_shortfall_025_2026-11-02.txt.
+
+  0.25 across the pace rungs: 1.04 -> 192 @ 80.2% (+216.05u, 38 brk);
+  1.08 -> 132 @ 90.2% (+229.40u, 13 brk); 1.12 -> 115 @ 90.4% (+195.81u,
+  11 brk); 1.16 -> 91 @ 95.6% (+183.60u, 4 brk).  At 0.25 the best ladder
+  point is again TC-S 1.08, not the live TC-C 1.04: +13u more net, 10
+  points higher win rate, 25 fewer breaks.
+
+Tests: `BLM_ALLOW_HEAVY_TESTS=1 pytest -q tests/test_total_ladder_split_2026_11_02.py
+tests/test_fixture_context.py` -> 12 passed.  (Unflagged runs are REFUSED by
+the conftest production-pipeline guard while the collector is live; the
+targeted pair was run with the explicit override, 0.8 s wall.)
+
+Deploy: NOTHING OF THIS WORK IS RUNTIME CODE.  Analysis scripts, two dated
+evidence files and this status entry only — no module the server or collector
+imports was touched, so a restart would load no change from this session.
+The restart was NOT performed: the working tree still carries another
+session's uncommitted blm_v4/betting/api.py, explorer.js, styles.css and the
+new fixture_context.py, and a restart loads the working tree, not HEAD.
