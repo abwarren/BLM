@@ -3914,3 +3914,43 @@ matches respectively).  The panel shows the three rows above as NOT PLACED
 with their refusal; new qualifying moments appear within one 3-second pass.
 
 COMMIT: runtime branch fix/price-mapping-2026-10-06 -> 3403fdb (pushed).
+
+## 2026-11-02 21:59 SAST — MULTI-ACCOUNT GUARD + the account question answered
+
+Operator: "it is my account" (1956500422 — the session in the blm-exec-gx Opera
+GX profile) and then "cant i use different accounts?".
+
+ACCOUNT CORRECTED (config, backed up):
+  /home/ubuntu/.config/systemd/user/blm-server.service.d/91-account-identity.conf
+  BLM_EXPECTED_ACCOUNT_ID 233997789 -> 1956500422  (backup kept alongside as
+  .bak-20261102T195549Z).  daemon-reload + restart done; the running process
+  carries 1956500422 and `fast_lane_ready` reports balance 100.63 with ZERO
+  ACCOUNT_MISMATCH lines since.  The three BLOCKED rows 3696-3698 are the
+  historical evidence, not a live state.
+
+MULTI-ACCOUNT SUPPORT (runtime branch fix/price-mapping-2026-10-06, pushed):
+  * blm_v4/betting/provider.py — new `configured_account_ids` property parses
+    BLM_EXPECTED_ACCOUNT_ID as a comma / semicolon / space separated LIST;
+    `configured_account_id` still returns the first id for single-account
+    callers.
+  * blm_v4/betting/account_guard.py — `verify_account` now accepts the bet when
+    the authenticated id is ANY member of that set.  Unchanged fail-closed
+    behaviour: unlisted account blocks, unreadable authenticated id blocks,
+    empty permitted set on an identity-requiring provider blocks.  The message
+    names the authenticated id and the number of permitted accounts.
+  * tests/test_multi_account_identity_2026_11_02.py — 8 tests (single still
+    matches/blocks, any permitted accepted, unlisted blocked, unreadable
+    blocked, empty set blocked, env list parsing, dry provider exempt).
+    Combined run with the orphan-identity, candidate and fast-lane suites:
+    34 passed.  Server restarted; healthz 200; lane live.
+
+TO ADD AN ACCOUNT: append it to the same env line, e.g.
+  Environment=BLM_EXPECTED_ACCOUNT_ID=1956500422,233997789
+then daemon-reload + restart.  Only ids the operator names are ever accepted.
+
+STILL GLOBAL, NOT PER ACCOUNT (by design, and worth knowing before using two):
+  the kill switch, the daily bet count / exposure limits, the ladder rung and
+  the one-bet-per-game rule all key off the shared ledger — they are NOT split
+  per account.  And bet_executions/candidates do not yet record WHICH account
+  placed a slip, so with two accounts the audit trail cannot tell them apart.
+  That column is the next piece of work if multi-account is really used.
