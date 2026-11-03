@@ -954,28 +954,47 @@ class PokerBetDomAdapter(SelectionResolver):
     #: localStorage key the PokerBet SPA keeps the signed-in session in
     AUTH_DATA_KEY = "__18751019-web__AUTH_DATA"
 
+    @classmethod
+    def auth_data_keys(cls) -> tuple[str, ...]:
+        """Every localStorage key PokerBet may keep the auth blob under.
+
+        The SPA writes ``<prefix>AUTH_DATA`` when "remember me" is ticked
+        and ``<prefix><prefix>AUTH_DATA_NOT_REMEMBER`` when it is not — its
+        authData module prefixes the already-prefixed NOT_REMEMBER name a
+        second time.  Reading only the first key made a signed-in browser
+        look unprovable (observed live 2026-11-03), so GATE 8 blocked every
+        bet while the account was perfectly readable under the second.
+        """
+        prefix = cls.AUTH_DATA_KEY[:-len("AUTH_DATA")]
+        return (cls.AUTH_DATA_KEY,
+                prefix + prefix + "AUTH_DATA_NOT_REMEMBER")
+
     def read_account_id(self) -> Optional[str]:
         """The signed-in account number, or None when unprovable.
 
         PokerBet keeps the authenticated user in localStorage under
-        ``…__AUTH_DATA`` → ``data.user_id`` — observed live 233997789, the
-        same number its profile panel renders.  Read-only, and only the id
-        is extracted: no token ever leaves the page or reaches a log.
+        ``…__AUTH_DATA`` (or ``…__AUTH_DATA_NOT_REMEMBER``) → ``data.user_id``
+        — observed live 233997789, the same number its profile panel renders.
+        Read-only, and only the id is extracted: no token ever leaves the
+        page or reaches a log.
         """
         if self._page is None or not hasattr(self._page, "evaluate"):
             return None
         try:
             uid = self._page.evaluate(
-                """(key) => {
-                       try {
-                           const raw = localStorage.getItem(key);
-                           if (!raw) return null;
-                           const d = JSON.parse(raw);
-                           const id = d && d.data && d.data.user_id;
-                           return id == null ? null : String(id);
-                       } catch (e) { return null; }
+                """(keys) => {
+                       for (const key of keys) {
+                           try {
+                               const raw = localStorage.getItem(key);
+                               if (!raw) continue;
+                               const d = JSON.parse(raw);
+                               const id = d && d.data && d.data.user_id;
+                               if (id != null) return String(id);
+                           } catch (e) { /* try the next key */ }
+                       }
+                       return null;
                    }""",
-                self.AUTH_DATA_KEY)
+                list(self.auth_data_keys()))
         except Exception:
             return None
         uid = str(uid or "").strip()
