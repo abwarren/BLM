@@ -3999,3 +3999,51 @@ the live betting path:
   implemented. `PokerBetProvider.submit()` raises ProviderUnavailable.
   Change this and add the bookmaker HTTP/SSE transport before a real bet
   can fire.
+
+## 2026-11-04 01:40 SAST — AUTOBET IDENTITY BLOCKER REMOVED (runtime branch)
+
+Operator: "get my autobet to fire on next candidate." Autobet was already
+FIRING at candidates and being refused at GATE 8 every time. Root cause, in
+TWO layers, both fixed:
+
+1. **The authenticated id was stored under a key the adapter never read.**
+   The Opera GX session was signed in WITHOUT "remember me", so PokerBet's
+authData module wrote the blob to
+   `__18751019-web____18751019-web__AUTH_DATA_NOT_REMEMBER` (double prefix by
+   design), not `__18751019-web__AUTH_DATA`. `PokerBetDomAdapter.read_account_id`
+   read only the latter, returned None, and `verify_account` failed closed
+   with "account identity unverifiable". Every one of the 15 BLOCKED rows on
+   2026-11-03 (ids 3804-3866) carries that message.
+   FIX: `auth_data_keys()` + a two-key read, still fail-closed when neither
+   carries `data.user_id`. Runtime tree `blm_v4/execution/pokerbet/dom.py`,
+   commit **b1ea136** (branch `fix/price-mapping-2026-10-06`, pushed).
+
+2. **The signed-in account was not in the allowlist.** The live session is
+   **233997789**; `91-account-identity.conf` held only 1956500422. Both are
+   operator accounts (233997789 was the configured id before 2026-11-02).
+   FIX: `BLM_EXPECTED_ACCOUNT_ID=1956500422,233997789` (backup
+   `91-account-identity.conf.bak-20261103T231503Z`); daemon-reload + restart.
+
+### Verification
+- Live page read through the patched method: **233997789** (was None).
+- `verify_account({authenticated:233997789, permitted:{...both}}) -> None`;
+  an unlisted id still blocks. Fail-closed preserved.
+- `blm-server` restarted 23:15:33Z, PID 709975, `/healthz` 200 (~4 min bind,
+  the usual WAL pinning). Env carries both ids; `fast_lane_ready`
+  provider=pokerbet_browser, balance **119.9**.
+- **Zero** `bet_executions` rows / ACCOUNT_MISMATCH since the restart.
+  (The 9 "post-restart" journal hits seen mid-session were pre-restart rows:
+  journalctl `--since` had been given local SAST, 2 h ahead of UTC.)
+- Lane healthy and armed-eligible: passes show rows>0 with `refused_top:
+  pace=N` only.
+
+### NOT OBSERVED (honest limitation)
+No game qualified for ~20 min of watching, so no real submission was seen
+end-to-end after the fix. The next candidate that passes pace/shortfall/
+price/progress should reach the browser transport; the identity gate no
+longer blocks it.
+
+### Untouched
+`blm_v4/betting/provider.py` in THIS tree (handoff branch) is still dirty
+with the earlier HTTP-stub/GATE-8 work — not live, not used by the server;
+left as-is. No collector, alert, settlement or DB write touched.
