@@ -177,6 +177,14 @@ class BettingConfig:
         return not self.dry_run
 
 
+    @property
+    def account_identity_configured(self) -> bool:
+        """True when the operator has supplied an authorized account id
+        so the guard can actually run.  An unconfigured id is not a
+        permission — it means "blocked, no id to compare"."""
+        return self.expected_account_id is not None
+
+
 def credentials_present() -> dict:
     """Whether the provider credentials are PRESENT in the environment —
     never their values.  Safe to log and to serve (booleans only)."""
