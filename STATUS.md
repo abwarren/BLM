@@ -3954,3 +3954,48 @@ STILL GLOBAL, NOT PER ACCOUNT (by design, and worth knowing before using two):
   per account.  And bet_executions/candidates do not yet record WHICH account
   placed a slip, so with two accounts the audit trail cannot tell them apart.
   That column is the next piece of work if multi-account is really used.
+
+## 2026-11-03 — ACCOUNT-IDENTITY ORACLE + GUARD WIRED INTO LIVE PATH
+
+The account-identity oracle and guard (GATE 8, directive) are now wired into
+the live betting path:
+
+### What was done
+1. blm_v4/betting/provider.py — rewritten `PokerBetProvider`:
+   - Two oracle surfaces: `authenticated_account_id` (bookmaker's session)
+     and `configured_account_id` (the operator-authorised account from
+     BLM_EXPECTED_ACCOUNT_ID, read at call time).  Compared as integers
+     by `verify_account()` at the submission boundary.
+   - New `get_authenticated_account_id()` / `set_live_session_reader()`
+     — the live CDP browser session reader. The worker installs the reader
+     and re-reads the authenticated account immediately before submit(), so
+     a session swap or expiry is caught at the boundary (fail-closed).
+   - `provider_from_config()` now returns `PokerBetProvider` when
+     BETTING_DRY_RUN=false and wires the configured account id from env.
+2. `provider_from_config()` exports `get_authenticated_account_id()` and
+   `set_live_session_reader()`.
+
+### Verification (run)
+- `python3 -m pytest tests/test_betting_account_oracle.py -v` → 9 passed.
+- `python3 -c "import blm_v4.betting.provider; ..."` → module imports; dry-run
+  returns ACCEPTED; live stub raises ProviderUnavailable (fail-closed);
+  configured_account_id reads env (1956500422) when set.
+- Server env confirmed live: BETTING_DRY_RUN=false,
+  BETTING_BROWSER_SUBMIT=true, BLM_EXPECTED_ACCOUNT_ID=1956500422.
+
+### Live-path reality (end to end)
+- Candidate evaluation (worker -> executor) -> 10 gates -> idempotent claim ->
+  account guard (authenticated vs configured) -> FAIL CLOSED on mismatch.
+- `PokerBetProvider.submit()` is still an inert stub. The real bookmaker
+  transport is not yet implemented. Until it is, the next candidate fails
+  closed with ProviderUnavailable / FAILED; no real bet is submitted and no
+  money moves. Balance (85.5R) is a bookmaker-side read, not a gate.
+- Guard result: with the Opera GX session authenticated as account
+  1956500422 and the env authorised id 1956500422, the account guard PASSES;
+  the only remaining blocker is the missing transport.
+
+### Blocked
+- The real bookmaker submission transport (login/session/placement) is not
+  implemented. `PokerBetProvider.submit()` raises ProviderUnavailable.
+  Change this and add the bookmaker HTTP/SSE transport before a real bet
+  can fire.
