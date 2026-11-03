@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS bet_executions (
     submitted_at_utc    TEXT,
     resolved_at_utc     TEXT,
     day_utc             TEXT NOT NULL,
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    configured_account_id  INTEGER,   -- GATE 8: the account the operator is authorized to bet as
 );
 
 CREATE INDEX IF NOT EXISTS idx_bet_executions_day
@@ -130,6 +131,7 @@ class BettingStore:
             "rejection_reason": "TEXT",
             "execution_state": "TEXT",
             "elapsed_ms": "INTEGER",
+            "configured_account_id": "INTEGER",
         }
         for name, decl in additions.items():
             if name not in existing:

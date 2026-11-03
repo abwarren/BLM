@@ -1,5 +1,6 @@
 """Betting package — execution layer (DRY_RUN by default)."""
-from blm_v4.betting.config import BettingConfig, credentials_present
+
+from blm_v4.betting.config import BettingConfig
 from blm_v4.betting.executor import evaluate, execute
 from blm_v4.betting.provider import (
     DryRunProvider,

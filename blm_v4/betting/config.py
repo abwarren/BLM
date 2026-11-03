@@ -2,7 +2,8 @@
 
 EVERY value comes from the environment (or the gitignored ``.env`` file
 the server process loads).  Nothing here is hard-coded: not the monetary
-values, not the credentials, not the provider endpoints.
+values, not the credentials, not the provider endpoints, not the account
+identity the operator intends to bet as.
 
 Credential policy (directive 2026-09-21 §SECURITY): the username and
 password NEVER appear in source, Git, logs, API responses, frontend
@@ -10,7 +11,16 @@ JavaScript or the database.  They are read from
 ``POKERBET_USERNAME`` / ``POKERBET_PASSWORD`` at runtime and exist only
 inside the provider's process memory.  This module deliberately exposes
 no credential value: it only reports whether they are PRESENT.
+
+Account identity policy (directive GATE 8 / 2026-09-28): live money may
+only be submitted from the account the operator has authorized.  The
+authorized account id is supplied by the environment as
+``BLM_EXPECTED_ACCOUNT_ID`` — a non-secret integer label, never a
+credential — and is read at call time.  A pokerbet account that appears
+in the signed-in browser but is not the authorized account is blocked
+at the submission boundary: no partial state, no money moved.
 """
+
 from __future__ import annotations
 
 import math
@@ -79,6 +89,13 @@ class BettingConfig:
     the frontend kill switch: even with AUTO BETTING ON (frontend) and
     ``auto_betting_enabled`` persisted, no real submission happens unless
     the environment explicitly sets ``BETTING_DRY_RUN=false``.
+
+    Account identity (GATE 8): ``expected_account_id`` is the account the
+    operator authorized to bet as.  It is a non-secret integer label
+    supplied through the environment as ``BLM_EXPECTED_ACCOUNT_ID``.
+    It is read at call time by the provider and compared against the
+    account the bookmaker authenticated.  Missing/invalid → the account
+    guard cannot run → the bet is BLOCKED (fail-closed, no bet).
     """
 
     # ── the provider execution mode (directive: DO NOT enable live yet) ──
@@ -105,6 +122,12 @@ class BettingConfig:
     # ── paths ──────────────────────────────────────────────────────────
     db_path: str = ""
 
+    # ── account identity (GATE 8) ──────────────────────────────────────
+    # The account the operator has authorized to submit real money.  A
+    # non-empty, parseable integer.  Missing → account identity
+    # unverifiable → the guard blocks before any submission.
+    expected_account_id: Optional[int] = None
+
     @staticmethod
     def from_env(root: Optional[Path] = None) -> "BettingConfig":
         """Build the configuration from the environment.
@@ -122,6 +145,11 @@ class BettingConfig:
         if root is None:
             root = Path(__file__).resolve().parent.parent.parent
         _load_env_file(root / ".env")
+        expected = _env("BLM_EXPECTED_ACCOUNT_ID", "").strip()
+        try:
+            expected_id = int(expected) if expected else None
+        except ValueError:
+            expected_id = None
         return BettingConfig(
             dry_run=_env_bool("BETTING_DRY_RUN", "true"),
             max_stake_per_bet=_env_float("BETTING_MAX_STAKE_PER_BET", ""),
@@ -137,6 +165,7 @@ class BettingConfig:
                 "BETTING_PROVIDER_TIMEOUT_S", "20") or 20.0,
             db_path=_env("BETTING_DB_PATH",
                          str(root / "blm_betting.db")),
+            expected_account_id=expected_id,
         )
 
     @property
@@ -155,3 +184,24 @@ def credentials_present() -> dict:
     pw = os.environ.get("POKERBET_PASSWORD", "")
     return {"username_present": bool(user),
             "password_present": bool(pw)}
+
+
+def _load_env_file(path: Path) -> None:
+    """Load KEY=VALUE lines from ``path`` into the environment WITHOUT
+    overriding variables that are already set.  Missing file → no-op;
+    parse problems → skip the line; never raises.  Values are quoted-
+    aware (strips matching single/double quotes)."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value

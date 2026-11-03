@@ -716,6 +716,9 @@ td.ex-st-failed { color: #ef4444; }
 td.ex-st-unknown, td.ex-st-expired { color: #9ca3af; }
 td.ex-st-would_bet, td.ex-st-pending, td.ex-st-submitting,
 td.ex-st-submitted { color: #3b82f6; }
+/* line_minus_final: + green = total finished under the line (UNDER won) */
+#exTable td.ex-pos { color: #22c55e; font-weight: 700; }
+#exTable td.ex-neg { color: #ef4444; font-weight: 700; }
 
 .ab-exec.st-accepted { border-left-color: #22c55e; }
 .ab-exec.st-accepted .ab-status { color: #22c55e; }
