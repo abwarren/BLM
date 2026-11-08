@@ -81,6 +81,136 @@ def _floats(text: str) -> list[float]:
     return [float(m) for m in _FLOAT_RE.findall(text or "")]
 
 
+@dataclass(frozen=True)
+class TotalOffer:
+    """One independently parsed game-total offer.
+
+    ``line`` is the POINT value; ``over`` / ``under`` are DECIMAL ODDS.
+    They are kept in separate fields because confusing the two is the
+    defect this module exists to prevent.
+    """
+    line: float
+    over: Optional[float]
+    under: Optional[float]
+    suspended: bool = False
+
+    def price(self, position: str) -> Optional[float]:
+        return self.over if str(position).upper() == "OVER" else self.under
+
+
+#: select_total_offer refusal reasons (stable, auditable)
+R_LINE_NOT_AVAILABLE = "LINE_NOT_AVAILABLE"
+R_AMBIGUOUS_LINES = "AMBIGUOUS_LINES"
+R_MISSING_ODDS = "MISSING_ODDS"
+R_MARKET_SUSPENDED = "MARKET_SUSPENDED"
+R_MARKET_AMBIGUOUS = "MARKET_AMBIGUOUS"
+
+_ODDS_MIN, _ODDS_MAX = 1.01, 1000.0
+_TEAM_TOTAL_RE = re.compile(r"\b(team|home|away)\s+total\b", re.IGNORECASE)
+
+
+def _is_line_token(token: str) -> bool:
+    return bool(_LINE_RE.match(token))
+
+
+def _is_odds(value: float) -> bool:
+    return _ODDS_MIN <= value <= _ODDS_MAX
+
+
+def parse_total_offers(text: Optional[str]) -> list[TotalOffer]:
+    """Parse EVERY line in a rendered game-total market, independently.
+
+    The parser is deliberately strict about structure and tolerant about
+    whitespace: a row must yield exactly ONE point line and at most two
+    odds values.  Ambiguous rows are DROPPED — a half-understood market
+    is never offered to the selector.  Odds are only ever read from
+    values inside the decimal-odds band; a point value can therefore
+    never be mistaken for a price.
+    """
+    if not text:
+        return []
+    offers: list[TotalOffer] = []
+    for raw_row in (text or "").splitlines():
+        row = raw_row.strip()
+        if not row or _TEAM_TOTAL_RE.search(row):
+            continue
+        tokens = row.replace(":", " ").replace("|", " ").split()
+        lines = [float(t) for t in tokens if _is_line_token(t)]
+        if len(lines) != 1:
+            continue                       # no line, or more than one
+        nums = []
+        for t in tokens:
+            if not re.fullmatch(r"\d+(?:\.\d+)?", t):
+                continue
+            v = float(t)
+            if v == lines[0] or not _is_odds(v):
+                continue
+            nums.append(v)
+        if len(nums) > 2:
+            continue                       # ambiguous row
+        over = under = None
+        lowered = row.lower()
+        if "over" in lowered or re.search(r"\bo\b", lowered):
+            m = re.search(r"(?:over|\bo\b)\s*(\d+(?:\.\d+)?)", lowered)
+            if m and _is_odds(float(m.group(1))):
+                over = float(m.group(1))
+        if "under" in lowered or re.search(r"\bu\b", lowered):
+            m = re.search(r"(?:under|\bu\b)\s*(\d+(?:\.\d+)?)", lowered)
+            if m and _is_odds(float(m.group(1))):
+                under = float(m.group(1))
+        # positional fallback ONLY when the row is genuinely two-sided:
+        # an unlabelled single price is ambiguous and never assigned to an
+        # arbitrary side, and a labelled side is never overwritten.
+        if len(nums) == 2:
+            if over is None and under is None:
+                over, under = nums[0], nums[1]
+            elif over is None:
+                over = next((n for n in nums if n != under), None)
+            elif under is None:
+                under = next((n for n in nums if n != over), None)
+        elif len(nums) == 1 and over is None and under is None:
+            continue                        # one unlabelled price → ambiguous
+        offers.append(TotalOffer(line=lines[0], over=over, under=under))
+    # a duplicate line is an ambiguous structure — drop both
+    counts: dict[float, int] = {}
+    for o in offers:
+        counts[o.line] = counts.get(o.line, 0) + 1
+    return [o for o in offers if counts[o.line] == 1]
+
+
+def select_total_offer(offers: list[TotalOffer], trigger_line, position: str,
+                       *, tolerance: float = 0.0,
+                       suspended: bool = False
+                       ) -> tuple[Optional[TotalOffer], Optional[str]]:
+    """Select the offer at the ORIGINAL trigger line — never the line
+    whose odds are nearest 1.85, never the current total substituted for
+    the trigger, and never a guessed line.
+
+    Returns ``(offer, None)`` or ``(None, reason)``.
+    """
+    try:
+        want = float(trigger_line)
+    except (TypeError, ValueError):
+        return None, R_LINE_NOT_AVAILABLE
+    if not str(position).upper() in ("OVER", "UNDER"):
+        return None, R_MARKET_AMBIGUOUS
+    matches = [o for o in offers
+               if abs(o.line - want) <= tolerance + 1e-9]
+    if not matches:
+        return None, R_LINE_NOT_AVAILABLE
+    if len(matches) > 1:
+        return None, R_AMBIGUOUS_LINES
+    offer = matches[0]
+    if suspended:
+        return None, R_MARKET_SUSPENDED
+    price = offer.price(position)
+    if price is None:
+        return None, R_MISSING_ODDS
+    if not _is_odds(price):
+        return None, R_MISSING_ODDS
+    return offer, None
+
+
 @dataclass
 class OfferCheck:
     """The ordered verification result for one live offer."""
@@ -107,6 +237,19 @@ class PokerBetDomAdapter(SelectionResolver):
         # legs clicked in this process, for the pre-submit slip gate:
         # {"event", "market", "position", "line", "price", "game_id"}
         self._pending_legs: list[dict] = []
+        # the FROZEN BLM trigger line this execution must bet.  When set,
+        # the adapter refuses every other line on the board instead of
+        # substituting the current bookmaker total.
+        self._required_line: Optional[float] = None
+
+    def set_required_line(self, line: Optional[float]) -> None:
+        """Bind this adapter instance to ONE trigger line for the next
+        resolution.  ``None`` clears the binding (and then a multi-line
+        market is treated as ambiguous rather than guessed)."""
+        try:
+            self._required_line = None if line is None else float(line)
+        except (TypeError, ValueError):
+            self._required_line = None
 
     # ── registration (canonical binding, directive 2A) ────────────────
     def register_game(self, event: str, *, game_id: str,
@@ -229,22 +372,49 @@ class PokerBetDomAdapter(SelectionResolver):
             return False
         if self._page is None:
             return False
-        try:
-            block = self._page.locator(SEL_MARKET_BLOCK,
-                                       has_text="Total")
-            return block.count() > 0
-        except Exception:
-            return False
+        # exactly ONE game-total block — a second candidate is ambiguous
+        return len(self._market_texts()) == 1
 
     # ── protocol: resolve the CURRENT offer ───────────────────────────
-    def _market_text(self) -> Optional[str]:
+    @staticmethod
+    def _is_game_total_text(text: Optional[str]) -> bool:
+        """A game-total market block — never a TEAM total, a spread or a
+        props market that merely contains the word 'total'."""
+        t = str(text or "")
+        if not re.search(r"\btotal\b", t, re.IGNORECASE):
+            return False
+        if _TEAM_TOTAL_RE.search(t):
+            return False
+        if re.search(r"\b(handicap|spread|team)\b", t, re.IGNORECASE):
+            return False
+        return True
+
+    def _market_texts(self) -> list[str]:
+        """Every rendered GAME-TOTAL market block (0, 1 or many)."""
         try:
             loc = self._page.locator(SEL_MARKET_BLOCK, has_text="Total")
-            if loc.count() == 0:
-                return None
-            return loc.first.inner_text()
+            nth = getattr(loc, "nth", None)
+            out = []
+            for i in range(loc.count()):
+                try:
+                    item = nth(i) if nth is not None else loc.first
+                    text = item.inner_text()
+                except Exception:
+                    continue
+                if self._is_game_total_text(text):
+                    out.append(text)
+            return out
         except Exception:
+            return []
+
+    def _market_text(self) -> Optional[str]:
+        """The ONE game-total market block, or None when absent/ambiguous.
+        More than one candidate block is an ambiguous structure — the
+        adapter fails closed rather than betting the first one."""
+        texts = self._market_texts()
+        if len(texts) != 1:
             return None
+        return texts[0]
 
     def parse_market_text(self, text: Optional[str]
                           ) -> tuple[Optional[float], Optional[float],
@@ -289,18 +459,71 @@ class PokerBetDomAdapter(SelectionResolver):
         if "TOTAL" not in str(market or "").upper():
             return None
         text = self._market_text()
-        line, over, under = self.parse_market_text(text)
-        price = over if position.upper() == "OVER" else under
-        if line is None or price is None:
-            return None                     # POSITION_NOT_FOUND (recoverable)
+        if text is None:
+            return None                     # missing OR ambiguous structure
+        offers = parse_total_offers(text)
+        if not offers:
+            return None
         suspended = self._market_suspended()
+        if self._required_line is not None:
+            offer, _reason = select_total_offer(
+                offers, self._required_line, position,
+                tolerance=self.line_tolerance, suspended=suspended)
+            if offer is None:
+                # LINE_NOT_AVAILABLE / AMBIGUOUS_LINES / MISSING_ODDS /
+                # MARKET_SUSPENDED — never substituted by another line
+                return None
+        else:
+            active = [o for o in offers
+                      if o.price(position) is not None]
+            if len(active) != 1:
+                # several selectable lines and no trigger-line binding:
+                # an ambiguous structure is refused, not guessed
+                return None
+            offer = active[0]
+            if suspended:
+                return None
+        price = offer.price(position)
+        if price is None:
+            return None
+        # the click target must be uniquely identifiable at THIS line;
+        # otherwise the click is refused rather than guessed
+        clickable = self._locate_outcome(position, offer.line)
         handle = {"page": self._page, "market_text": text,
                   "game_id": rec["game_id"],
+                  "offers": offers,
+                  "clickable": clickable,
                   "rendered_home": self._page_teams()[0],
                   "rendered_away": self._page_teams()[1]}
         return MarketObservation(
             event=event, market=market, position=position.upper(),
-            line=line, price=price, handle=handle, suspended=suspended)
+            line=offer.line, price=price, handle=handle, suspended=suspended)
+
+    def _locate_outcome(self, position: str, line: float):
+        """The unique OVER/UNDER element for ``line`` (or None).
+
+        The rendered label format is not established in-repo, so the
+        match includes the line text; if that is not exactly one element
+        the click is refused (fail closed) instead of clicking a
+        different line's price.
+        """
+        label = "Over" if str(position).upper() == "OVER" else "Under"
+        try:
+            loc = self._page.locator("[class*='outcome'], button",
+                                     has_text=label)
+            if loc.count() == 0:
+                return None
+            if loc.count() == 1:
+                return loc.first
+            # multiple outcomes: narrow to the requested line
+            narrowed = self._page.locator(
+                "[class*='outcome'], button",
+                has_text=f"{label} {line:g}")
+            if narrowed.count() == 1:
+                return narrowed.first
+            return None
+        except Exception:
+            return None
 
     def _market_suspended(self) -> bool:
         try:
@@ -315,18 +538,9 @@ class PokerBetDomAdapter(SelectionResolver):
         handle = obs.handle or {}
         loc = handle.get("clickable")
         if loc is None:
-            # build the clickable from the market block's position cell:
-            # the OVER/UNDER price element inside the current market text
-            try:
-                cell = self._page.locator(
-                    "[class*='outcome'], button", has_text=(
-                        "Over" if obs.position.upper() == "OVER"
-                        else "Under"))
-                if cell.count() == 0:
-                    return False
-                loc = cell.first
-            except Exception:
-                return False
+            # NO unambiguous target for the verified line — never click a
+            # look-alike outcome (that is how a different line gets bet).
+            return False
         try:
             loc.click(timeout=4_000)
         except Exception:
