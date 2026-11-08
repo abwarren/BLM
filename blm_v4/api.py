@@ -986,6 +986,10 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
 
     mkt_src: Optional[str] = "event-view" if mlatest else None
     ws_obs: Optional[dict] = None
+    # every live game-total line the bookmaker is offering in the latest
+    # observed batch — the LADDER the rung validator infers its tick from.
+    # Never fabricated: absent when no WS batch was observed.
+    observed_lines: Optional[list] = None
     if conn is not None:
         # clean-data boundary: only post-epoch WS observations may feed
         # the current live market line (legacy lines are audit data only)
@@ -1021,6 +1025,9 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
         else:
             row = None
         ws_obs = dict(row) if row is not None else None
+        if r:
+            observed_lines = sorted({_f(rr["line_value"]) for rr in r
+                                     if _f(rr["line_value"]) is not None})
     ws_line = _f(ws_obs["line_value"]) if ws_obs else None
     if ws_line is not None and (total_line is None
                                 or (ws_obs and mlatest
@@ -1141,6 +1148,11 @@ def _analyze_game(game: dict, rows: list[dict], now: datetime,
             "under_odds": (
                 _f(ws_obs["under_price"]) if mkt_src == "ws" and ws_obs
                 else _f(latest["total_under_odds"]) if latest else None),
+            "observed_lines": observed_lines,
+            # the authoritative market gate's own status label (LIVE / STALE
+            # / ...), exposed so the executor can refuse a non-live market
+            # instead of inferring freshness from the line's presence.
+            "market_status": ((proj_row or {}).get("market_status")),
             "spread": spread,
             "spread_indicator": (latest.get("spread_indicator") if latest else None),
             "home_total_line": home_total_line,

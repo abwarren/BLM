@@ -505,15 +505,42 @@ def main() -> None:
                 _betting_payload_cache.update(at=time.monotonic(), games=games)
             return games
 
-        # Expose the same authoritative in-process game view to the
-        # read-only eligibility endpoint and the manual Total validator.
-        configure_betting(betting_store, betting_cfg,
-                          live_payload_fn=_live_games_for_betting)
-
         betting_worker = BettingWorker(
             betting_cfg, betting_store, _live_games_for_betting,
-            poll_interval_s=5.0)
+            poll_interval_s=float(os.environ.get(
+                "BETTING_WORKER_POLL_S", "5")))
         betting_worker.start()
+
+        # UNKNOWN submissions are reconciled by a separate, read-only
+        # pass that NEVER submits.  It only advances a record when the
+        # bookmaker reports the order the idempotency key produced.
+        from blm_v4.betting.reconcile import BettingReconciler
+        betting_reconciler = BettingReconciler(
+            betting_store, betting_worker.provider,
+            poll_interval_s=float(os.environ.get(
+                "BETTING_RECONCILE_POLL_S", "30")))
+        betting_reconciler.start()
+        app.state._betting_reconciler = betting_reconciler
+        logger.info("betting_reconciler_started",
+                    unknown=len(betting_store.needs_reconciliation()))
+
+        def _betting_browser_status() -> dict:
+            """Genuine bookmaker-browser state for the dashboard.  The
+            account oracle is the only reader installed here; with no
+            live session reader it honestly returns UNKNOWN (None)."""
+            from blm_v4.betting.provider import get_authenticated_account_id
+            acct = get_authenticated_account_id()
+            return {"connected": None if acct is None else True,
+                    "account_id": acct}
+
+        # Expose the same authoritative in-process game view to the
+        # read-only eligibility endpoint and the manual Total validator;
+        # also expose the RUNNING worker so /status cannot show a worker
+        # state the process does not actually have.
+        configure_betting(betting_store, betting_cfg,
+                          live_payload_fn=_live_games_for_betting,
+                          worker=betting_worker,
+                          browser_status_fn=_betting_browser_status)
         app.state._betting_worker = betting_worker
         logger.info("betting_worker_started",
                     dry_run=betting_cfg.dry_run,

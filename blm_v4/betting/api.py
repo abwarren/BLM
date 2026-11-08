@@ -33,16 +33,52 @@ router = APIRouter(prefix="/api/v4/betting", tags=["blm-v4-betting"])
 _store: Optional[BettingStore] = None
 _cfg: Optional[BettingConfig] = None
 _live_payload_fn = None
+_worker = None
+_browser_status_fn = None
 
 
 def configure_betting(store: BettingStore, cfg: BettingConfig,
-                      live_payload_fn=None) -> None:
-    """Wire the process-wide store/config (called from server.py)."""
-    global _store, _cfg, _live_payload_fn
+                      live_payload_fn=None, worker=None,
+                      browser_status_fn=None) -> None:
+    """Wire the process-wide store/config (called from server.py).
+
+    ``worker`` and ``browser_status_fn`` are optional read-only status
+    probes: the dashboard reports the RUNNING worker and the BOOKMAKER
+    browser state, never a frontend guess.
+    """
+    global _store, _cfg, _live_payload_fn, _worker, _browser_status_fn
     _store = store
     _cfg = cfg
     if live_payload_fn is not None:
         _live_payload_fn = live_payload_fn
+    if worker is not None:
+        _worker = worker
+    if browser_status_fn is not None:
+        _browser_status_fn = browser_status_fn
+
+
+def _worker_status() -> dict:
+    w = _worker
+    if w is None:
+        return {"running": None, "last_error": None,
+                "poll_interval_s": None}
+    thread = getattr(w, "_thread", None)
+    return {"running": bool(thread is not None and thread.is_alive()),
+            "last_error": getattr(w, "last_error", None),
+            "poll_interval_s": getattr(w, "poll_interval_s", None)}
+
+
+def _browser_status() -> dict:
+    """Genuine browser/account state when a reader is installed; otherwise
+    an explicit UNKNOWN — never a cosmetic 'connected'."""
+    if _browser_status_fn is None:
+        return {"connected": None, "account_id": None}
+    try:
+        state = _browser_status_fn() or {}
+    except Exception:  # noqa: BLE001 — status must not break the endpoint
+        return {"connected": None, "account_id": None}
+    return {"connected": state.get("connected"),
+            "account_id": state.get("account_id")}
 
 
 def _require() -> tuple[BettingStore, BettingConfig]:
@@ -89,6 +125,7 @@ def betting_status() -> dict:
     # ``dry_run``.
     amount_raw = (round(stats["amount"], 2)
                   if stats["amount"] is not None else None)
+    counts = store.today_status_counts()
     today_block = {
         "bets": stats["bets"],
         "units": (round(stats["bets"] * cfg.stake_units, 2)
@@ -101,6 +138,12 @@ def betting_status() -> dict:
         "amount_simulated": amount_raw if cfg.dry_run else 0.0,
         "is_simulated": cfg.dry_run,
         "remaining_exposure": remaining,
+        # state-machine tiles — served from the ledger, never inferred
+        "status_counts": counts.get("counts", {}),
+        "pending": counts.get("pending"),
+        "unknown": counts.get("unknown"),
+        "confirmed": counts.get("confirmed"),
+        "rejected": counts.get("rejected"),
     }
     return {
         "enabled": enabled,
@@ -119,6 +162,12 @@ def betting_status() -> dict:
         # authorized account id (integer label only; never a credential).
         "credentials": credentials_present(),   # booleans ONLY
         "account_identity": _account_identity_block(),
+        # authorization surface: every leg of the live gate, read from the
+        # server config (the frontend may only DISPLAY it)
+        "submission_authorized": cfg.submission_authorized,
+        "browser_submit_enabled": cfg.browser_submit_enabled,
+        "worker": _worker_status(),
+        "browser": _browser_status(),
         "recent": [_public_execution(r) for r in store.recent(25)],
     }
 

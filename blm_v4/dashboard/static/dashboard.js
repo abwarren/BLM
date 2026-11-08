@@ -4094,11 +4094,39 @@ function abStatusHTML(st) {
   const credVal = $("abCredVal");
   if (credVal) {
     const cred = st.credentials || {};
+    // the API serves PRESENCE booleans only (never values)
     const credParts = [];
-    if (cred.username != null) credParts.push(cred.username ? "USER ✓" : "USER ✗");
-    if (cred.password != null) credParts.push(cred.password ? "PASS ✓" : "PASS ✗");
+    if (cred.username_present != null) credParts.push(cred.username_present ? "USER ✓" : "USER ✗");
+    if (cred.password_present != null) credParts.push(cred.password_present ? "PASS ✓" : "PASS ✗");
     credVal.textContent = credParts.length ? credParts.join(" · ") : "—";
     credVal.className = "ab-state-val muted";
+  }
+  // ── Browser / worker / authorization: genuine backend state ──
+  const browserVal = $("abBrowserVal");
+  if (browserVal) {
+    const b = st.browser || {};
+    browserVal.textContent = b.connected === true ? "CONNECTED"
+      : b.connected === false ? "DISCONNECTED" : "UNKNOWN";
+    browserVal.className = "ab-state-val " + (b.connected === true
+      ? "ab-val-on" : b.connected === false ? "ab-val-off" : "muted");
+    browserVal.title = b.account_id != null ? `account ${b.account_id}` : "no session reader";
+  }
+  const workerVal = $("abWorkerVal");
+  if (workerVal) {
+    const w = st.worker || {};
+    workerVal.textContent = w.running === true ? "RUNNING"
+      : w.running === false ? "STOPPED" : "NOT CONFIGURED";
+    workerVal.className = "ab-state-val " + (w.running === true
+      ? "ab-val-on" : w.running === false ? "ab-val-off" : "muted");
+    if (w.last_error) workerVal.title = String(w.last_error);
+  }
+  const authVal = $("abSubmitAuthVal");
+  if (authVal) {
+    authVal.textContent = st.submission_authorized === true
+      ? "AUTHORIZED" : "NOT AUTHORIZED";
+    authVal.className = "ab-state-val " + (st.submission_authorized === true
+      ? "ab-val-live" : "ab-val-off");
+    authVal.title = `dry_run=${st.dry_run} · browser_submit=${st.browser_submit_enabled} · account=${(st.account_identity || {}).account_identity_configured}`;
   }
   // ── Switch + unit price ────────────────────────────────────
   const sw = $("abSwitch");
@@ -4131,6 +4159,15 @@ function abStatusHTML(st) {
   }
   $("abTodayRemaining").textContent =
     t.remaining_exposure != null ? money(t.remaining_exposure) : "–";
+  const pendingEl = $("abTodayPending");
+  if (pendingEl) {
+    const pend = (t.pending ?? "–") + " / " + (t.unknown ?? "–");
+    pendingEl.textContent = pend;
+  }
+  const settledEl = $("abTodaySettled");
+  if (settledEl) {
+    settledEl.textContent = (t.confirmed ?? "–") + " / " + (t.rejected ?? "–");
+  }
   // ── Execution list ────────────────────────────────────────
   const list = $("abExecList");
   if (!st.recent || !st.recent.length) {
