@@ -22,7 +22,10 @@ def game():
     captured = datetime.now(timezone.utc).isoformat()
     return {
         "game_id": "evt-canonical-001", "live": True,
-        "market": {"total_line": 193.5, "market_status": "LIVE"},
+        "market": {"total_line": 193.5, "market_status": "LIVE",
+                   "under_odds": 1.85, "over_odds": 1.95,
+                   "observed_lines": [190.5, 191.5, 192.5, 193.5,
+                                      194.5, 195.5]},
         "projector": {"live_total_line": 193.5, "market_status": "LIVE",
                       "market_age_seconds": 1, "captured_at": captured,
                       "required_pts_per_min": 5, "progress_pct": 76},

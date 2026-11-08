@@ -66,7 +66,12 @@ def qualifying_game(game_id="30990001", checkpoint=75, age_s=5.0):
         "game_id": game_id,
         "live": True,
         "live_reason": None,
-        "market": {"total_line": 193.5, "market_status": "LIVE"},
+        # the bookmaker's live game-total ladder (rung inference) + the
+        # rendered UNDER price.  The line is 193.5; the price is odds.
+        "market": {"total_line": 193.5, "market_status": "LIVE",
+                   "under_odds": 1.85,
+                   "observed_lines": [190.5, 191.5, 192.5, 193.5,
+                                      194.5, 195.5]},
         "projector": {
             "progress_pct": 76.0,
             "required_pts_per_min": 5.0,
@@ -172,11 +177,14 @@ def test_idempotency_key_is_game_checkpoint_alert(tmp_path):
                    enabled=True, unit_price=10.0,
                    stats=store.today_stats())
     assert res["candidate"]["idempotency_key"] == "G1|75|G1|75"
-    # same game different checkpoint is a DIFFERENT opportunity
+    # SAME GAME, different checkpoint: NOT a new opportunity.  One bet
+    # per game is enforced by the persistent game claim (directive
+    # Phase Four), so the second attempt is refused.
     other = evaluate(qualifying_game("G1", 50), cfg=cfg, store=store,
                      enabled=True, unit_price=10.0,
                      stats=store.today_stats())
-    assert other["decision"] == "WOULD_BET"
+    assert other["decision"] == "NO_BET"
+    assert other["reason"] == "duplicate_execution"
 
 
 def test_database_enforces_uniqueness(tmp_path):

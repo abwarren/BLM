@@ -110,7 +110,10 @@ def _qualifying_game(game_id="TEST-GAME-9001", *, fresh_s=1.0) -> dict:
                         "trigger_line": 180.5},
         "under_alert_eligibility": {"eligible": True,
                                     "reason": "market_live"},
-        "market": {"total_line": 180.5, "market_status": "LIVE"},
+        "market": {"total_line": 180.5, "market_status": "LIVE",
+                   "under_odds": 1.85,
+                   "observed_lines": [177.5, 178.5, 179.5, 180.5,
+                                      181.5, 182.5]},
         "projector": {"required_pts_per_min": 5.0, "progress_pct": 80.0,
                       "actual_pts_per_min": 4.0,
                       "captured_at": _iso(_now() - timedelta(seconds=fresh_s)),
@@ -129,9 +132,11 @@ def enabled_store(store):
 # ══════════════════════════════════════════════════════════════════════
 
 class _IdentityProvider:
+    # Account identity is an INTEGER label (the bookmaker's account id).
+    # A non-numeric label is unverifiable and must fail closed.
     requires_account_identity = True
-    authenticated_account_id = "ACCT-A"
-    configured_account_id = "ACCT-A"
+    authenticated_account_id = 1001
+    configured_account_id = 1001
 
 
 def test_guard_matching_identity_proceeds():
@@ -140,9 +145,9 @@ def test_guard_matching_identity_proceeds():
 
 def test_guard_wrong_account_blocks():
     p = _IdentityProvider()
-    p.configured_account_id = "ACCT-B"
+    p.configured_account_id = 2002
     reason = verify_account(p)
-    assert reason and "ACCT-A" in reason and "ACCT-B" in reason
+    assert reason and "1001" in reason and "2002" in reason
 
 
 def test_guard_unverifiable_identity_fails_closed():
@@ -163,7 +168,7 @@ def test_guard_blocks_before_any_submission(store, enabled_store, live_cfg,
     """THE critical rule: account mismatch → NO BET — the provider never
     sees the wager."""
     fake.set_scenario("success")
-    fake.set_configured_account("ACCT-WRONG")          # ≠ authenticated
+    fake.set_configured_account(900000099)             # ≠ authenticated
     res = evaluate(_qualifying_game(), cfg=live_cfg, store=enabled_store,
                    enabled=True, unit_price=2.0,
                    stats=enabled_store.today_stats())
@@ -309,9 +314,12 @@ def test_real_provider_still_fails_safe(store, enabled_store, live_cfg):
                    stats=enabled_store.today_stats())
     out = execute(res["candidate"], cfg=live_cfg, store=enabled_store,
                   provider=provider)
-    assert out["status"] in ("FAILED", "UNKNOWN")
+    # No authorized account identity is configured here, so guard BLOCKED is
+    # the correct fail-closed answer; a FAILED/UNKNOWN stub answer is also
+    # acceptable.  What must NEVER happen is ACCEPTED or a provider ref.
+    assert out["status"] in ("BLOCKED", "FAILED", "UNKNOWN"), out
     rec = enabled_store.get_execution(res["candidate"]["execution_id"])
-    assert rec["status"] == rec["status"]           # recorded honestly
+    assert rec["status"] == out["status"]           # recorded honestly
     assert rec["provider_ref"] is None              # nothing submitted
 
 
