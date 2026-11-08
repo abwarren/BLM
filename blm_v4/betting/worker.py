@@ -76,11 +76,18 @@ class BettingWorker:
         games = self._live_payload_fn() or []
         stats = self.store.today_stats()
         for g in games:
-            res = evaluate(g, cfg=self.cfg, store=self.store,
-                           enabled=True, unit_price=unit_price,
-                           stats=stats,
-                           game_enabled=self.store.is_game_enabled(
-                               g.get("game_id")))
+            # A persistence failure anywhere in one game must stop the
+            # pass: continuing could execute the next game blind.
+            try:
+                res = evaluate(g, cfg=self.cfg, store=self.store,
+                               enabled=True, unit_price=unit_price,
+                               stats=stats,
+                               game_enabled=self.store.is_game_enabled(
+                                   g.get("game_id")))
+            except Exception as e:  # noqa: BLE001 — fail closed, no bet
+                self.last_error = f"evaluate: {type(e).__name__}: {e}"[:300]
+                summary["error"] = self.last_error
+                break
             if res["decision"] == "NO_BET":
                 summary["no_bet"] += 1
                 continue
@@ -103,8 +110,16 @@ class BettingWorker:
                 # immediately after they are persisted)
                 stats = self.store.today_stats()
                 continue
-            out = execute(cand, cfg=self.cfg, store=self.store,
-                          provider=self.provider)
+            try:
+                # The FRESH payload goes back in: submission-time
+                # revalidation must see the state as it is NOW, not a
+                # snapshot from earlier in the pass.
+                out = execute(cand, cfg=self.cfg, store=self.store,
+                              provider=self.provider, game=g)
+            except Exception as e:  # noqa: BLE001 — fail closed, no retry
+                self.last_error = f"execute: {type(e).__name__}: {e}"[:300]
+                summary["error"] = self.last_error
+                break
             if out.get("status") in ("ACCEPTED", "SUBMITTED"):
                 summary["executed"] += 1
             # refresh the running stats so later candidates in this same

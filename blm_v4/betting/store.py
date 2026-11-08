@@ -64,13 +64,28 @@ CREATE TABLE IF NOT EXISTS bet_executions (
     resolved_at_utc     TEXT,
     day_utc             TEXT NOT NULL,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    configured_account_id  INTEGER,   -- GATE 8: the account the operator is authorized to bet as
+    configured_account_id  INTEGER     -- GATE 8: the account the operator is authorized to bet as
 );
 
 CREATE INDEX IF NOT EXISTS idx_bet_executions_day
     ON bet_executions(day_utc, status);
 CREATE INDEX IF NOT EXISTS idx_bet_executions_game
     ON bet_executions(game_id, checkpoint);
+
+-- ONE BET PER GAME (directive Phase Four).  A separate claim table gives
+-- the database its own atomic guard without rebuilding historical ledger
+-- rows: a game_id is held while an execution is PENDING / SUBMITTING /
+-- SUBMITTED / ACCEPTED / UNKNOWN / RECONCILING, and released only when the
+-- attempt definitively failed before/at the bookmaker (no money moved).
+CREATE TABLE IF NOT EXISTS bet_game_claims (
+    game_id          TEXT PRIMARY KEY,
+    execution_id     TEXT NOT NULL,
+    idempotency_key  TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    claimed_at_utc   TEXT NOT NULL,
+    updated_at_utc   TEXT NOT NULL,
+    released_at_utc  TEXT
+);
 
 CREATE TABLE IF NOT EXISTS bet_audit (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +110,18 @@ _STATUSES = ("PENDING", "WOULD_BET", "SUBMITTING", "SUBMITTED",
              "RECONCILING", "EXPIRED", "FAILED", "CANCELLED")
 _TERMINAL_STATUSES = {"WOULD_BET", "ACCEPTED", "REJECTED", "BLOCKED",
                       "EXPIRED", "FAILED", "CANCELLED"}
+
+#: Statuses that hold the ONE-BET-PER-GAME slot.  A row in any of these
+#: states may represent live or not-yet-known money and must block another
+#: submission for the same game.  WOULD_BET is a dry-run "bet" and is held
+#: too: the simulation must exercise the same one-per-game discipline.
+_GAME_BLOCKING_STATUSES = {"PENDING", "WOULD_BET", "SUBMITTING",
+                           "SUBMITTED", "ACCEPTED", "UNKNOWN",
+                           "RECONCILING"}
+#: Statuses that prove no money moved for this attempt; the game slot is
+#: released so a later, genuinely different opportunity may bet.
+_GAME_RELEASING_STATUSES = {"REJECTED", "BLOCKED", "EXPIRED", "FAILED",
+                            "CANCELLED"}
 
 
 def _now() -> str:
@@ -132,6 +159,8 @@ class BettingStore:
             "execution_state": "TEXT",
             "elapsed_ms": "INTEGER",
             "configured_account_id": "INTEGER",
+            "reconciliation_state": "TEXT",
+            "reconciliation_attempts": "INTEGER DEFAULT 0",
         }
         for name, decl in additions.items():
             if name not in existing:
@@ -216,8 +245,39 @@ class BettingStore:
         win (§4 / concurrency test).
         """
         ik = rec["idempotency_key"]
+        game_id = str(rec["game_id"])
+        now = _now()
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
+            # (a) the SAME opportunity must never create a second row
+            existing = c.execute(
+                "SELECT * FROM bet_executions WHERE idempotency_key=?",
+                (ik,)).fetchone()
+            if existing is not None:
+                c.commit()
+                return False, dict(existing)
+            # (b) ONE BET PER GAME — the persistent claim table is the
+            # authority.  A held slot (money may be in play) refuses the
+            # claim even for a different checkpoint/alert id.  A released
+            # slot (no money moved) may be taken over.
+            holder = c.execute(
+                "SELECT * FROM bet_game_claims WHERE game_id=?",
+                (game_id,)).fetchone()
+            if holder is not None and holder["released_at_utc"] is None \
+                    and holder["status"] in _GAME_BLOCKING_STATUSES:
+                held = c.execute(
+                    "SELECT * FROM bet_executions WHERE execution_id=?",
+                    (holder["execution_id"],)).fetchone()
+                c.commit()
+                if held is not None:
+                    return False, dict(held)
+                # the ledger row is gone but the slot is still held: report
+                # the holder rather than betting again (fail closed)
+                return False, {
+                    "execution_id": holder["execution_id"],
+                    "idempotency_key": holder["idempotency_key"],
+                    "game_id": game_id, "status": holder["status"],
+                    "game_claim": True}
             cur = c.execute(
                 """INSERT OR IGNORE INTO bet_executions
                    (execution_id, idempotency_key, game_id, alert_id,
@@ -228,22 +288,38 @@ class BettingStore:
                     accepted_amount, simulated_amount, unit_limit,
                     rejection_reason)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (rec["execution_id"], ik, rec["game_id"], rec["alert_id"],
+                (rec["execution_id"], ik, game_id, rec["alert_id"],
                  rec["checkpoint"], rec.get("market") or
                  "MONEYLINE_TOTAL_UNDER", rec.get("selection") or "UNDER",
                  rec.get("triggered_line"), rec.get("price"),
                  rec.get("unit_price"), rec.get("stake_units"),
                  rec.get("stake_amount"), rec.get("status") or "PENDING",
                  rec.get("execution_state") or rec.get("status") or "PENDING",
-                 _now(), _day(), rec.get("requested_amount"),
+                 now, _day(), rec.get("requested_amount"),
                  rec.get("accepted_amount"), rec.get("simulated_amount"),
                  rec.get("unit_limit"), rec.get("rejection_reason")))
-            if cur.rowcount == 0:
+            if cur.rowcount == 0:      # impossible under BEGIN IMMEDIATE
                 row = c.execute(
                     "SELECT * FROM bet_executions WHERE idempotency_key=?",
                     (ik,)).fetchone()
                 c.commit()
                 return False, (dict(row) if row else None)
+            status = rec.get("status") or "PENDING"
+            if holder is None:
+                c.execute(
+                    """INSERT INTO bet_game_claims
+                       (game_id, execution_id, idempotency_key, status,
+                        claimed_at_utc, updated_at_utc, released_at_utc)
+                       VALUES (?,?,?,?,?,?,NULL)""",
+                    (game_id, rec["execution_id"], ik, status, now, now))
+            else:                      # take over a RELEASED slot
+                c.execute(
+                    """UPDATE bet_game_claims
+                          SET execution_id=?, idempotency_key=?, status=?,
+                              claimed_at_utc=?, updated_at_utc=?,
+                              released_at_utc=NULL
+                        WHERE game_id=?""",
+                    (rec["execution_id"], ik, status, now, now, game_id))
             row = c.execute(
                 "SELECT * FROM bet_executions WHERE idempotency_key=?",
                 (ik,)).fetchone()
@@ -292,6 +368,21 @@ class BettingStore:
             args.append(execution_id)
             c.execute(f"UPDATE bet_executions SET {', '.join(sets)} "
                       "WHERE execution_id=?", args)
+            # keep the ONE-BET-PER-GAME claim in step: hold while money may
+            # be in play, release only on proof that none moved.
+            now = _now()
+            if status in _GAME_RELEASING_STATUSES:
+                c.execute(
+                    """UPDATE bet_game_claims
+                          SET status=?, updated_at_utc=?, released_at_utc=?
+                        WHERE execution_id=?""",
+                    (status, now, now, execution_id))
+            else:
+                c.execute(
+                    """UPDATE bet_game_claims
+                          SET status=?, updated_at_utc=?
+                        WHERE execution_id=?""",
+                    (status, now, execution_id))
             c.commit()
 
     def get_execution(self, execution_id: str) -> Optional[dict]:
@@ -307,6 +398,30 @@ class BettingStore:
                 "SELECT * FROM bet_executions WHERE idempotency_key=?",
                 (key,)).fetchone()
         return dict(row) if row else None
+
+    def game_claim(self, game_id: str) -> Optional[dict]:
+        """The persistent ONE-BET-PER-GAME slot for ``game_id`` (or None)."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM bet_game_claims WHERE game_id=?",
+                (str(game_id),)).fetchone()
+        return dict(row) if row else None
+
+    def has_blocking_execution(self, game_id: str,
+                               exclude_execution_id: Optional[str] = None
+                               ) -> Optional[dict]:
+        """The execution (if any) that forbids another submission for this
+        game.  A database error propagates: an unverifiable guard must
+        never be read as permission to bet."""
+        claim = self.game_claim(game_id)
+        if claim is None or claim.get("released_at_utc") is not None:
+            return None
+        if claim.get("status") not in _GAME_BLOCKING_STATUSES:
+            return None
+        if exclude_execution_id and \
+                claim.get("execution_id") == exclude_execution_id:
+            return None
+        return claim
 
     def latest_for_game(self, game_id: str) -> Optional[dict]:
         with self._conn() as c:
@@ -408,8 +523,11 @@ class BettingStore:
         outcome is unresolved might still be live money — the risk limit
         must assume the worst (§9)."""
         day = _day()
-        counted = ("WOULD_BET", "SUBMITTING", "SUBMITTED", "ACCEPTED",
-                   "UNKNOWN", "RECONCILING")
+        # PENDING is a claimed-but-not-yet-submitted attempt: its stake is
+        # already committed to this game and must count toward exposure
+        # until it resolves (never assume an in-flight attempt is free).
+        counted = ("PENDING", "WOULD_BET", "SUBMITTING", "SUBMITTED",
+                   "ACCEPTED", "UNKNOWN", "RECONCILING")
         try:
             with self._conn() as c:
                 n = c.execute(
@@ -430,6 +548,68 @@ class BettingStore:
                     "verifiable": False}
         return {"day": day, "bets": int(n), "amount": float(amt or 0.0),
                 "verifiable": True}
+
+    def needs_reconciliation(self, limit: int = 50) -> list[dict]:
+        """Executions whose outcome is not established yet.
+
+        UNKNOWN and RECONCILING are included: an UNKNOWN submission is
+        NEVER assumed successful OR unsuccessful without evidence.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM bet_executions "
+                "WHERE status IN ('UNKNOWN','RECONCILING') "
+                "ORDER BY id ASC LIMIT ?",
+                (max(1, min(int(limit), 500)),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_reconciliation(self, execution_id: str, state: str,
+                            *, note: str = "") -> None:
+        """Record one reconciliation pass without changing the money
+        state; the caller advances the status separately when evidence
+        exists."""
+        with self._lock, self._conn() as c:
+            c.execute(
+                """UPDATE bet_executions
+                      SET reconciliation_state=?,
+                          reconciliation_attempts=
+                              COALESCE(reconciliation_attempts,0)+1,
+                          error_message=CASE WHEN ?<>'' THEN ?
+                                             ELSE error_message END
+                    WHERE execution_id=?""",
+                (state, note, note[:500], execution_id))
+            c.commit()
+
+    def today_status_counts(self) -> dict:
+        """Today's execution counts per status (fail-closed shape).
+
+        The dashboard's PENDING / UNKNOWN / CONFIRMED / REJECTED tiles read
+        this directly, so the page can never invent a state the ledger does
+        not hold.
+        """
+        day = _day()
+        try:
+            with self._conn() as c:
+                rows = c.execute(
+                    "SELECT status, COUNT(*) AS n FROM bet_executions "
+                    "WHERE day_utc=? GROUP BY status", (day,)).fetchall()
+        except sqlite3.Error:
+            return {"verifiable": False, "day": day}
+        counts = {r["status"]: int(r["n"]) for r in rows}
+        return {
+            "verifiable": True, "day": day, "counts": counts,
+            "pending": (counts.get("PENDING", 0)
+                        + counts.get("SUBMITTING", 0)
+                        + counts.get("SUBMITTED", 0)),
+            "unknown": (counts.get("UNKNOWN", 0)
+                        + counts.get("RECONCILING", 0)),
+            "confirmed": counts.get("ACCEPTED", 0),
+            "rejected": (counts.get("REJECTED", 0)
+                         + counts.get("BLOCKED", 0)
+                         + counts.get("FAILED", 0)
+                         + counts.get("CANCELLED", 0)),
+            "would_bet": counts.get("WOULD_BET", 0),
+        }
 
     # ── audit (credential-free by construction) ────────────────────────
     def audit(self, event: str, idempotency_key: Optional[str] = None,

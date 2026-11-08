@@ -101,6 +101,13 @@ class BettingConfig:
     # ── the provider execution mode (directive: DO NOT enable live yet) ──
     dry_run: bool = True
 
+    # ── the SECOND, independent live-submission gate ───────────────────
+    # ``BETTING_BROWSER_SUBMIT`` must be explicitly true for any real
+    # in-browser submission.  It is separate from dry-run on purpose:
+    # clearing dry-run with this still false keeps every candidate in a
+    # resolve/verify/no-submit mode.  Shipped default: false.
+    browser_submit_enabled: bool = False
+
     # ── risk limits (server-side authority; the frontend can never raise
     #    these — it may only request settings within them) ──────────────
     max_stake_per_bet: Optional[float] = None
@@ -152,6 +159,8 @@ class BettingConfig:
             expected_id = None
         return BettingConfig(
             dry_run=_env_bool("BETTING_DRY_RUN", "true"),
+            browser_submit_enabled=_env_bool(
+                "BETTING_BROWSER_SUBMIT", "false"),
             max_stake_per_bet=_env_float("BETTING_MAX_STAKE_PER_BET", ""),
             max_bets_per_day=_env_int("BETTING_MAX_BETS_PER_DAY", ""),
             max_daily_exposure=_env_float("BETTING_MAX_DAILY_EXPOSURE", ""),
@@ -176,6 +185,15 @@ class BettingConfig:
         influence it."""
         return not self.dry_run
 
+
+    @property
+    def submission_authorized(self) -> bool:
+        """The operator-facing authorization state: real submission is
+        possible ONLY when dry-run is off, the browser-submit switch is
+        explicitly on, AND an authorized account identity is configured.
+        Any missing leg reads as NOT authorized (fail closed)."""
+        return (self.live_money_enabled and self.browser_submit_enabled
+                and self.account_identity_configured)
 
     @property
     def account_identity_configured(self) -> bool:

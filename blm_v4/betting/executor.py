@@ -31,7 +31,14 @@ from blm_v4.betting.provider import (
     ProviderUnavailable,
 )
 from blm_v4.betting.account_guard import verify_account
+from blm_v4.betting import rung as rung_rule
 from blm_v4.betting.store import BettingStore
+
+#: Decimal odds bounds for a real selection.  A rendered number outside
+#: this range is not an odds price (it is a line, a stake or noise) and is
+#: refused rather than recorded as the bet's price.
+MIN_ODDS = 1.01
+MAX_ODDS = 1000.0
 
 # directive §5 — the execution-state vocabulary
 STATUS_PENDING = "PENDING"
@@ -67,6 +74,126 @@ def _alert_age_s(game: dict) -> Optional[float]:
         return None
     now = dt.now(timezone.utc)
     return max(0.0, (now - t).total_seconds())
+
+
+def _candidate_game(candidate: dict) -> dict:
+    """Reconstruct the execution-relevant game payload from a claimed
+    candidate.  Used only when the caller cannot supply a FRESH payload;
+    the live path always passes the freshly re-read one."""
+    return {
+        "game_id": candidate.get("game_id"),
+        "live": True,
+        "under_alert": {
+            "active": True,
+            "checkpoint": candidate.get("checkpoint"),
+            "alert_id": candidate.get("alert_id"),
+            "trigger_line": candidate.get("triggered_line"),
+            "trigger_captured_at": candidate.get("alert_captured_at"),
+        },
+        "market": {
+            "total_line": candidate.get("current_line"),
+            "observed_lines": candidate.get("observed_lines"),
+            "market_status": candidate.get("market_status"),
+            "under_odds": candidate.get("price"),
+        },
+        "projector": {"captured_at": candidate.get("alert_captured_at")},
+    }
+
+
+def _revalidate_at_submission(candidate: dict, game: dict,
+                              cfg: BettingConfig, store: BettingStore
+                              ) -> Optional[str]:
+    """MANDATORY submission-time revalidation (§Phase Five).
+
+    Returns ``None`` when the bet may proceed, else a stable refusal code.
+    Every gate is re-read NOW — a candidate that qualified a moment ago is
+    not automatically eligible.
+    """
+    execution_id = candidate["execution_id"]
+    game_id = str(candidate.get("game_id") or "")
+    # game identity must still be the claimed game
+    if str(game.get("game_id") or "") != game_id or not game_id:
+        return "GAME_IDENTITY_CHANGED"
+    # A MANUAL command is not an alert-driven Auto-Bet: it has no frozen
+    # trigger line and no rung strategy.  It still passes the duplicate,
+    # limit, unit-price and stake gates below.  (The API route has already
+    # verified the line against the CURRENT observed total.)
+    manual = (str(candidate.get("checkpoint") or "").upper() == "MANUAL"
+              or str(candidate.get("alert_id") or "").startswith("manual:"))
+    if not manual:
+        # the canonical rung + identity validator, on the CURRENT payload
+        check = rung_rule.autonomous_execution_command(
+            game, market=str(candidate.get("market") or "TOTAL"),
+            selection=str(candidate.get("selection") or "UNDER"))
+        if check.get("decision") != rung_rule.ALLOW:
+            return "RUNG_REJECTED:" + str(check.get("reason"))
+        if _finite(check.get("trigger_line")) != _finite(
+                candidate.get("triggered_line")):
+            return "TRIGGER_LINE_CHANGED"
+        # freshness of the observation the alert verdict came from
+        age = _alert_age_s(game)
+        if age is None or age > cfg.alert_max_age_s:
+            return "ALERT_STALE_AT_SUBMISSION"
+        market = game.get("market") or {}
+        if str(market.get("market_status") or "").upper() not in (
+                "LIVE", "OPEN"):
+            return "MARKET_NOT_ACTIVE"
+        # the selection's CURRENT line and odds must match what was claimed
+        if _finite(check.get("current_line")) != _finite(
+                candidate.get("current_line")):
+            return "LINE_CHANGED"
+        odds = _finite(market.get("under_odds"))
+        if odds is None or not (MIN_ODDS <= odds <= MAX_ODDS):
+            return "ODDS_UNAVAILABLE"
+        if abs(odds - float(candidate.get("price"))) > 1e-9:
+            return "ODDS_CHANGED"
+    # duplicate execution status (another attempt for this game?)
+    try:
+        holder = store.has_blocking_execution(
+            game_id, exclude_execution_id=execution_id)
+    except Exception:  # noqa: BLE001 — unverifiable duplicate guard
+        return "DUPLICATE_CHECK_UNAVAILABLE"
+    if holder is not None:
+        return "DUPLICATE_GAME_EXECUTION"
+    # financial limits, re-read at the boundary.  The claimed row is now
+    # PENDING, so its own stake/count must be excluded from "existing".
+    stats = store.today_stats()
+    if not stats.get("verifiable"):
+        return "LIMITS_UNVERIFIABLE"
+    own = store.get_execution(execution_id) or {}
+    own_counted = 1 if (own.get("day_utc") == stats.get("day")
+                        and own.get("status") in (
+                            "PENDING", "WOULD_BET", "SUBMITTING",
+                            "SUBMITTED", "ACCEPTED", "UNKNOWN",
+                            "RECONCILING")) else 0
+    own_amount = float(own.get("stake_amount") or 0.0) if own_counted else 0.0
+    stake = float(candidate.get("stake_amount") or 0.0)
+    if stake <= 0:
+        return "STAKE_INVALID"
+    # UNIT PRICE CONSISTENCY: when the ledger has a persisted price it is
+    # the authority and must equal the price the candidate was built from.
+    # (The worker always passes the store's own value.)  A caller that has
+    # not persisted one at all is a direct/simulated invocation; the
+    # candidate's already-validated price stands.
+    unit = store.get_unit_price()
+    if unit is None:
+        unit = _finite(candidate.get("unit_price"))
+    if unit is None or abs(
+            float(unit) - float(candidate.get("unit_price"))) > 1e-9:
+        return "UNIT_PRICE_CHANGED"
+    if abs(stake - round(float(unit) * float(cfg.stake_units), 2)) > 0.005:
+        return "STAKE_CALCULATION_MISMATCH"
+    if cfg.max_stake_per_bet is not None \
+            and stake > cfg.max_stake_per_bet:
+        return "MAX_STAKE_EXCEEDED"
+    if cfg.max_bets_per_day is not None \
+            and stats["bets"] - own_counted >= cfg.max_bets_per_day:
+        return "DAILY_BET_LIMIT_REACHED"
+    if cfg.max_daily_exposure is not None \
+            and (stats["amount"] - own_amount) + stake \
+            > cfg.max_daily_exposure:
+        return "DAILY_EXPOSURE_REACHED"
+    return None
 
 
 def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
@@ -112,6 +239,19 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     trig_line = _finite(ua.get("trigger_line"))
     if line is None or line <= 0:
         return _no("market_missing", ik)
+    # the bookmaker market must be genuinely open — a suspended/closed
+    # market carries no selectable outcome.
+    if str(market.get("market_status") or "").upper() not in (
+            "LIVE", "OPEN"):
+        return _no("market_not_active", ik)
+    # ODDS ARE NOT LINES (§Phase Two).  The bet's price is the rendered
+    # UNDER decimal price; the line is a point value.  Missing/out-of-range
+    # odds block — the line is never substituted for the price.
+    odds = _finite(market.get("under_odds"))
+    if odds is None:
+        return _no("odds_missing", ik)
+    if not (MIN_ODDS <= odds <= MAX_ODDS):
+        return _no("odds_invalid", ik)
     proj = game.get("projector") or {}
     if _finite(proj.get("required_pts_per_min")) is None \
             or _finite(proj.get("progress_pct")) is None:
@@ -150,6 +290,20 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     if cfg.max_daily_exposure is not None \
             and stats["amount"] + stake_amount > cfg.max_daily_exposure:
         return _no("daily_exposure_reached", ik)
+    # ── RUNG VALIDATION (§Phase Three / PW-04) — the canonical, shared
+    #    pre-execution validator, called on the AUTONOMOUS path.  The
+    #    original trigger line is the frozen alert line; the current line
+    #    must be within one rung DOWN of it.  Unprovable inputs reject.
+    rung_check = rung_rule.autonomous_execution_command(
+        game, market="TOTAL", selection="UNDER")
+    if rung_check.get("decision") != rung_rule.ALLOW:
+        store.audit("rung_reject", idempotency_key=ik,
+                    reason=str(rung_check.get("reason"))[:200],
+                    details=rung_check)
+        return _no("rung_rejected:" + str(rung_check.get("reason")), ik)
+    # the trigger line is IMMUTABLE — never the current bookmaker total
+    if _finite(rung_check.get("trigger_line")) != trig_line:
+        return _no("trigger_line_mutated", ik)
     # ── fingerprint context (RECORDED — never a bet trigger) ──────────
     fp = game.get("under_alert_fingerprint") or {}
     fingerprints_fired = fp.get("fingerprints_fired") or []
@@ -165,7 +319,7 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
         "market": "TOTAL",
         "selection": "UNDER",
         "triggered_line": trig_line,
-        "price": line,
+        "price": odds,
         "unit_price": unit_price,
         "stake_units": units,
         "stake_amount": stake_amount,
@@ -173,6 +327,13 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
         "simulated_amount": stake_amount if cfg.dry_run else None,
         "unit_limit": unit_price,
         "status": STATUS_PENDING,
+        # snapshot for submission-time revalidation + the audit record
+        "current_line": line,
+        "observed_lines": list(market.get("observed_lines") or []),
+        "rung_size": rung_check.get("rung_size"),
+        "rungs_moved": rung_check.get("rungs_moved"),
+        "market_status": market.get("market_status"),
+        "alert_captured_at": (game.get("projector") or {}).get("captured_at"),
     }
     if claim:
         claimed, existing = store.claim(rec)
@@ -192,6 +353,11 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
             "stake_calculation": {
                 "unit_price": unit_price, "stake_units": units,
                 "stake_amount": stake_amount},
+            "line_and_odds": {
+                "trigger_line": trig_line, "current_line": line,
+                "under_odds": odds,
+                "rung_size": rung_check.get("rung_size"),
+                "rungs_moved": rung_check.get("rungs_moved")},
             "dry_run": cfg.dry_run,
         })
     return {
@@ -206,10 +372,16 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
             "market": "TOTAL",
             "selection": "UNDER",
             "triggered_line": trig_line,
-            "price": line,
+            "current_line": line,
+            "price": odds,
             "unit_price": unit_price,
             "stake_units": units,
             "stake_amount": stake_amount,
+            "observed_lines": list(market.get("observed_lines") or []),
+            "rung_size": rung_check.get("rung_size"),
+            "rungs_moved": rung_check.get("rungs_moved"),
+            "market_status": market.get("market_status"),
+            "alert_captured_at": (game.get("projector") or {}).get("captured_at"),
             "fingerprints_present": fingerprints_fired,
             "fingerprint_count": fingerprint_count,
         },
@@ -217,10 +389,16 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
 
 
 def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
-            provider) -> dict:
+            provider, game: Optional[dict] = None) -> dict:
     """Submit one claimed candidate to the provider and record the HONEST
     outcome.  In DRY_RUN the DryRunProvider answers ACCEPTED with a
-    dry-run reference; no network call, no credentials (§11)."""
+    dry-run reference; no network call, no credentials (§11).
+
+    ``game`` is the FRESH live payload re-read immediately before
+    submission.  When omitted (direct/simulated callers) the claimed
+    candidate's own snapshot is revalidated instead; the freshness gate
+    still applies, so an old candidate is refused.
+    """
     execution_id = candidate["execution_id"]
     ik = candidate["idempotency_key"]
     # The kill switch is re-read at the submission boundary; a worker's
@@ -231,6 +409,21 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                             error_message="global betting kill switch is OFF",
                             rejection_reason="GLOBAL_KILL_SWITCH")
         return {"status": "BLOCKED", "error_code": "GLOBAL_KILL_SWITCH"}
+    # ── MANDATORY submission-time revalidation (§Phase Five) ──────────
+    fresh = game if game is not None else _candidate_game(candidate)
+    refusal = _revalidate_at_submission(candidate, fresh, cfg, store)
+    if refusal:
+        store.update_status(execution_id, "BLOCKED",
+                            error_code=refusal.split(":", 1)[0],
+                            error_message=refusal[:300],
+                            rejection_reason=refusal.split(":", 1)[0])
+        store.audit("revalidation", idempotency_key=ik,
+                    execution_id=execution_id, reason=refusal[:300],
+                    details={"result": "BLOCKED",
+                             "source": ("fresh_payload" if game is not None
+                                        else "candidate_snapshot")})
+        return {"status": "BLOCKED",
+                "error_code": refusal.split(":", 1)[0]}
     if not cfg.dry_run and cfg.live_money_enabled is False:
         # unreachable by construction (live_money_enabled == not dry_run)
         # — kept as a belt-and-braces stop before any real submission
@@ -301,6 +494,20 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                             error_message=f"unmapped status {status!r}")
         return {"status": STATUS_UNKNOWN,
                 "error_code": "PROVIDER_RESPONSE_INVALID"}
+    # An ACCEPTED claim without the bookmaker's own reference is not a
+    # confirmed bet: keep it UNKNOWN so reconciliation (never a retry)
+    # establishes the truth.
+    if status == STATUS_ACCEPTED and not result.get("provider_ref"):
+        store.update_status(execution_id, STATUS_UNKNOWN,
+                            error_code="CONFIRMATION_REFERENCE_MISSING",
+                            error_message="provider reported ACCEPTED "
+                                          "without a confirmation reference")
+        store.audit("result", idempotency_key=ik,
+                    execution_id=execution_id,
+                    reason="ACCEPTED without a bookmaker reference",
+                    details={"result": "UNKNOWN"})
+        return {"status": STATUS_UNKNOWN,
+                "error_code": "CONFIRMATION_REFERENCE_MISSING"}
     store.update_status(execution_id, status,
                         provider_ref=result.get("provider_ref"),
                         error_code=result.get("error_code"),
@@ -319,7 +526,9 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
                 details={"result": status,
                          "provider": getattr(provider, "name", "?"),
                          "provider_ref": result.get("provider_ref")})
-    return {"status": status, "provider_ref": result.get("provider_ref")}
+    return {"status": status, "provider_ref": result.get("provider_ref"),
+            "error_code": result.get("error_code"),
+            "error_message": result.get("error_message")}
 
 
 def _no(reason: str, ik: Optional[str]) -> dict:

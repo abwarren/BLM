@@ -42,9 +42,12 @@ from blm_v4.betting.provider import (
     ProviderUnavailable,
 )
 
-#: the TEST bookmaker's authenticated account id — a synthetic identity
-#: for the account-identity guard to verify against.  NOT a credential.
-TEST_BOOKMAKER_ACCOUNT_ID = "TEST-ACCT-0001"
+#: the TEST bookmaker's authenticated account id — a synthetic INTEGER
+#: identity for the account-identity guard to verify against.  The real
+#: bookmaker account id is an integer label, so the test fixture uses the
+#: same contract (a non-numeric label is unverifiable and blocks).  NOT a
+#: credential.
+TEST_BOOKMAKER_ACCOUNT_ID = 900000001
 
 #: the TEST bookmaker's fixture game / market identities.
 TEST_GAME_ID = "TEST-GAME-9001"
@@ -89,7 +92,7 @@ class FakeBookmakerContractProvider(BetProvider):
         "market_closed":     ("REJECTED",  "MARKET_CLOSED"),
     }
 
-    def __init__(self, *, account_id: str = TEST_BOOKMAKER_ACCOUNT_ID,
+    def __init__(self, *, account_id: int = TEST_BOOKMAKER_ACCOUNT_ID,
                  game_id: str = TEST_GAME_ID,
                  market_id: str = TEST_MARKET_ID,
                  bet_type_id: str = TEST_BET_TYPE_ID,
@@ -106,7 +109,7 @@ class FakeBookmakerContractProvider(BetProvider):
         self._settlements: dict[str, dict] = {}
         self._fail_logins = 0
         self._login_calls = 0
-        self._configured_account_id: Optional[str] = account_id
+        self._configured_account_id: Optional[int] = account_id
 
     # ── TEST control surface ──────────────────────────────────────────
     def set_scenario(self, scenario: str) -> None:
@@ -125,13 +128,13 @@ class FakeBookmakerContractProvider(BetProvider):
                 "error_code": error_code, "error_message": error_message,
                 "accepted_amount": accepted_amount})
 
-    def set_configured_account(self, account_id: Optional[str]) -> None:
+    def set_configured_account(self, account_id: Optional[int]) -> None:
         """The account the OPERATOR configured (guard compares it against
         the account the bookmaker authenticated)."""
         self._configured_account_id = account_id
 
     @property
-    def configured_account_id(self) -> Optional[str]:
+    def configured_account_id(self) -> Optional[int]:
         return self._configured_account_id
 
     # ── the bookmaker contract (login → account → game → market → bet) ─

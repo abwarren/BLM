@@ -139,6 +139,7 @@ class PokerBetProvider(BetProvider):
         # Oracle side 2 - the account the operator authorized, from
         # BLM_EXPECTED_ACCOUNT_ID (read at call time).
         self._configured_account_id = configured_account_id
+        self._transport: Optional['PokerBetTransport'] = None
 
     @property
     def authenticated_account_id(self) -> Optional[int]:
@@ -182,19 +183,75 @@ class PokerBetProvider(BetProvider):
                stake_amount: float, market: str = "TOTAL",
                line: Optional[float] = None) -> dict:
         """Submit one bet.
-        Fail-closed stub: the live transport is not implemented, so every
-        submission fails SAFE with FAILED (no bet exists), per the
-        fail-closed rule. The account-identity guard above runs before
-        this method is ever reached by the executor."""
+
+        Runs the live transport and records the HONEST outcome
+        (SUBMITTED / ACCEPTED / REJECTED / FAILED / UNKNOWN).
+        """
         # Credential presence check (values never leave this method).
-        self._credentials()
-        # -> THE LIVE TRANSPORT IS NOT IMPLEMENTED <-
-        # Until the transport is coded, every candidate fails safe: FAILED,
-        # no bet, audit records the reason.
-        raise ProviderUnavailable(
-            "live submission not implemented (PokerBetProvider stub; DRY_RUN is the supported mode)")
+        # A browser transport rides the operator's already-authenticated
+        # PokerBet session and needs no environment credentials.
+        if self._transport is None \
+                or not getattr(self._transport, "uses_browser_session", False):
+            self._credentials()
+        # Account-identity guard (GATE 8) runs in the executor BEFORE this
+        # method is ever called.  Fail-closed: if the authenticated or
+        # configured account cannot be read, this method refuses.  The
+        # AUTHENTICATED side prefers the live session reader and falls
+        # back to this instance's injected identity; it never silently
+        # uses a stale process-global value.
+        auth = get_authenticated_account_id()
+        if auth is None:
+            auth = self._authenticated_account_id
+        configured = self.configured_account_id
+        if auth is None or configured is None:
+            raise ProviderUnavailable(
+                "account identity unverifiable: authenticated=%r "
+                "configured=%r - blocked before submission"
+                % (auth, configured))
+        if int(auth) != int(configured):
+            raise ProviderUnavailable(
+                "authenticated account %r != configured account %r - "
+                "blocked before submission" % (auth, configured))
+        # FAIL CLOSED: no transport means the live path does not exist.
+        # This is a definitive local failure (no bet exists), never an
+        # ambiguous outcome — mapping it to UNKNOWN would wrongly tell
+        # the operator money may be in play.
+        if self._transport is None:
+            raise ProviderUnavailable(
+                "live submission transport not installed "
+                "(PokerBetProvider fail-closed stub)")
+        # Hand the identity re-read at THIS boundary to the transport, so
+        # a session swap between provider construction and submission is
+        # seen rather than assumed away.
+        if hasattr(self._transport, "authenticated_account_id"):
+            self._transport.authenticated_account_id = auth
+        return self._transport.submit(
+            execution_id=execution_id, game_id=game_id, alert_id=alert_id,
+            selection=selection, price=price,
+            stake_amount=stake_amount, market=market, line=line)
 
     # -- oracle / live-read surface (production override points) ------
+
+    def set_transport(self, transport: 'PokerBetTransport') -> None:
+        """Wire the live bookmaker transport into this provider.
+
+        Production: the worker/server installs the configured transport
+        before any candidate is executed, so the provider can submit a
+        real bet through it.  The transport itself owns the network
+        call, the account identity and the idempotency; the provider
+        only delegates and then records the HONEST outcome.
+
+        Test/stub: set_transport(None) keeps the provider in fail-closed
+        stub mode.
+        """
+        self._transport = transport
+        if transport is not None and hasattr(
+                transport, "configured_account_id"):
+            if getattr(transport, "authenticated_account_id", None) is None:
+                transport.authenticated_account_id = \
+                    self._authenticated_account_id
+            if getattr(transport, "_configured_account_id", None) is None:
+                transport.configured_account_id = self.configured_account_id
 
     def set_authorized_account(self, account_id: int) -> None:
         """Set the account the operator authorizes to bet as.
@@ -261,47 +318,351 @@ def get_authenticated_account_id() -> Optional[int]:
     return None
 
 
-# The transport is NOT implemented. Until _submit_live replaces this stub,
-# every candidate fails SAFE with FAILED; the account guard runs before
-# this method is ever reached, so no partial state or money moves from a
-# failed transport attempt.
-def _submit_live(
-    provider: "PokerBetProvider",
-    *,
-    execution_id: str,
-    game_id: str,
-    alert_id: str,
-    selection: str,
-    price: Optional[float],
-    stake_amount: float,
-    market: str = "TOTAL",
-    line: Optional[float] = None,
-) -> dict:
-    """Fail-closed live submission. Replaced by the real transport when
-    it is implemented."""
-    # The account-identity guard already ran in the executor and
-    # returned BLOCKED on any mismatch, so it is safe to re-read here
-    # (idempotent) and fail closed on any uncertainty.
-    auth = get_authenticated_account_id()
-    configured = provider.configured_account_id
-    if auth is None or configured is None:
-        return {
-            "status": "FAILED",
-            "error_code": "ACCOUNT_MISMATCH",
-            "error_message": (
-                "account identity unverifiable: authenticated=%r configured=%r - blocked before submission" % (auth, configured),
-            ),
-        }
-    if int(auth) != int(configured):
-        return {
-            "status": "FAILED",
-            "error_code": "ACCOUNT_MISMATCH",
-            "error_message": (
-                "authenticated account %r != configured account %r - blocked before submission" % (auth, configured)
-            ),
-        }
-    raise ProviderUnavailable(
-        "live submission not implemented (PokerBetProvider transport stub; DRY_RUN is the supported mode)")
+# == BOOKMAKER TRANSPORT ==
+# The live bookmaker submission transport.  This owns:
+#
+#   * the account identity (reads the signed-in Opera GX session via the
+#     CDP bridge, from the environment, or from a configured stub);
+#   * the idempotency key (so retries never re-submit a live bet);
+#   * the HTTP/SSE submission to PokerBet;
+#   * the HONEST outcome reporting (SUBMITTED / ACCEPTED / REJECTED /
+#     FAILED / UNKNOWN).
+#
+# Fail-closed by construction: the provider's account-identity guard and
+# this transport's identity reader are the ONLY paths to submission.
+# Nothing here logs, stores or returns credential values.
+
+class PokerBetTransport:
+    """Live bookmaker submission transport for PokerBet.
+
+    One bet, one honest outcome:
+
+        SUBMITTED   the request reached the bookmaker; outcome not yet known
+        ACCEPTED    the bookmaker confirmed the bet
+        REJECTED    the bookmaker definitively refused (insufficient funds,
+                    market closed, ...) - no money moved
+        FAILED      the request definitively failed before/at the bookmaker
+                    - no bet exists
+        UNKNOWN     the outcome could not be determined (timeout, ambiguous
+                    response, connection dropped mid-flight) - money MAY be
+                    in play; the ledger keeps UNKNOWN and the risk limits
+                    keep counting it
+
+    The transport is constructed with the credentials, the authorised/
+    authenticated account ids, and the base URL.  It is the ONLY place in
+    the provider that touches the network.
+    """
+
+    name = "pokerbet_transport"
+
+    def __init__(
+        self,
+        base_url: str = "https://pokerbet.co.za",
+        *,
+        username: str,
+        password: str,
+        authenticated_account_id: Optional[int] = None,
+        configured_account_id: Optional[int] = None,
+        timeout_s: float = 20.0,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.username = username
+        self.password = password
+        self.authenticated_account_id = authenticated_account_id
+        self._configured_account_id = configured_account_id
+        self.timeout_s = timeout_s
+
+    @property
+    def configured_account_id(self) -> Optional[int]:
+        """The account the operator authorizes to bet as."""
+        if self._configured_account_id is None:
+            raw = os.environ.get("BLM_EXPECTED_ACCOUNT_ID", "").strip()
+            try:
+                self._configured_account_id = int(raw) if raw else None
+            except ValueError:
+                self._configured_account_id = None
+        return self._configured_account_id
+
+    @configured_account_id.setter
+    def configured_account_id(self, value: Optional[int]) -> None:
+        self._configured_account_id = value
+
+    def submit(
+        self,
+        *,
+        execution_id: str,
+        game_id: str,
+        alert_id: str,
+        selection: str,
+        price: Optional[float],
+        stake_amount: float,
+        market: str = "TOTAL",
+        line: Optional[float] = None,
+    ) -> dict:
+        """Submit one bet to the bookmaker and return the HONEST outcome.
+
+        The transport:
+          1. reads the account the bookmaker authenticated at call time
+             (CDP bridge / environment / configured stub);
+          2. builds an idempotency key from game + checkpoint + alert;
+          3. performs the placement HTTP/SSE request;
+          4. handles any retry/reconciliation at the transport (so the
+             executor and worker never re-submit);
+          5. returns the honest outcome.
+
+        Fail-closed: if the authenticated account cannot be read, the
+        transport refuses (no network call), and returns FAILED.
+        """
+        # --- 1. account identity at call time --------------------------
+        auth = self.authenticated_account_id
+        configured = self.configured_account_id
+        if auth is None or configured is None:
+            return {
+                "status": "FAILED",
+                "error_code": "ACCOUNT_MISMATCH",
+                "error_message": (
+                    "account identity unverifiable: authenticated=%r "
+                    "configured=%r - blocked before submission"
+                    % (auth, configured)),
+            }
+        if int(auth) != int(configured):
+            return {
+                "status": "FAILED",
+                "error_code": "ACCOUNT_MISMATCH",
+                "error_message": (
+                    "authenticated account %r != configured account %r - "
+                    "blocked before submission" % (auth, configured)),
+            }
+
+        # --- 2. idempotent key (unique per opportunity) ------------------
+        # It is the SAME key the execution ledger claimed, so a later
+        # reconciliation looks up the exact order this attempt created.
+        ik = self._idempotency_key(game_id=game_id, alert_id=alert_id)
+        # --- 3. perform the placement ----------------------------------
+        try:
+            result = self._place(
+                execution_id=execution_id, game_id=game_id, alert_id=alert_id,
+                selection=selection, price=price,
+                stake_amount=stake_amount, market=market, line=line,
+                idempotency_key=ik)
+        except ProviderUnavailable as e:
+            # definitive local failure: no request reached the bookmaker,
+            # so no money moved.  Never report this as UNKNOWN.
+            return {"status": "FAILED",
+                    "error_code": "TRANSPORT_UNAVAILABLE",
+                    "error_message": str(e)[:300]}
+        except TimeoutError:
+            return {"status": "UNKNOWN",
+                    "error_code": "TRANSACTION_TIMEOUT",
+                    "error_message": "bookmaker request timed out"}
+        except Exception as e:
+            return {"status": "UNKNOWN",
+                    "error_code": "TRANSPORT_EXCEPTION",
+                    "error_message": str(e)[:300]}
+
+        status = result.get("status", "UNKNOWN")
+        if status == "REJECTED":
+            return {"status": "REJECTED",
+                    "provider_ref": result.get("provider_ref"),
+                    "error_code": result.get("error_code"),
+                    "error_message": result.get("error_message")}
+        if status == "FAILED":
+            return {"status": "FAILED",
+                    "provider_ref": result.get("provider_ref"),
+                    "error_code": result.get("error_code"),
+                    "error_message": result.get("error_message")}
+        if status == "SUBMITTED":
+            return {"status": "SUBMITTED",
+                    "provider_ref": result.get("provider_ref")}
+        if status == "ACCEPTED":
+            return {"status": "ACCEPTED",
+                    "provider_ref": result.get("provider_ref")}
+        return {"status": "UNKNOWN",
+                "error_code": "UNMAPPED_TRANSPORT_STATUS",
+                "error_message": "unmapped transport status %r" % (status,)}
+
+    def _idempotency_key(self, game_id: str, alert_id: str,
+                         checkpoint: str = "") -> str:
+        """A unique idempotency key per (game, checkpoint, alert).
+
+        Format: ``{game_id}|{checkpoint}|{alert_id}`` — the SAME key the
+        executor's ledger claimed.  The autonomous alert id is
+        ``{game_id}|{checkpoint}``, so the checkpoint is recovered from
+        it here instead of being invented.  A manual key (no such
+        prefix) keeps an empty checkpoint, which is still stable and
+        unique.  The database's UNIQUE index on
+        ``bet_executions.idempotency_key`` enforces ONE execution per
+        opportunity across restarts, retries and workers.
+        """
+        prefix = f"{game_id}|"
+        if not checkpoint and str(alert_id).startswith(prefix):
+            checkpoint = str(alert_id)[len(prefix):]
+        return f"{game_id}|{checkpoint}|{alert_id}"
+
+    def _place(self, *, execution_id: str, game_id: str, alert_id: str,
+               selection: str, price: Optional[float],
+               stake_amount: float, market: str, line: Optional[float],
+               idempotency_key: str) -> dict:
+        """The actual HTTP/SSE placement call.
+
+        Override this in production to issue the real bookmaker request.
+        The default raises ProviderUnavailable - the transport is NOT
+        wired to the bookmaker until the real endpoint exists.
+        """
+        raise ProviderUnavailable(
+            "bookmaker placement not implemented (live transport not wired)")
+
+
+class PokerBetBrowserTransport(PokerBetTransport):
+    """Submission transport over the VERIFIED PokerBet DOM adapter.
+
+    This is the bridge between the Auto-Bet execution authority and the
+    existing browser execution subsystem (``blm_v4.execution.pokerbet``).
+    It does not open a browser and does not create a second execution
+    engine: the operator installs an already-connected
+    ``PokerBetDomAdapter`` and registers each canonical game id to its
+    rendered event name.
+
+    Sequence (fail closed at every step):
+      1. canonical game id → registered event (unregistered = no bet)
+      2. event identity + game id verified on the page
+      3. game-TOTAL market present and unambiguous
+      4. the selection at the ORIGINAL trigger line (never a substitute)
+      5. exact odds match
+      6. click the uniquely identified outcome
+      7. re-read the betslip and verify event/line/odds exactly once
+      8. fill + submit the stake through the existing adapter
+      9. return the bookmaker's own receipt, or SUBMITTED (unconfirmed)
+
+    ``PokerBetProvider`` is still the only caller, still guarded by the
+    account-identity check, and this class is never constructed by
+    ``provider_from_config`` — the live path requires explicit code.
+    """
+
+    name = "pokerbet_browser"
+    uses_browser_session = True
+
+    def __init__(self, adapter, games: dict[str, str], *,
+                 authenticated_account_id: Optional[int] = None,
+                 configured_account_id: Optional[int] = None,
+                 base_url: str = "https://pokerbet.co.za",
+                 timeout_s: float = 20.0):
+        super().__init__(
+            base_url=base_url, username="", password="",
+            authenticated_account_id=authenticated_account_id,
+            configured_account_id=configured_account_id,
+            timeout_s=timeout_s)
+        self._adapter = adapter
+        self._games = {str(k): str(v) for k, v in (games or {}).items()}
+
+    def register_game(self, game_id: str, event: str) -> None:
+        """Bind a canonical BLM game id to the rendered event name.  An
+        unregistered game can never be submitted."""
+        self._games[str(game_id)] = str(event)
+
+    def _place(self, *, execution_id: str, game_id: str, alert_id: str,
+               selection: str, price: Optional[float],
+               stake_amount: float, market: str, line: Optional[float],
+               idempotency_key: str) -> dict:
+        # THE final authorization gate: real in-browser submission stays
+        # disabled unless BETTING_BROWSER_SUBMIT is explicitly true.
+        if os.environ.get("BETTING_BROWSER_SUBMIT", "").strip().lower() \
+                not in ("1", "true", "yes", "on"):
+            raise ProviderUnavailable(
+                "browser submission not authorized "
+                "(BETTING_BROWSER_SUBMIT is not true)")
+        adapter = self._adapter
+        if adapter is None:
+            raise ProviderUnavailable("no browser adapter installed")
+        event = self._games.get(str(game_id))
+        if not event:
+            return {"status": "FAILED", "error_code": "GAME_NOT_REGISTERED",
+                    "error_message": ("game %s is not bound to a "
+                                      "bookmaker event" % game_id)}
+        if line is None or price is None:
+            return {"status": "FAILED", "error_code": "MISSING_LINE_OR_ODDS",
+                    "error_message": "trigger line and odds are required"}
+        try:
+            adapter.set_required_line(float(line))
+        except AttributeError:
+            return {"status": "FAILED", "error_code": "ADAPTER_CONTRACT",
+                    "error_message": "adapter cannot bind a trigger line"}
+        try:
+            found = adapter.find_event(event)
+        except Exception as e:  # noqa: BLE001 — browser gone → no bet
+            return {"status": "FAILED", "error_code": "BROWSER_UNAVAILABLE",
+                    "error_message": str(e)[:300]}
+        if not found:
+            return {"status": "FAILED", "error_code": "GAME_NOT_FOUND",
+                    "error_message": "event/game identity not verified"}
+        try:
+            if not adapter.find_market(event, market or "TOTAL"):
+                return {"status": "FAILED",
+                        "error_code": "MARKET_NOT_FOUND",
+                        "error_message": "game-total market not offered "
+                                        "or ambiguous"}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "FAILED", "error_code": "BROWSER_UNAVAILABLE",
+                    "error_message": str(e)[:300]}
+        try:
+            obs = adapter.find_position(event, market or "TOTAL", selection)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "FAILED", "error_code": "BROWSER_UNAVAILABLE",
+                    "error_message": str(e)[:300]}
+        if obs is None:
+            return {"status": "FAILED",
+                    "error_code": "SELECTION_NOT_AVAILABLE",
+                    "error_message": ("no unique %s offer at line %s"
+                                      % (selection, line))}
+        if abs(float(obs.line) - float(line)) > 1e-9:
+            return {"status": "FAILED", "error_code": "LINE_MISMATCH",
+                    "error_message": "resolved line is not the trigger line"}
+        if abs(float(obs.price) - float(price)) > 1e-9:
+            return {"status": "FAILED", "error_code": "ODDS_MISMATCH",
+                    "error_message": "resolved odds differ from the "
+                                    "revalidated candidate"}
+        if getattr(obs, "suspended", False):
+            return {"status": "FAILED", "error_code": "MARKET_SUSPENDED",
+                    "error_message": "selection is suspended"}
+        try:
+            clicked = adapter.click_selection(obs)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "FAILED", "error_code": "SELECTION_NOT_CLICKED",
+                    "error_message": str(e)[:300]}
+        if not clicked:
+            return {"status": "FAILED", "error_code": "SELECTION_NOT_CLICKED",
+                    "error_message": "no unambiguous outcome could be clicked"}
+        # INDEPENDENT betslip verification: the click is not the bet.
+        try:
+            entries = adapter.read_betslip()
+        except Exception as e:  # noqa: BLE001
+            return {"status": "UNKNOWN",
+                    "error_code": "BETSLIP_UNREADABLE",
+                    "error_message": str(e)[:300]}
+        matches = [e for e in (entries or [])
+                   if str(e.get("position") or "").upper()
+                   == str(selection).upper()
+                   and str(e.get("game_id") or "") in ("", str(game_id))
+                   and abs(float(e.get("line") or -1) - float(line)) <= 1e-9]
+        if len(matches) != 1:
+            return {"status": "FAILED",
+                    "error_code": "BETSLIP_VERIFICATION_FAILED",
+                    "error_message": ("expected exactly one matching "
+                                      "betslip leg, found %d" % len(matches))}
+        if abs(float(matches[0].get("price") or -1) - float(price)) > 1e-9:
+            return {"status": "FAILED", "error_code": "ODDS_MISMATCH",
+                    "error_message": "betslip odds differ from the "
+                                    "verified offer"}
+        result = adapter.place_parlay(float(stake_amount))
+        status = str(result.get("status") or "UNKNOWN").upper()
+        if status == "ACCEPTED" and result.get("provider_ref"):
+            return result
+        if status == "ACCEPTED":         # acceptance without a receipt
+            return {"status": "SUBMITTED", "provider_ref": None}
+        if status in ("SUBMITTED", "REJECTED", "FAILED", "UNKNOWN"):
+            return result
+        return {"status": "UNKNOWN", "error_code": "UNMAPPED_ADAPTER_STATUS",
+                "error_message": "unmapped adapter status %r" % (status,)}
 
 
 def provider_from_config(cfg) -> BetProvider:
