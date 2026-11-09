@@ -108,12 +108,13 @@ class _E:
     """A fake element."""
 
     def __init__(self, text="", cls="", market=None, role="leaf",
-                 disabled=False):
+                 disabled=False, hidden=False):
         self.text = text
         self.cls = cls
         self.market = market
         self.role = role
         self.disabled = disabled
+        self.hidden = hidden
 
 
 class FakeLocator:
@@ -146,6 +147,9 @@ class FakeLocator:
 
     def is_disabled(self) -> bool:
         return bool(self._els[0].disabled) if self._els else True
+
+    def is_visible(self) -> bool:
+        return bool(self._els) and not self._els[0].hidden
 
     def click(self, timeout=None):
         el = self._els[0] if self._els else None
@@ -226,6 +230,10 @@ class FakePage:
         #: can model it as absent or DISABLED so the gate's refusals are real
         self.place_button_present = True
         self.place_button_disabled = False
+        #: PokerBet renders a betslip clone inside every event card; the gate
+        #: must pick the ONE visible control, never count the hidden clones.
+        self.place_button_hidden_copies = 0
+        self.place_button_visible_copies = 0
         self.tabs = ["", "All", "Match", "Totals", "Handicaps", "Halves",
                      "Quarters"]
 
@@ -311,9 +319,14 @@ class FakePage:
             if sel == DOM.SEL_PLACE_BUTTON:
                 if not self.place_button_present:
                     return FakeLocator(self, [])
-                return FakeLocator(self, [_E(
+                els = [_E(
                     role="submit", text="ACCEPT CHANGES AND PLACE BET",
-                    disabled=self.place_button_disabled)])
+                    disabled=self.place_button_disabled)]
+                els += [_E(role="submit", text="BET NOW", hidden=True)
+                        for _ in range(self.place_button_hidden_copies)]
+                els += [_E(role="submit", text="BET NOW")
+                        for _ in range(self.place_button_visible_copies)]
+                return FakeLocator(self, els)
             return FakeLocator(self, [])
         return FakeLocator(self, [])
 

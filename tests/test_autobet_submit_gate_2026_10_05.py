@@ -68,6 +68,30 @@ def test_gate_does_not_click_by_itself():
 
 # ═══════════════ the gate's refusals (each → NO CLICK) ══════════════
 
+def test_gate_selects_the_visible_control_among_hidden_betslip_copies():
+    """PokerBet clones the betslip inside every event card.  A grid page had
+    68 matching buttons, so the old ``count() == 1`` gate refused valid
+    submissions (201 ``SUBMIT_CONTROL_UNAVAILABLE`` rows in the ledger)."""
+    page = FakePage()
+    page.place_button_hidden_copies = 67
+    adapter = with_pending(ready_adapter(page))
+    gate = adapter.prepare_submit(2.00)
+    assert gate["ready"] is True, gate
+    assert adapter._submit_button is not None
+
+
+def test_gate_still_refuses_two_visible_controls():
+    """Visibility resolves clones, never ambiguity: two visible submit controls
+    could be two different bets, so the gate fails closed."""
+    page = FakePage()
+    page.place_button_visible_copies = 1
+    adapter = with_pending(ready_adapter(page))
+    gate = adapter.prepare_submit(2.00)
+    assert gate["ready"] is False
+    assert gate["reason"] == "submit_control_unavailable"
+    assert adapter._submit_button is None
+
+
 def test_gate_refuses_when_control_is_absent():
     page = FakePage()
     page.place_button_present = False

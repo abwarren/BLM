@@ -1092,6 +1092,32 @@ class PokerBetDomAdapter(SelectionResolver):
             except Exception:
                 pass
 
+    def _visible_place_button(self):
+        """The ONE visible, enabled place-bet control, or None.
+
+        Live-observed 2026-11-06: PokerBet renders a full betslip clone inside
+        EVERY event card.  A grid page carried 68 ``SEL_PLACE_BUTTON`` matches
+        while only the operator's real slip had a visible, enabled control, so
+        the previous ``count() == 1`` test refused every submission with
+        ``submit_control_unavailable`` (201 such failures in the ledger).
+        Visibility is the discriminator the DOM actually offers; MORE THAN ONE
+        visible control is still ambiguous and fails closed (never guessed).
+        """
+        try:
+            loc = self._page.locator(SEL_PLACE_BUTTON)
+            total = min(loc.count(), 200)
+        except Exception:
+            return None
+        found = []
+        for i in range(total):
+            el = loc.nth(i)
+            try:
+                if el.is_visible() and not el.is_disabled():
+                    found.append(el)
+            except Exception:
+                continue
+        return found[0] if len(found) == 1 else None
+
     # ── THE SUBMIT GATE: every pre-submit check, and NO click ─────────
     def prepare_submit(self, stake_amount,
                        obs: Optional[MarketObservation] = None) -> dict:
@@ -1121,9 +1147,8 @@ class PokerBetDomAdapter(SelectionResolver):
         deadline = time.monotonic() + self.submit_gate_timeout_ms / 1000.0
         button = None
         while time.monotonic() < deadline:
-            loc = self._page.locator(SEL_PLACE_BUTTON)
-            if loc.count() == 1 and not loc.first.is_disabled():
-                button = loc.first
+            button = self._visible_place_button()
+            if button is not None:
                 break
             self._page.wait_for_timeout(100)
         if button is None:
@@ -1148,9 +1173,7 @@ class PokerBetDomAdapter(SelectionResolver):
                             continue
             except Exception:
                 pass
-            loc = self._page.locator(SEL_PLACE_BUTTON)
-            if loc.count() == 1 and not loc.first.is_disabled():
-                button = loc.first
+            button = self._visible_place_button()
         if button is None:
             return {"ready": False, "reason": "submit_control_unavailable",
                     "button_count": self._page.locator(
