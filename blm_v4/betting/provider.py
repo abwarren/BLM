@@ -195,6 +195,10 @@ class PokerBetBrowserProvider(BetProvider):
         self._owns_adapter = adapter is None
         self._wire_thread: Optional[int] = None
         self._rewires = 0
+        # BLM_EXPECTED_ACCOUNT_ID=auto: the account the browser is signed
+        # into when the first submission gate runs IS the authorized account.
+        # It is pinned here, so a later swap still blocks instead of betting.
+        self._pinned_live_account: Optional[str] = None
 
     # ── game_id → the event label the browser resolves ───────────────
     def _event_label(self, game_id: str) -> str:
@@ -413,6 +417,18 @@ class PokerBetBrowserProvider(BetProvider):
     ACCOUNT_ENV = "BLM_EXPECTED_ACCOUNT_ID"
 
     @property
+    def _auto_live_account(self) -> bool:
+        """True when the operator authorized "the account already signed in".
+
+        ``auto`` / ``live`` is an explicit instruction, not a missing value:
+        the first readable live identity is pinned and every later submission
+        must still match it.  A session swap therefore blocks (and needs a
+        restart after the operator signs into the intended account).
+        """
+        return (os.environ.get(self.ACCOUNT_ENV) or "").strip().lower() \
+            in ("auto", "live")
+
+    @property
     def configured_account_ids(self) -> frozenset:
         """EVERY permitted account id (operator may run more than one).
 
@@ -420,7 +436,14 @@ class PokerBetBrowserProvider(BetProvider):
         list — "use either of my accounts".  The browser must be signed into
         one of them; anything else still blocks the bet.  Empty when the
         operator has declared nothing.
+
+        ``auto`` (or ``live``) means "the account currently signed in is the
+        one I want": the first readable identity is pinned by
+        ``authenticated_account_id`` and returned as the permitted set.
         """
+        if self._auto_live_account:
+            pinned = getattr(self, "_pinned_live_account", None)
+            return frozenset({pinned}) if pinned else frozenset()
         raw = os.environ.get(self.ACCOUNT_ENV) or ""
         for sep in (",", ";", " "):
             raw = raw.replace(sep, " ")
@@ -441,15 +464,23 @@ class PokerBetBrowserProvider(BetProvider):
         the guard is fail-closed: an unreadable page id blocks the bet
         (BLOCKED / ACCOUNT_MISMATCH) instead of betting blind.
         """
-        return bool(self.configured_account_id)
+        # auto/live must require identity even BEFORE the first identity is
+        # pinned; otherwise an unreadable page would exempt itself from GATE 8.
+        return self._auto_live_account or bool(self.configured_account_id)
 
     @property
     def authenticated_account_id(self) -> Optional[str]:
         """The account the BROWSER is signed into, read live (never cached).
 
-        Read from the page's own session storage — the same number the
-        profile panel renders.  None means unprovable, which the guard
-        treats as a refusal, never as a match.
+        The adapter reads the numeric PokerBet user id when the session
+        exposes it, and otherwise the signed-in account's email from the
+        bookmaker's own ``LaUserDetails`` cookie (a session that was restored
+        from cookies has no localStorage auth blob).  None means unprovable,
+        which the guard treats as a refusal, never as a match.
+
+        With ``BLM_EXPECTED_ACCOUNT_ID=auto`` the first readable identity is
+        pinned as the authorized account; later reads are compared against
+        that pin, so signing into a different account blocks the bet.
         """
         try:
             self._wire()
@@ -459,9 +490,16 @@ class PokerBetBrowserProvider(BetProvider):
         if not callable(rd):
             return None
         try:
-            return rd()
+            account = rd()
         except Exception:
             return None
+        account = str(account or "").strip()
+        if not account:
+            return None
+        if self._auto_live_account and not getattr(
+                self, "_pinned_live_account", None):
+            self._pinned_live_account = account
+        return account
 
     def _gate(self, command: dict, stake_amount: float) -> dict:
         """Resolve → select → verify the betslip → PRICE/STAKE gate, then STOP.

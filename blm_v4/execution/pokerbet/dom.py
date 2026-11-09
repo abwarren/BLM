@@ -969,15 +969,30 @@ class PokerBetDomAdapter(SelectionResolver):
         return (cls.AUTH_DATA_KEY,
                 prefix + prefix + "AUTH_DATA_NOT_REMEMBER")
 
+    #: cookie the PokerBet backend writes for the signed-in account; survives
+    #: a page reload and a cookie-restored session (which has no auth blob).
+    USER_DETAILS_COOKIE = "LaUserDetails"
+
     def read_account_id(self) -> Optional[str]:
-        """The signed-in account number, or None when unprovable.
+        """The signed-in account number, or the signed-in email, or None.
 
         PokerBet keeps the authenticated user in localStorage under
         ``…__AUTH_DATA`` (or ``…__AUTH_DATA_NOT_REMEMBER``) → ``data.user_id``
         — observed live 233997789, the same number its profile panel renders.
-        Read-only, and only the id is extracted: no token ever leaves the
-        page or reaches a log.
+        A session restored from cookies has no such blob (observed live
+        2026-11-09: the page was signed in, localStorage held no auth key),
+        so the numeric id is followed by the backend's own ``LaUserDetails``
+        cookie → email.  Both are identifiers, never credentials.
+
+        Read-only, and only the identity is extracted: no token ever leaves
+        the page or reaches a log.
         """
+        uid = self._read_stored_user_id()
+        if uid:
+            return uid
+        return self._read_signed_in_email()
+
+    def _read_stored_user_id(self) -> Optional[str]:
         if self._page is None or not hasattr(self._page, "evaluate"):
             return None
         try:
@@ -999,6 +1014,34 @@ class PokerBetDomAdapter(SelectionResolver):
             return None
         uid = str(uid or "").strip()
         return uid or None
+
+    def _read_signed_in_email(self) -> Optional[str]:
+        """The email in PokerBet's signed-in cookie, normalised, or None.
+
+        The backend sets ``LaUserDetails`` at login and clears it at logout;
+        it identifies the active account even when no auth blob was persisted.
+        """
+        if self._page is None or not hasattr(self._page, "evaluate"):
+            return None
+        try:
+            email = self._page.evaluate(
+                """(name) => {
+                       const parts = document.cookie.split(';')
+                           .map(s => s.trim());
+                       const hit = parts.find(
+                           s => s.startsWith(name + '='));
+                       if (!hit) return null;
+                       try {
+                           const d = JSON.parse(decodeURIComponent(
+                               hit.slice(name.length + 1)));
+                           return d && d.email ? String(d.email) : null;
+                       } catch (e) { return null; }
+                   }""",
+                self.USER_DETAILS_COOKIE)
+        except Exception:
+            return None
+        email = str(email or "").strip().lower()
+        return email or None
 
     def parse_betslip_text(self, text: Optional[str]) -> list[dict]:
         """Tolerant betslip parse → [{event, market, position, line,
