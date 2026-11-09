@@ -1,5 +1,59 @@
 # BLM — STATUS
 
+## 2026-11-09 — AUTO-BET LIVE-READINESS REPAIR (TEST branch, live betting DISABLED). NOT DEPLOYED, NOT MERGED, PRODUCTION UNTOUCHED.
+
+Branch `test/autobet-live-readiness-2026-11-08` from `f506564`. Commits:
+`2de4fbd` (execution core), `e95ef71` (DOM exact-line selection),
+`0be97ce` (dashboard/API + reconciler wiring), `f796ae7` (tests + 48-test
+readiness suite), then docs (`docs/autobet/AUTO_BET_*.md`). Final verdict:
+**BLM AUTO-BET: PARTIAL — NOT READY FOR OPERATOR REVIEW**.
+
+### FIXED
+- Ledger schema trailing comma made every `BettingStore()` raise
+  `OperationalError: near ")"`; baseline 54 failed / 50 errors. Baseline
+  now clean.
+- New `bet_game_claims` table enforces one bet per game atomically inside
+  the same `BEGIN IMMEDIATE` as the ledger insert; DB errors fail closed.
+- Canonical rung validator wired into `evaluate` + submission revalidation;
+  trigger line immutable; odds separated from line.
+- Mandatory submission-time revalidation (16 checks) with stable codes;
+  ACCEPTED requires a bookmaker reference.
+- Provider fails closed on a missing transport (`ProviderUnavailable` ->
+  FAILED, never UNKNOWN); idempotency key matches the ledger; account
+  identity propagated; browser transport behind `BETTING_BROWSER_SUBMIT`.
+- DOM adapter selects the exact trigger line, never nearest-1.85; rejects
+  team totals, ambiguous/suspended markets, missing odds, non-unique clicks,
+  betslip mismatch.
+- Read-only `BettingReconciler` for UNKNOWN; never submits; advances only on
+  positive bookmaker evidence.
+- Dashboard reads backend authorization/worker/browser state; credential
+  presence keys corrected; pending/UNKNOWN/confirmed/rejected tiles.
+
+### TESTS
+- `tests/test_autobet_live_readiness_2026_11_08.py`: 48 tests.
+- 16-file auto-bet/execution/market focused suite: **481 passed, 0 failed**.
+- 6-file operational/API suite: 85 passed, 2 failed (test_stack fixture lacked
+  `under_odds`/`observed_lines`), fixed in the fixture -> test_stack 9 passed.
+- Pre-existing unrelated failure still open:
+  `tests/test_capture_efficiency.py::test_phase2_tick_body_records_buckets`
+  (`KeyError: 'panel_read_ms'`, `collector.py:3628`; file untouched).
+- Full `pytest tests` exceeds the 10-minute tool timeout; not completed.
+
+### REMAINING / RISKS (why PARTIAL)
+- `provider_from_config` installs no browser transport -> live mode cannot
+  submit (fails closed). No authenticated session reader; no
+  `find_order_by_idempotency` on `PokerBetProvider`, so UNKNOWN cannot be
+  confirmed. OPL has no representation anywhere. No Fast Lane exists. New
+  schema DDL is additive but production was NOT migrated.
+- `BETTING_BROWSER_SUBMIT` untouched (false); no credentials read; no deploy,
+  no restart, no merge; production DB inspected read-only (no
+  `bet_game_claims` table, proving no write from this branch).
+
+### CONTINUE
+See `docs/autobet/AUTO_BET_PRODUCTION_READINESS.md` §3/§5: wire the real
+browser transport + order lookup, establish OPL semantics, then re-run
+G8/G11/G15 in a staged authenticated environment before any activation.
+
 ## 2026-10-04 — C2 RESTORED to the fingerprint layer (non-gating) + doc reconciliation + focused regression. NOT COMMITTED, NOT DEPLOYED, NOT RESTARTED.
 
 Directive: LOCUS A only — restore C2 as a NON-GATING recorded fingerprint;
