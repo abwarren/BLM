@@ -770,3 +770,11 @@ def exec_price_reason(price) -> Optional[str]:
     if not math.isfinite(p):
         return PRICE_FLOOR
     return None if p >= TRADE_EXEC_MIN_PRICE else PRICE_FLOOR
+
+
+# ── OPERATOR-SET PROGRESS FLOOR (appended 2026-11-11; tail-only by contract) ──
+#: The TRADE progress FLOOR is deployment config, not a code decision.
+#: Default 75.0 (the alert era floor); a drop-in can lower it to widen the
+#: band without editing this file.  Env: TRADE_MIN_PROGRESS_PCT.
+#: Operator directive 2026-11-11: lower to 70.0 (Gate-B sweep, 7-day Nov 4-10).
+TRADE_MIN_PROGRESS_PCT = _env_float("TRADE_MIN_PROGRESS_PCT", TRADE_MIN_PROGRESS_PCT)
