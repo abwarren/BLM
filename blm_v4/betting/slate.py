@@ -139,7 +139,9 @@ def build_slate(prod_db, clean_db, lookback_s: float = DEFAULT_LOOKBACK_S) -> di
         avg = (pace.get(slug or "") or {}).get("avg_pace")
         req, act = r["required_pts_per_min"], r["actual_pts_per_min"]
         price = r["under_price"]
-        ratio = (float(req) / float(avg)) if (req and avg) else None
+        # the gate's OWN ratio (trade_pace_ratio), never a second formula:
+        # required pace / competition league-average pace
+        ratio = TW.trade_pace_ratio(req, avg)
         leg = legs(required_pace=req, avg_pace=avg, actual_pace=act,
                    progress_pct=r["progress_pct"], total_points=r["total_points"],
                    under_odds=price, competition_slug=slug,

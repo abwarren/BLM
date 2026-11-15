@@ -815,3 +815,26 @@ def exec_shortfall_reason(required_pace, actual_pace=None) -> Optional[str]:
     if not TRADE_SHORTFALL_ENABLED:
         return None
     return _shortfall_leg_frozen(required_pace, actual_pace)
+
+
+# ── THE PACE RATIO, ONE DEFINITION (appended 2026-11-15; tail-only) ─────────
+#: ``required_pts_per_min / league_avg_pace`` — the quantity the PACE leg gates
+#: on and the quantity the slate publishes as its ``ratio``.
+#:
+#: This is NOT actual pace: actual pace appears only in the GAP / shortfall leg
+#: and in the slate's display-only Act÷Avg column.  The ratio is deliberately
+#: required-over-league (how much the LINE demands vs how the league normally
+#: scores); an already-hot game still shows ~1.00.
+#:
+#: Exists so the slate cannot drift from the gate: both read this function
+#: (tests/test_slate_gate_parity_2026_11_15.py pins the equivalence).  Returns
+#: ``None`` for an unprovable or non-positive input, which the gate refuses.
+def trade_pace_ratio(required_pace, avg_pace) -> Optional[float]:
+    try:
+        req = float(required_pace)
+        avg = float(avg_pace)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(req) and math.isfinite(avg)) or avg <= 0:
+        return None
+    return req / avg
