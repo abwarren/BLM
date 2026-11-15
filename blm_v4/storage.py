@@ -25,6 +25,7 @@ from typing import Any, Optional
 from blm_v4.classifications import Classification
 from blm_v4.models import MarketObservation, PokerBetGame
 from blm_v4.performance import PERFORMANCE
+from blm_v4.sqlite_coordination import connect_pipeline_db, run_schema_stage
 
 logger = logging.getLogger("blm_v4.storage")
 
@@ -548,17 +549,7 @@ class PokerBetStore:
         return self._db_path
 
     def _connect(self) -> sqlite3.Connection:
-        uri = f"file:{self._db_path}?mode=ro" if False else str(self._db_path)
-        # timeout = SQLite busy_timeout (seconds).  The server's scorecard
-        # holds per-section write transactions on this same DB for ~30-90s
-        # windows; 30s was shorter than a window, so live snapshot/market
-        # writes failed with "database is locked" and the collector
-        # relaunched healthy browsers.  90s waits out a section window —
-        # transient cross-process contention must never drop an
-        # observation or kill a live session.
-        conn = sqlite3.connect(uri, timeout=90)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = connect_pipeline_db(self._db_path)
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -672,8 +663,7 @@ class PokerBetStore:
 
     def _init(self) -> None:
         with self._lock:
-            conn = self._connect()
-            try:
+            def migrate(conn: sqlite3.Connection) -> None:
                 conn.executescript(_SCHEMA)
                 # Quarter-score columns on snapshots (directive 2026-09-22)
                 # — backward-compatible ALTERs for DBs created before the
@@ -688,8 +678,7 @@ class PokerBetStore:
                         conn.execute(
                             f"ALTER TABLE snapshots ADD COLUMN {c} INTEGER")
                 conn.commit()
-            finally:
-                conn.close()
+            run_schema_stage(self._db_path, "pipeline-storage-v1", migrate)
 
     # ── Games ────────────────────────────────────────────────────
 

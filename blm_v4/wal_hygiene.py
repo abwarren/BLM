@@ -48,6 +48,10 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
+from blm_v4.sqlite_coordination import (
+    SQLITE_BUSY_TIMEOUT_MS,
+    connect_pipeline_db,
+)
 
 logger = logging.getLogger("blm_v4.wal_hygiene")
 
@@ -66,7 +70,7 @@ DEFAULT_THRESHOLD_MB = 256.0
 #: busy_timeout for the hygiene connection itself: the PRAGMA must
 #: return promptly even if it cannot make progress; PASSIVE never waits
 #: on readers anyway, this only bounds the connection setup handshake.
-DEFAULT_BUSY_TIMEOUT_MS = 5000
+DEFAULT_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_MS
 
 
 def wal_bytes(db_path: Path | str) -> int:
@@ -120,9 +124,9 @@ def passive_checkpoint_once(db_path: Path | str, *,
                 "held_back": -1}
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(str(db_path), timeout=30)
-        conn.execute(
-            f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        conn = connect_pipeline_db(db_path, row_factory=False)
+        # The shared pipeline timeout is uniform; this legacy argument stays
+        # for call compatibility and does not alter connection policy.
         row = conn.execute(
             "PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         # PRAGMA result row (sqlite3_wal_checkpoint_v2 semantics):

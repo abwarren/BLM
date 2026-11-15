@@ -15,6 +15,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+from blm_v4.sqlite_coordination import connect_pipeline_db, run_schema_stage
 from typing import Optional
 
 SCHEMA = """
@@ -112,9 +113,10 @@ class ExecutionStore:
     def __init__(self, db_path: str):
         self.db_path = str(Path(db_path))
         self._lock = threading.Lock()
-        with self._conn() as c:
+        def migrate(c):
             c.executescript(SCHEMA)
             self._migrate(c)
+        run_schema_stage(self.db_path, "execution-ledger-v1", migrate)
 
     # ── migrations (idempotent; pre-game_id ledgers keep working) ──────
     @staticmethod
@@ -140,11 +142,7 @@ class ExecutionStore:
         conn.commit()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+        return connect_pipeline_db(self.db_path)
 
     # ── jobs ───────────────────────────────────────────────────────────
     def upsert_job(self, execution_id: str, job: dict, mode: str) -> None:

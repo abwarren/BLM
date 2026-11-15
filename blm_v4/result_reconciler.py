@@ -76,6 +76,7 @@ from blm_v4.result_policy import (
     validate_page_result,
 )
 from blm_v4.scorecard import SCORECARD_SCHEMA
+from blm_v4.sqlite_coordination import connect_pipeline_db, run_schema_stage
 
 logger = logging.getLogger("blm_v4.result_reconciler")
 
@@ -454,10 +455,7 @@ class ResultReconciler:
 
     # ── schema ────────────────────────────────────────────────────
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path), timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        return connect_pipeline_db(self._db_path)
 
     def _init_schema(self) -> None:
         """Idempotent bootstrap (same policy as settle_worker): create the
@@ -465,8 +463,7 @@ class ResultReconciler:
         add the result_source provenance column when missing, then this
         worker's own tables."""
         with self._lock:
-            conn = self._connect()
-            try:
+            def migrate(conn: sqlite3.Connection) -> None:
                 conn.executescript(SCORECARD_SCHEMA)
                 cols = {r["name"] for r in conn.execute(
                     "PRAGMA table_info(game_results)")}
@@ -476,8 +473,7 @@ class ResultReconciler:
                 conn.executescript(SCHEMA)
                 self.repair_stale_provenance(conn)
                 conn.commit()
-            finally:
-                conn.close()
+            run_schema_stage(self._db_path, "result-reconciler-v1", migrate)
 
     # ── provenance hygiene (directive 2026-09-24) ──────────────────
     def repair_stale_provenance(self, conn: sqlite3.Connection) -> int:

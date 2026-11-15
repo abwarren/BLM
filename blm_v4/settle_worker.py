@@ -63,6 +63,7 @@ from blm_v4.result_policy import (
     is_results_page_verdict,
 )
 from blm_v4.scorecard import SCORECARD_SCHEMA, Scorecard, _snapshot_history_quality
+from blm_v4.sqlite_coordination import connect_pipeline_db, run_schema_stage
 
 logger = logging.getLogger("blm_v4.settle_worker")
 
@@ -84,23 +85,16 @@ def settle_once(db_path: Path | str, *,
     problems (fail-closed, logged); only a wholly unreadable DB raises.
     """
     log = log or logger
-    conn = sqlite3.connect(str(db_path), timeout=30)
-    conn.row_factory = sqlite3.Row
-    try:
-        # The scorecard's own schema — on a fresh DB the worker creates the
-        # SAME game_results table the sweep would (idempotent CREATE IF
-        # NOT EXISTS); on a production DB it is a no-op.
+    def migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(SCORECARD_SCHEMA)
-        # result reconciliation (directive 2026-09-23): the provenance
-        # column the reconciler writes — ensured here too so this
-        # worker's guarded candidate query cannot outrun the migration
-        # (idempotent; no-op once present).
-        _cols = {r[1] for r in conn.execute(
-            "PRAGMA table_info(game_results)")}
-        if "result_source" not in _cols:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(game_results)")}
+        if "result_source" not in cols:
             conn.execute(
                 "ALTER TABLE game_results ADD COLUMN result_source TEXT")
-        conn.commit()
+
+    run_schema_stage(db_path, "settle-worker-v1", migrate)
+    conn = connect_pipeline_db(db_path)
+    try:
         # Candidates, bounded and oldest-first so a backlog drains
         # predictably:
         #   (a) a newly ended game with NO game_results row at all,
@@ -139,17 +133,23 @@ def settle_once(db_path: Path | str, *,
                ORDER BY g.last_seen_at ASC
                LIMIT ?""",
             (batch_limit,)).fetchall()
+        # Release the candidate scan snapshot before per-game transactions.
+        # This prevents a read-to-write upgrade from failing with
+        # SQLITE_BUSY_SNAPSHOT while collector writes are active.
+        conn.commit()
         stats = {"checked": 0, "settled": 0, "unknown": 0, "invalid": 0,
                  "skipped": 0}
         for g in rows:
             stats["checked"] += 1
             try:
+                conn.execute("BEGIN IMMEDIATE")
                 outcome = _settle_game(conn, g)
             except Exception:
                 # fail-closed per game: one unreadable history never
                 # breaks the pass — exactly like the sweep's per-game
                 # isolation
                 stats["skipped"] += 1
+                conn.rollback()
                 log.exception("settle_worker_game_failed %s",
                               g["source_game_id"])
                 continue
