@@ -838,3 +838,63 @@ def trade_pace_ratio(required_pace, avg_pace) -> Optional[float]:
     if not (math.isfinite(req) and math.isfinite(avg)) or avg <= 0:
         return None
     return req / avg
+
+
+# ── LINE-AGE LEG (appended 2026-11-15; tail-only by contract) ──────────────
+#: Operator directive 2026-11-15: the live gate must match the tc-new cohort,
+#: which admits a candidate only when the market line is at most 15 s older
+#: than its capture (``captured_at - market_captured_at <= 15 s``).
+#:
+#: This is a THIRD, separate freshness rule, and deliberately not a rewrite of
+#: the lane's existing one: ``MAX_MARKET_AGE_S`` (300 s, fast_lane) still lets a
+#: stale capture be RETRIED up to ``stale_attempts`` with the book's betslip as
+#: the authority (operator directive 2026-10-28).  This leg refuses up front
+#: instead, on the captured line's own age, because the 66.0% cohort was
+#: measured with exactly that filter.
+#:
+#: Env: ``TRADE_MAX_LINE_AGE_S``.  The CODE DEFAULT is 0 = disabled, because
+#: the 2026-10-28 directive ("a stale captured line is not refused outright —
+#: retry it and let the book's betslip be the authority") is still the module
+#: contract and its suite pins it.  The DEPLOYMENT selects 15 (drop-in
+#: 99-line-age-15s.conf), which is what matches the tc-new cohort.
+#:
+#: Absent-both contract, mirroring the price leg: when the caller supplies
+#: NEITHER timestamp the leg is not this rule's business (older callers and the
+#: cohort suites construct legs from paces only).  A timestamp that is present
+#: but unparseable REFUSES — provenance that cannot be proven is never a pass.
+TRADE_MAX_LINE_AGE_S = _env_float("TRADE_MAX_LINE_AGE_S", 0.0)
+LINE_STALE = "line_stale"
+
+from datetime import datetime  # noqa: E402  (tail import; frozen prefix untouched)
+
+
+def line_age_seconds(captured_at, market_captured_at) -> Optional[float]:
+    """``captured_at - market_captured_at`` in seconds; ``None`` if unprovable."""
+    def _parse(value):
+        if value is None or value == "":
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    cap = _parse(captured_at)
+    mkt = _parse(market_captured_at)
+    if cap is None or mkt is None:
+        return None
+    return (cap - mkt).total_seconds()
+
+
+def line_age_reason(captured_at, market_captured_at) -> Optional[str]:
+    """``None`` when the captured line is fresh enough — else LINE_STALE.
+
+    Disabled by ``TRADE_MAX_LINE_AGE_S <= 0``.  Fail closed: a supplied but
+    unreadable timestamp refuses.
+    """
+    if TRADE_MAX_LINE_AGE_S is not None and TRADE_MAX_LINE_AGE_S <= 0:
+        return None
+    if captured_at is None and market_captured_at is None:
+        return None                      # no provenance supplied - not this leg
+    age = line_age_seconds(captured_at, market_captured_at)
+    if age is None:
+        return LINE_STALE
+    return None if age <= TRADE_MAX_LINE_AGE_S else LINE_STALE

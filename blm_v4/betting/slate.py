@@ -21,6 +21,7 @@ from typing import Optional
 
 from blm_v4 import trade_window as TW
 from blm_v4.betting.fast_lane import legs, first_refusal
+from blm_v4.betting import market_heat
 
 #: rows older than this are not "the slate" any more
 DEFAULT_LOOKBACK_S = 120.0
@@ -83,7 +84,8 @@ def _live_rows(clean_db: Path, lookback_s: float) -> list:
                       o.progress_pct, o.required_pts_per_min,
                       o.actual_pts_per_min, o.live_total_line, o.under_price,
                       o.remaining_game_minutes, o.classification, o.status,
-                      o.terminal, g.home_team, g.away_team, g.status AS game_status
+                      o.market_captured_at, o.terminal,
+                      g.home_team, g.away_team, g.status AS game_status
                  FROM clean_observations o
                  LEFT JOIN clean_games g ON g.source_game_id = o.source_game_id
                 WHERE o.id >= ?
@@ -131,6 +133,11 @@ def build_slate(prod_db, clean_db, lookback_s: float = DEFAULT_LOOKBACK_S) -> di
     slugs = _slugs(prod_db, ids)
     pace = _pace_reference(prod_db)
     now = time.time()
+    # the global guardrail: one verdict for the whole market this pass
+    heat = market_heat.state(prod_db, clean_db, now)
+    heat_tripped = bool(heat.get("tripped"))
+    heat_reason = (f"market_heat:{heat.get('reason') or 'unders_beaten'}"
+                   if heat_tripped else None)
 
     games = []
     for r in rows:
@@ -146,8 +153,14 @@ def build_slate(prod_db, clean_db, lookback_s: float = DEFAULT_LOOKBACK_S) -> di
                    progress_pct=r["progress_pct"], total_points=r["total_points"],
                    under_odds=price, competition_slug=slug,
                    entry_line=r["live_total_line"], open_line=None,
-                   league_avg_line=None)
+                   league_avg_line=None,
+                   captured_at=r["captured_at"],
+                   market_captured_at=r["market_captured_at"])
         refusal = first_refusal(leg)
+        if heat_tripped:
+            leg = dict(leg)
+            leg["market_heat"] = heat.get("reason") or "unders_beaten"
+            refusal = heat_reason
         band = _band(r["progress_pct"])
         # "on track" = the pace/price legs it CAN be judged on already pass, so
         # entering the band is the only thing left.  This is the number the
@@ -162,6 +175,7 @@ def build_slate(prod_db, clean_db, lookback_s: float = DEFAULT_LOOKBACK_S) -> di
             and price is not None and float(price) >= TW.TRADE_EXEC_MIN_PRICE
             and not leg.get("competition") and not leg.get("shortfall")
             and not leg.get("price") and not leg.get("score"))
+        on_track = on_track and not heat_tripped
         games.append({
             "game_id": gid,
             "home": r["home_team"], "away": r["away_team"],
@@ -179,6 +193,8 @@ def build_slate(prod_db, clean_db, lookback_s: float = DEFAULT_LOOKBACK_S) -> di
                           if (req is not None and act is not None) else None),
             "price": price,
             "line": r["live_total_line"],
+            "line_age_s": TW.line_age_seconds(r["captured_at"],
+                                              r["market_captured_at"]),
             "left_min": r["remaining_game_minutes"],
             "band": band,
             "eta_band_min": _eta_to_band_min(r["progress_pct"], r["remaining_game_minutes"]),
@@ -208,6 +224,8 @@ def build_slate(prod_db, clean_db, lookback_s: float = DEFAULT_LOOKBACK_S) -> di
             "pace_ratio": TW.TRADE_MIN_PACE_RATIO,
             "shortfall_margin": TW.SHORTFALL_MARGIN,
             "shortfall_enabled": bool(TW.TRADE_SHORTFALL_ENABLED),
+            "max_line_age_s": TW.TRADE_MAX_LINE_AGE_S,
+            "market_heat": heat,
             "price_floor": TW.TRADE_EXEC_MIN_PRICE,
             "signal_price_floor": TW.TRADE_MIN_UNDER_PRICE,
             "excluded_competitions": list(TW.TRADE_EXCLUDED_COMPETITIONS or []),

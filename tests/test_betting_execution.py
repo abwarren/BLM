@@ -66,6 +66,11 @@ def qualifying_game(game_id="30990001", checkpoint=75, age_s=5.0):
         "game_id": game_id,
         "live": True,
         "live_reason": None,
+        # canonical competition identity — the auto-bet qualification gate
+        # (2026-11-15) resolves the strength tier from its league pace and
+        # hard-blocks cyber-2k26 by this slug.  The live payload always
+        # carries it (blm_v4/api.py detail block).
+        "competition_slug": "betual-euroleague",
         "market": {"total_line": 193.5, "market_status": "LIVE"},
         "projector": {
             "progress_pct": 88.0,

@@ -70,7 +70,8 @@ def fetch_state(game_id: str) -> Optional[dict]:
         cc.row_factory = sqlite3.Row
         row = cc.execute(
             "SELECT captured_at, total_points, progress_pct, required_pts_per_min,"
-            " actual_pts_per_min, under_price, live_total_line, status"
+            " actual_pts_per_min, under_price, live_total_line, status,"
+            " market_captured_at"
             " FROM clean_observations WHERE source_game_id = ?"
             # the NEWEST READABLE capture, not the newest row: the collector
             # emits MISSING_CLOCK frames every ~30-60 s, and taking one of those
@@ -107,7 +108,8 @@ def verdict(state: dict, candidate: dict, *, now: Optional[datetime] = None,
             max_drift: Optional[float] = None) -> Optional[tuple[str, str]]:
     """Pure decision: ``None`` when the state still passes, else (code, why)."""
     from blm_v4.trade_window import (exec_alert_reason, exec_shortfall_reason,
-                                     execution_window_reason, score_reason,
+                                     execution_window_reason, line_age_reason,
+                                     score_reason,
                                      trade_competition_reason, exec_price_reason)
 
     if not state:
@@ -135,6 +137,8 @@ def verdict(state: dict, candidate: dict, *, now: Optional[datetime] = None,
                                 state.get("progress_pct"))
            or exec_shortfall_reason(state.get("required_pts_per_min"),
                                     state.get("actual_pts_per_min"))
+           or line_age_reason(state.get("captured_at"),
+                              state.get("market_captured_at"))
            or exec_price_reason(state.get("under_price")))
     if why:
         return (f"REVALIDATION_{str(why).upper()}"[:60],
@@ -157,9 +161,27 @@ def revalidate(candidate: dict, *,
                fetch: Optional[Callable[[str], Optional[dict]]] = None,
                now: Optional[datetime] = None,
                max_age_s: Optional[float] = None,
-               max_drift: Optional[float] = None
+               max_drift: Optional[float] = None,
+               heat: Optional[bool] = None
                ) -> Optional[tuple[str, str]]:
     """Returns ``None`` to place, or ``(error_code, message)`` to refuse."""
+    # MARKET-HEAT GUARDRAIL: a global pause applies at submission too — a
+    # candidate claimed moments before the market turned hot must not fill on
+    # legs that were true only of the old market.  Evaluated even when the
+    # per-candidate revalidation below is off.
+    if heat is None:
+        try:
+            from blm_v4.betting.market_heat import state as _heat_state
+            hs = _heat_state()
+            heat, heat_text = bool(hs.get("tripped")), hs.get("text")
+        except Exception:
+            heat, heat_text = False, None
+    else:
+        heat_text = None
+    if heat:
+        return ("REVALIDATION_MARKET_HEAT",
+                "market-heat guardrail is pausing armed trades: "
+                f"{heat_text}")
     if not enabled():
         return OK
     game_id = candidate.get("game_id")

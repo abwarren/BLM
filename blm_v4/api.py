@@ -62,6 +62,7 @@ from blm_v4.trade_window import (PACE_BELOW, TRADE_EXEC_MIN_PRICE,
                                  exec_alert_reason,
                                  exec_shortfall_reason,
                                  execution_window_reason,
+                                 line_age_reason,
                                  score_reason, trade_competition_reason,
                                  trade_move_reason, exec_price_reason)
 
@@ -71,6 +72,11 @@ from blm_v4.trade_window import (PACE_BELOW, TRADE_EXEC_MIN_PRICE,
 from blm_v4.trade_cohorts import resolve_cohort
 
 from blm_v4.live_analytics.fingerprint_c5 import q3_pace_reference
+
+# MARKET-HEAT GUARDRAIL (2026-11-15): a GLOBAL pause, not a per-game leg —
+# while unders are being beaten market-wide, no game is armed however clean
+# its own legs look.  Same definition the fast lane and the slate read.
+from blm_v4.betting import market_heat
 
 # ── PRECOMPUTED LEAGUE REFERENCES (empty-live-data diagnostic 2026-09-25) ──
 # v4_live consumed competition_pace_reference + q3_pace_reference INLINE per
@@ -2486,7 +2492,10 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                     g.get("competition_slug")),
             }
             g["under_alert_exec_armed"] = (
-                trade_competition_reason(
+                not market_heat.tripped(
+                    _db_path(),
+                    _db_path().parent / "blm_metrics_clean.db")
+                and trade_competition_reason(
                     g.get("competition_slug")) is None
                 and exec_alert_reason(
                     proj.get("required_pts_per_min"), entry.get("avg_pace"),
@@ -2500,7 +2509,10 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                     (g.get("market") or {}).get("under_odds")) is None
                 and trade_move_reason(
                     entry_line, open_line, league_avg_line,
-                    history_s=history_s) is None)
+                    history_s=history_s) is None
+                and line_age_reason(
+                    proj.get("captured_at"),
+                    proj.get("market_captured_at")) is None)
             # ── THE NAMED COHORT (operator directive 2026-10-23): an alert must
             # say WHICH cohort it belongs to.  Same inputs as the gate above, so
             # the name can never disagree with the verdict: `code` is the

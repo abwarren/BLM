@@ -27,6 +27,7 @@ from typing import Optional
 
 from blm_v4.betting.config import BettingConfig
 from blm_v4.betting.executor import evaluate, execute
+from blm_v4.betting import qualify as _qualify
 from blm_v4.betting.provider import provider_from_config
 from blm_v4.betting.store import BettingStore
 from blm_v2.telemetry.logging import get_logger
@@ -150,6 +151,24 @@ class BettingWorker:
         """
         if unit_price is None:
             unit_price = self.store.get_unit_price()
+        # ── STRENGTH × FINGERPRINT QUALIFICATION (directive 2026-11-15) ──
+        # Additive gate BEFORE the execution chain, on the alert feed that
+        # carries its evidence (competition slug + the alert's own Q3/fingerprint
+        # block).  A refusal is counted with the executor's other NO_BET reasons
+        # so the pass log shows WHY, and it never reaches claim=True.
+        #
+        # Only ARMED games are qualified: that is the population the directive
+        # governs, and every other game is already refused downstream with its
+        # own reason.  Skipping them also keeps the §5.4 audit line meaningful
+        # instead of logging every live game on every 5 s pass.
+        _ua = g.get("under_alert") or {}
+        if g.get("under_alert_exec_armed") is True or _ua.get("active") is True:
+            qualification = _qualify.check_game(g)
+            if not qualification["qualified"]:
+                summary["no_bet"] += 1
+                self._no_bet_reasons[
+                    f"autobet_gate:{qualification['reason']}"] += 1
+                return stats
         res = evaluate(g, cfg=self.cfg, store=self.store,
                        enabled=True, unit_price=unit_price,
                        stats=stats, balance=balance,

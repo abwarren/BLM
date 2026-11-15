@@ -82,6 +82,17 @@ def _capture(monkeypatch):
     return rec
 
 
+def _passes_qualification(monkeypatch):
+    """These tests stub the EXECUTOR to pin how its reasons are logged; the
+    strength × fingerprint gate (2026-11-15) runs before it and would refuse
+    their minimal ``{"game_id": ...}`` payloads for MISSING_INPUT, so it is
+    stubbed to a pass here.  Its own contract is tested separately in
+    tests/test_autobet_qualify_2026_11_15.py."""
+    monkeypatch.setattr(
+        worker_mod._qualify, "check_game",
+        lambda game: {"qualified": True, "reason": "TIER_A", "tier": "A"})
+
+
 def test_a_quiet_pass_is_summarised_once_a_minute(monkeypatch):
     """First pass logs; an immediate second pass does not (throttle)."""
     rec = _capture(monkeypatch)
@@ -129,6 +140,7 @@ def test_the_logged_pass_carries_games_and_balance(monkeypatch):
 def test_the_pass_log_names_which_gate_rejected_the_games(monkeypatch):
     """100 rejections say nothing; the reason says which gate did it."""
     rec = _capture(monkeypatch)
+    _passes_qualification(monkeypatch)
     monkeypatch.setattr(
         worker_mod, "evaluate",
         lambda *a, **k: {"decision": "NO_BET",
@@ -145,6 +157,7 @@ def test_the_pass_log_names_which_gate_rejected_the_games(monkeypatch):
 def test_the_reasons_are_a_per_pass_census_not_a_running_total(monkeypatch):
     """Each pass reports its own reasons — not the day's accumulation."""
     rec = _capture(monkeypatch)
+    _passes_qualification(monkeypatch)
     w = _worker(games=[{"game_id": "g1"}])
     monkeypatch.setattr(
         worker_mod, "evaluate",
@@ -163,6 +176,7 @@ def test_the_reasons_are_a_per_pass_census_not_a_running_total(monkeypatch):
 def test_the_eligibility_sub_reason_is_named(monkeypatch):
     """"alert_not_eligible" alone hides WHY an armed game was excluded."""
     rec = _capture(monkeypatch)
+    _passes_qualification(monkeypatch)
     monkeypatch.setattr(
         worker_mod, "evaluate",
         lambda *a, **k: {"decision": "NO_BET",

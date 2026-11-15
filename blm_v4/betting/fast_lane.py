@@ -54,10 +54,13 @@ from blm_v4.trade_window import (
     exec_price_reason,
     exec_shortfall_reason,
     execution_window_reason,
+    line_age_reason,
     score_reason,
     trade_competition_reason,
     trade_move_reason,
 )
+from blm_v4.betting import market_heat
+from blm_v4.betting import qualify as _qualify
 from blm_v2.telemetry.logging import get_logger
 
 logger = get_logger("fast_lane")
@@ -93,7 +96,8 @@ def _epoch(iso: Optional[str]) -> Optional[float]:
 
 def legs(*, required_pace, avg_pace, actual_pace, progress_pct,
          total_points, under_odds, competition_slug,
-         entry_line=None, open_line=None, league_avg_line=None) -> dict:
+         entry_line=None, open_line=None, league_avg_line=None,
+         captured_at=None, market_captured_at=None) -> dict:
     """Every trade leg, in the order the served verdict ANDs them.
 
     Returns ``{leg_name: reason_or_None}``; ``None`` on every leg means the
@@ -108,6 +112,7 @@ def legs(*, required_pace, avg_pace, actual_pace, progress_pct,
         "score": score_reason(total_points),
         "price": exec_price_reason(under_odds),
         "move": trade_move_reason(entry_line, open_line, league_avg_line),
+        "line_age": line_age_reason(captured_at, market_captured_at),
     }
 
 
@@ -340,6 +345,11 @@ class FastLaneWorker:
             # 0 = the normally-fresh path; >0 = a stale-line retry, which the
             # executor records under its own ``#rN`` identity
             "under_alert_attempt": int(attempt or 0),
+            # the competition's league-average pace, for the strength tier of
+            # the auto-bet qualification gate (directive 2026-11-15).  This
+            # path carries NO Q3 evidence: the strength tier still resolves,
+            # and the gate treats Q3 as UNAVAILABLE — it never guesses one.
+            "competition_pace": {"avg_pace": avg_pace},
             "under_alert_competition": {"slug": slug, "known": True,
                                         "reason": None},
             "under_alert_line_move": {"entry_line": line, "open_line": None,
@@ -374,6 +384,11 @@ class FastLaneWorker:
         except Exception:
             pass
         now = time.time()
+        # GLOBAL leg, evaluated once per pass: while unders are being beaten
+        # market-wide every per-game leg can still pass on a game whose edge
+        # is gone.  Cached inside the module, so this costs a read every 2 min.
+        heat = market_heat.refusal(self._prod_db, self._clean_db, now)
+        summary["market_heat"] = bool(heat)
         seen: set[str] = set()
         for row in rows:
             base = row["source_game_id"].split("#")[0]
@@ -389,8 +404,10 @@ class FastLaneWorker:
                 progress_pct=row["progress_pct"],
                 total_points=row["total_points"],
                 under_odds=row["under_price"],
-                competition_slug=slug)
-            refusal = first_refusal(leg_map)
+                competition_slug=slug,
+                captured_at=row["captured_at"],
+                market_captured_at=row["market_captured_at"])
+            refusal = heat or first_refusal(leg_map)
             market_age = None
             cap = _epoch(row["market_captured_at"])
             if cap is not None:
@@ -419,6 +436,18 @@ class FastLaneWorker:
             except Exception:
                 continue
             game = self.build_game(row, slug, avg, now, attempt=attempt)
+            # ── STRENGTH × FINGERPRINT QUALIFICATION (directive 2026-11-15) ──
+            # The lane's synthetic payload carries the competition slug and its
+            # league pace but NO Q3 evidence, so the gate's "Q3 unavailable"
+            # branch applies literally: a Tier-B base rate may proceed, a
+            # Tier-C edge may not.  Refused candidates never claim a slot.
+            qualification = _qualify.check_game(game)
+            if not qualification["qualified"]:
+                key = f"autobet_gate:{qualification['reason']}"
+                summary["refused"][key] = summary["refused"].get(key, 0) + 1
+                self._record_candidate(row, base, avg, attempt,
+                                       outcome="NOT_PLACED", reason=key)
+                continue
             bal = balance if isinstance(balance, (int, float)) else None
             res = evaluate(
                 game, cfg=self.cfg, store=self.store, enabled=True,
