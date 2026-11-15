@@ -1,5 +1,48 @@
 # BLM — STATUS
 
+## 2026-11-15 — GLOBAL CLICKABLE GAMEID UI (development worktree only)
+
+Implemented a shared `GameIdLink` renderer in the isolated worktree
+`/home/ubuntu/BLM-ui-test` on branch
+`codex/global-clickable-gameid-2026-11-15`. The repository's root TEST and
+production apps serve the same static directory, so the root checkout was
+left untouched. The current `blm-dev` checkout is behind the active UI and
+was not used.
+
+The helper builds PokerBet event URLs from the API's canonical source game
+ID, preserves the displayed value (including a virtual-instance `#iN`
+suffix), and leaves nonnumeric or missing values non-clickable. Links use
+`target="_blank"` and `rel="noopener noreferrer"`. Covered active/resulted
+alerts, game cards, modal detail and raw snapshot source IDs, betting trace
+and histories, and Explorer game/checkpoint/execution and flattened views.
+Stats tables are prepared to render a GameId column through the same helper;
+the current Stats payload has no GameId column. Search, identity matching,
+API payloads and betting logic were not changed.
+
+### Verification
+
+- Added `tests/test_game_id_link.py`; its three checks passed in an isolated
+  scratch harness: URL/link contract, user-facing renderer coverage, and raw
+  modal snapshot source-ID rendering.
+- `node --check` passed for `game-id-link.js`, `dashboard.js`, `explorer.js`,
+  and `stats.js`.
+- Built the dedicated TEST app with temporary databases and verified
+  `/static/game-id-link.js` and `/static/game-id-link.css` both return HTTP
+  200.
+- Repository pytest invocation was refused by `tests/conftest.py` because a
+  production collector is running on this host. The guard was not overridden.
+- No frontend package/build configuration exists in this checkout; JS syntax
+  checks and TEST static serving are the available build-level checks.
+- `git diff --check` passed. No backend, database, collector, alert, or
+  betting code changed. No production deployment or restart occurred.
+
+### Continuation
+
+Review the branch diff in this development worktree. Do not copy static files
+into `/home/ubuntu/BLM` before an approved production change window because
+that root checkout serves the production frontend directly. Commit/push state
+is recorded in the final handoff after review.
+
 ## 2026-11-09 — AUTO-BET LIVE-READINESS REPAIR (TEST branch, live betting DISABLED). NOT DEPLOYED, NOT MERGED, PRODUCTION UNTOUCHED.
 
 Branch `test/autobet-live-readiness-2026-11-08` from `f506564`. Commits:

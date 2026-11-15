@@ -1135,7 +1135,7 @@ function q3HistoryRowHTML(rec) {
   const ocClass = alertOutcomeClass(rec.outcome);
   return `
     <li class="al-row${running ? "" : " al-resolved"}${ocClass ? " " + ocClass : ""}">
-      <div class="al-ident">[Q3 BREAK] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
+      <div class="al-ident">[Q3 BREAK] ${esc(rec.league)} | Game ${GameIdLink.html(rec.game_id)}</div>
       ${(rec.home_team || rec.away_team)
         ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
       ${rec.alert_rule !== Q3B_ALERT_RULE_ID
@@ -1521,7 +1521,7 @@ function closeUnderAlert(id, act, game, now) {
   saveAlertHistory();
 }
 
-const alertIdent = (r) => `${esc(r.league)} | Game ${esc(r.game_id)}`;
+const alertIdent = (r) => `${esc(r.league)} | Game ${GameIdLink.html(r.game_id)}`;
 
 /* ── LIVE ALERTS — compact rows ─────────────────────────────────────────
    The panel answers "what is firing NOW" and sits directly above the game
@@ -1659,7 +1659,7 @@ function historyRowHTML(rec) {
         ${(rec.home_team || rec.away_team)
           ? `<span class="al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</span>` : ""}
       </div>
-      <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
+      <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${GameIdLink.html(rec.game_id)}</div>
       ${rec.alert_rule !== ALERT_RULE_ID
         ? `<div class="al-audit">AUDIT · triggered under the superseded condition — not a validated alert under the current rule</div>` : ""}
       ${(rec.refire_count)
@@ -2623,7 +2623,7 @@ function cardHTML(g, ui, alertEnter) {
     </details>
     <div class="card-foot">
       <span>${fmtTime(g.last_update)}</span>
-      <span>id ${esc(g.game_id)}</span>
+      <span>id ${GameIdLink.html(g.game_id)}</span>
     </div>`;
 }
 
@@ -2824,6 +2824,27 @@ function openModal(gameId) {
   if (live) renderModal(live);
   else $("modalBody").innerHTML = `<div class="empty">Loading…</div>`;
   loadModalDetail(gameId);
+}
+
+// Keep the diagnostic JSON readable while linking only its PokerBet source
+// identity. Snapshot `game_id` is an internal database key and stays text.
+function rawDataHTML(raw) {
+  const source = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
+  const links = [];
+  const tokenized = source.replace(
+    /("source_game_id"\s*:\s*)("(?:\\.|[^"\\])*")/g,
+    (whole, key, jsonValue) => {
+      let id;
+      try { id = JSON.parse(jsonValue); } catch (_) { return whole; }
+      const token = `BLM_GAME_ID_LINK_${links.length}_TOKEN`;
+      links.push({ token, html: GameIdLink.html(id) });
+      return key + JSON.stringify(token);
+    });
+  let html = esc(tokenized);
+  for (const link of links) {
+    html = html.replace(`&quot;${link.token}&quot;`, link.html);
+  }
+  return html;
 }
 
 function closeModal() {
@@ -3280,7 +3301,7 @@ function renderModal(g) {
         <div class="m-rows">
           <div class="m-row"><span class="k">Classification</span><span class="v">${esc(g.classification)}</span></div>
           <div class="m-row"><span class="k">Competition</span><span class="v">${esc(g.competition_slug || g.competition || "–")}</span></div>
-          <div class="m-row"><span class="k">Event ID</span><span class="v">${esc(g.game_id)}</span></div>
+          <div class="m-row"><span class="k">Event ID</span><span class="v">${GameIdLink.html(g.game_id)}</span></div>
           <div class="m-row"><span class="k">Region</span><span class="v">${esc(g.region)}</span></div>
           <div class="m-row"><span class="k">Status</span><span class="v">${esc(g.status)}</span></div>
           <div class="m-row"><span class="k">Quality</span><span class="v">${esc(g.quality_status || "OK")}${g.quality_reason ? ` · ${esc(g.quality_reason)}` : ""}</span></div>
@@ -3291,7 +3312,7 @@ function renderModal(g) {
         </div>
       </div>
     </details>
-    ${g.raw ? `<details class="tech-raw"><summary>Technical / Raw Data</summary><pre>${esc(typeof g.raw === "string" ? g.raw : JSON.stringify(g.raw, null, 2))}</pre></details>` : ""}`;
+    ${g.raw ? `<details class="tech-raw"><summary>Technical / Raw Data</summary><pre>${rawDataHTML(g.raw)}</pre></details>` : ""}`;
 
   if (prevCanvas) {
     const box = $("modalBody").querySelector(".chart-box");
@@ -3963,9 +3984,10 @@ function execStateWord(raw) {
 function traceHTML(g, exec, bstate) {
   const st = execStateWord((exec && (exec.execution_state || exec.status))
     || (bstate && bstate.state) || "UNKNOWN");
-  const chain = (label, value, cls) =>
+  const chain = (label, value, cls, trustedHtml = false) =>
     `<span class="tr-step ${cls || ""}" title="${label}">`
-      + `<span class="tr-k">${label}</span><span class="tr-v">${esc(value)}</span></span>`;
+      + `<span class="tr-k">${label}</span>`
+      + `<span class="tr-v">${trustedHtml ? value : esc(value)}</span></span>`;
   const timing = [];
   if (exec) {
     if (exec.requested_at_utc) timing.push(`req ${(exec.requested_at_utc || "").replace("T", " ").slice(11, 19)}`);
@@ -3978,7 +4000,7 @@ function traceHTML(g, exec, bstate) {
     || (bstate && bstate.blocked_reason) || "";
   return `<div class="tr-chain">
     ${chain("ALERT", exec && exec.alert_id ? exec.alert_id : "–", "tr-alert")}
-    ${chain("GAME", `${g.game_id}${(g.home_team || g.away_team) ? ` · ${g.home_team || "–"} vs ${g.away_team || "–"}` : ""}`)}
+    ${chain("GAME", `${GameIdLink.html(g.game_id)}${(g.home_team || g.away_team) ? ` · ${esc(g.home_team || "–")} vs ${esc(g.away_team || "–")}` : ""}`, "", true)}
     ${chain("SIGNAL", exec ? `${exec.market || "TOTAL"} ${exec.selection || "–"}` : "–")}
     ${chain("LINE", exec ? (exec.line != null || exec.price != null ? num1(exec.line != null ? exec.line : exec.price) : "–") : "–")}
     ${chain("EXECUTION", exec && exec.execution_id ? exec.execution_id : "–", "tr-exec")}
@@ -4186,7 +4208,7 @@ function abStatusHTML(st) {
             : ""));
       return `
       <li class="ab-exec st-${esc(statusLower)}">
-        <span class="ab-game" title="game ID">${esc(r.game_id || "")}</span>
+        <span class="ab-game" title="game ID">${GameIdLink.html(r.game_id)}</span>
         <span class="ab-alert muted" title="alert ID">${esc(r.alert_id ? `A:${r.alert_id}` : "")}</span>
         <span class="ab-chk muted">${esc(r.checkpoint != null ? "@" + r.checkpoint + "%" : "")}</span>
         <span title="direction/selection">${esc(r.selection || "")}</span>
@@ -4224,7 +4246,7 @@ async function loadBettingHistory() {
     const body = await response.json();
     list.innerHTML = body.executions.length ? body.executions.map((r) =>
       `<li class="ab-exec st-${esc(String(r.status || "UNKNOWN").toLowerCase())}">
-        <span class="ab-game">${esc(r.game_id)}</span><span>${esc(r.alert_id || "")}</span>
+        <span class="ab-game">${GameIdLink.html(r.game_id)}</span><span>${esc(r.alert_id || "")}</span>
         <span>${esc(r.execution_id || "")}</span><span>${esc(r.market || "TOTAL")} ${esc(r.selection || "")} @ ${num1(r.line)}</span>
         <span>${esc(r.execution_state || r.status || "UNKNOWN")}</span>
         <span>${esc(r.provider_ref || "")}</span><span>${esc(r.error_message || r.rejection_reason || "")}</span>

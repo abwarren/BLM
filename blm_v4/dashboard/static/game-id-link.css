@@ -1,0 +1,11 @@
+.game-id-link {
+  color: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.game-id-link:hover,
+.game-id-link:focus-visible {
+  color: var(--accent, #ffd400);
+  text-decoration-style: solid;
+}

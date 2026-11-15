@@ -105,9 +105,12 @@
     } else {
       for (const r of rows) {
         h += "<tr>";
-        for (const c of r) {
+        for (let index = 0; index < r.length; index++) {
+          const c = r[index];
           if (c && typeof c === "object" && c.html !== undefined) {
             h += '<td class="' + (c.cls || "") + '">' + c.html + "</td>";
+          } else if (/(^|\s)(game_id|source_game_id)$/i.test(headers[index])) {
+            h += "<td>" + (c == null ? "–" : GameIdLink.html(c)) + "</td>";
           } else {
             h += "<td>" + esc(c) + "</td>";
           }

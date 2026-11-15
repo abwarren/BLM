@@ -115,7 +115,11 @@
       };
       flat(body, "");
       table.innerHTML = "<thead><tr><th>FIELD</th><th>VALUE</th></tr></thead><tbody>"
-        + rows.map((r) => `<tr><td>${esc(r.key)}</td><td>${esc(r.value)}</td></tr>`).join("")
+        + rows.map((r) => {
+          const isGameId = /(^|\.)(game_id|source_game_id)$/i.test(r.key);
+          const value = isGameId ? GameIdLink.html(r.value) : esc(r.value);
+          return `<tr><td>${esc(r.key)}</td><td>${value}</td></tr>`;
+        }).join("")
         + "</tbody>";
       return;
     }
@@ -138,7 +142,9 @@
         : delta != null && delta > 0 ? ' class="ex-pos"'
         : delta != null && delta < 0 ? ' class="ex-neg"'
         : "";
-      const text = delta != null
+      const text = c === "game_id"
+        ? (v == null ? "–" : GameIdLink.html(v))
+        : delta != null
         ? (delta > 0 ? `+${delta}` : String(delta))
         : (v == null ? "–" : esc(v));
       return `<td${cls}>${text}</td>`;
