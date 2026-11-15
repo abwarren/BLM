@@ -36,12 +36,18 @@ API payloads and betting logic were not changed.
 - `git diff --check` passed. No backend, database, collector, alert, or
   betting code changed. No production deployment or restart occurred.
 
-### Continuation
+### Git State and Continuation
 
-Review the branch diff in this development worktree. Do not copy static files
-into `/home/ubuntu/BLM` before an approved production change window because
-that root checkout serves the production frontend directly. Commit/push state
-is recorded in the final handoff after review.
+- Branch: `codex/global-clickable-gameid-2026-11-15`
+- Implementation commit: `2ce2c12` (`Make PokerBet GameIds clickable across dashboard`)
+- Remote: `origin` (`git@github.com:abwarren/BLM.git`)
+- Push status: successful; feature branch tracks `origin`.
+- Working tree: clean after this handoff update is committed.
+- No deployment, merge, production file copy, or service restart occurred.
+
+Do not copy static files into `/home/ubuntu/BLM` before an approved
+production change window because that root checkout serves the production
+frontend directly.
 
 ## 2026-11-09 — AUTO-BET LIVE-READINESS REPAIR (TEST branch, live betting DISABLED). NOT DEPLOYED, NOT MERGED, PRODUCTION UNTOUCHED.
 
