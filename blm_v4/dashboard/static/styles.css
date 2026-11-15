@@ -1259,3 +1259,38 @@ td.ex-st-submitted { color: #3b82f6; }
   background-repeat: no-repeat, no-repeat;
   }
 
+
+/* ── Read-only historical execution analytics ─────────────────────── */
+.ex-data-warning { margin: 10px 12px; padding: 9px 11px; border-left: 3px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 8%, transparent); }
+.ex-analytics-filters { justify-content: flex-start; }
+.ex-analytics-filters input[type="date"] { width: 132px; }
+.ex-analytics-kpis { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.ex-analytics-kpis .st-kpi:first-child { min-width: 160px; }
+.ex-analytics-kpis .st-kpi:first-child .st-kpi-value { font-size: 34px; }
+.ex-subhead { padding: 12px 12px 6px; align-items: baseline; }
+.ex-subhead .st-title { font-size: 11px; }
+.ex-config-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr));
+  gap: 8px; padding: 8px 12px 12px; }
+.ex-config-item { min-width: 0; padding: 8px; background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 5px; }
+.ex-config-item .k { color: var(--muted); font: 9px var(--mono); letter-spacing: .7px;
+  text-transform: uppercase; }
+.ex-config-item .v { margin-top: 4px; color: var(--text); font: 11px var(--mono);
+  overflow-wrap: anywhere; }
+.ex-breakdowns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px;
+  padding: 8px 12px 14px; }
+.ex-breakdowns section { min-width: 0; }
+.ex-breakdowns h3 { margin: 0 0 6px; color: var(--muted); font: 10px var(--mono);
+  letter-spacing: .7px; text-transform: uppercase; }
+.ex-break-table { width: 100%; border-collapse: collapse; font: 10px var(--mono); }
+.ex-break-table td { padding: 4px 5px; border-bottom: 1px solid var(--border); }
+.ex-break-table td:nth-child(n+2) { text-align: right; }
+.ex-league-tag { display: inline-flex; align-items: center; gap: 6px; }
+.ex-league-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.ex-pagination { display: flex; justify-content: center; gap: 12px; align-items: center;
+  padding: 10px; color: var(--muted); font: 10px var(--mono); }
+.ex-pagination button { background: var(--panel2); border: 1px solid var(--border);
+  color: var(--text); padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+.ex-pagination button:disabled { opacity: .4; cursor: default; }
+@media (max-width: 760px) { .ex-breakdowns { grid-template-columns: 1fr; } }

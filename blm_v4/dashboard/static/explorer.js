@@ -36,6 +36,9 @@
     cohort: "",       // "" = every cohort; otherwise a TC-* code
     windowMin: 0,     // 0 = no timeframe; otherwise minutes back from now
     fromMs: null,     // FROM box: overrides windowMin when set
+    analyticsPage: 1,
+    analyticsInFlight: false,
+    leagueColors: new Map(),
   };
 
   /* The dataset's own time column — the field a timeframe is applied to.
@@ -64,6 +67,224 @@
     if (S.fromMs) return S.fromMs;
     if (S.windowMin > 0) return Date.now() - S.windowMin * 60000;
     return null;
+  }
+
+  const PERFORMANCE_API = "/api/v4/betting/explorer";
+  const money = (v) => v == null ? "Unavailable" : `R${Number(v).toFixed(2)}`;
+  const pct = (v, n) => v == null ? "Unavailable" : `${Number(v).toFixed(1)}% (N=${n})`;
+  const display = (v) => v == null || v === "" ? "—" : String(v);
+  const fmt = (v, digits = 2) => v == null ? "—" : Number(v).toFixed(digits);
+  function setupLeagueColors(options) {
+    S.leagueColors.clear();
+    [...new Set(options || [])].sort().forEach((name, i) => {
+      // Golden-angle spacing gives each known league a distinct, stable hue.
+      S.leagueColors.set(name, `hsl(${(i * 137.508) % 360} 72% 58%)`);
+    });
+  }
+
+  function gameIdLink(gameId) {
+    const raw = String(gameId ?? "");
+    const eventId = raw.split("#", 1)[0];
+    if (!/^\d+$/.test(eventId)) return esc(raw || "—");
+    const url = "https://www.pokerbet.co.za/en/sports/live/event-view/Basketball/Virtual%20Matches/18296900-betual-tbsl/"
+      + encodeURIComponent(eventId);
+    return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(raw)}</a>`;
+  }
+
+  function kpi(label, value, sub = "", tone = "plain") {
+    return `<div class="st-kpi"><div class="st-kpi-label">${esc(label)}</div>`
+      + `<div class="st-kpi-value ${tone}">${esc(value)}</div>`
+      + `<div class="st-kpi-sub">${esc(sub)}</div></div>`;
+  }
+
+  function renderPerformance(p) {
+    const target = $("exKpis");
+    if (!target) return;
+    const actual = p.actual_performance || {};
+    const theoreticalLabel = p.theoretical_signal_performance_available
+      ? "Available" : "Unavailable — no complete historical signal/qualifying-price ledger";
+    target.innerHTML = [
+      kpi("Actual win rate", pct(actual.win_rate_pct, actual.win_rate_n),
+        `${actual.settled_selections || 0} settled selections (N=${actual.win_rate_n || 0})`,
+        actual.win_rate_pct == null ? "warn" : "good"),
+      kpi("Actual net units", actual.net_units == null ? "Unavailable" : fmt(actual.net_units, 3),
+        `Net amount ${money(actual.net_amount)}`, actual.net_units == null ? "warn" : "plain"),
+      kpi("Actual ROI", actual.roi_pct == null ? "Unavailable" : `${fmt(actual.roi_pct, 2)}%`,
+        `Total stake ${money(actual.total_stake)} · Settled stake ${money(actual.settled_stake)}`,
+        actual.roi_pct == null ? "warn" : "plain"),
+      kpi("Confirmed bets", String(actual.confirmed_bets || 0),
+        `Average odds ${fmt(actual.average_odds, 3)}`),
+      kpi("Wins / Losses / Pushes",
+        `${actual.wins || 0} / ${actual.losses || 0} / ${actual.pushes || 0}`,
+        `Settled sample N=${actual.settled_selections || 0}`),
+      kpi("Pending / Unknown", `${actual.pending_executions || 0} / ${actual.unknown_executions || 0}`,
+        `Not attempted ${actual.not_attempted || 0}`),
+      kpi("Theoretical signal ledger", theoreticalLabel,
+        "Price-at-qualification records are not persisted", "warn"),
+    ].join("");
+  }
+
+  function renderBreakdown(id, entries, colors = false) {
+    const root = $(id);
+    if (!root) return;
+    const rows = entries || [];
+    root.innerHTML = `<table class="ex-break-table"><tbody>` + (rows.length
+      ? rows.map((r) => {
+        const name = String(r.group ?? "Unknown");
+        const color = S.leagueColors.get(name) || "#94a3b8";
+        const label = colors
+          ? `<span class="ex-league-tag"><i class="ex-league-dot" style="background:${color}"></i>${esc(name)}</span>`
+          : esc(name);
+        return `<tr><td>${label}</td><td>${esc(pct(r.win_rate_pct, r.win_rate_n))}</td>`
+          + `<td>${esc(`${r.wins || 0}W / ${r.losses || 0}L / ${r.pushes || 0}P`)}</td></tr>`;
+      }).join("")
+      : `<tr><td>No recorded rows</td><td>—</td><td>—</td></tr>`)
+      + `</tbody></table>`;
+  }
+
+  function configValue(value) {
+    if (value === true) return "Enabled";
+    if (value === false) return "Disabled";
+    if (value == null || value === "") return "Not available";
+    if (typeof value === "object") {
+      return Object.entries(value).map(([k, v]) => `${k}: ${v ?? "unavailable"}`).join(" · ");
+    }
+    return String(value);
+  }
+
+  function renderConfiguration(c) {
+    const target = $("exConfig");
+    if (!target) return;
+    const values = [
+      ["Persisted Auto-Bet enabled", c.auto_betting_enabled], ["Dry run", c.dry_run],
+      ["Browser submit", c.browser_submit], ["Submission authorized", c.submission_authorized],
+      ["Account identity configured", c.account_identity_configured],
+      ["Kill switch (persisted Auto-Bet flag)", c.kill_switch_enabled], ["Unit price", c.unit_price],
+      ["Stake units", c.stake_units], ["Per-bet limit", c.max_stake_per_bet],
+      ["Daily bet limit", c.max_bets_per_day], ["Daily exposure limit", c.max_daily_exposure],
+      ["Odds range", `${c.odds_min ?? "?"} – ${c.odds_max ?? "?"}`],
+      ["Alert freshness (seconds)", c.alert_max_age_s], ["Signal profile", c.signal_profile],
+      ["Market availability", c.market_requirement], ["Price validation", c.price_requirement],
+      ["Permitted cohorts", c.permitted_cohorts],
+      ["Fingerprint requirements", c.fingerprint_requirements],
+      ["Confidence threshold", c.confidence_threshold], ["Ladder staking", c.ladder_staking],
+      ["Historical config snapshots", c.historical_snapshots_available],
+    ];
+    target.innerHTML = values.map(([name, value]) =>
+      `<div class="ex-config-item"><div class="k">${esc(name)}</div>`
+      + `<div class="v">${esc(configValue(value))}</div></div>`).join("");
+  }
+
+  function renderAnalyticsRows(rows) {
+    const table = $("exAnalyticsTable");
+    if (!table) return;
+    const cols = ["requested_at_utc", "game_id", "fixture", "league", "cohort", "cohort_reason",
+      "strategy", "signal_qualification", "eligibility", "eligibility_reason",
+      "execution", "execution_reason", "selection", "triggered_line", "price",
+      "final_total", "points_margin", "settlement", "theoretical_units",
+      "actual_stake", "actual_stake_source", "actual_units", "actual_profit"];
+    const headers = ["EXECUTION TIME", "GAME ID", "FIXTURE", "LEAGUE", "COHORT", "COHORT REASON",
+      "STRATEGY", "SIGNAL", "ELIGIBILITY", "ELIGIBILITY REASON", "EXECUTION",
+      "EXECUTION REASON", "PICK", "MARKET LINE", "EXECUTION ODDS", "FINAL TOTAL",
+      "POINTS MARGIN", "SETTLEMENT", "THEORETICAL UNITS", "ACTUAL STAKE", "STAKE SOURCE",
+      "ACTUAL UNITS", "ACTUAL PROFIT"];
+    table.innerHTML = `<thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>`
+      + ((rows || []).length ? rows.map((row) => `<tr>${cols.map((key) => {
+        if (key === "game_id") return `<td>${gameIdLink(row[key])}</td>`;
+        if (key === "league") {
+          const name = String(row[key] || "Unknown");
+          return `<td><span class="ex-league-tag"><i class="ex-league-dot" style="background:${S.leagueColors.get(name) || "#94a3b8"}"></i>${esc(name)}</span></td>`;
+        }
+        if (key === "theoretical_units") return `<td title="${esc(row.price_at_qualification_reason || "No signal-price ledger")}">Unavailable</td>`;
+        const v = row[key];
+        const shown = key === "actual_profit" || key === "actual_stake" ? money(v)
+          : key === "actual_units" ? fmt(v, 3)
+          : key === "price" ? fmt(v, 3)
+          : key === "triggered_line" || key === "points_margin" ? fmt(v, 1)
+          : display(v);
+        const cls = key === "points_margin" && Number(v) > 0 ? "ex-pos"
+          : key === "points_margin" && Number(v) < 0 ? "ex-neg" : "";
+        return `<td class="${cls}">${esc(shown)}</td>`;
+      }).join("")}</tr>`).join("")
+      : `<tr><td colspan="${cols.length}">No execution evidence matches these filters.</td></tr>`)
+      + `</tbody>`;
+  }
+
+  function setSelectOptions(selectId, options, includeAll = true) {
+    const select = $(selectId);
+    if (!select) return;
+    const old = select.value;
+    const first = includeAll ? '<option value="">All</option>' : "";
+    select.innerHTML = first + (options || []).map((o) =>
+      `<option value="${esc(o)}">${esc(o)}</option>`).join("");
+    if ([...select.options].some((o) => o.value === old)) select.value = old;
+  }
+
+  async function pullAnalytics() {
+    if (S.analyticsInFlight) return;
+    S.analyticsInFlight = true;
+    const params = new URLSearchParams();
+    const from = $("exAnalyticsFrom")?.value, to = $("exAnalyticsTo")?.value;
+    if (from) params.set("from_day", from);
+    if (to) params.set("to_day", to);
+    const filters = [["league", "exLeague"], ["qualification", "exQualification"],
+      ["eligibility", "exEligibility"], ["execution", "exExecution"],
+      ["settlement", "exSettlement"], ["cohort", "exAnalyticsCohort"], ["strategy", "exStrategy"]];
+    for (const [key, id] of filters) {
+      const value = $(id)?.value;
+      if (value) params.set(key, value);
+    }
+    params.set("page", String(S.analyticsPage));
+    params.set("page_size", "100");
+    try {
+      const resp = await fetch(`${PERFORMANCE_API}?${params.toString()}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      setupLeagueColors(data.league_options || []);
+      setSelectOptions("exLeague", data.league_options || []);
+      renderPerformance(data);
+      renderConfiguration(data.current_configuration || {});
+      renderBreakdown("exLeagueBreakdown", data.league_performance, true);
+      renderBreakdown("exEligibilityBreakdown", data.eligibility_performance);
+      renderBreakdown("exExecutionBreakdown", data.execution_performance);
+      renderBreakdown("exStrategyBreakdown", data.strategy_performance);
+      renderAnalyticsRows(data.rows || []);
+      const warning = $("exDataAvailability");
+      if (warning) {
+        const gaps = (data.data_gaps || []).map(esc).join(" ");
+        warning.textContent = `This view contains ${data.population || "recorded evidence"}, not the full qualified-signal population. ${gaps}`;
+      }
+      const meta = $("exAnalyticsMeta");
+      if (meta) meta.textContent = `${data.matched ?? data.total ?? 0} matching execution rows · ${data.from_day} to ${data.to_day}`;
+      const page = $("exPage");
+      if (page) page.textContent = `Page ${data.page} · ${data.matched} matched`;
+      $("exPrev").disabled = data.page <= 1;
+      $("exNext").disabled = (data.page * data.page_size) >= data.matched;
+      const asOf = $("exAnalyticsAsOf");
+      if (asOf) asOf.textContent = `UPDATED ${new Date().toISOString().slice(11, 19)}Z`;
+    } catch (err) {
+      const warning = $("exDataAvailability");
+      if (warning) warning.textContent = `Explorer data unavailable: ${err.message || err}`;
+      const table = $("exAnalyticsTable");
+      if (table) table.innerHTML = `<tbody><tr><td>Unable to load read-only analytics.</td></tr></tbody>`;
+    } finally {
+      S.analyticsInFlight = false;
+    }
+  }
+
+  function initializeAnalyticsFilters() {
+    const today = new Date();
+    const to = today.toISOString().slice(0, 10);
+    const from = new Date(today.getTime() - 6 * 86400000).toISOString().slice(0, 10);
+    if ($("exAnalyticsFrom") && !$("exAnalyticsFrom").value) $("exAnalyticsFrom").value = from;
+    if ($("exAnalyticsTo") && !$("exAnalyticsTo").value) $("exAnalyticsTo").value = to;
+    $("exAnalyticsReload")?.addEventListener("click", () => { S.analyticsPage = 1; pullAnalytics(); });
+    $("exPrev")?.addEventListener("click", () => { S.analyticsPage = Math.max(1, S.analyticsPage - 1); pullAnalytics(); });
+    $("exNext")?.addEventListener("click", () => { S.analyticsPage += 1; pullAnalytics(); });
+    for (const id of ["exAnalyticsFrom", "exAnalyticsTo", "exLeague", "exQualification", "exEligibility",
+      "exExecution", "exSettlement", "exAnalyticsCohort", "exStrategy"]) {
+      $(id)?.addEventListener("change", () => { S.analyticsPage = 1; pullAnalytics(); });
+    }
   }
 
   /* ── dataset → display rows (transparent projections only) ── */
@@ -364,11 +585,12 @@
         : onStats ? "fired-alert cohort · fingerprints · league standings"
         : "live games + alerts";
     }
-    if (onExplorer) { pull(); startPolling(); }
+    if (onExplorer) { pull(); pullAnalytics(); startPolling(); }
     else stopPolling();
   }
 
   function init() {
+    initializeAnalyticsFilters();
     const tabs = $("tabs");
     if (tabs) {
       tabs.addEventListener("click", (ev) => {

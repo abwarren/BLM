@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import math
 import hashlib
+import os
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -379,6 +382,103 @@ def betting_history(q: str = "", status: str = "", game_id: str = "",
         "audit": audit[:max(1, min(int(limit), 500))],
         "limit": max(1, min(int(limit), 500)),
     }
+
+
+@router.get("/explorer")
+def betting_explorer(from_day: str = "", to_day: str = "", league: str = "",
+                     execution: str = "", settlement: str = "",
+                     eligibility: str = "", qualification: str = "",
+                     cohort: str = "", strategy: str = "",
+                     page: int = 1, page_size: int = 100) -> dict:
+    """Read-only paged execution analytics for the DB Explorer.
+
+    The response is intentionally bounded to persisted execution evidence.
+    It does not synthesize absent signal, eligibility, cohort, or historical
+    configuration records.
+    """
+    _, cfg = _require()
+    now = datetime.now(timezone.utc).date()
+    if not to_day:
+        to_day = now.isoformat()
+    if not from_day:
+        from_day = (now - timedelta(days=6)).isoformat()
+    pipeline_db = Path(os.environ.get("BLM_POKERBET_DB") or
+                       (Path(cfg.db_path).parent / "blm_pokerbet.db"))
+    from blm_v4.db_explorer_analytics import load_execution_page
+    try:
+        payload = load_execution_page(
+            Path(cfg.db_path), pipeline_db, from_day=from_day, to_day=to_day,
+            league=league, execution=execution, settlement_filter=settlement,
+            eligibility=eligibility, qualification=qualification,
+            cohort=cohort, strategy=strategy,
+            page=page, page_size=page_size)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    from blm_v4.live_analytics import under_alert
+    from blm_v4.betting.provider import browser_submit_authorized
+    from blm_v4.trade_window import TRADE_EXEC_MIN_PRICE
+    profile = (under_alert.active_profile()
+               if hasattr(under_alert, "active_profile") else None)
+    signal_profile = {
+        "name": profile.name if profile else "production-default",
+        "required_margin": (profile.required_margin if profile
+                            else under_alert.REQUIRED_MARGIN),
+        "progress_min": (profile.progress_min if profile
+                         else under_alert.ALERT_PROGRESS_PCT),
+        "progress_max": profile.progress_max if profile else 100.0,
+        "min_under_price": profile.min_under_price if profile else None,
+        "max_market_age_s": profile.max_market_age_s if profile else None,
+    }
+    persisted = {}
+    try:
+        from blm_v4.db_explorer_analytics import _connect_ro
+        conn = _connect_ro(Path(cfg.db_path))
+        try:
+            persisted = {r["key"]: r["value"] for r in conn.execute(
+                "SELECT key,value FROM betting_config "
+                "WHERE key IN ('auto_betting_enabled','unit_price')")}
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        persisted = {}
+    enabled_value = persisted.get("auto_betting_enabled")
+    enabled_text = str(enabled_value).strip().lower() if enabled_value is not None else ""
+    unit_value = persisted.get("unit_price")
+    try:
+        unit_value = float(unit_value) if unit_value is not None else None
+    except (TypeError, ValueError):
+        unit_value = None
+    payload["current_configuration"] = {
+        "source": "live BettingConfig, betting_config store, and active alert profile",
+        "auto_betting_enabled": (enabled_text in {"true", "1", "yes", "on"}
+                                  if enabled_value is not None else None),
+        "dry_run": cfg.dry_run,
+        "browser_submit": cfg.browser_submit,
+        "submission_authorized": browser_submit_authorized(),
+        "account_identity_configured": None,
+        "kill_switch_enabled": (enabled_text in {"true", "1", "yes", "on"}
+                                if enabled_value is not None else None),
+        "unit_price": unit_value,
+        "stake_units": cfg.stake_units,
+        "max_stake_per_bet": cfg.max_stake_per_bet,
+        "max_bets_per_day": cfg.max_bets_per_day,
+        "max_daily_exposure": cfg.max_daily_exposure,
+        "odds_min": TRADE_EXEC_MIN_PRICE,
+        "odds_max": None,
+        "alert_max_age_s": cfg.alert_max_age_s,
+        "market_requirement": "Current market must be LIVE or OPEN.",
+        "price_requirement": "Current UNDER odds must be recorded and within the Auto-Bet odds range.",
+        "signal_profile": signal_profile,
+        "permitted_cohorts": "No cohort allowlist is configured in the Auto-Bet executor.",
+        "fingerprint_requirements": "Fingerprints are recorded context, not an Auto-Bet gate.",
+        "confidence_threshold": "No confidence threshold is configured in this Auto-Bet path.",
+        "ladder_staking": "No ladder progression is applied to Auto-Bet stake sizing; stake_units is flat.",
+        "historical_snapshots_available": False,
+    }
+    return payload
+
+
 
 
 @router.post("/manual")

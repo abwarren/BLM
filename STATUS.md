@@ -1,5 +1,35 @@
 # BLM — STATUS
 
+## 2026-11-15 — DB EXPLORER RELEASE CANDIDATE (BASED ON RUNNING SERVER REVISION)
+
+The active server checkout is `/home/ubuntu/blm-fix-price-mapping`, branch
+`fix/price-mapping-2026-10-06`, HEAD `057b626533392cba9f5b9fbf5321e87391167c2a`.
+Its only local change is an unrelated modification to
+`docs/LIVE_TRADING_PARAMETERS.md`. The candidate is isolated at
+`/tmp/BLM-db-explorer-release`, based on that exact HEAD. It adds a read-only
+execution-evidence analytics endpoint and UI panel; it does not replace the
+newer/more extensive betting API, execution engine, collector, or dashboard
+files from another branch. Auto-Bet/collector/settlement/config files are
+unchanged.
+
+Validation: compileall, py_compile, JS syntax, diff check, six analytics test
+functions, four existing Explorer static assertions, and a direct API call
+against disposable SQLite files passed. A read-only query against the live
+SQLite files for 2026-11-08 through 2026-11-15 returned 111 execution records
+and five fixture/league options; the full-signal and theoretical ledgers were
+unavailable as documented. `/healthz` returned HTTP 200. The Explorer API
+route is not deployed; unauthenticated direct access correctly returned 401.
+
+The normal pytest invocation was refused by `tests/conftest.py` because
+production collector PID 559576 is active. The guard was not overridden. The
+operator explicitly accepted this outstanding full-suite risk for the minimal
+Explorer release. A later read-only check found
+`betting_config.auto_betting_enabled=true`, conflicting with the required OFF
+state; no setting was changed. Restart/deployment is withheld while that
+conflict remains because the production service has live submission gates.
+No production files, configuration, databases, services, or deployments were
+changed.
+
 ## 2026-10-04 — C2 RESTORED to the fingerprint layer (non-gating) + doc reconciliation + focused regression. NOT COMMITTED, NOT DEPLOYED, NOT RESTARTED.
 
 Directive: LOCUS A only — restore C2 as a NON-GATING recorded fingerprint;

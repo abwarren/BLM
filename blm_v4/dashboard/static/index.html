@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BLM Command Center — PokerBet Live Analytics</title>
-  <link rel="stylesheet" href="/static/styles.css?v=6855974.3">
+  <link rel="stylesheet" href="/static/styles.css?v=dbexplorer-20261115">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <style>
     /* SLATE mode: stats.js's switcher re-asserts viewLive/viewStats on its own
@@ -336,6 +336,53 @@
        ledger, quarter-collection observability, result integrity).
        Read-only investigation surface; no data is modified. -->
   <div class="view" id="viewExplorer" hidden>
+    <section class="st-card" id="exAnalytics">
+      <div class="st-head">
+        <span class="st-title">HISTORICAL EXECUTION ANALYTICS</span>
+        <span class="pill muted" id="exAnalyticsAsOf">READ-ONLY</span>
+      </div>
+      <div class="st-note ex-data-warning" id="exDataAvailability" role="status"></div>
+      <div class="ex-toolbar ex-analytics-filters">
+        <label>FROM <input type="date" id="exAnalyticsFrom"></label>
+        <label>TO <input type="date" id="exAnalyticsTo"></label>
+        <label>LEAGUE <select id="exLeague"><option value="">All</option></select></label>
+        <label>SIGNAL <select id="exQualification">
+          <option value="" selected>All</option><option>Qualified</option><option>Rejected</option>
+          <option>Incomplete</option><option>Unknown</option>
+        </select></label>
+        <label>ELIGIBILITY <select id="exEligibility">
+          <option value="" selected>All</option><option>Eligible</option><option>Rejected</option>
+          <option>Not evaluated</option><option>Incomplete</option><option>Unknown</option>
+        </select></label>
+        <label>EXECUTION <select id="exExecution">
+          <option value="" selected>All</option><option>Confirmed placed</option><option>Not attempted</option>
+          <option>Rejected by bookmaker</option><option>Submission failed</option><option>Unknown</option>
+        </select></label>
+        <label>SETTLEMENT <select id="exSettlement">
+          <option value="" selected>All</option><option>Won</option><option>Lost</option><option>Push</option>
+          <option>Void</option><option>Pending</option><option>Unknown</option>
+        </select></label>
+        <label>COHORT <select id="exAnalyticsCohort"><option value="">All</option><option>UNCLASSIFIED</option></select></label>
+        <label>STRATEGY <select id="exStrategy"><option value="">All</option><option>UNCLASSIFIED</option></select></label>
+        <button id="exAnalyticsReload" type="button">APPLY</button>
+        <span class="muted" id="exAnalyticsMeta"></span>
+      </div>
+      <div class="st-kpis ex-analytics-kpis" id="exKpis"></div>
+      <div class="st-head ex-subhead"><span class="st-title">CURRENT AUTO-BET CONFIGURATION</span>
+        <span class="muted">Read-only current state; historical snapshots are not recorded.</span></div>
+      <div class="ex-config-grid" id="exConfig"></div>
+      <div class="ex-breakdowns">
+        <section><h3>Win rate by league</h3><div id="exLeagueBreakdown"></div></section>
+        <section><h3>Win rate by eligibility</h3><div id="exEligibilityBreakdown"></div></section>
+        <section><h3>Win rate by execution</h3><div id="exExecutionBreakdown"></div></section>
+        <section><h3>Win rate by strategy</h3><div id="exStrategyBreakdown"></div></section>
+      </div>
+      <div class="st-head ex-subhead"><span class="st-title">PERSISTED EXECUTION EVIDENCE</span>
+        <span class="muted">Actual bookmaker attempts only; signal qualification is not inferred from a bet attempt.</span></div>
+      <div class="st-scroll"><table class="st-table" id="exAnalyticsTable"></table></div>
+      <div class="ex-pagination"><button id="exPrev" type="button">PREVIOUS</button>
+        <span id="exPage"></span><button id="exNext" type="button">NEXT</button></div>
+    </section>
     <section class="st-card" id="explorerCard">
       <div class="st-head">
         <span class="st-title">DATABASE / DATA EXPLORER</span>
@@ -529,7 +576,7 @@
 
   <script src="/static/dashboard.js?v=6855974.17"></script>
   <script src="/static/stats.js?v=6855974.1"></script>
-  <script src="/static/explorer.js?v=6855974.3"></script>
+  <script src="/static/explorer.js?v=dbexplorer-20261115"></script>
   <script src="/static/assistant.js?v=6855974.1"></script>
   <script>
     /* SLATE tab wiring.  It has to live here: when the view became an iframe
@@ -607,4 +654,3 @@
   </script>
 </body>
 </html>
-
