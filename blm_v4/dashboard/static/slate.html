@@ -82,9 +82,11 @@
         <th>Band</th>
         <th>Prog %</th>
         <th>Pts</th>
+        <th title="live market total line for this game (same value the gate reads)">Line</th>
         <th>Req</th>
         <th>Act</th>
-        <th>Ratio</th>
+        <th title="competition league-average pace — the denominator of Ratio">Avg</th>
+        <th title="required pace ÷ league-average pace (the gate's PACE leg). NOT actual÷required — that is Gap.">Ratio (Req÷Avg)</th>
         <th title="pace ratio minus the rung: negative = still short">To rung</th>
         <th title="required pace minus actual pace; the gate wants >= +0.50">Gap</th>
         <th>Price</th>
@@ -139,8 +141,21 @@ function verdict(g, gate){
 async function tick(){
   try {
     const r = await fetch(`/api/slate?lookback_s=120`, {cache:"no-store"});
+    if (r.status === 401 || r.status === 403) {
+      // The shell owns the session; a dead session must send the OPERATOR to
+      // the login page, not leave an empty board with a TypeError.
+      $("#stamp").textContent = "session expired — returning to sign-in…";
+      try { window.top.location.href = "/login?error=expired"; }
+      catch (e) { window.location.href = "/login?error=expired"; }
+      return;
+    }
+    if (!r.ok) { $("#stamp").textContent = "API ERROR " + r.status; return; }
     const d = await r.json();
     if (d.error){ $("#stamp").textContent = "ERROR " + d.error; return; }
+    if (!d.gate || !d.counts || !Array.isArray(d.games)) {
+      $("#stamp").textContent = "bad slate payload (no gate/counts/games)";
+      return;
+    }
     const g0 = d.gate;
     $("#gateChips").innerHTML = [
       `BAND <b>${g0.band[0]}–${g0.band[1]}%</b>`,
@@ -164,7 +179,7 @@ async function tick(){
       + `${d.games.length} live games  ·  newest capture ${fmt(newest,0)}s old`;
 
     if (!d.games.length){
-      $("#rows").innerHTML = `<tr><td colspan="12" class="empty">no live captures in the last ${d.lookback_s}s</td></tr>`;
+      $("#rows").innerHTML = `<tr><td colspan="14" class="empty">no live captures in the last ${d.lookback_s}s</td></tr>`;
       return;
     }
     $("#rows").innerHTML = d.games.map(g => {
@@ -179,8 +194,10 @@ async function tick(){
         <td>${meter(g.progress_pct, [d.gate.band[0], d.gate.band[1]])}</td>
         <td class="num">${fmt(g.progress_pct,1)}</td>
         <td class="num">${g.total_points ?? "–"}</td>
+        <td class="num">${fmt(g.line,1)}</td>
         <td class="num">${fmt(g.required_pace,2)}</td>
         <td class="num">${fmt(g.actual_pace,2)}</td>
+        <td class="num muted">${fmt(g.avg_pace,2)}</td>
         <td class="num"><b>${fmt(g.ratio,3)}</b></td>
         <td class="num" style="color:${needColor}">${need}</td>
         <td class="num">${fmt(g.shortfall,2)}</td>
@@ -193,7 +210,7 @@ async function tick(){
     $("#stamp").textContent = "fetch failed: " + e;
   }
 }
-tick(); setInterval(tick, 3000);
+tick(); setInterval(function(){ if (!document.hidden) tick(); }, 10000);
 </script>
 </body>
 </html>
