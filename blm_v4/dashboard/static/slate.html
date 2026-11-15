@@ -64,6 +64,23 @@
         color:#ffd7da;font-size:12.5px;line-height:1.5}
   .heat b{color:#fff;letter-spacing:.06em}
   .heat .why{color:#f3b9be}
+  /* market-heat history: the banner's number, day by day */
+  .heat-strip{display:flex;gap:9px;align-items:flex-end;margin:0 0 12px;
+              padding:8px 12px;border:1px solid var(--line);border-radius:4px;
+              background:var(--panel2);font-size:10.5px}
+  .hs-title{color:var(--muted);letter-spacing:.08em;align-self:center;
+            margin-right:4px;white-space:nowrap}
+  .hs-day{display:flex;flex-direction:column;align-items:center;gap:3px;width:42px}
+  .hs-track{position:relative;height:34px;width:20px;background:#0a1017;
+            border:1px solid var(--line);border-radius:2px;overflow:hidden}
+  .hs-fill{position:absolute;left:0;right:0;bottom:0;background:var(--accent);opacity:.75}
+  .hs-day.hot .hs-fill{background:var(--red);opacity:.85}
+  .hs-thr{position:absolute;left:0;right:0;border-top:1px dashed var(--amber);opacity:.7}
+  .hs-day.now .hs-track{outline:1px solid var(--blue);outline-offset:1px}
+  .hs-lbl{color:var(--muted)}
+  .hs-pct{color:var(--txt);font-variant-numeric:tabular-nums}
+  .hs-pct.hot{color:var(--red)}
+  .hs-pct.none{color:var(--grey)}
   .foot{margin-top:10px;color:var(--grey);font-size:10.5px}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
        background:var(--accent);margin-right:6px;vertical-align:middle}
@@ -82,6 +99,7 @@
 </header>
 <main>
   <div class="heat" id="heatBanner" hidden></div>
+  <div class="heat-strip" id="heatStrip" hidden></div>
   <table>
     <thead>
       <tr>
@@ -108,7 +126,7 @@
     <b>Ratio (Req÷Avg) · gate</b> = required pace ÷ league-average pace — the auto-bet PACE leg, must exceed the PACE chip above.
     <b>Act÷Avg · display</b> = actual pace ÷ league-average pace — how fast the game is running vs its league; informational, never gates.
     <b>Gap</b> = required − actual. <b>Req</b>/<b>Act</b> are points per minute; <b>Avg</b> is the competition's league-average pace.
-    <b>HEAT</b> = share of recently settled games that finished OVER their last line; at the threshold the gate pauses market-wide and <b>nothing arms</b>, however clean a single game looks.
+    <b>HEAT</b> = share of recently settled games that finished OVER their last line; at the threshold the gate pauses market-wide and <b>nothing arms</b>, however clean a single game looks. The strip under it is that same share, day by day.
   </div>
 </main>
 <script>
@@ -207,6 +225,33 @@ async function tick(){
         + `<span class="why">${heat.text || ""}</span> · `
         + `no game arms until the OVER share falls below `
         + `${(heat.threshold*100).toFixed(0)}% or the window clears.`;
+    }
+    // MARKET-HEAT HISTORY: the banner is the verdict, this is the trend behind
+    // it — the same settled-game OVER share, day by day, so one hot afternoon
+    // is visibly different from a week-long drift.  A day with no settled game
+    // keeps its slot and reads "–" instead of shrinking the axis, and the same
+    // threshold marks every bar, so the strip cannot contradict the banner.
+    const strip = $("#heatStrip");
+    const hist = heat.enabled ? (heat.history || []) : [];
+    strip.hidden = !hist.length;
+    if (hist.length){
+      const thr = heat.threshold == null ? 0.45 : heat.threshold;
+      strip.innerHTML = `<span class="hs-title">OVER SHARE · ${hist.length} DAYS</span>`
+        + hist.map(d => {
+            const pct = (d.share == null) ? null : d.share * 100;
+            const hot = d.tripped === true;
+            const tip = (pct == null)
+              ? `${d.day}: no settled game with a usable line`
+              : `${d.day}: ${d.over}/${d.n} settled games finished OVER their last line (${pct.toFixed(0)}%) · threshold ${(thr*100).toFixed(0)}%`
+                + (hot ? " — at or above it, the gate pauses" : "");
+            return `<div class="hs-day${hot ? " hot" : ""}${d.today ? " now" : ""}" title="${tip}">
+              <div class="hs-track">`
+              + (pct == null ? "" : `<div class="hs-fill" style="height:${Math.min(100, pct).toFixed(0)}%"></div>`)
+              + `<div class="hs-thr" style="bottom:${(thr*100).toFixed(0)}%"></div></div>
+              <div class="hs-lbl">${d.label}</div>
+              <div class="hs-pct${hot ? " hot" : (pct == null ? " none" : "")}">`
+              + (pct == null ? "–" : `${pct.toFixed(0)}%`) + `</div></div>`;
+          }).join("");
     }
     const c = d.counts;
     $("#counts").innerHTML = [

@@ -197,6 +197,8 @@ def test_slate_publishes_the_pause_and_refuses_every_row(monkeypatch):
         "reason": "unders_beaten_61pct_of_33", "threshold": 0.58,
         "min_games": 20, "overshare": 0.61, "n": 33, "over": 20,
         "text": "20/33 recent settled games finished OVER the line"})
+    monkeypatch.setattr(slate_mod.market_heat, "history",
+                        lambda *a, **k: [])
     d = slate_mod.build_slate("x", "y")
     assert d["gate"]["market_heat"]["tripped"] is True
     g = d["games"][0]
@@ -211,3 +213,87 @@ def test_the_dashboard_shows_a_banner_and_a_heat_chip():
     assert 'id="heatBanner"' in html
     assert "AUTO-BET PAUSED" in html
     assert "market_heat" in html
+
+
+# ── 6. the history strip: the banner's number, day by day ─────────────
+def test_daily_aggregates_the_same_definition_per_day():
+    pairs = ([("2026-11-13", 210.0, 200.0)] * 3
+             + [("2026-11-13", 200.0, 205.0)] * 2)
+    rows = market_heat.daily(pairs, days=2, today="2026-11-14",
+                             threshold=0.45, min_games_n=5)
+    assert [r["day"] for r in rows] == ["2026-11-13", "2026-11-14"]
+    assert [r["label"] for r in rows] == ["11-13", "11-14"]
+    assert rows[0]["over"] == 3 and rows[0]["n"] == 5
+    assert rows[0]["share"] == pytest.approx(0.6)
+    assert rows[0]["tripped"] is True          # 60 % >= 45 % with 5 games
+    assert rows[0]["today"] is False and rows[1]["today"] is True
+
+
+def test_a_day_with_no_settled_game_keeps_its_slot():
+    rows = market_heat.daily([("2026-11-14", 210.0, 200.0)],
+                             days=3, today="2026-11-14")
+    assert [r["share"] for r in rows] == [None, None, 1.0]
+    assert rows[1]["n"] == 0 and rows[1]["tripped"] is False
+    assert [r["today"] for r in rows] == [False, False, True]
+
+
+def test_pushes_are_not_over_and_a_thin_day_never_reads_as_hot():
+    rows = market_heat.daily([("2026-11-14", 205.0, 205.0)] * 3,
+                             days=1, today="2026-11-14",
+                             threshold=0.45, min_games_n=20)
+    assert rows[0]["n"] == 3 and rows[0]["over"] == 0
+    assert rows[0]["tripped"] is False
+    # same sample, but it clears the minimum: a push-only day is 0 %, not hot
+    assert market_heat.daily([("2026-11-14", 205.0, 205.0)] * 20,
+                             days=1, today="2026-11-14",
+                             min_games_n=20)[0]["tripped"] is False
+
+
+def test_history_is_cached_and_reads_fail_open(monkeypatch):
+    now = datetime(2026, 11, 15, 12, tzinfo=timezone.utc).timestamp()
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        return [("2026-11-15", 210.0, 200.0)]
+
+    monkeypatch.setattr(market_heat, "samples_by_day", fake)
+    first = market_heat.history(days=1, now=now, refresh=True)
+    second = market_heat.history(days=1, now=now + 1)
+    assert calls["n"] == 1                     # the second read hit the cache
+    assert first == second
+    assert first[-1]["over"] == 1 and first[-1]["today"] is True
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(market_heat, "samples_by_day", boom)
+    assert market_heat.history(days=1, now=now, refresh=True) == []
+
+
+def test_the_slate_ships_the_history_without_polluting_the_cached_state(
+        monkeypatch):
+    from blm_v4.betting import slate as slate_mod
+    monkeypatch.setattr(slate_mod, "_live_rows", lambda *a, **k: [_live_row()])
+    monkeypatch.setattr(slate_mod, "_slugs", lambda *a, **k: {"31380565": SLUG})
+    monkeypatch.setattr(slate_mod, "_pace_reference",
+                        lambda *a, **k: {SLUG: {"avg_pace": AVG_PACE}})
+    cached = {"enabled": True, "tripped": False, "reason": None,
+              "threshold": 0.45, "min_games": 20, "overshare": 0.30,
+              "n": 30, "over": 9, "text": "9/30"}
+    rows = [{"day": "2026-11-14", "label": "11-14", "over": 40, "n": 82,
+             "share": 0.49, "today": False, "tripped": True}]
+    monkeypatch.setattr(slate_mod.market_heat, "state", lambda *a, **k: cached)
+    monkeypatch.setattr(slate_mod.market_heat, "history", lambda *a, **k: rows)
+    d = slate_mod.build_slate("x", "y")
+    assert d["gate"]["market_heat"]["history"] == rows
+    assert "history" not in cached             # the module cache stays clean
+
+
+def test_the_dashboard_draws_the_strip_next_to_the_banner():
+    html = (Path(__file__).resolve().parents[1]
+            / "blm_v4/dashboard/static/slate.html").read_text()
+    assert 'id="heatStrip"' in html
+    assert "OVER SHARE" in html
+    assert "market_heat" in html and "history" in html
+    # the strip must be built from the payload, never recomputed in the page
+    assert "heat.history" in html and "hs-fill" in html

@@ -134,10 +134,16 @@ def build_slate(prod_db, clean_db, lookback_s: float = DEFAULT_LOOKBACK_S) -> di
     pace = _pace_reference(prod_db)
     now = time.time()
     # the global guardrail: one verdict for the whole market this pass
-    heat = market_heat.state(prod_db, clean_db, now)
+    # (copy: the module caches this dict, so the history must not be written
+    # into the object every other caller reads)
+    heat = dict(market_heat.state(prod_db, clean_db, now))
     heat_tripped = bool(heat.get("tripped"))
     heat_reason = (f"market_heat:{heat.get('reason') or 'unders_beaten'}"
                    if heat_tripped else None)
+    # the strip beside the banner: the same OVER share, one row per UTC day.
+    # Only the slate pays for it — the lane reads state() alone, every 3 s.
+    if heat.get("enabled"):
+        heat["history"] = market_heat.history(prod_db, clean_db, now=now)
 
     games = []
     for r in rows:
