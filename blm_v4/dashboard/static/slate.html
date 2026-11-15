@@ -160,7 +160,9 @@ async function tick(){
     $("#gateChips").innerHTML = [
       `BAND <b>${g0.band[0]}–${g0.band[1]}%</b>`,
       `PACE <b>&gt;${g0.pace_ratio}</b>`,
-      `SHORTFALL <b>≥${g0.shortfall_margin}</b>`,
+      g0.shortfall_enabled === false
+        ? `SHORTFALL <b>OFF</b>`
+        : `SHORTFALL <b>≥${g0.shortfall_margin}</b>`,
       `PRICE <b>≥${g0.price_floor}</b>`,
       `PTS <b>≥${g0.min_points}</b>`,
       `EXCL <b>${(g0.excluded_competitions||[]).join(", ") || "–"}</b>`,

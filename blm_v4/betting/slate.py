@@ -205,6 +205,7 @@ def build_slate(prod_db, clean_db, lookback_s: float = DEFAULT_LOOKBACK_S) -> di
             "min_points": TW.TRADE_MIN_SCORED_POINTS,
             "pace_ratio": TW.TRADE_MIN_PACE_RATIO,
             "shortfall_margin": TW.SHORTFALL_MARGIN,
+            "shortfall_enabled": bool(TW.TRADE_SHORTFALL_ENABLED),
             "price_floor": TW.TRADE_EXEC_MIN_PRICE,
             "signal_price_floor": TW.TRADE_MIN_UNDER_PRICE,
             "excluded_competitions": list(TW.TRADE_EXCLUDED_COMPETITIONS or []),

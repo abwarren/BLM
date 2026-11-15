@@ -778,3 +778,40 @@ def exec_price_reason(price) -> Optional[str]:
 #: band without editing this file.  Env: TRADE_MIN_PROGRESS_PCT.
 #: Operator directive 2026-11-11: lower to 70.0 (Gate-B sweep, 7-day Nov 4-10).
 TRADE_MIN_PROGRESS_PCT = _env_float("TRADE_MIN_PROGRESS_PCT", TRADE_MIN_PROGRESS_PCT)
+
+
+# ── SHORTFALL LEG KILL SWITCH (appended 2026-11-15; tail-only by contract) ──
+#: Operator directive 2026-11-15: "shortfall should be off".
+#:
+#: The shortfall leg is the SECOND execution leg
+#: (``required_pts_per_min - actual_pts_per_min >= SHORTFALL_MARGIN``) and it is
+#: the one that refuses a game already scoring at or above the rate its line
+#: requires.  It is NOT the pace leg: the pace leg reads only REQUIRED pace vs
+#: the competition average, this one reads the two PACES against each other.
+#:
+#: DEFAULT ON, so an unconfigured deployment behaves exactly as before and every
+#: suite that pins the leg keeps its contract.  A deployment turns it off with
+#: ``TRADE_SHORTFALL_ENABLED=0`` (or false/no/off); the leg then always clears.
+#: Disabling it LOOSENS the gate: measured on the corrected cohort, requiring
+#: the shortfall lifted the archive UNDER rate 68.0% -> 73.0% (n=2355, held
+#: out-of-time), so expect more trades at a lower per-trade edge.
+#:
+#: Implemented as a tail rebind, never an edit, because this module's prefix is
+#: byte-frozen at HEAD (tests/test_trade_move_filter_2026_10_12.py asserts it).
+#: Every consumer (served ``under_alert_exec_armed``, the fast lane, the
+#: submission-time revalidation) imports THIS name, so one switch covers all.
+TRADE_SHORTFALL_ENABLED = _env_flag("TRADE_SHORTFALL_ENABLED", True)
+
+_shortfall_leg_frozen = exec_shortfall_reason
+
+
+def exec_shortfall_reason(required_pace, actual_pace=None) -> Optional[str]:
+    """The shortfall leg, honouring :data:`TRADE_SHORTFALL_ENABLED`.
+
+    Enabled (default) -> the frozen rule, verbatim, fail-closed.
+    Disabled          -> always ``None`` (the leg clears); the other legs of
+    the trade gate are unchanged and still decide the trade.
+    """
+    if not TRADE_SHORTFALL_ENABLED:
+        return None
+    return _shortfall_leg_frozen(required_pace, actual_pace)
