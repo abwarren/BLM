@@ -14,3 +14,7 @@ datasets/
 *.parquet
 blm_v4/state/
 .env
+
+# runtime state written by the health monitor (regenerated every 15 s)
+.monitor/
+blm_v4/dashboard/static/health.json

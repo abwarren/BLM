@@ -117,6 +117,8 @@
             aria-selected="true">LIVE</button>
     <button class="tab" role="tab" id="tabSlate" data-view="slate"
             aria-selected="false">SLATE</button>
+    <button class="tab" role="tab" id="tabHealth" data-view="health"
+            aria-selected="false">HEALTH</button>
     <!-- STATS is retired (operator 2026-11-02: "remove the other stats").
          Kept in the DOM, hidden, so the existing tab wiring that references
          #tabStats cannot throw; it is unreachable from the UI. -->
@@ -137,6 +139,14 @@
          /static/slate.html in an iframe so it keeps its own poll loop and
          cannot be broken by the dashboard's render cycle. -->
     <iframe id="slateFrame" src="/static/slate.html" title="Live slate"
+            style="width:100%;height:calc(100vh - 150px);min-height:620px;border:0;display:block;background:#0b0f14"></iframe>
+  </div>
+
+  <!-- ═══════════ VIEW: HEALTH — system health monitor ═══════════
+       Rendered from /static/health.html in an iframe; the health.json it
+       fetches is written every cycle by scripts/blm_health_monitor.py. -->
+  <div class="view" id="viewHealth" hidden>
+    <iframe id="healthFrame" src="/static/health.html" title="System health"
             style="width:100%;height:calc(100vh - 150px);min-height:620px;border:0;display:block;background:#0b0f14"></iframe>
   </div>
 
@@ -238,6 +248,7 @@
           <div class="ab-note muted">stake = unit price × 1 unit · server-side limits cannot be raised from this page</div>
         </div>
         <div class="ab-today">
+          <div class="ab-row"><span>Account balance:</span><span class="al-num" id="abBalance">–</span></div>
           <div class="ab-row"><span>Today's Bets:</span><span class="al-num" id="abTodayBets">–</span></div>
           <div class="ab-row"><span>Units:</span><span class="al-num" id="abTodayUnits">–</span></div>
           <div class="ab-row"><span>Amount wagered:</span><span class="al-num" id="abTodayAmount">–</span></div>
@@ -297,6 +308,23 @@
     <div class="sec-tools"><button id="abResRefresh" type="button">REFRESH</button></div>
     <div class="alerts-body" id="abResList">
       <div class="alerts-empty">No placed candidates yet</div>
+    </div>
+    </details>
+  </section>
+
+  <!-- ═══════════ QUALIFYING BETS — EVERY game that cleared the gate.
+       Operator directive 2026-11-02: a bet the gate qualified must be listed
+       whether a slip was placed or not.  Data: GET /api/v4/betting/candidates
+       (the fast lane's decision ledger; execution rows stay in /history). -->
+  <section class="alerts sec-collapsible" id="abCandSection">
+    <details class="sec-details" open>
+    <summary class="alerts-head sec-summary">
+      <span class="alerts-title">QUALIFYING BETS</span>
+      <span class="muted alerts-sub" id="abCandHead">every game that cleared the gate · placed or not</span>
+    </summary>
+    <div class="sec-tools"><button id="abCandRefresh" type="button">REFRESH</button></div>
+    <div class="alerts-body" id="abCandList">
+      <div class="alerts-empty">No qualifying bets yet</div>
     </div>
     </details>
   </section>
@@ -533,6 +561,43 @@
         if (t === tab) return;
         t.addEventListener("click", function () {
           document.body.classList.remove("slate-mode");
+          view.hidden = true;
+          tab.classList.remove("active");
+          tab.setAttribute("aria-selected", "false");
+        });
+      });
+    })();
+  </script>
+  <script>
+    /* HEALTH tab wiring — same DOM-only pattern as the SLATE tab above.
+       It must run LAST so the stats.js/explorer.js live/stats/explorer
+       switchers (which do not know about this view) cannot leave it
+       visible, and it hides itself when any other tab is clicked. */
+    (function () {
+      var tab = document.getElementById("tabHealth");
+      var view = document.getElementById("viewHealth");
+      if (!tab || !view) return;
+      var others = ["viewLive", "viewStats", "viewExplorer", "viewSlate"];
+      var otherTabs = ["tabLive", "tabStats", "tabExplorer", "tabSlate"];
+      tab.addEventListener("click", function (e) {
+        e.preventDefault();
+        others.forEach(function (id) {
+          var el = document.getElementById(id); if (el) el.hidden = true;
+        });
+        otherTabs.forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el) { el.classList.remove("active"); el.setAttribute("aria-selected", "false"); }
+        });
+        document.body.classList.remove("slate-mode");
+        view.hidden = false;
+        tab.classList.add("active");
+        tab.setAttribute("aria-selected", "true");
+        var note = document.getElementById("tabNote");
+        if (note) note.textContent = "system health · collector · pipeline · persistence";
+      });
+      document.querySelectorAll(".tab").forEach(function (t) {
+        if (t === tab) return;
+        t.addEventListener("click", function () {
           view.hidden = true;
           tab.classList.remove("active");
           tab.setAttribute("aria-selected", "false");

@@ -1772,6 +1772,32 @@ def _load_collector_state() -> Optional[dict]:
     return None
 
 
+# The collector persists per-game recovery maps (last_market_at,
+# last_market_attempt_at, market_attempt_streaks) inside its state file.  They
+# are crash-recovery data, not health data, and they grow with every game ever
+# seen — at ~900 games the /status payload measured 3.15 MB.  The dashboard
+# polls /status every 10 s with an 8 s hard abort, so a remote/slow client
+# timed out and painted "API/DATA UNAVAILABLE — collector state cannot be
+# verified".  /status serves the health block only; the maps stay in the state
+# file and are exposed as counts so diagnostics can still see their size.
+_STATUS_HEAVY_STATE_KEYS = ("last_market_at", "last_market_attempt_at",
+                            "market_attempt_streaks")
+
+
+def _slim_collector_state(state: Optional[dict]) -> Optional[dict]:
+    if not isinstance(state, dict):
+        return state
+    slim = dict(state)
+    omitted = {}
+    for key in _STATUS_HEAVY_STATE_KEYS:
+        value = slim.pop(key, None)
+        if isinstance(value, dict):
+            omitted[key] = len(value)
+    if omitted:
+        slim["omitted_map_sizes"] = omitted
+    return slim
+
+
 def _canonical_display(game: dict) -> None:
     """Betual presentation normalization at the API boundary.
 
@@ -1953,8 +1979,8 @@ def v4_status() -> dict:
     try:
         conn = _connect()
     except Exception:
-        return {"status": "offline", "collector": state, "db": None,
-                "server_time": now.isoformat()}
+        return {"status": "offline", "collector": _slim_collector_state(state),
+                "db": None, "server_time": now.isoformat()}
     try:
         db = _db_stats(conn, now)
         # freshest complete game state (DOM or WS) — read on the SAME open
@@ -1983,7 +2009,7 @@ def v4_status() -> dict:
     # game state.
     return {
         "status": col_status,
-        "collector": state,
+        "collector": _slim_collector_state(state),
         "db": db,
         "server_time": now.isoformat(),
     }
@@ -2948,16 +2974,23 @@ def v4_scorecard_events(
         # snapshot join + calculation as _game_checkpoint_market) so the
         # events table can show the actual clock/elapsed game state next
         # to the checkpoint target % — never the terminal state.
-        cpts = [r["checkpoint_timestamp"] for r in rows if r["checkpoint_timestamp"]]
+        # Deduped AND chunked.  The events query above has no LIMIT, so cpts
+        # can hold tens of thousands of timestamps; one IN(...) with a
+        # placeholder per row blew past SQLITE_MAX_VARIABLE_NUMBER and made
+        # this endpoint 500 on every call ("too many SQL variables",
+        # 2026-11-02).  Batches of 500 stay far inside the limit.
+        cpts = sorted({r["checkpoint_timestamp"] for r in rows
+                       if r["checkpoint_timestamp"]})
         snaps: dict[str, dict] = {}
-        if cpts:
-            marks = ",".join("?" * len(cpts))
+        for _i in range(0, len(cpts), 500):
+            batch = cpts[_i:_i + 500]
+            marks = ",".join("?" * len(batch))
             for s in conn.execute(
                     f"""SELECT captured_at, quarter, clock, period_label,
                                home_score, away_score
                         FROM snapshots WHERE captured_at IN ({marks})
                         ORDER BY id ASC""",
-                    (*cpts,)).fetchall():
+                    (*batch,)).fetchall():
                 snaps[s["captured_at"]] = dict(s)
     finally:
         conn.close()

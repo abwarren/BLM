@@ -369,12 +369,18 @@ def main() -> None:
 
     @app.get("/api/slate", include_in_schema=False)
     def api_slate(lookback_s: float = 120.0):
+        # JSONResponse, not dict: FastAPI serialises a returned dict ON THE EVENT
+        # LOOP, and a slow serialisation there freezes every other request —
+        # measured 2026-11-02, a 20 s stall with /healthz timing out.  Encoding
+        # here runs in the threadpool instead.
+        from fastapi.responses import JSONResponse as _JSON
         try:
-            return cached_slate(root / "blm_pokerbet.db",
-                                root / "blm_metrics_clean.db",
-                                lookback_s=lookback_s)
+            payload = cached_slate(root / "blm_pokerbet.db",
+                                   root / "blm_metrics_clean.db",
+                                   lookback_s=lookback_s)
         except Exception as exc:                  # never 500 the poll loop
-            return {"error": f"{type(exc).__name__}: {exc}"[:300]}
+            payload = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        return _JSON(payload)
 
     @app.get("/api/betting", include_in_schema=False)
     def api_betting():
@@ -411,7 +417,8 @@ def main() -> None:
                 c.close()
         except _sqlite3.Error:
             pass
-        return {
+        from fastapi.responses import JSONResponse as _JSON
+        return _JSON({
             "ok": True,
             "auto_bet": betting_store.is_enabled(),
             "unit_price": unit,
@@ -424,7 +431,8 @@ def main() -> None:
             "max_stake_per_bet": betting_cfg.max_stake_per_bet,
             "today": today,
             "last": last,
-        }
+        })
+        # same reason as /api/slate: keep the encode off the event loop
 
 
     # ── Operator dashboard at the root ───────────────────────
@@ -761,6 +769,15 @@ def main() -> None:
                     log=logger.info)
                 fast_lane.start()
                 app.state._fast_lane = fast_lane
+                # the SIGNED-IN balance lives on the lane's provider (Playwright
+                # is thread-affine) — hand the API a read-only accessor so the
+                # status surface reports the real number instead of null.
+                # LOCAL import: configure_betting is imported further up in a
+                # DIFFERENT function scope, so relying on it here would raise
+                # NameError and take the fast lane down with it.
+                from blm_v4.betting.api import configure_betting as _cfg_bet
+                _cfg_bet(betting_store, betting_cfg,
+                         balance_fn=fast_lane.balance)
                 logger.info("fast_lane_started",
                             interval_s=fast_lane.interval_s,
                             lookback_s=fast_lane.lookback_s,

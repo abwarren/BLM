@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BLM · System Health</title>
+<style>
+  :root{
+    --bg:#0e1116; --card:#161b22; --line:#232a34; --fg:#e6edf3; --dim:#8b949e;
+    --green:#2ea043; --yellow:#d29922; --red:#da3633; --grey:#6e7681;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:22px 20px 40px}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:16px}
+  h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12px}
+  .overall{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:10px;
+           border:1px solid var(--line);background:var(--card);margin-bottom:18px}
+  .dot{width:11px;height:11px;border-radius:50%;flex:0 0 auto;box-shadow:0 0 0 3px rgba(255,255,255,.04)}
+  .GREEN{background:var(--green)} .YELLOW{background:var(--yellow)}
+  .RED{background:var(--red)} .GREY{background:var(--grey)}
+  .overall b{font-size:15px;letter-spacing:.4px}
+  table{width:100%;border-collapse:collapse;background:var(--card);
+        border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--dim);font-weight:600}
+  tr:last-child td{border-bottom:none}
+  td.st{font-family:var(--mono);font-size:12px;letter-spacing:.5px;white-space:nowrap}
+  td.det{color:var(--dim);font-size:12.5px}
+  .card{margin-top:18px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--dim);
+           margin:0 0 12px;font-weight:600}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .kv{background:#0f141a;border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+  .kv .k{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.6px}
+  .kv .v{font-family:var(--mono);font-size:15px;margin-top:3px}
+  .legend{display:flex;gap:16px;margin-top:14px;color:var(--dim);font-size:11.5px;flex-wrap:wrap}
+  .legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+  #alerts .row{display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+  #alerts .row:last-child{border-bottom:none}
+  #alerts .t{font-family:var(--mono);color:var(--dim);font-size:11px;white-space:nowrap}
+  .err{color:var(--red)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>BLM · System Health</h1>
+    <span class="sub" id="stamp">loading…</span>
+  </header>
+
+  <div class="overall">
+    <span class="dot GREY" id="ovDot"></span>
+    <b id="ovText">UNKNOWN</b>
+    <span class="sub" id="ovDetail"></span>
+  </div>
+
+  <table>
+    <thead><tr><th style="width:34px"></th><th>Component</th><th style="width:150px">Status</th><th>Detail</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="4" class="det">no report yet</td></tr></tbody>
+  </table>
+
+  <div class="card">
+    <h2>Collection &amp; pipeline</h2>
+    <div class="grid">
+      <div class="kv"><div class="k">Last successful collection</div><div class="v" id="mLast">—</div></div>
+      <div class="kv"><div class="k">Seconds since</div><div class="v" id="mAge">—</div></div>
+      <div class="kv"><div class="k">Polling interval</div><div class="v" id="mPoll">—</div></div>
+      <div class="kv"><div class="k">Capture rate</div><div class="v" id="mFreq">—</div></div>
+      <div class="kv"><div class="k">Success rate</div><div class="v" id="mRate">—</div></div>
+      <div class="kv"><div class="k">Error rate</div><div class="v" id="mErrRate">—</div></div>
+      <div class="kv"><div class="k">PokerBet</div><div class="v" id="mConn">—</div></div>
+      <div class="kv"><div class="k">Browser</div><div class="v" id="mBrowser">—</div></div>
+      <div class="kv"><div class="k">Event-page hydration</div><div class="v" id="mHydrate">—</div></div>
+      <div class="kv"><div class="k">Market capture</div><div class="v" id="mMarket">—</div></div>
+      <div class="kv"><div class="k">Queue depth</div><div class="v" id="mQueue">—</div></div>
+      <div class="kv"><div class="k">Jobs enqueued</div><div class="v" id="mEnq">—</div></div>
+      <div class="kv"><div class="k">Pending resolves</div><div class="v" id="mPendRes">—</div></div>
+      <div class="kv"><div class="k">Market queue</div><div class="v" id="mMktQ">—</div></div>
+      <div class="kv"><div class="k">Jobs persisted</div><div class="v" id="mPersisted">—</div></div>
+      <div class="kv"><div class="k">Failed jobs</div><div class="v" id="mFailed">—</div></div>
+      <div class="kv"><div class="k">Dropped jobs</div><div class="v" id="mDropped">—</div></div>
+      <div class="kv"><div class="k">Persistence worker</div><div class="v" id="mPersist">—</div></div>
+      <div class="kv"><div class="k">DB write failures</div><div class="v" id="mDbWrite">—</div></div>
+      <div class="kv"><div class="k">CPU</div><div class="v" id="mCpu">—</div></div>
+      <div class="kv"><div class="k">RAM</div><div class="v" id="mRam">—</div></div>
+      <div class="kv"><div class="k">Disk free</div><div class="v" id="mDisk">—</div></div>
+      <div class="kv"><div class="k">Successful collections</div><div class="v" id="mSnaps">—</div></div>
+      <div class="kv"><div class="k">Failed collections</div><div class="v" id="mFailedColl">—</div></div>
+      <div class="kv"><div class="k">Games tracked</div><div class="v" id="mGames">—</div></div>
+      <div class="kv"><div class="k">Cycle cost</div><div class="v" id="mCycle">—</div></div>
+    </div>
+  </div>
+
+  <div class="card" id="alerts">
+    <h2>Open incidents</h2>
+    <div id="alertRows"><div class="det">none</div></div>
+  </div>
+
+  <div class="legend">
+    <span><i class="GREEN"></i>healthy</span>
+    <span><i class="YELLOW"></i>degraded</span>
+    <span><i class="RED"></i>failure</span>
+    <span><i class="GREY"></i>unknown</span>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = (v, unit="") => (v === null || v === undefined) ? "—" : `${v}${unit}`;
+const ago = iso => {
+  if (!iso) return "—";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  return new Date(iso).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+};
+
+async function tick() {
+  let d;
+  try {
+    const r = await fetch("health.json?t=" + Date.now(), {cache:"no-store"});
+    d = await r.json();
+  } catch (e) {
+    $("stamp").textContent = "health.json unreachable — " + e.message;
+    return;
+  }
+  $("stamp").textContent = "report " + ago(d.generated_at) + " · refresh 10s";
+  $("ovDot").className = "dot " + d.overall_color;
+  $("ovText").textContent = d.overall;
+  const bad = d.components.filter(c => c.color === "RED" || c.color === "YELLOW");
+  $("ovDetail").textContent = bad.length ? bad.map(c => c.label).join(" · ") : "all components reporting healthy";
+
+  $("rows").innerHTML = d.components.map(c => `
+    <tr>
+      <td><span class="dot ${c.color}"></span></td>
+      <td>${c.label}</td>
+      <td class="st" style="color:var(--${c.color.toLowerCase()})">${c.state}</td>
+      <td class="det">${(c.detail || "").replace(/</g,"&lt;")}</td>
+    </tr>`).join("");
+
+  const s = d.signals || {};
+  $("mLast").textContent = ago(s.last_success_at);
+  $("mAge").textContent = fmt(s.seconds_since_collection, "s");
+  $("mPoll").textContent = s.polling_interval_s != null ? fmt(s.polling_interval_s, "s") : "—";
+  $("mFreq").textContent = s.collection_rate_per_min != null ? fmt(s.collection_rate_per_min, "/min") : "—";
+  $("mRate").textContent = fmt(s.collection_success_pct, "%");
+  $("mErrRate").textContent = fmt(s.collection_error_pct, "%");
+  $("mConn").textContent = s.pokerbet_connectivity || "—";
+  $("mBrowser").textContent = s.browser_health || "—";
+  $("mHydrate").textContent = s.event_page_hydration_rate_pct != null ? fmt(s.event_page_hydration_rate_pct, "%") : "—";
+  $("mMarket").textContent = s.market_observation_coverage_pct != null ? fmt(s.market_observation_coverage_pct, "%") : "—";
+  $("mQueue").textContent = fmt(s.queue_depth);
+  $("mEnq").textContent = s.enqueued != null ? s.enqueued.toLocaleString() : "—";
+  $("mPendRes").textContent = fmt(s.pending_resolve_depth);
+  $("mMktQ").textContent = fmt(s.market_queue_depth);
+  $("mPersisted").textContent = s.persisted ? s.persisted.toLocaleString() : "—";
+  $("mFailed").textContent = fmt(s.failed);
+  $("mDropped").textContent = fmt(s.dropped);
+  $("mPersist").textContent = s.persistence_worker_health || "—";
+  $("mDbWrite").textContent = s.database_write_failures != null ? s.database_write_failures.toLocaleString() : "—";
+  $("mCpu").textContent = fmt(s.cpu_pct, "%");
+  $("mRam").textContent = fmt(s.ram_pct, "%");
+  $("mDisk").textContent = fmt(s.disk_free_pct, "%");
+  $("mSnaps").textContent = s.successful_collections != null ? s.successful_collections.toLocaleString() : "—";
+  $("mFailedColl").textContent = s.failed_collections != null ? s.failed_collections.toLocaleString() : "—";
+  $("mGames").textContent = fmt(s.games_tracked);
+  $("mCycle").textContent = fmt(d.cycle_ms, "ms");
+
+  const open = (d.alerts && d.alerts.open) || [];
+  $("alertRows").innerHTML = open.length ? open.map(a => `
+    <div class="row">
+      <span class="dot ${a.severity === "critical" ? "RED" : "YELLOW"}"></span>
+      <span style="flex:1">${a.label} — ${(a.detail||"").replace(/</g,"&lt;")}</span>
+      <span class="t">since ${ago(a.started_at)}</span>
+    </div>`).join("") : '<div class="det">none</div>';
+}
+tick(); setInterval(() => { if (!document.hidden) tick(); }, 10000);
+</script>
+</body>
+</html>
