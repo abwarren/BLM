@@ -63,6 +63,7 @@ import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+from blm_v4.sqlite_coordination import connect_pipeline_db
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
@@ -399,9 +400,7 @@ class ResultVerifier:
 
     # -- db -------------------------------------------------------------
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path), timeout=30)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return connect_pipeline_db(self._db_path)
 
     def load_db_finals(self, conn: sqlite3.Connection) -> list[dict]:
         """The recorded finals inside the window, with their teams.

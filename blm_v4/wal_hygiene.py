@@ -48,6 +48,10 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
+from blm_v4.sqlite_coordination import (
+    SQLITE_BUSY_TIMEOUT_MS,
+    connect_pipeline_db,
+)
 
 logger = logging.getLogger("blm_v4.wal_hygiene")
 
@@ -66,25 +70,13 @@ DEFAULT_THRESHOLD_MB = 256.0
 #: busy_timeout for the hygiene connection itself: the PRAGMA must
 #: return promptly even if it cannot make progress; PASSIVE never waits
 #: on readers anyway, this only bounds the connection setup handshake.
-DEFAULT_BUSY_TIMEOUT_MS = 5000
-#: HARD CAP (2026-10-31, the 14.25 GB incident) — above this the pass
-#: escalates from PASSIVE to TRUNCATE.
+DEFAULT_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_MS
+#: HARD CAP (2026-10-31, the 14.25 GB incident) — above this the worker
+#: reports an alert; all checkpoints remain PASSIVE to avoid blocking writers.
 #:
-#: PASSIVE cannot shrink the file: it copies the frames it can and leaves
-#: the rest, so with a writer appending continuously and even a small
-#: reader-pinned tail the WAL never resets and only grows.  Measured on
-#: 2026-10-31: passes copied 2.3-2.5 M frames each and held back only
-#: 19-285 k, yet wal_bytes climbed 8.8 -> 14.9 GB, the collector's fast
-#: cycle hit 231 s in the persistence stage, the self-watchdog killed the
-#: unit twice, and the restarts fragmented live games into instance ids
-#: that never settled.  TRUNCATE is the only mode that gives the space
-#: back.  It takes the exclusive lock at the end, so it is BOUNDED by
-#: busy_timeout here: if readers are active the pass reports busy and
-#: leaves the frames for the next tick — it can never stall the box.
+#: Alert threshold for oversized WAL files. Checkpointing remains PASSIVE
+#: regardless of size because TRUNCATE can contend with active writers.
 DEFAULT_HARD_CAP_MB = 2048.0
-#: journal_size_limit applied on the hygiene connection so a completed
-#: TRUNCATE leaves a small WAL rather than the previous high-water mark.
-DEFAULT_JOURNAL_SIZE_LIMIT_MB = 64.0
 #: HARD ALERT bound — a WAL past this logs ``wal_hygiene_alert`` with the size,
 #: well below the escalation cap so the growth is visible before writes slow.
 #: 0 disables the alert.
@@ -156,20 +148,15 @@ def passive_checkpoint_once(db_path: Path | str, *,
                 "held_back": -1, "mode": "gated", "alert": bool(alert)}
     conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(str(db_path), timeout=30)
-        conn.execute(
-            f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-        # Escalate to TRUNCATE above the hard cap: PASSIVE alone never
-        # gives the space back (see DEFAULT_HARD_CAP_MB).  busy_timeout
-        # bounds the wait, so a busy pass reports instead of stalling.
+        conn = connect_pipeline_db(db_path, row_factory=False)
+        # busy_timeout is inherited from connect_pipeline_db; the legacy
+        # argument remains accepted for callers but does not vary policy.
+        # Checkpointing must remain non-blocking while collector/server
+        # writers are active.  A hard-cap alert is preferable to TRUNCATE:
+        # TRUNCATE needs stronger coordination and can interfere with them.
         truncate = wal >= hard_cap_mb * 1024 * 1024
-        if truncate:
-            conn.execute(
-                f"PRAGMA journal_size_limit="
-                f"{int(DEFAULT_JOURNAL_SIZE_LIMIT_MB * 1024 * 1024)}")
         row = conn.execute(
-            "PRAGMA wal_checkpoint(TRUNCATE)" if truncate
-            else "PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            "PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         # PRAGMA result row (sqlite3_wal_checkpoint_v2 semantics):
         #   busy         — 0 unless the pass was blocked by another
         #                  connection (PASSIVE reports, never waits);
@@ -178,7 +165,7 @@ def passive_checkpoint_once(db_path: Path | str, *,
         busy, log_frames, copied = (int(row[0]), int(row[1]),
                                     int(row[2]))
         held_back = max(0, log_frames - copied)
-        mode = "truncate" if truncate else "passive"
+        mode = "passive_hard_cap" if truncate else "passive"
         if copied:
             log.info(
                 "wal_hygiene_checkpoint mode=%s wal_bytes=%d "
@@ -231,12 +218,7 @@ class WalHygieneWorker:
         self._threshold_mb = float(threshold_mb)
         self._hard_cap_mb = float(hard_cap_mb)
         self._alert_mb = float(alert_mb)
-        #: How long the ESCALATED (TRUNCATE) pass may wait for a tick gap.
-        #: 2026-11-02: measured `checkpointed_frames=62,374 held_back=727
-        #: busy_flag=1` — the copy finished but the exclusive lock was lost to a
-        #: writer committing every few seconds, so the file never shrank.  A
-        #: longer wait is safe: the pass is a daemon thread, and the truncate
-        #: holds the lock for milliseconds once it wins.
+        #: Retained for call compatibility; connect_pipeline_db owns timeout.
         self._busy_timeout_ms = int(busy_timeout_ms)
         self._log = log or logger
         self._stop = threading.Event()

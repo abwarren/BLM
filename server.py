@@ -65,24 +65,14 @@ WAL_HYGIENE_INTERVAL_S = float(
 #: below it the default wal_autocheckpoint is managing fine alone.
 WAL_HYGIENE_THRESHOLD_MB = float(
     os.environ.get("BLM_WAL_HYGIENE_THRESHOLD_MB", "256"))
-#: above this the hygiene pass ESCALATES from PASSIVE to TRUNCATE — PASSIVE
-#: folds frames but NEVER gives the file back, so a PASSIVE-only janitor cannot
-#: bound the WAL by construction (2026-10-02: 30.8 GB; 2026-11-01: 157 MB was
-#: already enough to make a persistence burst cost 140 s and trip the collector
-#: watchdog).  2026-11-02: this wiring was LOST when the trunk's server.py won
-#: the merge and the janitor went back to PASSIVE-only — the WAL reached 233 MB
-#: with zero hygiene events in the journal.
+#: above this size, WAL hygiene reports an alert. Checkpointing remains
+#: PASSIVE so it cannot compete with active writers.
 WAL_HYGIENE_HARD_CAP_MB = float(
     os.environ.get("BLM_WAL_HYGIENE_HARD_CAP_MB", "2048"))
 #: HARD ALERT bound: a WAL past this logs ``wal_hygiene_alert`` with its size,
 #: far below the escalation cap, so growth is visible in the journal early.
 WAL_HYGIENE_ALERT_MB = float(
     os.environ.get("BLM_WAL_HYGIENE_ALERT_MB", "256"))
-#: How long the janitor's TRUNCATE pass may wait for a gap between writes.
-#: The collector commits every few seconds, so a 5 s wait loses the exclusive
-#: lock routinely (measured: copy complete, busy_flag=1, file unchanged).
-WAL_HYGIENE_BUSY_TIMEOUT_MS = int(
-    os.environ.get("BLM_WAL_HYGIENE_BUSY_TIMEOUT_MS", "15000"))
 #: a live-flagged game with NO snapshot AND NO WS observation for this
 #: long has left the source's live board — its authoritative final state
 #: exists upstream, so reconcile it to ended.
@@ -487,6 +477,13 @@ def main() -> None:
     # ── Lifespan handlers ────────────────────────────────────
     @app.on_event("startup")
     async def start_pipeline():
+        # Establish collector-owned tables before server background workers
+        # query them. A collector in another process uses the same coordinated
+        # migration stage and may safely race this startup.
+        from blm_v4.storage import PokerBetStore
+        PokerBetStore(root / "blm_pokerbet.db")
+        logger.info("pipeline_storage_schema_ready")
+
         if V1_COLLECTOR_ENABLED:
             logger.info("collector_starting")
             collector.start()
@@ -558,13 +555,12 @@ def main() -> None:
         # second collector, no snapshot writes, no re-derivation of any
         # model input.
         def _game_finished_reconciler():
-            import sqlite3 as _sq
             import time as _t
+            from blm_v4.sqlite_coordination import connect_pipeline_db
             while True:
                 try:
                     dbp = root / "blm_pokerbet.db"
-                    conn = _sq.connect(f"file:{dbp}", uri=True, timeout=30)
-                    conn.row_factory = _sq.Row
+                    conn = connect_pipeline_db(dbp)
                     try:
                         cutoff = (datetime.now(timezone.utc)
                                   - timedelta(seconds=GAME_SOURCE_EXPIRY_S))
@@ -636,8 +632,7 @@ def main() -> None:
                 interval_s=WAL_HYGIENE_INTERVAL_S,
                 threshold_mb=WAL_HYGIENE_THRESHOLD_MB,
                 hard_cap_mb=WAL_HYGIENE_HARD_CAP_MB,
-                alert_mb=WAL_HYGIENE_ALERT_MB,
-                busy_timeout_ms=WAL_HYGIENE_BUSY_TIMEOUT_MS)
+                alert_mb=WAL_HYGIENE_ALERT_MB)
             wal_hygiene_worker.start()
             app.state._wal_hygiene_worker = wal_hygiene_worker
             logger.info("wal_hygiene_worker_started",

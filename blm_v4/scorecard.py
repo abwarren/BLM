@@ -57,6 +57,7 @@ from blm_v4.result_policy import (
 )
 from blm_v4.projection import (MODEL_VERSION, clock_minutes, duration_for,
                                project)
+from blm_v4.sqlite_coordination import connect_pipeline_db, run_schema_stage
 from blm_v4.terminal_eligibility import (TERMINAL_EXCLUSION_REASON,
                                          eligibility_state,
                                          is_terminal_checkpoint)
@@ -1134,9 +1135,7 @@ class Scorecard:
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path), timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = connect_pipeline_db(self._db_path)
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -1300,8 +1299,7 @@ class Scorecard:
 
     def _init(self) -> None:
         with self._lock:
-            conn = self._connect()
-            try:
+            def migrate(conn: sqlite3.Connection) -> None:
                 conn.executescript(SCORECARD_SCHEMA)
                 # result reconciliation (directive 2026-09-23): the
                 # provenance column the reconciler writes — ensured here
@@ -1339,8 +1337,7 @@ class Scorecard:
                 # research tables — idempotent, rows never deleted.
                 _ensure_eligibility_columns(conn)
                 conn.commit()
-            finally:
-                conn.close()
+            run_schema_stage(self._db_path, "scorecard-v1", migrate)
 
     # ── Record predictions ─────────────────────────────────────────
 
