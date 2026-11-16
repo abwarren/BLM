@@ -1,5 +1,103 @@
 # BLM — STATUS
 
+## 2026-11-16 14:20 SAST — WAL DID **NOT** TRUNCATE AFTER THE SCAN (I WAS WRONG). PLUS A LIVE STAKE-LIMIT BREACH AND A MEASURED WIN RATE.
+
+Four operator asks answered below with measurements. **No code changed in this entry** (the pace-ref scan
+bound was deliberately NOT shipped — see §6). Nothing restarted.
+
+### 1. WAL after the reference scan — prediction FAILED, here is the truth
+
+The pace-ref first scan completed at **14:09:15** (`pace_ref_scan`, elapsed 1935 s = 32 min, 9 pace /
+6 q3 competitions) — not the ~2 h I predicted. The WAL did **not** go to zero afterwards:
+
+```
+PASSIVE : busy=0 log=277114 checkpointed=215400  (0.0 s)
+TRUNCATE: busy=1 log=277116 checkpointed=215400  (gave up after 60.2 s)
+wal size: 1.116 G
+```
+
+`PASSIVE` copies everything up to the oldest reader and returns immediately (busy=0); `TRUNCATE` needs
+`checkpointed == log` and **cannot finish while any reader sits behind the newest frame**. Frame 215,400
+has not advanced since ~14:03, so an **in-process read snapshot is still held** — ~61 k frames (~240 MB) of
+live WAL content ahead of it, file stuck at 1.1 G. Only the server process (PID 465922) has the WAL open.
+The pace-ref worker is NOT the holder: `_run_once` closes its connection in a `finally` (verified at
+`pace_reference_worker.py`). Remaining candidates, not yet proven: the settle path, the line-reference
+scan (next run ~14:23) and the stats/scorecard path. **The 0.00 G reading at 13:37–13:40 was the gap before
+any scan started, not a post-scan truncate** — my earlier "expect a truncate to 0 at ~15:40" was wrong and
+is corrected here.
+Practical position: `/` 17 G free, WAL oscillating ~1 G instead of 5.7 G. Bounded, but not zero, and it
+needs the holder identified before any further "reclaim" claim is made.
+
+### 2. Caused by me: `database is locked` burst at 14:12
+
+`scorecard_run_failed` and `settle_once` both raised `sqlite3.OperationalError: database is locked`
+(`capture_results`, `flag_conflict`) at **14:12:13**, inside the 60 s window where my
+`PRAGMA wal_checkpoint(TRUNCATE)` was copying 215 k frames. **0 lock errors since 14:13** — self-healed, no
+further attempts made. Recorded so the next agent does not read it as an application regression.
+
+### 3. P0 — THE LEDGER SHOWS STAKES ABOVE 1 UNIT (directive §2.3 says max 1 unit, never increased)
+
+`blm_betting.db.bet_executions`, 1148 rows, all `market=TOTAL`, `selection=UNDER`:
+
+* **98 of 1148 executions carry `stake_units` > 1.0** (max **5.832**, `stake_amount` 116.64, `unit_limit` 20.0).
+* Real submissions above one unit, most recent first: 2026-11-15 `31576125` **1.8 units** (SUBMITTED),
+  `31575499` **3.24 units** (SUBMITTED); 2026-11-16 `31582709` **5.832 units** (status ACCEPTED but
+  `execution_state=WOULD_BET`, i.e. classified, not money down).
+* `betting_config` holds `ladder_wins = 3` and the audit log carries `ladder_wins {"ladder_wins": 3,
+  "step_units": 0.8}` — i.e. **a ladder that increases stake after wins**.
+* This conflicts with AGENTS.md §2.3 ("Maximum stake: 1 unit. Never silently increase the stake.").
+  **Not changed** — it is a live money-path policy conflict and needs an operator ruling, not a quiet patch.
+
+### 4. The gate's win rate — measured, not assumed (operator said 70 %)
+
+Settled against `game_results.final_total` (UNDER wins when final < triggered line), 1015 resolved:
+
+| cohort | W/L | rate |
+|---|---|---|
+| all candidates with a final | 634W / 330L | **65.8 %** |
+| `status=ACCEPTED` (money down) | 27W / 12L | 69.2 % (n=39, ±14 pts) |
+| `status=SUBMITTED` | 186W / 115L | 61.8 % |
+| `status=BLOCKED` (never placed) | 57W / 12L | 82.6 % |
+| `status=UNKNOWN` | 35W / 25L | 58.3 % |
+
+Recent days swing 54 %–100 % (11-14 54 %, 11-12 83 %, 11-13 72 %). So "~70 %" is only true of the ACCEPTED
+slice on 39 bets; the cohort as a whole is **66 %**, and the placed subset is **62 %** (SUBMITTED). The
+76.2 %/84.4 % figures in the 12:25 entry are *cohort analysis* rates (Tier-B base / FP-confirmed), not
+realised results.
+
+### 5. What the auto-bet actually trades right now
+
+* Market: **TOTAL only**; side: **UNDER only** (1148/1148 — no OVER has ever been executed).
+* Entry: live total line from the line reference at 70–92 % game progress, `TRADE_MIN_PACE_RATIO=1.16`
+  (Tier B, now fingerprint-gated), `TRADE_EXEC_MIN_PRICE=1.60`, `TRADE_MAX_LINE_AGE_S=15`, shortfall leg off,
+  `BET_REVALIDATE=1/120 s`, `BETTING_DRY_RUN=false`, `BETTING_BROWSER_SUBMIT=true`, kill switch on.
+* Observed lines 200.5–277.5, prices 1.65–2.50, base stake 1 unit (see §3 for the ladder).
+* Today: 3 executions, all `315xxxxx` BetConstruct ids.
+
+### 6. Pace-ref scan bound — NOT shipped (deliberate)
+
+A `WHERE captured_at >= ?` window would still full-scan: `snapshots` has indexes on `source_game_id` and
+`(classification, captured_at)`, none on `captured_at` alone. The sound fix is to stop using one
+full-history `GROUP BY` and instead read **per-game segments through `idx_snapshots_game_ts` over the
+settled games in a lookback window** (thousands of index lookups, seconds not minutes). That changes the
+*population* behind `league_q3_avg`, i.e. an input to the live gate, so it needs its own offline
+verification against the current reference values plus a restart window — not something to rush in the same
+session as a restart. Left as the top P3 item with the design above.
+
+### 7. Fast-lane Q3 — still no live candidate
+
+`armed: 0` in every pass since the restart (14:13 check: 0), `refused_top: market_heat`; 0
+`autobet_qualification` records since 13:37, so the new Q3 block has not yet been exercised on a real
+candidate. Offline verification stands (§13:05 entry).
+
+### Next actions
+
+1. **Operator ruling on §3** (stake above one unit / `ladder_wins`) — P0, money path.
+2. Identify the in-process WAL pin holder (§1): sample `PRAGMA wal_checkpoint(PASSIVE)` `checkpointed`
+   every minute against the log; the run that coincides with an advance is the holder.
+3. Implement §6 (per-game Q3 reference) offline first.
+4. Wait for the first armed Tier-B candidate and confirm a real `q3_ratio` (§7).
+
 ## 2026-11-16 14:10 SAST — `blm-server` RESTARTED (AUTHORISED). WAL PIN RELEASED, Q3 FIX LIVE-CODED. ROOT CAUSE OF THE PIN FOUND.
 
 `systemctl --user restart blm-server` at 13:36:57 SAST. Old PID 405820 → new PID 465922.
