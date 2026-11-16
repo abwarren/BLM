@@ -61,6 +61,7 @@ from blm_v4.trade_window import (
 )
 from blm_v4.betting import market_heat
 from blm_v4.betting import qualify as _qualify
+from blm_v4.live_analytics.under_fingerprints import evaluate_fingerprints
 from blm_v2.telemetry.logging import get_logger
 
 logger = get_logger("fast_lane")
@@ -161,6 +162,9 @@ class FastLaneWorker:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._slugs: dict[str, str] = {}
+        #: classification per game, filled by the same games scan as _slugs —
+        #: it selects the quarter length the Q3 segment is divided by
+        self._cls: dict[str, str] = {}
         self._slugs_at = 0.0
         self._pace: dict = {}
         self._pace_at = 0.0
@@ -225,10 +229,12 @@ class FastLaneWorker:
                 conn = self._ro(self._prod_db)
                 try:
                     for r in conn.execute(
-                            "SELECT source_game_id, competition_slug FROM games "
+                            "SELECT source_game_id, competition_slug, "
+                            "       classification FROM games "
                             "WHERE competition_slug IS NOT NULL "
                             "AND competition_slug <> ''"):
                         self._slugs[r["source_game_id"]] = r["competition_slug"]
+                        self._cls[r["source_game_id"]] = r["classification"]
                 finally:
                     conn.close()
                 self._slugs_at = now
@@ -257,6 +263,66 @@ class FastLaneWorker:
         except Exception as e:
             self._warn("fast_lane_pace_ref_failed", error=str(e)[:200])
         return self._pace
+
+    def _q3_evidence(self, base: str) -> dict:
+        """The game's OWN third-quarter evidence, exactly as the served
+        payload carries it — so the strength×fingerprint gate can evaluate
+        C3/C5/R2 instead of reading Q3 as UNAVAILABLE on every candidate.
+
+        Two authorities, both imported rather than reimplemented (directive
+        2026-11-15 §6):
+
+          * ``api._q3_pace_reference()`` — the per-competition average Q3
+            pace, served from the in-process ``PaceReferenceWorker``'s last
+            completed scan (``{}`` while it warms up, never an inline scan:
+            that would read the whole 115 GB archive on this thread);
+          * ``api._q3_game_ppm()`` — the Q3 segment rule (cumulative score at
+            the '3rd Quarter' end minus the '2nd Quarter' end over the
+            classification's quarter minutes) over this game's own snapshot
+            rows, read through ``idx_snapshots_game_ts``.
+
+        Missing operands stay ``None``: the gate then treats Q3 as
+        UNAVAILABLE and its own directive branch decides, so this can only
+        ever ADD proof, never invent one.  Callers must not read a ``None``
+        here as FALSE.
+        """
+        out: dict = {"q3_ppm": None, "league_q3_avg": None}
+        try:
+            from blm_v4.api import _q3_game_ppm, _q3_pace_reference
+        except Exception as e:                        # import cycle / absence
+            self._warn("fast_lane_q3_import_failed", error=str(e)[:200])
+            return out
+        try:
+            slug = self._slug_for(base)
+            ref = _q3_pace_reference() if slug else {}
+            out["league_q3_avg"] = (ref.get(slug) or {}).get("avg_q3_pace")
+        except Exception as e:
+            self._warn("fast_lane_q3_ref_failed", error=str(e)[:200])
+        try:
+            conn = self._ro(self._prod_db)
+            try:
+                # Range bounds, not ``= ? OR LIKE ?||'#%'``: the OR form is
+                # planned as a SCAN of the whole archive (verified on this DB),
+                # the range uses idx_snapshots_source_ts and touches only this
+                # game's rows.  The suffix match is then made exact in Python,
+                # so a longer id sharing the prefix can never contaminate it.
+                rows = conn.execute(
+                    "SELECT source_game_id, period_label, home_score, "
+                    "       away_score "
+                    "  FROM snapshots "
+                    " WHERE source_game_id >= ? AND source_game_id <= ? "
+                    "   AND period_label IN ('2nd Quarter', '3rd Quarter') "
+                    " ORDER BY captured_at", (base, base + "\uffff")).fetchall()
+            finally:
+                conn.close()
+            keep = [r for r in rows
+                    if r[0] == base or str(r[0]).startswith(base + "#")]
+            # _q3_game_ppm reads dict keys; sqlite3.Row has no .get()
+            out["q3_ppm"] = _q3_game_ppm(
+                {"classification": self._cls.get(base)}, [dict(r) for r in keep])
+        except Exception as e:
+            self._warn("fast_lane_q3_segment_failed", error=str(e)[:200])
+        return out
 
     # ── the fresh rows ───────────────────────────────────────────────
     def fresh_rows(self) -> list:
@@ -308,7 +374,7 @@ class FastLaneWorker:
             conn.close()
 
     def build_game(self, row, slug: Optional[str], avg_pace, now: float,
-                   attempt: int = 0) -> dict:
+                   attempt: int = 0, fingerprint: Optional[dict] = None) -> dict:
         """The executor's input contract, built from one captured row.
 
         ONLY the fields ``evaluate`` reads are populated.  Everything that
@@ -346,16 +412,44 @@ class FastLaneWorker:
             # executor records under its own ``#rN`` identity
             "under_alert_attempt": int(attempt or 0),
             # the competition's league-average pace, for the strength tier of
-            # the auto-bet qualification gate (directive 2026-11-15).  This
-            # path carries NO Q3 evidence: the strength tier still resolves,
-            # and the gate treats Q3 as UNAVAILABLE — it never guesses one.
+            # the auto-bet qualification gate (directive 2026-11-15).
             "competition_pace": {"avg_pace": avg_pace},
+            # Q3 evidence for the fingerprint half of that gate: the SAME
+            # block shape the served payload carries, built from this game's
+            # own snapshot segment and the competition's Q3 reference.  It is
+            # present but empty when either operand is unprovable, so the
+            # gate's ``q3_ratio is None`` branch (= UNAVAILABLE) applies
+            # rather than being silently assumed.  Without this block a
+            # Tier-B candidate could never be confirmed — every fast-lane
+            # candidate would pass on the base rate.
+            "under_alert_fingerprint": dict(fingerprint or {}),
             "under_alert_competition": {"slug": slug, "known": True,
                                         "reason": None},
             "under_alert_line_move": {"entry_line": line, "open_line": None,
                                       "league_avg_line": None,
                                       "move_norm": None, "reason": None},
         }
+
+    def _fingerprint_block(self, row, avg) -> Optional[dict]:
+        """The ``under_alert_fingerprint`` block for one captured row.
+
+        Same operands, same evaluation function and therefore the same
+        three-state verdicts as the served payload — C3/C5/R2 can be TRUE here
+        now that the Q3 segment is supplied.  ``None`` (no block) only when the
+        competition pace is unusable, which the gate then refuses as
+        MISSING_INPUT, exactly as before.
+        """
+        if not isinstance(avg, (int, float)) or avg <= 0:
+            return None
+        base = str(row["source_game_id"]).split("#")[0]
+        q3 = self._q3_evidence(base)
+        block = evaluate_fingerprints(
+            row["required_pts_per_min"], avg, q3["q3_ppm"],
+            q3["league_q3_avg"], None, row["actual_pts_per_min"])
+        # the pace authority ``inputs_from_game`` reads first, so the gate and
+        # the audit record use the ratio this lane actually computed
+        block["league_average_pace"] = avg
+        return block
 
     # ── one pass ─────────────────────────────────────────────────────
     def pass_once(self) -> dict:
@@ -435,12 +529,18 @@ class FastLaneWorker:
                     continue
             except Exception:
                 continue
-            game = self.build_game(row, slug, avg, now, attempt=attempt)
+            game = self.build_game(
+                row, slug, avg, now, attempt=attempt,
+                fingerprint=self._fingerprint_block(row, avg))
             # ── STRENGTH × FINGERPRINT QUALIFICATION (directive 2026-11-15) ──
-            # The lane's synthetic payload carries the competition slug and its
-            # league pace but NO Q3 evidence, so the gate's "Q3 unavailable"
-            # branch applies literally: a Tier-B base rate may proceed, a
-            # Tier-C edge may not.  Refused candidates never claim a slot.
+            # The payload now carries the game's real Q3 segment, so Tier B is
+            # decided by C3/C5/R2 rather than falling through the "Q3
+            # unavailable" branch on every candidate: a Tier-B game whose Q3
+            # is on record and fires nothing is REFUSED here exactly as the
+            # poll worker refuses it.  Q3 that is genuinely unprovable (no 2nd/
+            # 3rd-Quarter rows yet, no league reference) still reads
+            # UNAVAILABLE and keeps the directive's base-rate branch.
+            # Refused candidates never claim a slot.
             qualification = _qualify.check_game(game)
             if not qualification["qualified"]:
                 key = f"autobet_gate:{qualification['reason']}"
