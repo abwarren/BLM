@@ -1,5 +1,68 @@
 # BLM — STATUS
 
+## 2026-11-16 13:05 SAST — FAST LANE NOW CARRIES THE GAME'S REAL Q3 SEGMENT. IMPLEMENTED — VERIFICATION PASSED — NOT YET LIVE (NEEDS `blm-server` RESTART).
+
+Fixes §3 of the 12:25 audit: the fast lane can no longer trade a Tier-B rung **unconfirmed**. Code is
+in the runtime tree `/home/ubuntu/blm-fix-price-mapping` (branch `fix/price-mapping-2026-10-06`); the
+running server loaded its modules at 11:30:13, so **nothing here is live yet**.
+
+### What changed (`blm_v4/betting/fast_lane.py`, +115/−11)
+
+* `_q3_evidence(base)` — the game's own Q3 segment, built from the SAME authorities the served
+  payload uses (imported, not reimplemented): `api._q3_pace_reference()` (read from the in-process
+  `PaceReferenceWorker` cache — never an inline `snapshots` scan) and `api._q3_game_ppm()` (the Q3
+  segment rule over this game's own rows, `duration_for(classification)` minutes).
+* `_cls` — classification cached by the existing games scan; it selects the quarter length.
+* `_fingerprint_block(row, avg)` — `evaluate_fingerprints(required, avg, q3_ppm, league_q3_avg,
+  None, actual)`; recent-3m pace is unavailable on this path, so C2 stays UNAVAILABLE (it is not a
+  qualifying fingerprint). Block is `None`/empty when the pace is unusable → gate's MISSING_INPUT.
+* `build_game(..., fingerprint=)` writes `under_alert_fingerprint` + `competition_pace.avg_pace`, so
+  `qualify.inputs_from_game` sees real Q3. `pass_once` passes the block in.
+* **Scan defect caught during verification:** my first WHERE clause was
+  `source_game_id = ? OR source_game_id LIKE ? || '#%'`, which `EXPLAIN QUERY PLAN` shows as
+  `SCAN snapshots` (whole 115 GB archive per candidate). Replaced with an index range
+  `source_game_id >= ? AND source_game_id <= ?"\uffff"` (`SEARCH ... USING INDEX
+  idx_snapshots_source_ts`) plus an exact-id filter in Python. Measured on the live archive:
+  **0.3 ms, 23 rows** for a current game.
+
+### Verification (standalone; pytest is conftest-blocked on this host)
+
+`/tmp/verify_fastlane_q3_2026_11_16.py` — temp archive, real `_q3_evidence`/`_fingerprint_block`/
+`build_game`/`qualify.check_game`, `PaceReferenceWorker` wiring simulated on `api._PACE_REF_LATEST`:
+
+| game | Q3 evidence | q3_ratio | fired | verdict | before |
+|---|---|---|---|---|---|
+| 111 | 1.5 ppm vs league 4.0 | 0.375 | C3, C5, R2 | `TIER_B` qualified | qualified (unconfirmed) |
+| 222 | 4.0 ppm vs league 4.0 | 1.00 | — | **`NO_FINGERPRINT` refused** | **qualified unconfirmed** |
+| 333 | none | `None` | — | `TIER_B` qualified (directive branch) | same |
+
+`RESULT: PASS`. `git diff --check` clean. Import of the module OK; targeted pytest NOT run (guard:
+collector PID 222134 live; host at load ~21).
+
+### Residual window (deliberate, unchanged policy)
+
+Tier B still passes when Q3 is genuinely unprovable: no 2nd/3rd-Quarter rows yet (game at 70–74 %
+progress, or a collector gap) or the pace-reference worker is warming → `q3_ratio=None` → the
+2026-11-15 directive's UNAVAILABLE branch. Tightening that is an operator decision, not silently taken.
+
+### WAL / disk (unchanged by this work)
+
+`blm_pokerbet.db` 122.83 G, **WAL 5.68 G** (grew from 4.71 G), `/` 95 %, **13 G free**.
+`blm_metrics_clean.db` WAL 0.94 G (churning, housekeeping truncates it). The pokerbet pin is still
+`checkpointed_frames=1069520 busy_flag=1` since 11:31:44 → a read snapshot held inside `blm-server`
+(PID 405820). **A `blm-server` restart is the only way to release it** (~5.7 G reclaim, stops the
+~0.1 G/min growth) — and it is also what makes this Q3 fix live. NOT done: §5.2 forbids unauthorised
+restarts, and `wal_hygiene`'s own docstring records the 2026-09-29 restart-storm where a restart
+against a multi-GB WAL cost an outage. Operator decision required.
+
+### Next actions
+
+1. **Operator: authorise `systemctl restart blm-server`** (never the collector). Expect: WAL→0,
+   ~5.7 G reclaimed, Q3 fix live; watch `fast_lane`/`autobet_qualification` for real `q3_ratio`
+   values and for `NO_FINGERPRINT` refusals appearing on the fast lane for the first time.
+2. After a clean run, consider raising the rung only with the FP-confirmed rate in hand.
+3. Disk stays at ~95 % until step 1; no further analysis scans were run.
+
 ## 2026-11-16 12:25 SAST — FP/Q3 AUDIT OF THE 1.16 RUNG + COLLECTOR STALL INCIDENT. NO CODE CHANGE, NO RESTART.
 
 Operator challenge: "you're forgetting the fingerprints and the third-quarter conditions that make
