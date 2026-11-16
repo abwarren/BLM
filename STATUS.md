@@ -1,5 +1,135 @@
 # BLM — STATUS
 
+## 2026-11-16 11:30 SAST — LIVE AUTO-BET PACE RUNG MOVED 1.08 → 1.16 (operator-approved). APPLIED + VERIFIED. REAL MONEY.
+
+Operator asked what the auto-bet gate trades, then asked for "tc-supera / tc-super /
+(tc-premier)" and finally accepted the recommendation: **pace > 1.16, price ≥ 1.60,
+15 s line age**, tc-premier dropped (only 67.7 % over 30 days, below the 70 % bar).
+The three proposed rungs are NESTED (>1.20 ⊂ >1.16 ⊂ >1.12), so only one floor is
+armed: the pace leg.
+
+### WHAT CHANGED
+One new drop-in — **`~/.config/systemd/user/blm-server.service.d/99z-trade-pace-super.conf`**
+(`Environment=TRADE_MIN_PACE_RATIO=1.16`; sorts after `99-gate-b.conf`, so it wins).
+No code change. No other leg touched: progress 70–92, shortfall OFF, price ≥ 1.60,
+line age ≤ 15 s, move filter OFF, cyber-2k26 excluded, revalidate ≤ 120 s,
+stakes/limits unchanged (2000 / 200 / 400 000), `BETTING_DRY_RUN=false`,
+`BETTING_BROWSER_SUBMIT=true`, `auto_betting_enabled=true`.
+
+### MEASUREMENT BEHIND THE CHOICE
+30 days, 2026-10-17 → 2026-11-15, cyber excluded, price ≥ 1.60, line age ≤ 15 s,
+progress 70–92, settled only (streaming rerun of
+`scripts/analysis_gate_volume_sweep_2026-11-11.py` rules):
+
+| pace floor | bets | /day | settled | win % | wLB | units |
+|---|---|---|---|---|---|---|
+| >1.20 | 164 | 5.5 | 132 | 81.8 | 74.4 | +52.87u (+40.1 %) |
+| **>1.16 (armed)** | **223** | **7.4** | **189** | **76.2** | **69.6** | **+60.86u** |
+| >1.12 | 406 | 13.5 | 359 | 67.7 | 62.7 | +72.15u |
+| >1.08 (previous live) | 789 | 26.3 | 723 | 65.1 | — | — |
+| >1.04 | 1801 | 60.0 | 1684 | 60.9 | — | — |
+
+At price ≥ 1.70 all three rungs fall to 67.2 / 62.8 / 59.5 % — the 1.70 floor is NOT
+armed. **Caveat:** the live worker also runs the strength×FP layer
+(`blm_v4/betting/qualify.py` via `worker.py:166`), which the backtest did not model,
+so live candidates will be ≤ 7.4/day (extra filter, never a loosening).
+
+### APPLIED + VERIFIED
+- `systemctl --user daemon-reload && systemctl --user restart blm-server`
+  (server only; collector untouched — PID 222134, NRestarts 0).
+- Pre-restart safety check: latest execution 5590 (05:41Z) already resolved; no
+  PENDING/UNKNOWN in flight, so no reconciliation debt was interrupted.
+- New MainPID **405820**, ActiveState **active**, NRestarts **0**.
+- `/proc/405820/environ`: `TRADE_MIN_PACE_RATIO=1.16`, `TRADE_EXEC_MIN_PRICE=1.60`,
+  `TRADE_MAX_LINE_AGE_S=15`, `TRADE_MIN_PROGRESS_PCT=70.0`,
+  `TRADE_MAX_PROGRESS_PCT=92.0`, `TRADE_SHORTFALL_ENABLED=0`,
+  `BETTING_DRY_RUN=false`, `BETTING_BROWSER_SUBMIT=true`.
+- `journalctl`: `betting_worker_started {"dry_run": false, "enabled": true}`,
+  `fast_lane_started`, and `fast_lane_ready {"provider": "pokerbet_browser",
+  "balance": 90.18, "pace_rung": 1.16}` — the running process reports the new rung.
+- `scripts/blm_live_params.py`: declared vs effective agree, 1.16 from
+  `99z-trade-pace-super.conf` (overrides tcw/tc25/gate-b). Note its "cohort: no
+  cohort matches these legs" line is cosmetic: it compares against
+  `trade_cohorts.COHORTS` at module constants (progress 75–92), not the env band.
+- `/healthz` **200** (listener comes up ~60 s after the workers; the first curl
+  during startup is refused).
+- `fast_lane_pass` ticks running, `armed 0` (no qualifying game at that moment).
+
+### NAMED COHORTS — NOT CHANGED (deliberate)
+`blm_v4/trade_cohorts.py` still has TC-W/C/S/E/X/D/C+; no TC-SUPERA/TC-SUPER/
+TC-PREMIER entries were added. The 1.16 rung already exists there as **TC-X ·
+ELITE**, and adding a duplicate pace-1.16 name would make `resolve_cohort` return
+whichever sorts first — a silent rename of every 1.16 game on the board. The live
+leg is armed regardless; only the *label* is TC-X.
+
+### PRE-EXISTING, NOT CAUSED BY THIS CHANGE (open risks)
+- `wal_hygiene_alert` on `blm_pokerbet.db` (WAL ≈ **4.0 GB**) and
+  `blm_metrics_clean.db` (WAL ≈ **7.6 GB**); 154 alerts between 08:00 and 11:29 —
+  i.e. before the restart. A pinning reader / slow write path is growing them.
+  NOT touched (production DBs, no writes from analysis). Needs an operator
+  decision; a full checkpoint or a service window.
+- One `settle_worker_game_failed 30771918 — sqlite3.OperationalError: database is
+  locked` at 11:31:01, immediately after restart (startup write contention).
+  Watch it; no repeat seen.
+- `blm-exec-actuator` self-restarted 10:47:54 (restart counter 4), unrelated to
+  this change.
+
+### REVERT
+Remove `99z-trade-pace-super.conf`, `systemctl --user daemon-reload`,
+`systemctl --user restart blm-server` → back to pace > 1.08 (Gate-B).
+
+### CHECKS RUN
+`systemctl show`/`journalctl --user` on all three services · `/proc` environ ·
+`scripts/blm_live_params.py` · `/healthz` · read-only `blm_betting.db` queries
+(`mode=ro` + `PRAGMA query_only`). No pytest (conftest guard refuses on this host).
+No bet placed by this session.
+
+## 2026-11-16 — DB EXPLORER DEPLOYMENT: ALREADY LIVE. STOPPED AT SAFETY GATE — NO CONFIG CHANGE, NO RESTART, NO BET.
+
+Handover asked to deploy `b6067d2` and to first force the DISABLED betting state
+(`BROWSER_SUBMIT=false`, `DRY_RUN=true`, auto-bet off). Two of its premises are
+**false on this box**, so §6 was NOT executed.
+
+### DEPLOYMENT IS ALREADY DONE (no restart needed)
+- `/home/ubuntu/blm-fix-price-mapping`, branch `fix/price-mapping-2026-10-06`,
+  **HEAD == `b6067d2`** (the release commit); tree clean except the preserved
+  `docs/LIVE_TRADING_PARAMETERS.md`.
+- `blm-server` MainPID **286901**, started **2026-11-16 06:52:40**, AFTER the
+  Explorer files (mtime 2026-11-15 23:39) → running process already loaded them.
+- `/healthz` **200**. Route `/api/v4/betting/explorer` mounted
+  (`blm_v4/betting/api.py:387`, router prefix `/api/v4/betting`).
+  Unauthenticated → **401** (`"Authentication required"`).
+- Authenticated call NOT verified: no credentials were used/read. The 401 is the
+  global auth middleware (a bogus path also 401s), so it proves the guard, not
+  the route's success path.
+- `blm-collector` untouched: PID 222134, started 04:39:04, NRestarts 0.
+
+### WHY NO SAFETY CORRECTION WAS APPLIED (blocker)
+The live state is the opposite of the handover's table, and deliberate:
+- `auto_betting_enabled` = **true** in `blm_betting.db` (set 2026-11-16T08:07:06Z).
+- Drop-in `90-live-submit.conf` (2026-11-16) sets `BETTING_DRY_RUN=false`,
+  `BETTING_BROWSER_SUBMIT=true`, commented "Browser submission enabled by
+  explicit operator authorization".
+- Effective env read from `/proc/286901/environ` agrees.
+- Real execution evidence: 2026-11-16T05:41 bet **5590** SUBMITTED (game
+  31584315, UNDER 206.5 @1.90, stake 47.0).
+Applying the handover's "safe disabled state" would silently DISABLE live trading
+the operator enabled today — an unauthorized change to betting configuration.
+Stopped instead. Awaiting operator decision.
+
+### GATE NOW TRADING (evidence)
+Gate-B + the strength×FP layer (`blm_v4/betting/qualify.py`, commit `9ccf5fa`,
+wired in `worker._dispatch_game` before `evaluate(..., claim=True)`):
+pace **>1.08**, progress **70–92**, shortfall leg **OFF**, UNDER price **≥1.60**,
+line age **≤15 s**, move filter OFF, revalidate ≤120 s, cyber-2k26 excluded;
+Tier A ≥1.20 unconditional, Tier B 1.10–1.20 needs C3/C5/R2 (or no-Q3),
+Tier C only with FP (unreachable at the 1.08 floor), ≤1.04 never. Real money.
+
+### CHECKS RUN
+`/healthz` 200 · unauthenticated explorer 401 · `/proc` environ inspection ·
+read-only `blm_betting.db` queries (`mode=ro` + `PRAGMA query_only`).
+No pytest. No restart. No config write. No bet.
+
 ## 2026-11-09 — AUTO-BET LIVE-READINESS REPAIR (TEST branch, live betting DISABLED). NOT DEPLOYED, NOT MERGED, PRODUCTION UNTOUCHED.
 
 Branch `test/autobet-live-readiness-2026-11-08` from `f506564`. Commits:
