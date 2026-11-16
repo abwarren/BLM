@@ -1,5 +1,72 @@
 # BLM — STATUS
 
+## 2026-11-16 12:25 SAST — FP/Q3 AUDIT OF THE 1.16 RUNG + COLLECTOR STALL INCIDENT. NO CODE CHANGE, NO RESTART.
+
+Operator challenge: "you're forgetting the fingerprints and the third-quarter conditions that make
+that cohort so reliable." Correct — the 76.2 % / 7.4-per-day figure quoted when 1.16 was armed is the
+**Tier-B base rate**, not the fingerprint-confirmed rate. Audit below. Nothing was reconfigured.
+
+### 1. Where the FP/Q3 gate already lives
+
+`blm_v4/betting/qualify.py` (directive 2026-11-15) is wired into BOTH autonomous producers
+(`worker._dispatch_game`, `fast_lane.pass_once`) immediately before `executor.evaluate`. Pace is a
+TIER, not a verdict: A ≥ 1.20 (bet unconditionally), **B 1.10–1.20 (needs C3/C5/R2, or Q3
+UNAVAILABLE)**, C 1.04–1.10 (needs C3/C5/R2, never on UNAVAILABLE). The armed rung **1.16 is Tier B**,
+so the fingerprint layer is already load-bearing for it.
+
+### 2. Live evidence (journal, 2026-11-13 → 11-16, 987 `autobet_qualification` records)
+
+* tiers: A 396 · **B 290** · C 301
+* Tier B Q3 resolution: **284/290 (98 %)** have `q3_ratio` — Q3 is NOT the sparse leg in production
+* Tier B verdicts: **52 fired** a qualifying FP · **232 had Q3 and NO FP → refused (NO_FINGERPRINT)** · 6 Q3-unavailable → TIER_B pass
+* fingerprints fired overall: C3 346 · C5 224 · R2 208
+
+So on the worker path the gate rejects ~80 % of Tier-B candidates. That is the selectivity the
+cohort's reliability rests on — and it is real, not theoretical.
+
+### 3. The asymmetry that matters (RISK)
+
+The **fast lane** builds a synthetic payload with no Q3 evidence (`fast_lane.py`, comment above its
+`_qualify.check_game` call: "carries ... NO Q3 evidence, so the gate's 'Q3 unavailable' branch applies
+literally"). At 1.16 every Tier-B candidate therefore passes **unconfirmed** on the fast lane, while
+the same candidate would be refused by the worker. Implications:
+
+* the quoted 76.2 % / 7.4 per day is the *fast-lane* expectation (unconfirmed base rate),
+* the directive's FP-confirmed 84.4 % only materialises on the worker path,
+* effective volume on the worker path is far below 7.4/day (the 232/290 refusal rate), while the
+  fast lane is not filtered by FP at all.
+
+Options (operator decision, not yet implemented): (a) feed the fast lane the game's Q3 segment from
+`snapshots` so C3/C5/R2 can be evaluated; (b) refuse Q3-UNAVAILABLE at Tier B (contra directive
+§3.5, which explicitly permits it); (c) keep 1.16 on the worker path only.
+
+### 4. Collector stall incident 12:07–12:17 SAST (RECOVERED, NOT a crash)
+
+Collector PID 222134 never restarted (`NRestarts=0`, up since 04:39). `state_write` blocked 100 s /
+255 s / 196 s at 12:08 / 12:12 / 12:16; each time the watchdog stopped `WATCHDOG=1` pings and resumed
+on the next completed cycle. Back to normal: tick 1975 at 12:21:34, snapshots 44 915, errors 0,
+wal housekeeping truncating `blm_metrics_clean.db` WAL (32 028 → 31 450 pages).
+
+Cause is host pressure, which my own analysis made worse:
+
+* **host:red open since 08:27Z — "disk 3.2 % free, CPU 100 %", 432 occurrences**
+* load avg 21 (4 × chrome-headless + opera browser-automation processes ~50–60 % CPU each)
+* `/` 97 % used, **7.6 GB free**; `blm_pokerbet.db` 115 G, `blm_metrics_clean.db` 8.1 G + **7.6 G WAL**,
+  `blm_pokerbet.db-wal` **4.3 G**
+* my read-only FP replay (`/tmp/cohort_fp_split_2026_11_16.py`) ran a full `snapshots` GROUP BY on the
+  115 GB db from ~12:07 and was killed by its 560 s timeout with no results; it is **not** rerun while
+  the collector is live. Any future historical scan must use `quarter_score_observations` (78 k rows/month,
+  indexed) or a DB copy, never a full `snapshots` scan mid-collection.
+
+### 5. Next actions
+
+1. Operator decision on the fast-lane Tier-B policy (§3 a/b/c).
+2. Reclaim disk before it becomes an outage: WAL checkpoint/truncate on `blm_metrics_clean.db` and
+   `blm_pokerbet.db`, and review the 115 G pokerbet retention — **needs explicit authorization**, a
+   checkpoint on a loaded box is heavy IO.
+3. No code, config, drop-in or service change was made in this entry. Working tree untouched apart
+   from this file.
+
 ## 2026-11-16 11:30 SAST — LIVE AUTO-BET PACE RUNG MOVED 1.08 → 1.16 (operator-approved). APPLIED + VERIFIED. REAL MONEY.
 
 Operator asked what the auto-bet gate trades, then asked for "tc-supera / tc-super /
