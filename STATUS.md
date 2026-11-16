@@ -1,5 +1,58 @@
 # BLM — STATUS
 
+## 2026-11-16 14:10 SAST — `blm-server` RESTARTED (AUTHORISED). WAL PIN RELEASED, Q3 FIX LIVE-CODED. ROOT CAUSE OF THE PIN FOUND.
+
+`systemctl --user restart blm-server` at 13:36:57 SAST. Old PID 405820 → new PID 465922.
+**Collector never touched** (PID 222134 throughout, tick 2347 at 14:04:21, 3.69 s, errors 0).
+
+### Restart verification (all passed)
+
+* `systemctl --user is-active` → server / collector / exec-actuator all `active`.
+* Startup log clean — every worker started: `v2_app_started`, `settle_worker_started`, `wal_hygiene_worker_started`,
+  `pace_ref_worker_started`, `result_reconciler_started`, `betting_worker_started`, `fast_lane_started`,
+  `stats_worker_started`, `pipeline_started`, then `fast_lane_ready` (provider `pokerbet_browser`, balance 90.18,
+  **pace_rung 1.16**).
+* **New code is loaded**: `fast_lane_pass` now logs from `fast_lane.py:779` (was `:679`) — the line moved with the
+  Q3 patch. No `fast_lane_q3_*` warning events.
+* `GET 127.0.0.1:2262/healthz` (unit `PORT=2262`, not 8000) → `{"status":"ok","service":"blm","auth":true,"users":3}`.
+* One `settle_worker_game_failed 30771918` in the 3 min after start — **pre-existing**: the same single failure
+  occurred before the restart (11:00–13:36 window also had exactly 1). Not attributable to this change.
+
+### WAL: released, and the real cause identified
+
+* Before restart: `blm_pokerbet.db-wal` 5.68 G, `busy_flag=1`, `held_back` ~130 k frames, `/` 95 % (13 G free).
+* Immediately after: **0.00 G** — the restart released the pin and reclaimed the whole 5.7 G (`/` 92–93 %, 17 G free).
+  `blm_metrics_clean.db-wal` is self-managing (0.9–1.1 G churn, housekeeping truncates it).
+* **Root cause (new finding):** the pin is the **`PaceReferenceWorker` first scan**. Its `_loop` runs
+  `_run_once()` immediately at start, and the Q3 reference is a full-history `GROUP BY` over `snapshots`
+  (115 GB) — so it holds one read snapshot for its whole duration. Evidence: the previous pin began at 11:31:44
+  (server start 11:30:13) and persisted until ~13:33 — **~2 h**, i.e. the scan, not a leak. The restart re-armed
+  it: scan started 13:37, still running at 14:05 (PID 465922, 44.9 % CPU, one busy thread — progressing), WAL
+  already back to 0.85 G (`held_back=215341 busy_flag=1`).
+* Consequence to expect until ~15:40: the WAL grows again (observed 0.5 G at +30 min, ~30 MB/min) and then truncates
+  to 0 in one step when the scan completes. Disk headroom (17 G) covers it; watch for `/` < 5 G.
+* Follow-up worth doing (NOT done, out of scope): bound that scan (recent window / smaller `clean` DB) so a server
+  start does not pin the WAL for two hours. That is a P3 fix and an operator decision.
+
+### Fast-lane Q3 — live status
+
+Code live and executing (`fast_lane_pass` every ~60 s, `rows` 20–77, `gaps` 0) but **not yet observable on a
+candidate**: `armed` has been 0 in every pass since the restart (`refused_top: market_heat`), so
+`qualify.check_game` has not yet been reached on this process (0 `autobet_qualification` records since 13:37).
+The Q3 reference payload also only publishes when the scan above completes, so until then `q3_ratio` would read
+`None` (= UNAVAILABLE branch) by design. **Offline verification of the same code path already passed**
+(3-case table in the 13:05 entry: C3/C5/R2 fire; `NO_FINGERPRINT` refusal; genuine-UNAVAILABLE branch).
+Live confirmation still owed: the first armed Tier-B candidate, where the audit record must show a real
+`q3_ratio` and a `NO_FINGERPRINT` refusal must become possible on the fast lane.
+
+### Next actions
+
+1. Confirm the first fast-lane `autobet_qualification` record carries a non-null `q3_ratio` (watch
+   `journalctl --user -u blm-server | grep autobet_qualification`, check `qualification.country` layer
+   `AUTOBET_STRENGTH_FP_QUALIFICATION`).
+2. Watch `/` and the WAL until the pace-ref scan completes (~15:40) — expect one truncate to 0.
+3. Consider bounding the pace-ref Q3 scan (P3).
+
 ## 2026-11-16 13:05 SAST — FAST LANE NOW CARRIES THE GAME'S REAL Q3 SEGMENT. IMPLEMENTED — VERIFICATION PASSED — NOT YET LIVE (NEEDS `blm-server` RESTART).
 
 Fixes §3 of the 12:25 audit: the fast lane can no longer trade a Tier-B rung **unconfirmed**. Code is
