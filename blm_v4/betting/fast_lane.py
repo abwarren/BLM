@@ -455,8 +455,14 @@ class FastLaneWorker:
     def pass_once(self) -> dict:
         summary = {"rows": 0, "games": 0, "armed": 0, "executed": 0,
                    "would_bet": 0, "refused": {}}
-        if not self.store.is_enabled():
-            return summary
+        # Operator directive 2026-11-19: a switched-OFF Auto-Bet must still
+        # LIST the games that clear the trade legs — "off" is a fact about
+        # execution, not about qualification.  The lane keeps evaluating the
+        # legs while off and records each qualified game with reason
+        # ``autobet_off``; the execution path is never reached, so nothing can
+        # be priced, claimed or submitted.
+        enabled = self.store.is_enabled()
+        summary["autobet_off"] = not enabled
         rows = self.fresh_rows()
         summary["rows"] = len(rows)
         if not rows:
@@ -509,10 +515,13 @@ class FastLaneWorker:
             stale = (refusal is None
                      and (market_age is None or market_age > MAX_MARKET_AGE_S))
             attempt = 0
-            if stale:
+            if stale and enabled:
                 # operator directive 2026-10-28: a stale captured line is not
                 # refused outright — retry it up to N times and let the book's
-                # live betslip be the authority on line and price.
+                # live betslip be the authority on line and price.  This is an
+                # EXECUTION rule: while Auto-Bet is OFF the retry machinery is
+                # skipped, so a stale market neither spends an attempt nor
+                # hides the qualification.
                 attempt, refusal = self._stale_attempt(base)
             if refusal is not None:
                 key = refusal.split(":")[0]
@@ -528,6 +537,12 @@ class FastLaneWorker:
                                            reason="already_placed")
                     continue
             except Exception:
+                continue
+            if not enabled:
+                # Qualification is LISTED while OFF; execution never runs.
+                self._record_candidate(row, base, avg, attempt,
+                                       outcome="NOT_PLACED",
+                                       reason="autobet_off")
                 continue
             game = self.build_game(
                 row, slug, avg, now, attempt=attempt,

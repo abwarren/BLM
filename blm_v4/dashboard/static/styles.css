@@ -650,6 +650,19 @@ details > summary::marker { content: ""; }
 .ab-exec .ab-game { font-weight: 600; }
 .ab-exec .ab-alert { color: var(--muted, #9ca3af); }
 .ab-exec .ab-status { font-weight: 700; }
+/* QUALIFYING BETS — one line per fixture, the other ledger entries under
+   that fixture's dropdown (operator directive 2026-11-19). */
+.ab-cand-group { list-style: none; margin: 4px 0; }
+.ab-cand-group > details > summary { list-style: none; cursor: pointer; }
+.ab-cand-group > details > summary::-webkit-details-marker { display: none; }
+.ab-cand-count { margin-left: auto; font-size: 10px; color: var(--muted, #9ca3af); }
+.ab-cand-entries { list-style: none; margin: 2px 0 6px 18px; padding: 0 4px; }
+.ab-cand-entry {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline;
+  font-size: 11px; padding: 3px 8px; margin: 2px 0;
+  border-left: 2px solid var(--border, #374151); border-radius: 4px;
+  background: var(--bg-soft, rgba(255,255,255,0.02)); opacity: .85;
+}
 /* status colours — ACCEPTED green, REJECTED amber, FAILED red,
    UNKNOWN neutral grey; PENDING/SUBMITTED blue-ish */
 /* ── GLOBAL SEARCH + game-state filter (command center) ───── */

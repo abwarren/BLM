@@ -4380,28 +4380,71 @@ async function loadCandidates() {
   const list = $("abCandList");
   if (!list) return;
   try {
-    const resp = await fetch(`${BETTING_API}/candidates?limit=40`);
+    const resp = await fetch(`${BETTING_API}/candidates?limit=200`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const body = await resp.json();
     const rows = body.candidates || [];
     const today = body.today || [];
+    // settled finals for these games, from the ONE outcome authority
+    const finals = await candidateFinals(rows);
+    // ── ONE LINE PER FIXTURE (operator directive 2026-11-19) ──
+    // The ledger holds one row per decision (game × progress band × attempt),
+    // so a single game repeats for every tick it stayed qualified.  The panel
+    // shows ONE line per unique game id; the other entries live under that
+    // fixture's dropdown.  The line's own row is the PLACED row when one
+    // exists, else the row that carries a real stake (the execution attempt),
+    // else the newest decision.  Rows arrive newest-first.
+    const byGame = new Map();
+    for (const r of rows) {
+      const gid = String(r.game_id || "");
+      if (!byGame.has(gid)) byGame.set(gid, []);
+      byGame.get(gid).push(r);
+    }
+    const groups = [...byGame.entries()].map(([gid, list]) => {
+      const placed = list.find((r) => String(r.outcome || "").toUpperCase() === "PLACED");
+      const staked = list.find((r) => r.stake_amount != null && isFinite(r.stake_amount));
+      return { gid, list, row: placed || staked || list[0] };
+    });
     const head = $("abCandHead");
     if (head) {
-      head.textContent = `${rows.length} shown · ${today.length} today · ` +
-        `${today.filter((r) => String(r.outcome).toUpperCase() === "PLACED").length} placed`;
+      const todayGames = new Set(today.map((r) => String(r.game_id || "")));
+      const placedGames = groups.filter((g) =>
+        g.list.some((r) => String(r.outcome || "").toUpperCase() === "PLACED")).length;
+      head.textContent = `${groups.length} games · ${todayGames.size} today · ${placedGames} placed`;
     }
-    list.innerHTML = rows.length ? rows.map((r) => {
+    const entryLine = (r) => {
+      const p = String(r.outcome || "").toUpperCase() === "PLACED";
+      return `<li class="ab-cand-entry">
+        <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(11, 19))}</span>
+        <span>${p ? "PLACED" : "NOT PLACED"}</span>
+        <span class="al-num" title="UNDER price">${r.price != null ? num1(r.price) : "–"}</span>
+        <span class="al-num" title="line">${r.line != null ? num1(r.line) : "–"}</span>
+        <span class="muted" title="progress">${r.progress_pct != null ? num1(r.progress_pct) + "%" : ""}</span>
+        <span class="al-num" title="stake">${r.stake_amount != null ? money(r.stake_amount) : "–"}</span>
+        <span class="muted">${esc(r.reason || "")}</span>
+      </li>`;
+    };
+    list.innerHTML = groups.length ? groups.map(({ list: entries, row: r }) => {
       const placed = String(r.outcome || "").toUpperCase() === "PLACED";
-      return `<li class="ab-exec ${placed ? "st-accepted" : "st-blocked"}">
-        <span class="ab-game" title="game ID">${esc(r.game_id || "")}</span>
+      const res = candidateResult(r, finals);
+      const headHTML = `<span class="ab-game" title="game ID">${esc(r.game_id || "")}</span>
         <span class="ab-status">${placed ? "PLACED" : "NOT PLACED"}</span>
+        <span class="al-num ab-result ${res.cls}" title="settled final vs this row's line">${res.word}</span>
         <span class="al-num" title="UNDER price">${r.price != null ? num1(r.price) : "–"}</span>
         <span class="al-num" title="line">${r.line != null ? num1(r.line) : "–"}</span>
         <span class="muted" title="progress">${r.progress_pct != null ? num1(r.progress_pct) + "%" : ""}</span>
         <span class="al-num" title="stake">${r.stake_amount != null ? money(r.stake_amount) : "–"}</span>
         <span class="muted ab-reason" title="reason">${esc(r.reason || "")}</span>
-        <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(0, 19))}</span>
-      </li>`;
+        <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(0, 19))}</span>`;
+      if (entries.length === 1) {
+        return `<li class="ab-exec ${placed ? "st-accepted" : "st-blocked"}">${headHTML}</li>`;
+      }
+      const others = entries.filter((x) => x !== r).map(entryLine).join("");
+      return `<li class="ab-cand-group"><details>
+        <summary class="ab-exec ${placed ? "st-accepted" : "st-blocked"}">${headHTML}
+          <span class="ab-cand-count">${entries.length} entries ▾</span></summary>
+        <ul class="ab-cand-entries">${others}</ul>
+      </details></li>`;
     }).join("") : '<li class="alerts-empty">No qualifying bets yet</li>';
   } catch (err) {
     list.innerHTML = `<li class="alerts-empty">Candidates unavailable: ${esc(err.message)}</li>`;
