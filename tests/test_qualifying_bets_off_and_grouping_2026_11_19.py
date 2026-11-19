@@ -23,6 +23,13 @@ from blm_v4.betting.config import BettingConfig
 from blm_v4.betting.fast_lane import FastLaneWorker
 from blm_v4.betting.store import KEY_AUTO_ENABLED, BettingStore
 
+import pytest
+
+
+@pytest.fixture()
+def store(tmp_path) -> BettingStore:
+    return BettingStore(str(tmp_path / "store.db"))
+
 SLUG = "betual-euroleague"
 AVG_PACE = 4.2842
 GOOD = dict(progress=82.5, total=161.0, req=5.0714, act=4.8788,
@@ -147,5 +154,57 @@ def test_panel_groups_candidates_by_unique_game_id():
     assert '<ul class="ab-cand-entries">' in block
     # the header counts GAMES, not ledger rows
     assert "todayGames.size" in block
-    # PLACED wins the fixture's headline row, then the staked attempt
-    assert "placed || staked || list[0]" in block
+    # the window is not silently truncated: today's decisions are merged in
+    assert "today.filter((r) => !seenIds.has(r.id))" in block
+    assert "limit=500" in block
+
+
+def test_panel_reads_placement_from_the_execution_ledger():
+    src = DASHBOARD_JS.read_text(encoding="utf-8")
+    start = src.index("async function loadCandidates()")
+    block = src[start:src.index("const _abCandRefresh", start)]
+    assert "body.placed" in block, "placement must come from the execution map"
+    assert "bet && (!placedRow || bet.at_utc > placedRow.at_utc)" in block
+    assert "_fromExecution" in block
+
+
+# ── 3. a PLACED row is IMMUTABLE once written ─────────────────────────
+def test_a_later_not_placed_refresh_cannot_erase_a_placement(store):
+    store.record_candidate(dict(
+        dedupe_key="g9:80:0", game_id="g9", outcome="NOT_PLACED", reason="limit"))
+    store.record_candidate(dict(
+        dedupe_key="g9:80:0", game_id="g9", outcome="PLACED",
+        execution_id="exec-9", execution_state="SUBMITTED", stake_units=1.8,
+        stake_amount=324.0, line=186.5, price=1.85))
+    # every later tick re-sees the game and refreshes the SAME key
+    store.record_candidate(dict(
+        dedupe_key="g9:80:0", game_id="g9", outcome="NOT_PLACED",
+        reason="already_placed", line=187.5, price=1.9, progress_pct=90.0,
+        stake_amount=None))
+    r = store.candidates_recent(limit=5)[0]
+    assert r["outcome"] == "PLACED", "a placement must never be downgraded"
+    assert r["reason"] in (None, "")
+    assert r["execution_id"] == "exec-9"
+    assert r["line"] == pytest.approx(186.5), "the sealed bet line must not drift"
+    assert r["price"] == pytest.approx(1.85)
+    assert r["stake_amount"] == pytest.approx(324.0)
+
+
+def test_placed_executions_map_is_the_newest_placed_bet(store):
+    store.claim({"execution_id": "e-failed", "idempotency_key": "k1",
+                 "game_id": "g1", "alert_id": "a1", "checkpoint": "75",
+                 "status": "FAILED", "triggered_line": 199.5, "price": 1.9})
+    store.claim({"execution_id": "e-1", "idempotency_key": "k2",
+                 "game_id": "g1", "alert_id": "a1", "checkpoint": "75",
+                 "status": "SUBMITTED", "triggered_line": 200.5, "price": 1.8,
+                 "stake_amount": 100.0})
+    store.claim({"execution_id": "e-2", "idempotency_key": "k3",
+                 "game_id": "g1", "alert_id": "a1", "checkpoint": "75",
+                 "status": "ACCEPTED", "triggered_line": 201.5, "price": 1.75,
+                 "stake_amount": 324.0})
+    m = store.placed_executions_for(["g1", "g2"])
+    assert set(m) == {"g1"}, "unplaced / unknown games must be absent"
+    assert m["g1"]["execution_id"] == "e-2", "newest placed execution wins"
+    assert m["g1"]["line"] == pytest.approx(201.5)
+    assert m["g1"]["stake_amount"] == pytest.approx(324.0)
+    assert store.placed_executions_for([]) == {}

@@ -557,26 +557,55 @@ class BettingStore:
                         updated_at_utc)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(dedupe_key) DO UPDATE SET
-                        at_utc=excluded.at_utc,
-                        checkpoint=excluded.checkpoint,
-                        line=excluded.line,
-                        price=excluded.price,
-                        progress_pct=excluded.progress_pct,
-                        total_points=excluded.total_points,
-                        required_pace=excluded.required_pace,
-                        actual_pace=excluded.actual_pace,
-                        pace_ratio=excluded.pace_ratio,
-                        shortfall=excluded.shortfall,
-                        outcome=excluded.outcome,
-                        reason=excluded.reason,
-                        execution_id=COALESCE(excluded.execution_id,
-                                              bet_candidates.execution_id),
-                        execution_state=COALESCE(excluded.execution_state,
-                                                 bet_candidates.execution_state),
-                        stake_units=COALESCE(excluded.stake_units,
-                                             bet_candidates.stake_units),
-                        stake_amount=COALESCE(excluded.stake_amount,
-                                              bet_candidates.stake_amount),
+                        at_utc=CASE WHEN bet_candidates.outcome='PLACED'
+                                     THEN bet_candidates.at_utc
+                                     ELSE excluded.at_utc END,
+                        checkpoint=CASE WHEN bet_candidates.outcome='PLACED'
+                                        THEN bet_candidates.checkpoint
+                                        ELSE excluded.checkpoint END,
+                        line=CASE WHEN bet_candidates.outcome='PLACED'
+                                  THEN bet_candidates.line ELSE excluded.line END,
+                        price=CASE WHEN bet_candidates.outcome='PLACED'
+                                   THEN bet_candidates.price ELSE excluded.price END,
+                        progress_pct=CASE WHEN bet_candidates.outcome='PLACED'
+                                          THEN bet_candidates.progress_pct
+                                          ELSE excluded.progress_pct END,
+                        total_points=CASE WHEN bet_candidates.outcome='PLACED'
+                                          THEN bet_candidates.total_points
+                                          ELSE excluded.total_points END,
+                        required_pace=CASE WHEN bet_candidates.outcome='PLACED'
+                                           THEN bet_candidates.required_pace
+                                           ELSE excluded.required_pace END,
+                        actual_pace=CASE WHEN bet_candidates.outcome='PLACED'
+                                         THEN bet_candidates.actual_pace
+                                         ELSE excluded.actual_pace END,
+                        pace_ratio=CASE WHEN bet_candidates.outcome='PLACED'
+                                        THEN bet_candidates.pace_ratio
+                                        ELSE excluded.pace_ratio END,
+                        shortfall=CASE WHEN bet_candidates.outcome='PLACED'
+                                       THEN bet_candidates.shortfall
+                                       ELSE excluded.shortfall END,
+                        outcome=CASE WHEN bet_candidates.outcome='PLACED'
+                                     THEN 'PLACED' ELSE excluded.outcome END,
+                        reason=CASE WHEN bet_candidates.outcome='PLACED'
+                                    THEN bet_candidates.reason
+                                    ELSE excluded.reason END,
+                        execution_id=CASE WHEN bet_candidates.outcome='PLACED'
+                                          THEN bet_candidates.execution_id
+                                          ELSE COALESCE(excluded.execution_id,
+                                               bet_candidates.execution_id) END,
+                        execution_state=CASE WHEN bet_candidates.outcome='PLACED'
+                                             THEN bet_candidates.execution_state
+                                             ELSE COALESCE(excluded.execution_state,
+                                                  bet_candidates.execution_state) END,
+                        stake_units=CASE WHEN bet_candidates.outcome='PLACED'
+                                         THEN bet_candidates.stake_units
+                                         ELSE COALESCE(excluded.stake_units,
+                                              bet_candidates.stake_units) END,
+                        stake_amount=CASE WHEN bet_candidates.outcome='PLACED'
+                                          THEN bet_candidates.stake_amount
+                                          ELSE COALESCE(excluded.stake_amount,
+                                               bet_candidates.stake_amount) END,
                         updated_at_utc=excluded.updated_at_utc""",
                     (key, rec.get("at_utc") or now, rec.get("day_utc") or _day(),
                      str(rec.get("game_id")), rec.get("checkpoint"),
@@ -608,6 +637,46 @@ class BettingStore:
             return [dict(r) for r in rows]
         except sqlite3.Error:
             return []
+
+    def placed_executions_for(self, game_ids) -> dict:
+        """game_id -> the NEWEST placed execution for it.
+
+        The execution ledger is the authority on whether a bet exists — a
+        placement made by any executor (poll worker, fast lane, manual) lands
+        in ``bet_executions``, and only some of those paths also write a
+        ``bet_candidates`` row.  The qualifying-bets panel therefore reads
+        placement from HERE and never infers it from a decision row.
+        READ-ONLY; unknown / unplaced ids are simply absent from the map.
+        """
+        ids = [str(g) for g in dict.fromkeys(game_ids or []) if str(g)]
+        if not ids:
+            return {}
+        out: dict = {}
+        try:
+            with self._conn() as c:
+                for i in range(0, len(ids), 400):
+                    chunk = ids[i:i + 400]
+                    rows = c.execute(
+                        "SELECT execution_id, game_id, status, triggered_line, "
+                        "       price, stake_amount, requested_at_utc, "
+                        "       submitted_at_utc, day_utc "
+                        "  FROM bet_executions "
+                        " WHERE status IN ('SUBMITTED','ACCEPTED','SETTLED','PUSHED') "
+                        f"   AND game_id IN ({','.join('?' * len(chunk))}) "
+                        " ORDER BY id", chunk).fetchall()
+                    for r in rows:      # last row per game = newest
+                        out[str(r["game_id"])] = {
+                            "execution_id": r["execution_id"],
+                            "status": r["status"],
+                            "line": r["triggered_line"],
+                            "price": r["price"],
+                            "stake_amount": r["stake_amount"],
+                            "at_utc": r["submitted_at_utc"] or r["requested_at_utc"],
+                            "day_utc": r["day_utc"],
+                        }
+        except sqlite3.Error:
+            return {}
+        return out
 
     def get_execution(self, execution_id: str) -> Optional[dict]:
         with self._conn() as c:

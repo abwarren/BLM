@@ -4380,42 +4380,65 @@ async function loadCandidates() {
   const list = $("abCandList");
   if (!list) return;
   try {
-    const resp = await fetch(`${BETTING_API}/candidates?limit=200`);
+    const resp = await fetch(`${BETTING_API}/candidates?limit=500`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const body = await resp.json();
     const rows = body.candidates || [];
     const today = body.today || [];
+    const placed = body.placed || {};
     // settled finals for these games, from the ONE outcome authority
-    const finals = await candidateFinals(rows);
+    const finals = await candidateFinals(rows.concat(today));
     // ── ONE LINE PER FIXTURE (operator directive 2026-11-19) ──
     // The ledger holds one row per decision (game × progress band × attempt),
     // so a single game repeats for every tick it stayed qualified.  The panel
     // shows ONE line per unique game id; the other entries live under that
-    // fixture's dropdown.  The line's own row is the PLACED row when one
-    // exists, else the row that carries a real stake (the execution attempt),
-    // else the newest decision.  Rows arrive newest-first.
+    // fixture's dropdown.
+    //
+    // PLACEMENT IS AN EXECUTION FACT, not a decision row: `placed` carries the
+    // newest PLACED execution per game (poll worker and manual placements
+    // never write a candidates row).  A fixture with a placed execution is
+    // shown PLACED with THAT execution's sealed line/price/stake — never a
+    // later decision row's, and never "NOT PLACED" just because the decision
+    // row for the bet itself fell outside the window.
+    const seenIds = new Set(rows.map((r) => r.id));
+    const all = rows.concat(today.filter((r) => !seenIds.has(r.id)))
+      .sort((a, b) => Number(b.id) - Number(a.id));
     const byGame = new Map();
-    for (const r of rows) {
+    for (const r of all) {
       const gid = String(r.game_id || "");
       if (!byGame.has(gid)) byGame.set(gid, []);
       byGame.get(gid).push(r);
     }
-    const groups = [...byGame.entries()].map(([gid, list]) => {
-      const placed = list.find((r) => String(r.outcome || "").toUpperCase() === "PLACED");
-      const staked = list.find((r) => r.stake_amount != null && isFinite(r.stake_amount));
-      return { gid, list, row: placed || staked || list[0] };
+    const groups = [...byGame.entries()].map(([gid, entries]) => {
+      const bet = placed[gid] || null;
+      const placedRow = entries.find((r) =>
+        String(r.outcome || "").toUpperCase() === "PLACED") || null;
+      const staked = entries.find((r) =>
+        r.stake_amount != null && isFinite(r.stake_amount)) || null;
+      let row = placedRow || staked || entries[0];
+      // the execution ledger outranks a decision row whenever it is newer
+      // (or when no decision row ever recorded the placement at all)
+      if (bet && (!placedRow || bet.at_utc > placedRow.at_utc)) {
+        row = {
+          game_id: gid, outcome: "PLACED", reason: "",
+          line: bet.line, price: bet.price,
+          stake_amount: bet.stake_amount, at_utc: bet.at_utc,
+          progress_pct: null, execution_id: bet.execution_id,
+          execution_state: bet.status, _fromExecution: true,
+        };
+      }
+      return { gid, entries, row, placed: !!(bet || placedRow) };
     });
     const head = $("abCandHead");
     if (head) {
       const todayGames = new Set(today.map((r) => String(r.game_id || "")));
-      const placedGames = groups.filter((g) =>
-        g.list.some((r) => String(r.outcome || "").toUpperCase() === "PLACED")).length;
-      head.textContent = `${groups.length} games · ${todayGames.size} today · ${placedGames} placed`;
+      head.textContent = `${groups.length} games · ${todayGames.size} today · ` +
+        `${groups.filter((g) => g.placed).length} placed`;
     }
     const entryLine = (r) => {
       const p = String(r.outcome || "").toUpperCase() === "PLACED";
       return `<li class="ab-cand-entry">
-        <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(11, 19))}</span>
+        <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(0, 19))}</span>
         <span>${p ? "PLACED" : "NOT PLACED"}</span>
         <span class="al-num" title="UNDER price">${r.price != null ? num1(r.price) : "–"}</span>
         <span class="al-num" title="line">${r.line != null ? num1(r.line) : "–"}</span>
@@ -4424,11 +4447,13 @@ async function loadCandidates() {
         <span class="muted">${esc(r.reason || "")}</span>
       </li>`;
     };
-    list.innerHTML = groups.length ? groups.map(({ list: entries, row: r }) => {
-      const placed = String(r.outcome || "").toUpperCase() === "PLACED";
+    list.innerHTML = groups.length ? groups.map(({ entries, row: r, placed: isPlaced }) => {
       const res = candidateResult(r, finals);
+      const execTitle = r._fromExecution
+        ? `placed execution ${r.execution_id || ""} (${r.execution_state || ""})`
+        : "status";
       const headHTML = `<span class="ab-game" title="game ID">${esc(r.game_id || "")}</span>
-        <span class="ab-status">${placed ? "PLACED" : "NOT PLACED"}</span>
+        <span class="ab-status" title="${esc(execTitle)}">${isPlaced ? "PLACED" : "NOT PLACED"}</span>
         <span class="al-num ab-result ${res.cls}" title="settled final vs this row's line">${res.word}</span>
         <span class="al-num" title="UNDER price">${r.price != null ? num1(r.price) : "–"}</span>
         <span class="al-num" title="line">${r.line != null ? num1(r.line) : "–"}</span>
@@ -4436,12 +4461,12 @@ async function loadCandidates() {
         <span class="al-num" title="stake">${r.stake_amount != null ? money(r.stake_amount) : "–"}</span>
         <span class="muted ab-reason" title="reason">${esc(r.reason || "")}</span>
         <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(0, 19))}</span>`;
-      if (entries.length === 1) {
-        return `<li class="ab-exec ${placed ? "st-accepted" : "st-blocked"}">${headHTML}</li>`;
+      if (entries.length === 1 && !r._fromExecution) {
+        return `<li class="ab-exec ${isPlaced ? "st-accepted" : "st-blocked"}">${headHTML}</li>`;
       }
       const others = entries.filter((x) => x !== r).map(entryLine).join("");
       return `<li class="ab-cand-group"><details>
-        <summary class="ab-exec ${placed ? "st-accepted" : "st-blocked"}">${headHTML}
+        <summary class="ab-exec ${isPlaced ? "st-accepted" : "st-blocked"}">${headHTML}
           <span class="ab-cand-count">${entries.length} entries ▾</span></summary>
         <ul class="ab-cand-entries">${others}</ul>
       </details></li>`;

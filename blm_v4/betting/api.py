@@ -341,14 +341,24 @@ def betting_candidates(limit: int = 50) -> dict:
     every trade leg appears here even when the slip was refused, the limit
     blocked it, or the game had already been bet.  Execution rows stay in
     ``/history``; this endpoint never mixes the two.
+
+    ADDITIVE (integrity fix 2026-11-19): ``placed`` carries, per game id, the
+    newest PLACED execution from ``bet_executions``.  Placement is an
+    execution fact — some executors (poll worker, manual path) never write a
+    ``bet_candidates`` row, so the panel must not infer "no bet" from the
+    absence of a PLACED decision row.  The map is read-only and empty when
+    nothing was placed.
     """
     store, _cfg = _require()
     rows = store.candidates_recent(limit=max(1, min(int(limit), 500)))
+    today = store.candidates_recent(limit=500, day=_utc_day())
+    gids = sorted({str(r["game_id"]) for r in rows}
+                  | {str(r["game_id"]) for r in today})
     return {
         "candidates": rows,
         "limit": max(1, min(int(limit), 500)),
-        "today": store.candidates_recent(limit=500,
-                                         day=_utc_day()),
+        "today": today,
+        "placed": store.placed_executions_for(gids),
     }
 
 
