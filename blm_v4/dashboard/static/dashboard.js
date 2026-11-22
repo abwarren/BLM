@@ -4396,10 +4396,12 @@ async function loadCandidates() {
     //
     // PLACEMENT IS AN EXECUTION FACT, not a decision row: `placed` carries the
     // newest PLACED execution per game (poll worker and manual placements
-    // never write a candidates row).  A fixture with a placed execution is
-    // shown PLACED with THAT execution's sealed line/price/stake — never a
-    // later decision row's, and never "NOT PLACED" just because the decision
-    // row for the bet itself fell outside the window.
+    // never write a candidates row).  A fixture with a CONFIRMED execution
+    // (ACCEPTED — the bookmaker's own receipt is on file) is shown PLACED with
+    // THAT execution's sealed line/price/stake — never a later decision row's,
+    // and never "NOT PLACED" just because the decision row for the bet itself
+    // fell outside the window.  A SUBMITTED execution carries NO receipt: the
+    // slip was SENT and is UNCONFIRMED, so it is never rendered as PLACED.
     const seenIds = new Set(rows.map((r) => r.id));
     const all = rows.concat(today.filter((r) => !seenIds.has(r.id)))
       .sort((a, b) => Number(b.id) - Number(a.id));
@@ -4409,37 +4411,55 @@ async function loadCandidates() {
       if (!byGame.has(gid)) byGame.set(gid, []);
       byGame.get(gid).push(r);
     }
+    // A dry-run execution (WOULD_BET) is never a placement, even when its
+    // status reads ACCEPTED: the provider is the simulator and its reference
+    // starts with "dryrun-".  Both markers are honoured when the API ships
+    // them (`execution_state`, `provider_ref` are additive).
+    const CONFIRMED_STATES = ["ACCEPTED", "SETTLED", "PUSHED"];
     const groups = [...byGame.entries()].map(([gid, entries]) => {
       const bet = placed[gid] || null;
+      const betState = String((bet && bet.status) || "").toUpperCase();
+      const betExec = String((bet && bet.execution_state) || "").toUpperCase();
+      const betRef = String((bet && bet.provider_ref) || "");
+      const dryRun = !!bet && (betExec === "WOULD_BET" || /^dryrun-/i.test(betRef));
+      // a simulator row is simulation evidence, not placement evidence
+      const exec = dryRun ? null : bet;
+      const confirmed = !!exec && CONFIRMED_STATES.indexOf(betState) >= 0;
+      const unconfirmed = !!exec && betState === "SUBMITTED";
       const placedRow = entries.find((r) =>
         String(r.outcome || "").toUpperCase() === "PLACED") || null;
       const staked = entries.find((r) =>
         r.stake_amount != null && isFinite(r.stake_amount)) || null;
       let row = placedRow || staked || entries[0];
-      // the execution ledger outranks a decision row whenever it is newer
-      // (or when no decision row ever recorded the placement at all)
-      if (bet && (!placedRow || bet.at_utc > placedRow.at_utc)) {
+      // the execution ledger outranks a decision row whenever it is newer,
+      // when no decision row ever recorded the placement at all, or when the
+      // execution is still UNCONFIRMED (the frozen PLACED decision row would
+      // otherwise repeat a placement the book never confirmed)
+      if (exec && (!placedRow || exec.at_utc > placedRow.at_utc || !confirmed)) {
         row = {
-          game_id: gid, outcome: "PLACED", reason: "",
-          line: bet.line, price: bet.price,
-          stake_amount: bet.stake_amount, at_utc: bet.at_utc,
-          progress_pct: null, execution_id: bet.execution_id,
-          execution_state: bet.status, _fromExecution: true,
+          game_id: gid, outcome: confirmed ? "PLACED" : "NOT_PLACED", reason: "",
+          line: exec.line, price: exec.price,
+          stake_amount: exec.stake_amount, at_utc: exec.at_utc,
+          progress_pct: null, execution_id: exec.execution_id,
+          execution_state: exec.status, _fromExecution: true,
         };
       }
-      return { gid, entries, row, placed: !!(bet || placedRow) };
+      return { gid, entries, row, confirmed, unconfirmed };
     });
     const head = $("abCandHead");
     if (head) {
       const todayGames = new Set(today.map((r) => String(r.game_id || "")));
+      const nPlaced = groups.filter((g) => g.confirmed).length;
+      const nUnconf = groups.filter((g) => g.unconfirmed).length;
       head.textContent = `${groups.length} games · ${todayGames.size} today · ` +
-        `${groups.filter((g) => g.placed).length} placed`;
+        `${nPlaced} placed` + (nUnconf ? ` · ${nUnconf} unconfirmed` : "");
     }
-    const entryLine = (r) => {
+    const entryLine = (r, unconfirmedGame) => {
       const p = String(r.outcome || "").toUpperCase() === "PLACED";
+      const word = p ? (unconfirmedGame ? "UNCONFIRMED" : "PLACED") : "NOT PLACED";
       return `<li class="ab-cand-entry">
         <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(0, 19))}</span>
-        <span>${p ? "PLACED" : "NOT PLACED"}</span>
+        <span title="${p && unconfirmedGame ? "sent to PokerBet — no bookmaker receipt" : ""}">${word}</span>
         <span class="al-num" title="UNDER price">${r.price != null ? num1(r.price) : "–"}</span>
         <span class="al-num" title="line">${r.line != null ? num1(r.line) : "–"}</span>
         <span class="muted" title="progress">${r.progress_pct != null ? num1(r.progress_pct) + "%" : ""}</span>
@@ -4447,13 +4467,19 @@ async function loadCandidates() {
         <span class="muted">${esc(r.reason || "")}</span>
       </li>`;
     };
-    list.innerHTML = groups.length ? groups.map(({ entries, row: r, placed: isPlaced }) => {
+    list.innerHTML = groups.length ? groups.map(({ entries, row: r, confirmed, unconfirmed }) => {
       const res = candidateResult(r, finals);
+      const statusWord = confirmed ? "PLACED"
+        : (unconfirmed ? "UNCONFIRMED" : "NOT PLACED");
+      const statusCls = confirmed ? "st-accepted"
+        : (unconfirmed ? "st-submitted" : "st-blocked");
       const execTitle = r._fromExecution
-        ? `placed execution ${r.execution_id || ""} (${r.execution_state || ""})`
+        ? (confirmed
+          ? `placed execution ${r.execution_id || ""} (${r.execution_state || ""}) — bookmaker receipt on file`
+          : `execution ${r.execution_id || ""} (${r.execution_state || ""}) — sent to PokerBet, NO bookmaker receipt: not confirmed placed`)
         : "status";
       const headHTML = `<span class="ab-game" title="game ID">${esc(r.game_id || "")}</span>
-        <span class="ab-status" title="${esc(execTitle)}">${isPlaced ? "PLACED" : "NOT PLACED"}</span>
+        <span class="ab-status" title="${esc(execTitle)}">${statusWord}</span>
         <span class="al-num ab-result ${res.cls}" title="settled final vs this row's line">${res.word}</span>
         <span class="al-num" title="UNDER price">${r.price != null ? num1(r.price) : "–"}</span>
         <span class="al-num" title="line">${r.line != null ? num1(r.line) : "–"}</span>
@@ -4461,12 +4487,11 @@ async function loadCandidates() {
         <span class="al-num" title="stake">${r.stake_amount != null ? money(r.stake_amount) : "–"}</span>
         <span class="muted ab-reason" title="reason">${esc(r.reason || "")}</span>
         <span class="muted">${esc((r.at_utc || "").replace("T", " ").slice(0, 19))}</span>`;
-      if (entries.length === 1 && !r._fromExecution) {
-        return `<li class="ab-exec ${isPlaced ? "st-accepted" : "st-blocked"}">${headHTML}</li>`;
-      }
-      const others = entries.filter((x) => x !== r).map(entryLine).join("");
+      const others = entries.filter((x) => x !== r)
+        .map((x) => entryLine(x, unconfirmed)).join("");
+      if (!others) return `<li class="ab-exec ${statusCls}">${headHTML}</li>`;
       return `<li class="ab-cand-group"><details>
-        <summary class="ab-exec ${isPlaced ? "st-accepted" : "st-blocked"}">${headHTML}
+        <summary class="ab-exec ${statusCls}">${headHTML}
           <span class="ab-cand-count">${entries.length} entries ▾</span></summary>
         <ul class="ab-cand-entries">${others}</ul>
       </details></li>`;
