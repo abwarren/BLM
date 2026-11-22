@@ -1763,6 +1763,53 @@ def _load_snapshot_tail(conn: sqlite3.Connection, source_game_id: str,
         q, (source_game_id, CLEAN_DATA_EPOCH, limit))]
 
 
+# ── OUTCOME BLOCK CACHE (2026-11-22) ────────────────────────────────────
+# Every id in ``/api/v4/alert-outcomes`` costs one ``_load_snapshot_tail``
+# (500 rows via a JOIN + temp b-tree).  Measured on prod: ~0.85 s per game,
+# i.e. ~170 s for the panel's 200 ids — and the panel + the health monitor
+# asked again on every poll, so a handful of dashboard tabs filled the anyio
+# thread pool (40) and /static/* could not get a thread (the dashboard "could
+# not load" while /healthz stayed green).
+#
+# Caching rule: a SETTLED block is immutable (final + trigger lines come from
+# stored rows and a settled ``game_results`` entry) → cached for the process;
+# an unsettled block only has to be fresher than the poll interval → short
+# TTL.  The key carries the DB path so a test/other deployment can never be
+# served another database's block.
+_OUTCOME_CACHE: dict[tuple, tuple[float, dict, bool]] = {}
+_OUTCOME_CACHE_LOCK = threading.Lock()
+_OUTCOME_CACHE_MAX = 4000
+
+
+def _outcome_cache_ttl_s() -> float:
+    try:
+        return max(0.0, float(os.environ.get("BLM_OUTCOME_CACHE_TTL_S", "30")))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _outcome_cache_get(key) -> Optional[dict]:
+    with _OUTCOME_CACHE_LOCK:
+        hit = _OUTCOME_CACHE.get(key)
+    if hit is None:
+        return None
+    at, block, settled = hit
+    if settled:
+        return block
+    if (time.monotonic() - at) <= _outcome_cache_ttl_s():
+        return block
+    return None
+
+
+def _outcome_cache_put(key, block: dict, *, settled: bool) -> None:
+    with _OUTCOME_CACHE_LOCK:
+        _OUTCOME_CACHE[key] = (time.monotonic(), block, bool(settled))
+        if len(_OUTCOME_CACHE) > _OUTCOME_CACHE_MAX:
+            drop = [k for k, (_, _, s) in _OUTCOME_CACHE.items() if not s][:1000]
+            for k in drop:
+                _OUTCOME_CACHE.pop(k, None)
+
+
 def _load_collector_state() -> Optional[dict]:
     try:
         if STATE_FILE.exists():
@@ -2846,15 +2893,24 @@ def v4_alert_outcomes(
         settled = _settled_result_map([i for i in wanted if i in meta])
         proj_lines = _projection_lines_map(wanted)
         outcomes: dict = {}
+        cache_db = str(_db_path())
         for gid in wanted:
             cls = meta.get(gid)
             if cls is None:
                 continue        # unknown game — no block is invented for it
+            cache_key = (cache_db, gid)
+            hit = _outcome_cache_get(cache_key)
+            if hit is not None:
+                outcomes[gid] = hit
+                continue
             try:
                 rows = list(reversed(_load_snapshot_tail(conn, gid, limit=500)))
-                outcomes[gid] = under_alert_outcome(
+                block = under_alert_outcome(
                     rows, cls, settled=settled.get(gid),
                     projection_rows=proj_lines.get(gid))
+                outcomes[gid] = block
+                _outcome_cache_put(cache_key, block,
+                                   settled=settled.get(gid) is not None)
             except Exception:
                 # failure-isolated exactly like /live: one unreadable game
                 # yields no block rather than breaking the batch
