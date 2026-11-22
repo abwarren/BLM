@@ -28,6 +28,7 @@ from typing import Optional
 from blm_v4.betting.config import BettingConfig
 from blm_v4.betting.executor import evaluate, execute
 from blm_v4.betting import qualify as _qualify
+from blm_v4.betting import reconcile_evidence as _evidence
 from blm_v4.betting.provider import provider_from_config
 from blm_v4.betting.store import BettingStore
 from blm_v2.telemetry.logging import get_logger
@@ -94,6 +95,18 @@ class BettingWorker:
         games = self._live_payload_fn() or []
         stats = self.store.today_stats()
         balance = self._balance()
+        # ── SUBMISSION EVIDENCE (2026-11-22) ─────────────────────────────
+        # A SUBMITTED row with no receipt is adjudicated against the book's own
+        # balance: the stake left the account (PLACED_EVIDENCE) or it did not
+        # (NOT_PLACED_EVIDENCE).  Evidence only — no status change, no retry,
+        # no stake path reads it.  Disabled switch ⇒ no provider read ⇒ no
+        # adjudication (the rows stay UNCONFIRMED, which is the truth).
+        try:
+            recon = _evidence.reconcile_submitted(self.store, balance)
+            if recon.get("placed") or recon.get("not_placed"):
+                logger.info("submission_evidence", **recon)
+        except Exception:                 # never breaks the decision pass
+            pass
         self._no_bet_reasons = Counter()      # per-pass, so the log is a census
         for g in games:
             stats = self._dispatch_game(g, summary, stats, unit_price, balance)
@@ -206,6 +219,9 @@ class BettingWorker:
             # passes — WOULD_BET records count toward the limits
             # immediately after they are persisted)
             return self.store.today_stats()
+        # pin the pre-submit balance BEFORE the click: it is the only book-side
+        # evidence a SUBMITTED-without-receipt outcome can later be judged by
+        self.store.set_balance_before(cand["execution_id"], balance)
         out = execute(cand, cfg=self.cfg, store=self.store,
                       provider=self.provider)
         if out.get("status") in ("ACCEPTED", "SUBMITTED"):

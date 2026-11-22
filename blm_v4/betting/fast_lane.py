@@ -591,6 +591,10 @@ class FastLaneWorker:
                           progress=row["progress_pct"])
                 stats = self.store.today_stats()
                 continue
+            # pin the pre-submit balance BEFORE the click: it is the only
+            # book-side evidence a SUBMITTED-without-receipt outcome can be
+            # judged by later (see reconcile_evidence.py)
+            self.store.set_balance_before(res["candidate"]["execution_id"], bal)
             out = execute(res["candidate"], cfg=self.cfg,
                           store=self.store, provider=self._provider())
             placed = out.get("status") in ("ACCEPTED", "SUBMITTED")

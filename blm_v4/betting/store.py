@@ -190,6 +190,13 @@ class BettingStore:
             "rejection_reason": "TEXT",
             "execution_state": "TEXT",
             "elapsed_ms": "INTEGER",
+            # submission evidence (2026-11-22): the account balance read
+            # immediately BEFORE the submit, pinned so a later pass can tell a
+            # real placement (the stake left the account) from a no-op click
+            # (it did not).  Evidence only — status and the money path ignore it.
+            "balance_before": "REAL",
+            "reconciliation_state": "TEXT",
+            "reconciliation_attempts": "INTEGER DEFAULT 0",
         }
         for name, decl in additions.items():
             if name not in existing:
@@ -283,6 +290,69 @@ class BettingStore:
                 "AND (status='UNKNOWN' OR error_code='PROVIDER_AMBIGUOUS') "
                 "LIMIT 1", (str(game_id), _day())).fetchone()
         return row is not None
+
+    # ── SUBMISSION EVIDENCE (2026-11-22, operator directive) ──────────
+    # The browser bridge can only report SUBMITTED when the book returns no
+    # ticket ("sent, unconfirmed").  The account balance is the ONE book-side
+    # channel the system already reads every pass, so the pre-submit balance is
+    # pinned on the execution and a later pass labels the submission
+    # PLACED_EVIDENCE / NOT_PLACED_EVIDENCE.  These are EVIDENCE labels: the
+    # status stays SUBMITTED (so has_placed_bet() still blocks a re-bet) and no
+    # money path consults them.  See blm_v4/betting/reconcile_evidence.py.
+    PLACEMENT_EVIDENCE = ("PLACED_EVIDENCE", "NOT_PLACED_EVIDENCE")
+
+    def set_balance_before(self, execution_id: str, balance) -> None:
+        """Pin the account balance read immediately BEFORE submitting.
+
+        No-op on a non-numeric balance (fail-closed: without it the submission
+        stays unjudged, never guessed) and on a row that already carries one.
+        """
+        if isinstance(balance, bool) or not isinstance(balance, (int, float)):
+            return
+        with self._lock, self._conn() as c:
+            c.execute(
+                "UPDATE bet_executions SET balance_before=? "
+                " WHERE execution_id=? AND balance_before IS NULL",
+                (float(balance), str(execution_id)))
+
+    def open_submissions(self, *, within_minutes: int = 60,
+                         limit: int = 50) -> list[dict]:
+        """SUBMITTED rows carrying a pinned pre-balance and no verdict yet.
+
+        ISO-8601-shaped cutoff (same format as ``submitted_at_utc``) so the
+        comparison is not the ``'T' > ' '`` trap of a bare datetime string.
+        """
+        import datetime as _dt
+        cutoff = (_dt.datetime.now(_dt.timezone.utc)
+                  - _dt.timedelta(minutes=max(1, int(within_minutes)))
+                  ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM bet_executions "
+                " WHERE status='SUBMITTED' AND balance_before IS NOT NULL "
+                "   AND COALESCE(reconciliation_state,'')='' "
+                "   AND submitted_at_utc IS NOT NULL "
+                "   AND submitted_at_utc >= ? ORDER BY id LIMIT ?",
+                (cutoff, max(1, min(int(limit), 500)))).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_submission_evidence(self, execution_id: str, state: str,
+                                 *, detail: Optional[dict] = None,
+                                 idempotency_key: Optional[str] = None) -> None:
+        """Record the balance evidence on ONE execution (status unchanged)."""
+        if state not in self.PLACEMENT_EVIDENCE:
+            raise ValueError(f"not an evidence state: {state!r}")
+        with self._lock, self._conn() as c:
+            c.execute(
+                "UPDATE bet_executions SET reconciliation_state=?, "
+                "       reconciliation_attempts="
+                "       COALESCE(reconciliation_attempts,0)+1 "
+                " WHERE execution_id=? AND status='SUBMITTED' "
+                "   AND COALESCE(reconciliation_state,'')=''",
+                (str(state), str(execution_id)))
+        self.audit("placement_evidence", idempotency_key=idempotency_key,
+                   execution_id=str(execution_id), reason=str(state),
+                   details=detail)
 
     def set_game_enabled(self, game_id: str, enabled: bool) -> None:
         with self._lock, self._conn() as c:
@@ -659,7 +729,8 @@ class BettingStore:
                     rows = c.execute(
                         "SELECT execution_id, game_id, status, triggered_line, "
                         "       price, stake_amount, requested_at_utc, "
-                        "       submitted_at_utc, day_utc "
+                        "       submitted_at_utc, day_utc, execution_state, "
+                        "       provider_ref, reconciliation_state "
                         "  FROM bet_executions "
                         " WHERE status IN ('SUBMITTED','ACCEPTED','SETTLED','PUSHED') "
                         f"   AND game_id IN ({','.join('?' * len(chunk))}) "
@@ -673,6 +744,12 @@ class BettingStore:
                             "stake_amount": r["stake_amount"],
                             "at_utc": r["submitted_at_utc"] or r["requested_at_utc"],
                             "day_utc": r["day_utc"],
+                            # additive (2026-11-22): the panel needs these to
+                            # separate a receipt from a dry run, and to say
+                            # whether the book's balance shows the stake gone
+                            "execution_state": r["execution_state"],
+                            "provider_ref": r["provider_ref"],
+                            "reconciliation_state": r["reconciliation_state"],
                         }
         except sqlite3.Error:
             return {}
