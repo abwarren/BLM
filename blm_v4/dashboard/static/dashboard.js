@@ -4371,6 +4371,58 @@ async function refreshBettingStatus() {
   } catch (_) { /* betting panel is best-effort; never breaks the board */ }
 }
 
+/* The settled final for each candidate's game, from the SAME block the
+   RESULTED ALERTS panel settles on (GET /api/v4/alert-outcomes).  The server
+   clamps the id list at 200, so ask in chunks of 195.  Absence is not a
+   verdict: a game with no settled final simply carries no number here. */
+// A settled final is IMMUTABLE, but the endpoint costs the server a snapshot-tail
+// scan per id.  The board refreshes every few seconds, so the SAME ids were being
+// re-scanned on every pass — measured 2026-11-22: those scans took up to 6 min
+// each and exhausted the server's 40-thread pool, which stalled every /static/*
+// asset (the dashboard could not load at all).  Cache per page load and only ask
+// again — at most once a minute — for ids whose final is not known yet.
+const _finalsCache = new Map();      // game_id -> settled final_total
+let _finalsAskedAt = 0;
+const FINALS_RETRY_MS = 60000;
+
+async function candidateFinals(rows) {
+  const out = {};
+  for (const [g, v] of _finalsCache) out[g] = v;
+  const ids = [...new Set((rows || []).map((r) => String(r.game_id || "")).filter(Boolean))]
+    .filter((g) => !_finalsCache.has(g));
+  if (!ids.length || Date.now() - _finalsAskedAt < FINALS_RETRY_MS) return out;
+  _finalsAskedAt = Date.now();
+  for (let i = 0; i < ids.length; i += 195) {
+    const chunk = ids.slice(i, i + 195);
+    try {
+      const resp = await fetch(API_ALERT_OUTCOMES(chunk), { cache: "no-store" });
+      if (!resp.ok) continue;
+      const body = await resp.json();
+      for (const [gid, oc] of Object.entries(body.outcomes || {})) {
+        if (oc && oc.final_total != null && isFinite(oc.final_total)) {
+          out[gid] = oc.final_total;
+          _finalsCache.set(gid, oc.final_total);   // settled: never ask again
+        }
+      }
+    } catch (_) { /* the panel is best-effort — a failed lookup never breaks it */ }
+  }
+  return out;
+}
+
+/* final vs THIS ROW's line — the row's own executable line, never the live one.
+   No settled final, or no line on the row, is a dash: the panel refuses to
+   imply a result it cannot prove. */
+function candidateResult(row, finals) {
+  const fin = finals[String((row && row.game_id) || "")];
+  const line = row ? row.line : null;
+  if (fin == null || !isFinite(fin) || line == null || !isFinite(line)) {
+    return { word: "—", cls: "ab-res-none" };
+  }
+  if (fin < line) return { word: "UNDER", cls: "ab-res-under" };
+  if (fin > line) return { word: "OVER", cls: "ab-res-over" };
+  return { word: "PUSH", cls: "ab-res-push" };
+}
+
 /* ── QUALIFYING BETS (operator directive 2026-11-02) ─────────────────────
    Every game that cleared ALL the trade legs, placed or not.  The row's
    `outcome` is PLACED only when the provider accepted a slip; anything else
