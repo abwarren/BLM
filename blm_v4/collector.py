@@ -401,6 +401,23 @@ WS_SNAP_QUEUE_MAX = 2000
 # backpressure (see BETUAL_LINE_QUEUE_MAX rationale in the report).
 BETUAL_LINE_QUEUE_MAX = 2000
 
+#: Rolling window over which OVERFLOW DROPS are judged (2026-11-23).  The
+#: drop counter is lifetime, so one minute-long stall reads DEGRADED for ever
+#: and the only way to clear it was a restart — which erases the evidence.
+#: Health judges drops inside this window; the lifetime total stays reported.
+DROP_WINDOW_S = 900.0
+
+#: A fast tick slower than this is a capture stall, not a slow tick: while it
+#: runs the WS keeps delivering and the bounded queue overflows (tick 4780 took
+#: 63.06 s and cost 6,869 observations).  Logged as an explicit `tick_slow`
+#: event with per-stage timings so the cause is in the record, not inferred.
+SLOW_TICK_S = 15.0
+
+#: How many recent overflow-drop timestamps are remembered for the window.
+#: An overflow storm drops in bursts; 8192 covers a full queue being lost twice
+#: without letting a pathological producer grow the daemon's memory.
+MAX_TRACKED_DROP_TIMES = 8192
+
 # Max jobs committed in ONE batched transaction by the Betual drain
 # (2026-10-04 hardening).  The original whole-drain-in-one-transaction form
 # held the store lock + the SQLite write lock for the ENTIRE backlog; bounding
@@ -944,6 +961,11 @@ class PokerBetCollector:
             "enqueued": 0, "persisted": 0, "failed": 0,
             "dropped": 0, "max_depth": 0,
         }
+        # Monotonic timestamps of recent overflow drops, so health can judge a
+        # WINDOW instead of a lifetime counter that never decays.  Bounded: an
+        # overflow storm must not grow the daemon (oldest entries fall out).
+        self._betual_line_drop_times: deque[float] = deque(
+            maxlen=MAX_TRACKED_DROP_TIMES)
         # quarter-collection state (directive 2026-09-22)
         self._ws_raw_last: dict[str, str] = {}  # gid -> last raw-frame ts
         self._q_parse_failures = 0
@@ -1551,6 +1573,7 @@ class PokerBetCollector:
             # NEVER a silent drop: surface the loss as an explicit fault.
             t = self._betual_line_telemetry
             t["dropped"] += 1
+            self._betual_line_drop_times.append(time.monotonic())
             logger.error(
                 "BETUAL LINE QUEUE OVERFLOW — observation DROPPED for %s "
                 "(enqueued=%d persisted=%d failed=%d dropped=%d): the writer "
@@ -1591,6 +1614,7 @@ class PokerBetCollector:
             # NEVER a silent drop: surface the loss as an explicit fault.
             t = self._betual_line_telemetry
             t["dropped"] += 1
+            self._betual_line_drop_times.append(time.monotonic())
             logger.error(
                 "BETUAL LINE QUEUE OVERFLOW — quarter observation DROPPED "
                 "for %s (enqueued=%d persisted=%d failed=%d dropped=%d): the "
@@ -1650,6 +1674,7 @@ class PokerBetCollector:
         except queue.Full:
             t = self._betual_line_telemetry
             t["dropped"] += 1
+            self._betual_line_drop_times.append(time.monotonic())
             logger.error(
                 "BETUAL LINE QUEUE OVERFLOW — %s DROPPED for %s "
                 "(enqueued=%d persisted=%d failed=%d dropped=%d): the writer "
@@ -1782,6 +1807,19 @@ class PokerBetCollector:
         except Exception:
             pass
 
+    def _drops_within(self, window_s: float) -> int:
+        """Overflow drops stamped inside the last ``window_s`` seconds.
+
+        Timestamps are monotonic and pruned on read, so the deque holds only
+        what the window can still need.  A clock jump cannot make an old drop
+        look recent: ``monotonic`` never goes backwards.
+        """
+        cutoff = time.monotonic() - max(0.0, float(window_s))
+        times = self._betual_line_drop_times
+        while times and times[0] < cutoff:
+            times.popleft()
+        return len(times)
+
     def betual_line_worker_stats(self) -> dict:
         """Observable telemetry for the Betual line/timer persistence path."""
         self._betual_line_sync()
@@ -1802,6 +1840,8 @@ class PokerBetCollector:
             "persisted": t["persisted"],
             "failed": t["failed"],
             "dropped": t["dropped"],
+            "dropped_recent_15m": self._drops_within(DROP_WINDOW_S),
+            "drop_window_s": int(DROP_WINDOW_S),
             "batch_flushes": batch.get("flushes"),
             "batch_rows": batch.get("rows"),
             "batch_committed_rows": batch.get("committed"),
@@ -3773,17 +3813,34 @@ class PokerBetCollector:
             self._slow_wake.set()
 
         self.stats["games_seen"] = sum(len(v) for v in self._tracked.values())
-        self._tick_stats["tick_total_ms"].append(
-            time.monotonic() - t_tick)
+        tick_duration = time.monotonic() - t_tick
+        self._tick_stats["tick_total_ms"].append(tick_duration)
         logger.info(
             "fast tick %d done in %.2fs: tracked=%d snapshots=%d errors=%d"
             "%s",
-            self.stats["ticks"], time.monotonic() - t_tick,
+            self.stats["ticks"], tick_duration,
             self.stats["games_seen"], self.stats["snapshots"],
             self.stats["errors"],
             (f" — page-capture budget remaining: %.3fs"
              % page_capture_budget_remaining) if page_capture_budget_remaining > 0 else "",
         )
+        # A tick this slow is a STALL: the WS keeps delivering while it runs, so
+        # the bounded persist queue overflows and observations are dropped (tick
+        # 4780: 63.06 s, 6,869 drops).  Name the stall and its stage timings in
+        # the record so the cause is evidence, never an inference.
+        if tick_duration >= SLOW_TICK_S:
+            stages_ms = {k: round(v[-1] * 1000.0, 1)
+                         for k, v in self._tick_stats.items() if v}
+            logger.error(json.dumps({
+                "event": "tick_slow",
+                "tick": self.stats["ticks"],
+                "duration_s": round(tick_duration, 2),
+                "tracked": self.stats["games_seen"],
+                "stages_ms": stages_ms,
+                "queue_depth": self._betual_line_queue.qsize(),
+                "dropped_total": self._betual_line_telemetry["dropped"],
+                "dropped_recent_15m": self._drops_within(DROP_WINDOW_S),
+            }))
         # Phase 3 P2 — flush all dirty games through the deviation
         # benchmark ONCE per tick (after all observations for this tick
         # have landed).  This is the sole deviation refresh point per tick
