@@ -37,6 +37,11 @@
            It does NOT stop the collector — capture keeps running. -->
       <button class="ab-stop" id="abStop" type="button" disabled
               title="STOP auto-betting — persists the kill switch (survives a restart). Capture keeps running.">&#9632; STOP</button>
+      <!-- HEAT: the market-heat guardrail switch (betting_config.market_heat_enabled).
+           ON = arming pauses while >=45% of recent settled games finish OVER the
+           line. OFF = the guardrail is bypassed; every other gate still applies. -->
+      <button class="ab-stop" id="abHeat" type="button" disabled
+              title="MARKET-HEAT guardrail — ON pauses every arming while ≥45% of recent settled games finish OVER the line. Click to toggle.">HEAT: --</button>
       <span class="ab-top-sep" aria-hidden="true">|</span>
       <span class="ab-top-unit-wrap">
         <label class="ab-top-unit" for="abUnitPrice">UNIT:</label>

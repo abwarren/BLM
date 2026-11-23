@@ -35,6 +35,10 @@
   .team{color:var(--txt)}
   .comp{color:var(--muted);font-size:10.5px}
   .gid{color:var(--grey);font-size:10.5px}
+  /* the game id is a link to the PokerBet event view for that fixture */
+  .gid a.gid-link{color:inherit;text-decoration:underline;
+    text-decoration-color:rgba(57,208,166,.45);text-underline-offset:2px}
+  .gid a.gid-link:hover{color:var(--accent);text-decoration-color:var(--accent)}
   .muted{color:var(--muted)}
   .num{font-variant-numeric:tabular-nums}
   /* band meter */
@@ -276,10 +280,21 @@ async function tick(){
         ? g.actual_pace / g.avg_pace : null;
       const need = g.need === null ? "–" : (g.need <= 0 ? "+" + fmt(-g.need,3) : "−" + fmt(g.need,3));
       const needColor = g.need !== null && g.need <= 0 ? "var(--accent)" : (g.need !== null && g.need <= 0.10 ? "var(--amber)" : "inherit");
+      // Clickable Game id -> the PokerBet event view for THIS fixture.  Prefer the
+      // canonical source_url when the payload carries one; otherwise the id-path form
+      // (PokerBet's SPA resolves the trailing event id; same shape the explorer ships).
+      const gidKey = String(g.game_id ?? "").split("#")[0];
+      const gidUrl = g.url && /^https?:\/\//.test(String(g.url)) ? String(g.url)
+        : (/^\d+$/.test(gidKey)
+          ? "https://www.pokerbet.co.za/en/sports/live/event-view/Basketball/Virtual%20Matches/18296900-betual-tbsl/"
+            + encodeURIComponent(gidKey)
+          : "");
       return `<tr class="${cls}">
         <td class="l">
           <div class="team">${g.home ?? "?"} <span class="muted">v</span> ${g.away ?? "?"}</div>
-          <div class="comp">${g.competition ?? "?"} · <span class="gid">${g.game_id}</span></div>
+          <div class="comp">${g.competition ?? "?"} · ${gidUrl
+            ? `<a class="gid gid-link" href="${gidUrl}" target="_blank" rel="noopener noreferrer" title="open game ${g.game_id} on PokerBet">${g.game_id}</a>`
+            : `<span class="gid">${g.game_id}</span>`}</div>
         </td>
         <td>${meter(g.progress_pct, [d.gate.band[0], d.gate.band[1]])}</td>
         <td class="num">${fmt(g.progress_pct,1)}</td>

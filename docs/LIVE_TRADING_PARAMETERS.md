@@ -21,7 +21,8 @@ change on the box, and the test will fail until the two agree.
 | excluded competitions | `cyber-basketball-2k26-matches` | never traded (code constant) |
 | `BETTING_DRY_RUN` / `BETTING_BROWSER_SUBMIT` | **false / true** | real submission through the PokerBet DOM transport |
 | `BETTING_MAX_STAKE_PER_BET` | **2000.00** | hard per-bet cap the executor refuses above — sized so ladder rung 6 (1889.57) fits |
-| `BETTING_MAX_BETS_PER_DAY` | **200** | daily bet-count cap; the daily exposure ceiling is deliberately unset |
+| `BETTING_MAX_BETS_PER_DAY` | **200** | daily bet-count cap |
+| `BETTING_MAX_DAILY_EXPOSURE` | **400000.00** | maximum total recorded stake exposure per UTC day (R2,000 × 200 bets) |
 | `BLM_EXPECTED_ACCOUNT_ID` | **233997789** | account-identity guard, checked at the submission boundary |
 
 These values are exactly `TC-C` in `blm_v4/trade_cohorts.py`:
@@ -77,6 +78,9 @@ start-up) and from `blm_betting.db`, not from memory.
   would have had every candidate refused by `max_stake` and the ladder would
   have stranded itself. All rungs 1–6 now clear the cap; depth 6 banks before
   rung 7 (3401) can exist.
+- **2026-11-15** — daily exposure explicitly set to **R400,000** alongside
+  R2,000 per bet and 200 bets/day. This replaces a stale R100 fallback in the
+  data-root `.env`; the systemd drop-in now sets the same value explicitly.
 - **2026-11-02** — `bet: persist the odds the bet was TAKEN at` (`12db2cc`) and
   `live: run the first-line scan OFF the request path` (`2c42c11`) are both
   deployed. The second one matters here: the line-reference scan (93.5 s over

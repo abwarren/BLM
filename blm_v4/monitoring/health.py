@@ -64,8 +64,10 @@ class Thresholds:
     # host
     cpu_degraded_pct: float = 90.0
     ram_degraded_pct: float = 92.0
-    disk_degraded_free_pct: float = 10.0
-    disk_failed_free_pct: float = 5.0
+    # Operator rule (2026-11-20): the root SSD must never exceed 80% used.
+    # 80% used == 20% free -> YELLOW; 90% used == 10% free -> RED.
+    disk_degraded_free_pct: float = 20.0
+    disk_failed_free_pct: float = 10.0
     # alert flapping
     confirm_cycles: int = 2
 

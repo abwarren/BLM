@@ -1,0 +1,1319 @@
+/* ═══════════════════════════════════════════════════════════════
+   LIVE ANALYTICS — descriptive pace-Z operator terminal theme
+   Dark, dense, professional. Charts and hierarchy over decoration.
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  --bg: #0a0e14;
+  --panel: #111722;
+  --panel2: #0d1420;
+  --border: #1e2a3a;
+  --border2: #26374d;
+  --text: #d7e1f0;
+  --muted: #6b7a90;
+  --dim: #46546b;
+  --cyan: #22d3ee;
+  --amber: #fbbf24;
+  --green: #34d399;
+  --red: #f87171;
+  --orange: #fb923c;
+  --blue: #60a5fa;
+  --z: #a78bfa;
+  --mono: "JetBrains Mono", "SF Mono", "Cascadia Mono", Consolas, monospace;
+  --sans: "Inter", "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; }
+
+/* ── Header ─────────────────────────────────────────────── */
+.topbar {
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 10px 18px;
+  background: linear-gradient(180deg, #0d1520 0%, var(--panel) 100%);
+  border-bottom: 1px solid var(--border2);
+  position: sticky; top: 0; z-index: 50;
+}
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.brand-logo {
+  font-family: var(--mono); font-weight: 800; font-size: 20px; letter-spacing: 1px;
+  color: #04121a; background: var(--cyan);
+  padding: 2px 8px; border-radius: 4px;
+}
+.brand-title { font-weight: 800; font-size: 18px; letter-spacing: 2px; color: #eaf2ff; }
+.brand-sub { color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+
+.status-cluster { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.pill {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
+  padding: 4px 10px; border-radius: 20px;
+  border: 1px solid var(--border2); background: var(--panel2); color: var(--text);
+  white-space: nowrap;
+}
+.pill.muted { color: var(--muted); }
+
+/* AUDIO alert control — compact header toggle.  Off by default (browser
+   autoplay policy); green once alert audio is switched on, amber if it is
+   on but the audio context has not been unlocked by a gesture yet. */
+.audio-toggle {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
+  padding: 4px 10px; border-radius: 20px; cursor: pointer;
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border2);
+}
+.audio-toggle:hover { color: var(--text); border-color: var(--amber); }
+.audio-toggle.on {
+  color: #04121a; background: var(--green); border-color: var(--green);
+  font-weight: 700;
+}
+.audio-toggle.on.locked {
+  color: #1a1204; background: var(--amber); border-color: var(--amber);
+}
+.live-pill { border-color: #0f3d2e; }
+.live-pill.ok { color: var(--green); border-color: #14532d; background: #052e1c; }
+.live-pill.bad { color: var(--red); border-color: #7f1d1d; background: #2d0a0a; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--dim); }
+.live-pill.ok .dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
+.live-pill.bad .dot { background: var(--red); box-shadow: 0 0 8px var(--red); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+.filters { display: flex; gap: 6px; align-items: center; }
+.filter-sep { width: 1px; height: 18px; background: var(--border2); margin: 0 4px; opacity: .6; }
+.filter {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
+  padding: 5px 12px; border-radius: 6px; cursor: pointer;
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border);
+}
+.filter:hover { color: var(--text); border-color: var(--border2); }
+.filter.active { color: #04121a; background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
+/* IN WINDOW — the default board filter (operator directive 2026-11-01). Amber when
+   ON so an empty board reads as "nothing armed", not as a broken page. */
+.filter.filter-window { border-color: var(--amber); color: var(--amber); font-weight: 700; }
+.filter.filter-window.active { color: #1a1204; background: var(--amber); border-color: var(--amber); }
+/* STOP — persists the auto-bet kill switch. Solid red, unmissable, one click. */
+.ab-stop {
+  font-family: var(--mono); font-size: 12px; font-weight: 800; letter-spacing: 1px;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer;
+  color: #2b0505; background: var(--red); border: 1px solid var(--red);
+  box-shadow: 0 0 10px rgba(248, 113, 113, .45);
+}
+.ab-stop:hover:not(:disabled) { background: #ff8f8f; }
+.ab-stop:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
+.ab-stop.is-off { background: #2d0a0a; color: var(--red); border-color: #7f1d1d; box-shadow: none; }
+.filter-select { display:flex; align-items:center; gap:5px; color:var(--muted); font:10px var(--mono); letter-spacing:.6px; white-space:nowrap; }
+.filter-select select { background:var(--panel2); color:var(--text); border:1px solid var(--border2); border-radius:4px; padding:4px 6px; font:11px var(--mono); }
+
+/* ── Summary strip ──────────────────────────────────────── */
+.summary {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px; padding: 12px 18px;
+}
+.sum-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 14px;
+}
+.sum-label { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; }
+.sum-value { font-family: var(--mono); font-size: 22px; font-weight: 700; color: #eaf2ff; margin: 2px 0; }
+.sum-sub { font-size: 11px; color: var(--dim); }
+.sum-card .sum-value.cyber { color: var(--cyan); }
+.sum-card .sum-value.betual { color: var(--amber); }
+
+/* ── Live view header ───────────────────────────────────── */
+.live-head { display: flex; align-items: baseline; gap: 10px; padding: 2px 18px 10px; flex-wrap: wrap; }
+.live-title { font-family: var(--mono); font-size: 12px; font-weight: 800; letter-spacing: 2px; color: var(--cyan); }
+
+/* hide native <details> markers — sections draw their own ▸/▾ arrows */
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::marker { content: ""; }
+
+/* ── Game grid ──────────────────────────────────────────── */
+.grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(440px, 100%), 1fr));
+  gap: 14px; padding: 4px 18px 40px;
+}
+.empty { grid-column: 1/-1; text-align: center; color: var(--dim); padding: 60px 0; font-family: var(--mono); }
+
+.card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden; cursor: pointer;
+  transition: border-color .15s, transform .15s;
+  display: flex; flex-direction: column;
+}
+.card:hover { border-color: var(--border2); transform: translateY(-1px); }
+.card.hidden { display: none; }
+
+.card-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+.cat-badge {
+  font-family: var(--mono); font-size: 10px; font-weight: 800; letter-spacing: 1.5px;
+  padding: 3px 8px; border-radius: 4px; white-space: nowrap;
+}
+.cat-badge.CYBER_2K26 { color: #04121a; background: var(--cyan); }
+.cat-badge.BETUAL_NBA { color: #1a1204; background: var(--amber); }
+.cat-badge.UNKNOWN   { color: var(--text); background: var(--dim); }
+.comp-name { font-size: 11px; color: var(--muted); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip-live, .chip-stale, .chip-ended {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  padding: 2px 7px; border-radius: 10px; border: 1px solid;
+}
+.chip-live { color: var(--green); border-color: #14532d; }
+.chip-stale { color: var(--orange); border-color: #7c3a12; }
+.chip-ended { color: var(--muted); border-color: var(--border2); }
+/* analytically INVALID game — backend quality gate excluded it from
+   every aggregate; the card marks it clearly. */
+.chip-excluded { color: var(--red); border-color: #7f1d1d; background: #2d0a0a; font-weight: 700; }
+.gated-note {
+  margin: 0 14px 10px; border: 1px solid #7f1d1d; border-radius: 6px;
+  background: #2d0a0a; color: var(--red); padding: 8px 12px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 1px;
+}
+.gated-note .muted { color: var(--red); opacity: .75; font-weight: 400; }
+
+/* clean-data boundary: LEGACY / pre-clean partition warning */
+.legacy-banner {
+  margin: 0 14px 10px; border: 1px solid #7c3a12; border-radius: 6px;
+  background: #2a1607; color: var(--orange); padding: 8px 12px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 1px;
+}
+
+/* scoreboard */
+.scoreboard { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 6px; gap: 10px; }
+.team { flex: 1; min-width: 0; }
+.team.away { text-align: right; }
+.team-name { font-weight: 700; font-size: 14px; color: #eaf2ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team-score { font-family: var(--mono); font-size: 34px; font-weight: 800; color: #fff; }
+.team-score.home { color: var(--cyan); }
+.team-score.away { color: var(--amber); }
+.vs { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+.game-meta { display: flex; gap: 12px; justify-content: center; padding: 4px 14px 8px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.game-meta .period { color: var(--text); font-weight: 700; }
+
+/* deterministic pace state on LIVE cards (actual Pts/Min vs required to
+   reach the live line) — observed state only */
+.pace-strip {
+  display: flex; gap: 10px; justify-content: center; align-items: baseline;
+  padding: 2px 14px 8px; font-family: var(--mono); font-size: 11px; color: var(--text);
+}
+.pace-strip .pace-item b { color: var(--text); }
+.pace-strip .pace-item b.pos { color: var(--green); }
+.pace-strip .pace-item b.neg { color: var(--red); }
+
+/* live market panel (descriptive — observed line + freshness only) */
+.live-market {
+  margin: 0 14px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel2); padding: 6px 12px;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.market-compact,.trade-state { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:7px 10px; border-top:1px solid var(--border); font:11px var(--mono); flex-wrap:wrap; }
+.market-compact { color:var(--muted); }
+.market-compact b { color:var(--text); }
+.trade-state { background:#0c1520; }
+.trade-alert.is-active { color:var(--amber); font-weight:800; }
+.trade-direction { color:var(--cyan); font-weight:800; }
+.trade-execution { color:var(--green); font-weight:800; }
+.trade-execution.exec-rejected,.trade-execution.exec-blocked,.trade-execution.exec-failed { color:var(--red); }
+.trade-execution.exec-unknown { color:var(--orange); }
+.trade-execution.exec-submitted,.trade-execution.exec-submitting,.trade-execution.exec-pending { color:var(--blue); }
+.trade-execution.exec-idle { color:var(--muted); }
+.execution-trace { padding:6px 10px; color:var(--muted); font:10px var(--mono); overflow-wrap:anywhere; border-top:1px dashed var(--border); }
+.auto-game-state { padding:5px 10px; color:var(--cyan); font:10px var(--mono); font-weight:700; }
+.game-auto-toggle { margin-left:8px; background:var(--panel2); color:var(--cyan); border:1px solid var(--border2); border-radius:4px; padding:3px 7px; font:700 9px var(--mono); cursor:pointer; }
+.game-auto-toggle:disabled { opacity:.45; cursor:not-allowed; }
+.manual-bet { display:flex; align-items:center; gap:6px; padding:6px 10px; border-top:1px solid var(--border); font:10px var(--mono); }
+.manual-bet select,.manual-bet input,.ab-history-tools input,.ab-history-tools select { background:var(--panel2); color:var(--text); border:1px solid var(--border2); border-radius:4px; padding:4px 6px; }
+.manual-bet input { width:90px; }
+.manual-bet button,.ab-history-tools button { background:#123a43; border:1px solid var(--cyan); color:var(--cyan); border-radius:4px; padding:5px 9px; font:700 10px var(--mono); cursor:pointer; }
+.manual-bet button:disabled { opacity:.45; cursor:not-allowed; }
+.ab-history-tools { display:flex; align-items:center; flex-wrap:wrap; gap:9px; padding:9px 6px; border-top:1px solid var(--border); font:10px var(--mono); color:var(--muted); }
+.ab-history-tools label { display:flex; align-items:center; gap:5px; }
+.ab-history-title { padding:5px 6px; color:var(--cyan); font:700 10px var(--mono); letter-spacing:.8px; }
+.ab-audit-list { list-style:none; margin:0; padding:0 6px 8px; max-height:180px; overflow:auto; }
+.ab-audit-list li { padding:4px 5px; border-top:1px dashed var(--border); color:var(--muted); font:10px var(--mono); overflow-wrap:anywhere; }
+.live-market-label { font-size: 9px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; }
+.live-market-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 12px; flex-wrap: wrap; }
+.lm-line b { font-size: 15px; font-weight: 800; color: #eaf2ff; }
+.lm-sub { font-size: 10px; font-family: var(--mono); }
+
+/* card-level collapsible sections — CHARTS (sparkline) & DETAILS */
+.card-charts {
+  margin: 0 14px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel2); overflow: hidden;
+}
+.card-charts summary {
+  cursor: pointer; font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  color: var(--dim); user-select: none; padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.card-charts summary:hover { color: var(--cyan); }
+.card-charts .spark { padding: 8px 14px 4px; }
+.card-details {
+  margin: 0 14px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel2); padding: 6px 12px;
+}
+.card-details summary { cursor: pointer; font-family: var(--mono); font-size: 10px; letter-spacing: 1px; color: var(--dim); user-select: none; }
+.card-details summary:hover { color: var(--cyan); }
+.cd-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-top: 6px; font-family: var(--mono); font-size: 11px; }
+.cd-item { display: flex; justify-content: space-between; gap: 6px; }
+.cd-k { color: var(--muted); font-size: 9px; letter-spacing: 1px; text-transform: uppercase; white-space: nowrap; }
+.cd-v { color: var(--text); text-align: right; }
+
+/* sparkline */
+.spark { height: 44px; padding: 2px 14px 8px; position: relative; }
+.spark canvas { width: 100%; height: 100%; display: block; }
+
+/* technical/raw collapsible (detail view only) */
+.tech-raw { margin-top: 14px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+.tech-raw summary { cursor: pointer; font-family: var(--mono); font-size: 11px; letter-spacing: 1px; color: var(--dim); user-select: none; }
+.tech-raw summary:hover { color: var(--amber); }
+.tech-raw pre { margin-top: 8px; max-height: 320px; overflow: auto; font-family: var(--mono); font-size: 10px; line-height: 1.5; color: #9fb3cf; white-space: pre; }
+
+.card-foot {
+  border-top: 1px solid var(--border); padding: 6px 14px;
+  display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--dim);
+  background: var(--panel2);
+}
+
+/* ── Modal ──────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(4, 8, 14, .82);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+/* hidden attribute must win over display:flex — modal is closed by default */
+.modal-backdrop[hidden] { display: none !important; }
+.modal {
+  background: var(--panel); border: 1px solid var(--border2); border-radius: 12px;
+  width: min(1180px, 96vw); max-height: 94vh; display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,.6);
+}
+.modal-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 18px; border-bottom: 1px solid var(--border2);
+}
+.modal-title { font-size: 16px; font-weight: 800; margin-left: 10px; color: #eaf2ff; }
+.modal-actions { display: flex; gap: 8px; }
+.close {
+  background: transparent; border: 1px solid var(--border2); color: var(--muted);
+  border-radius: 5px; cursor: pointer; width: 28px; height: 28px; font-size: 13px;
+}
+.close:hover { color: var(--red); border-color: var(--red); }
+.modal-body { overflow-y: auto; padding: 16px 18px 24px; }
+
+.m-hero { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; margin-bottom: 14px; }
+.m-score { display: flex; align-items: center; gap: 16px; }
+.m-score .team-score { font-size: 44px; }
+
+/* state panels */
+.m-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.m-panel { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.m-panel h4 { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; margin-bottom: 8px; }
+.m-rows { display: grid; gap: 6px; }
+.m-row { display: flex; justify-content: space-between; font-size: 13px; gap: 10px; }
+.m-row .k { color: var(--muted); white-space: nowrap; }
+.m-row .v { font-family: var(--mono); font-weight: 700; text-align: right; }
+.m-row .v.pos { color: var(--green); }
+.m-row .v.neg { color: var(--red); }
+.m-wide { grid-column: 1/-1; }
+
+/* ── PACE Z-SCORE DEVIATION panel — the primary analytical metric ── */
+.zpanel {
+  margin-top: 14px; grid-column: 1 / -1;
+  border-color: #3b2f66; background:
+    linear-gradient(180deg, rgba(167,139,250,.06), transparent 60%), var(--panel2);
+}
+.zpanel-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 14px; }
+.zpanel h4 { color: var(--z); letter-spacing: 2px; margin-bottom: 6px; }
+.z-big {
+  font-family: var(--mono); font-size: 22px; font-weight: 800; color: var(--z);
+  letter-spacing: .5px; white-space: nowrap;
+}
+.z-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px; margin: 10px 0 8px;
+}
+.z-cell {
+  border: 1px solid var(--border); border-radius: 6px;
+  background: rgba(10, 14, 20, .5); padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.z-k { font-size: 9px; letter-spacing: 1px; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
+.z-v { font-family: var(--mono); font-size: 20px; font-weight: 800; color: #eaf2ff; }
+.z-u { font-size: 10px; color: var(--dim); font-family: var(--mono); }
+.z-key { font-family: var(--mono); font-size: 10px; letter-spacing: .5px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.z-note { font-size: 11px; line-height: 1.45; max-width: 110ch; }
+
+/* ── charts ─────────────────────────────────────────────── */
+.m-charts { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.m-chart.m-chart-full { grid-column: 1 / -1; }
+.chart-box { position: relative; height: 400px; width: 100%; min-width: 0; }
+.chart-box canvas { width: 100% !important; height: 100% !important; }
+.m-chart.m-chart-z { grid-column: 1 / -1; }
+.chart-box-z { height: 160px; }
+.m-chart { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.m-chart h4 { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; }
+.m-chart-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 2px 10px; margin-bottom: 6px; }
+.m-chart-head h4 { margin-bottom: 0; }
+.z-readout { font-family: var(--mono); font-size: 11px; letter-spacing: 1px; color: var(--z); white-space: nowrap; }
+
+/* modal-level collapsible sections — CHARTS & DETAILS */
+.m-details, .m-chart-toggle { margin-top: 14px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+.m-details summary, .m-chart-toggle summary { cursor: pointer; font-family: var(--mono); font-size: 11px; letter-spacing: 1.5px; color: var(--dim); user-select: none; }
+.m-details summary:hover, .m-chart-toggle summary:hover { color: var(--amber); }
+.m-details > *:not(summary) { margin-top: 10px; }
+.m-chart-toggle .m-charts { margin-top: 10px; }
+
+/* freshness + state badges */
+.st {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  padding: 2px 7px; border-radius: 10px; border: 1px solid;
+}
+.st-live { color: var(--green); border-color: #14532d; }
+.st-stale { color: var(--orange); border-color: #7c3a12; }
+.st-missing { color: var(--muted); border-color: var(--border2); }
+
+/* ── misc ───────────────────────────────────────────────── */
+.flash { animation: flash .5s; }
+@keyframes flash { 0% { background: #1e3a5f; } 100% { background: transparent; } }
+.muted { color: var(--muted); }
+
+/* ── historical under-condition layer ───────────────────────── */
+.hist-alert-box { margin-top: 10px; }
+.hist-alert-box:empty { display: none; }
+.hist-badge {
+  border: 1px solid var(--border2); border-left-width: 3px;
+  border-radius: 6px; padding: 6px 8px; margin: 6px 0 2px;
+  font-size: 10px; line-height: 1.5; background: var(--panel2);
+}
+.hist-panel {
+  border: 1px solid var(--border2); border-left-width: 3px;
+  border-radius: 8px; padding: 10px 12px; margin: 10px 0 2px;
+  background: var(--panel2); font-size: 12px;
+}
+.hist-badge.al-base, .hist-panel.al-base { border-left-color: var(--amber); }
+.hist-badge.al-strong, .hist-panel.al-strong { border-left-color: var(--orange); }
+.hist-badge.al-high, .hist-panel.al-high { border-left-color: var(--red); }
+.hist-badge.al-ctx, .hist-panel.al-ctx { border-left-color: var(--cyan); border-style: dashed; }
+/* pace-state — the PRIMARY league/state-relative UNDER condition */
+.hist-badge.al-pace-state, .hist-panel.al-pace-state { border-left-color: var(--green, #34d399); }
+.hist-panel.hist-alert.al-pace-state { background: linear-gradient(180deg, rgba(52,211,153,.10), transparent); }
+.hb-title.al-pace-state, .al-title.al-pace-state { color: var(--green, #34d399); }
+/* UNDER alert panel — deliberately more prominent than any ordinary metric
+   block (thicker frame, tinted field, larger title) so it cannot be
+   mistaken for a routine readout. */
+.hist-panel.hist-alert { border-width: 1px 1px 1px 5px; padding: 12px 14px; }
+.hist-panel.hist-alert.al-base { background: linear-gradient(180deg, rgba(251,191,36,.07), transparent); }
+.hist-panel.hist-alert.al-strong { background: linear-gradient(180deg, rgba(251,146,60,.10), transparent); }
+.hist-panel.hist-alert.al-high { background: linear-gradient(180deg, rgba(248,113,113,.12), transparent); }
+.hb-head, .al-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; flex-wrap: wrap;
+}
+.hb-title, .al-title {
+  font-weight: 800; letter-spacing: .5px; font-size: 10px;
+  color: var(--amber);
+}
+.hist-panel.hist-alert .al-title { font-size: 13px; letter-spacing: 1px; }
+.hb-title.al-strong, .al-title.al-strong { color: var(--orange); }
+.hb-title.al-high, .al-title.al-high { color: var(--red); }
+.hb-title-ctx, .al-title-ctx { color: var(--cyan); }
+.al-chip {
+  font-family: var(--mono); font-size: 9px; font-weight: 700;
+  padding: 1px 6px; border-radius: 3px; border: 1px solid;
+  white-space: nowrap;
+}
+.al-live { color: var(--green); border-color: #14532d; }
+.al-stale { color: var(--orange); border-color: #7c3a12; }
+.hb-state { font-family: var(--mono); font-size: 10px; color: var(--text); margin-top: 3px; }
+.hb-hist { color: var(--muted); font-size: 10px; margin-top: 2px; }
+.hb-cyber, .al-cyber { color: var(--cyan); margin-top: 4px; font-size: 10px; line-height: 1.55; }
+.al-limited { color: var(--orange); font-weight: 700; }
+.al-rows { display: grid; gap: 3px; margin: 6px 0; }
+.al-row { display: flex; justify-content: space-between; font-size: 12px; gap: 10px; }
+.al-row .k { color: var(--muted); }
+.al-row .v .u { color: var(--muted); font-size: 9px; }
+.al-hist { display: grid; gap: 2px; margin: 4px 0; }
+.al-big { font-weight: 800; letter-spacing: .5px; font-size: 12px; color: var(--text); }
+.al-line { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+.al-note { font-size: 10px; margin-top: 6px; }
+.al-in { animation: histPulse 1.2s ease-out; }
+@keyframes histPulse {
+  0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, .55); background: rgba(244, 63, 94, .16); }
+  100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); background: transparent; }
+}
+
+@media (max-width: 640px) {
+  .chart-box { height: 300px; }
+  .chart-box-z { height: 130px; }
+  .m-charts, .m-panels { grid-template-columns: 1fr; }
+  .zpanel { grid-column: 1; }
+  .m-hero { flex-direction: column; align-items: flex-start; }
+  .z-big { font-size: 18px; }
+}
+/* ── RELATIVE-PACE CONTEXT / STATE blocks (authoritative payload only) ── */
+.rp-block, .rp-state, .hc-block { display: grid; gap: 2px; margin: 6px 0 4px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: rgba(148, 163, 184, .05); }
+.rp-title { font-weight: 800; letter-spacing: .5px; font-size: 10px; color: var(--muted); }
+.rp-id { color: var(--muted); font-size: 9.5px; font-family: var(--mono); margin-top: 2px; }
+.rp-ident { display: flex; justify-content: space-between; gap: 10px; font-size: 10.5px; }
+.rp-ident .k { color: var(--muted); letter-spacing: .3px; }
+.rp-ident .v { font-family: var(--mono); font-weight: 700; }
+.rp-pace { margin-top: 3px; }
+.rp-pace .rp-cmp .v { font-weight: 800; }
+.rp-state-line { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+.rp-state-line.rp-true { color: #34d399; }
+.rp-state-line.rp-false { color: var(--muted); }
+.rp-both { font-family: var(--mono); font-size: 11px; font-weight: 800; margin-top: 2px; }
+.rp-both.rp-true { color: #34d399; }
+.rp-both.rp-false { color: var(--muted); }
+.hc-block { border-color: rgba(245, 158, 11, .5); }
+.hc-block .rp-title { color: #f59e0b; }
+.hc-block .al-big { color: #f59e0b; }
+.hc-block .al-line.muted { color: var(--muted); font-weight: 400; }
+
+/* ✅ AUTHORITATIVE FINAL-RESULT CORRECTION — a record whose settled final
+   the backend revised (verified game result).  Distinguished from normal
+   settlement and styled as information, never as a new alert: the verdict
+   colours (green/red/neutral) still come from the corrected status alone. */
+.al-corrected { color: #38bdf8; font-size: 11.5px; }
+.al-corrected::before { content: "✅ "; }
+
+/* ═══════════ UNDER ALERT SECTIONS — active vs history, never merged ═══════════ */
+.alerts { margin: 18px 22px 0; border: 1px solid var(--line, rgba(148, 163, 184, .25)); border-radius: 10px; background: var(--panel, rgba(15, 23, 42, .55)); }
+.alerts-head { display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line, rgba(148, 163, 184, .25)); }
+.alerts-title { font-size: 12px; font-weight: 700; letter-spacing: .14em; color: var(--muted, #94a3b8); }
+/* the RESULTED ALERTS legend — names the three verdicts in their own colours
+   so the panel is readable at a glance.  These are LABELS, not rows: they
+   reuse the verdict palette but never the row classes, so a legend can't be
+   mistaken for an alert. */
+.alerts-sub { font-size: 11.5px; letter-spacing: .02em; }
+.lg-under { color: #22c55e; font-weight: 700; }
+.lg-over { color: #ef4444; font-weight: 700; }
+.lg-push { color: var(--muted, #94a3b8); font-weight: 700; }
+.alerts-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+.alerts-empty { color: var(--muted, #94a3b8); font-size: 13px; font-style: italic; }
+.alerts ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.al-row { border: 1px solid var(--line, rgba(148, 163, 184, .25)); border-left: 3px solid #f59e0b; border-radius: 8px; padding: 9px 12px; font-size: 13px; line-height: 1.45; }
+.al-row.al-resolved { border-left-color: rgba(148, 163, 184, .5); opacity: .78; }
+.al-headline { font-weight: 700; color: #f59e0b; margin-bottom: 2px; }
+.al-resolved .al-headline { color: var(--muted, #94a3b8); }
+.al-ident { color: var(--fg, #e2e8f0); }
+.al-line { color: var(--muted, #94a3b8); }
+.al-line .al-num { color: var(--fg, #e2e8f0); font-variant-numeric: tabular-nums; }
+.al-line .al-neg { color: #38bdf8; font-variant-numeric: tabular-nums; }
+.al-times { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted, #94a3b8); font-size: 12px; }
+.al-times span { font-variant-numeric: tabular-nums; }
+.al-running { color: #f59e0b; }
+/* audit marker — records triggered under the superseded (pre-2026-09-13)
+   condition: visible, honest, never styled as a validated alert */
+.al-audit { color: #fbbf24; font-size: 11.5px; font-style: italic; }
+
+/* RE-FIRE tag — a re-armed activation of the SAME record identity.  The
+   bet and its settle line stay pinned to the FIRST trigger; the tag is
+   information, never a second bet or a second settle line. */
+.al-refire { color: #60a5fa; font-size: 11.5px; font-style: italic; }
+
+/* ── UNDER ALERT HISTORY — final-outcome coloring ─────────────
+   GREEN = successful UNDER (final total below the trigger line),
+   RED   = OVER, neutral = PUSH, active = the existing amber row.
+   The class lands on the whole history row so the outcome is
+   unmistakable at a glance; the badge colors to match. */
+.al-row.al-under { border-left-color: #22c55e; background: rgba(34, 197, 94, .10); }
+.al-row.al-under .al-headline { color: #22c55e; }
+.al-row.al-over { border-left-color: #ef4444; background: rgba(239, 68, 68, .10); }
+.al-row.al-over .al-headline { color: #ef4444; }
+.al-row.al-push { border-left-color: rgba(148, 163, 184, .8); background: rgba(148, 163, 184, .08); }
+.al-row.al-push .al-headline { color: var(--muted, #94a3b8); }
+/* the explicit FALLBACK state — an unknown/malformed result status is never
+   silently rendered as a normal settled row: it gets its own unmistakable
+   colour (amber) and is logged once for diagnosis.  Genuine PENDING rows
+   (no status at all) keep the default unresolved look instead. */
+.al-row.al-unknown { border-left-color: #f59e0b; background: rgba(245, 158, 11, .08); }
+.al-row.al-unknown .al-headline { color: #f59e0b; }
+.al-unknown .al-outcome, .al-row.al-unknown .al-result { color: #f59e0b; }
+.al-pending { color: var(--muted, #94a3b8); font-weight: 700; letter-spacing: .03em; }
+/* UNPROVABLE-RESULT states — explicit words for a row that can carry no
+   verdict: NO LINE (final provable, no market line ever observed at the
+   checkpoint boundary) and RESULT PENDING (resolved, backend proves
+   neither — an outstanding reconciliation job, never a result).
+   Display states only — deliberately NOT verdict colours: a row here has no
+   settled verdict, so it never receives a green/red/neutral verdict class. */
+.al-noline, .al-row .al-outcome[data-noline] { color: #fbbf24; }
+.al-nofinal, .al-row .al-outcome[data-nofinal] { color: var(--muted, #94a3b8); }
+
+/* ── RESULTED-PANEL FILTER BAR — display-only controls ──────────
+   Selects/inputs filter WHICH rows the panel renders; they never mutate the
+   stores or settlement.  Styled to read as a tool strip, not an alert. */
+.rf-bar { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 14px;
+  padding: 8px 10px; border: 1px solid var(--line, rgba(148, 163, 184, .25));
+  border-radius: 8px; background: var(--panel2, #0d1420); margin-bottom: 8px; }
+.rf-item { display: flex; flex-direction: column; gap: 3px;
+  font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--muted, #94a3b8); }
+.rf-item select, .rf-item input {
+  background: var(--panel, #0b111c); color: var(--fg, #e2e8f0);
+  border: 1px solid var(--border, #1e2a3a); border-radius: 6px;
+  padding: 4px 7px; font: inherit; font-size: 12.5px; min-width: 120px;
+  color-scheme: dark; }
+.rf-clear { background: none; border: 1px solid var(--border, #1e2a3a);
+  color: var(--fg, #e2e8f0); border-radius: 6px; padding: 5px 10px;
+  font: inherit; font-size: 12px; cursor: pointer; }
+.rf-clear:hover { border-color: var(--muted, #94a3b8); }
+.rf-note { font-size: 11px; margin-left: auto; }
+.al-outcome { font-weight: 700; letter-spacing: .03em; }
+.al-under .al-outcome { color: #22c55e; }
+.al-over .al-outcome { color: #ef4444; }
+.al-push .al-outcome { color: var(--muted, #94a3b8); }
+
+/* ── ACTIVE UNDER ALERTS — the TRIGGERED LINE + the RESULT state ──────
+   The live market line the alert fired against (sealed at trigger, never
+   the opening / closing / current line) is printed on its own prominent
+   line.  The result is NEUTRAL while the alert is unresolved — PENDING is
+   never coloured green or red — and becomes UNDER (green) / OVER (red) /
+   PUSH (neutral) only once the backend settles it, coloured on the word
+   AND on the value. */
+.al-trigger-line { color: var(--fg, #e2e8f0); font-weight: 700; font-size: 12px; font-variant-numeric: tabular-nums; }
+.al-line .al-result { color: var(--muted, #94a3b8); font-variant-numeric: tabular-nums; }
+.al-row.al-under .al-result { color: #22c55e; }
+.al-row.al-over .al-result { color: #ef4444; }
+.al-row.al-push .al-result { color: var(--muted, #94a3b8); }
+.al-line .al-pending { color: var(--muted, #94a3b8); font-weight: 700; letter-spacing: .03em; }
+
+/* ── FINAL RESULT on the game card (directive EVERY ENDED GAME ONCE
+   RESULTED) — the settled result of an ENDED game, shown whether or not the
+   game ever raised an alert.  The same verdict palette as the alert rows
+   (UNDER green / OVER red / PUSH neutral), so the card and the alert panels
+   read identically, plus a matching accent down the card's left edge. */
+.card-result {
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  margin: 6px 10px 2px; padding: 5px 9px; border-radius: 7px;
+  background: var(--panel2, #0d1420); border: 1px solid var(--border, #1e2a3a);
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .04em;
+}
+.card-result .cr-word { font-weight: 800; }
+.card-result.al-under { border-color: rgba(34, 197, 94, .45); }
+.card-result.al-under .cr-word { color: #22c55e; }
+.card-result.al-over { border-color: rgba(239, 68, 68, .45); }
+.card-result.al-over .cr-word { color: #ef4444; }
+.card-result.al-push { border-color: var(--border2, #26374d); }
+.card-result.al-push .cr-word { color: var(--muted, #94a3b8); }
+/* the settled accent on the card itself — a 3px verdict stripe */
+.card.card-result-under { border-left: 3px solid #22c55e; }
+.card.card-result-over { border-left: 3px solid #ef4444; }
+.card.card-result-push { border-left: 3px solid var(--muted, #94a3b8); }
+
+
+/* ═══════════ AUTO BETTING panel (directive 2026-09-21) ═══════════
+   Kill switch + unit price + today's stats + recent executions.
+   Display only: every limit is server-side authority. */
+.ab-grid {
+  display: flex; gap: 24px; flex-wrap: wrap;
+  padding: 8px 4px 4px;
+}
+.ab-settings, .ab-today { min-width: 260px; }
+.ab-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 3px 0; justify-content: space-between;
+}
+.ab-input-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.ab-input-wrap input {
+  width: 90px; background: transparent; color: var(--fg, #e5e7eb);
+  border: 1px solid var(--border, #374151); border-radius: 6px;
+  padding: 4px 8px; font: inherit;
+}
+.ab-input-wrap button, .ab-switch-wrap button {
+  background: var(--border, #374151); color: inherit; border: 0;
+  border-radius: 6px; padding: 4px 12px; cursor: pointer; font: inherit;
+}
+.ab-note { font-size: 11px; padding: 2px 0; }
+.ab-switch-wrap {
+  display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer; font-size: 13px;
+}
+.ab-switch-wrap input[type="checkbox"] { width: 18px; height: 18px; }
+.ab-exec-head {
+  font-size: 11px; letter-spacing: 0.08em; padding: 10px 4px 4px;
+  border-top: 1px solid var(--border, #374151); margin-top: 8px;
+}
+.ab-exec-list { list-style: none; margin: 0; padding: 0 4px; }
+.ab-exec {
+  display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline;
+  padding: 6px 8px; margin: 4px 0; border-radius: 6px;
+  border-left: 3px solid var(--border, #374151);
+  background: var(--bg-soft, rgba(255,255,255,0.03));
+  font-size: 12px;
+}
+.ab-exec .ab-game { font-weight: 600; }
+.ab-exec .ab-alert { color: var(--muted, #9ca3af); }
+.ab-exec .ab-status { font-weight: 700; }
+/* QUALIFYING BETS — one line per fixture, the other ledger entries under
+   that fixture's dropdown (operator directive 2026-11-19). */
+.ab-cand-group { list-style: none; margin: 4px 0; }
+.ab-cand-group > details > summary { list-style: none; cursor: pointer; }
+.ab-cand-group > details > summary::-webkit-details-marker { display: none; }
+.ab-cand-count { margin-left: auto; font-size: 10px; color: var(--muted, #9ca3af); }
+.ab-cand-entries { list-style: none; margin: 2px 0 6px 18px; padding: 0 4px; }
+.ab-cand-entry {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline;
+  font-size: 11px; padding: 3px 8px; margin: 2px 0;
+  border-left: 2px solid var(--border, #374151); border-radius: 4px;
+  background: var(--bg-soft, rgba(255,255,255,0.02)); opacity: .85;
+}
+/* status colours — ACCEPTED green, REJECTED amber, FAILED red,
+   UNKNOWN neutral grey; PENDING/SUBMITTED blue-ish */
+/* ── GLOBAL SEARCH + game-state filter (command center) ───── */
+.global-search {
+  background: var(--panel2); border: 1px solid var(--border);
+  color: var(--text); font: 11px var(--mono); border-radius: 4px;
+  padding: 4px 8px; width: 240px; letter-spacing: .3px;
+}
+.global-search:focus { outline: 1px solid var(--cyan); }
+
+/* per-card game-state pill (LIVE / STALE / ENDED / INVALID) */
+.card-state-pill { font: 10px var(--mono); letter-spacing: .5px; padding: 6px 10px 0; }
+.card-state-pill.csp-live { color: var(--green); }
+.card-state-pill.csp-off { color: var(--muted); }
+
+/* ── EXECUTION / AUDIT TRACE — ALERT → GAME → SIGNAL → EXECUTION → RESULT ── */
+.tr-row {
+  border-left: 3px solid var(--border); padding: 6px 10px; margin: 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+.tr-row:has(.tr-st-accepted) { border-left-color: #22c55e; }
+.tr-row:has(.tr-st-rejected) { border-left-color: #f59e0b; }
+.tr-row:has(.tr-st-blocked) { border-left-color: #f87171; }
+.tr-row:has(.tr-st-failed) { border-left-color: #ef4444; }
+.tr-row:has(.tr-st-unknown) { border-left-color: #9ca3af; }
+.tr-row:has(.tr-st-would_bet),
+.tr-row:has(.tr-st-pending),
+.tr-row:has(.tr-st-submitting),
+.tr-row:has(.tr-st-submitted) { border-left-color: #3b82f6; }
+.tr-chain { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+  font: 11px var(--mono); }
+.tr-step { display: inline-flex; gap: 5px; align-items: baseline; }
+.tr-step + .tr-step::before { content: "\2192"; color: var(--dim); margin-right: 2px; }
+.tr-k { font-size: 9px; letter-spacing: 1px; color: var(--muted); }
+.tr-v { color: var(--text); }
+.tr-alert .tr-v { color: var(--amber); }
+.tr-exec .tr-v { color: var(--cyan); }
+.tr-st-accepted .tr-v { color: #22c55e; font-weight: 800; }
+.tr-st-rejected .tr-v { color: #f59e0b; font-weight: 800; }
+.tr-st-blocked .tr-v { color: #f87171; font-weight: 800; }
+.tr-st-failed .tr-v { color: #ef4444; font-weight: 800; }
+.tr-st-unknown .tr-v { color: #9ca3af; font-weight: 800; }
+.tr-st-would_bet .tr-v, .tr-st-pending .tr-v, .tr-st-submitting .tr-v,
+.tr-st-submitted .tr-v, .tr-st-reconciling .tr-v { color: #3b82f6; font-weight: 700; }
+.tr-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font: 10px var(--mono);
+  margin-top: 3px; }
+.tr-reason { color: var(--red); font: 10px var(--mono); }
+#traceRefresh {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+  font: 10px var(--mono); padding: 2px 8px; border-radius: 4px; cursor: pointer;
+  margin-left: auto;
+}
+#traceRefresh:hover { color: var(--text); }
+
+/* ── DATABASE / DATA EXPLORER ─────────────────────────────── */
+.ex-toolbar {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  padding: 8px 12px; border-bottom: 1px solid var(--border); font: 11px var(--mono);
+}
+.ex-toolbar label { display: inline-flex; gap: 6px; align-items: center;
+  color: var(--muted); font-size: 10px; letter-spacing: 1px; }
+.ex-toolbar select, .ex-toolbar input {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  font: 11px var(--mono); border-radius: 4px; padding: 3px 6px;
+}
+.ex-toolbar input[type="search"] { width: 220px; }
+.ex-toolbar button {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  font: 10px var(--mono); padding: 3px 10px; border-radius: 4px; cursor: pointer;
+}
+.ex-toolbar button:hover { border-color: var(--cyan); }
+#exTable td, #exTable th { text-align: left; }
+#exTable td.ex-st { font-weight: 700; }
+td.ex-st-accepted { color: #22c55e; }
+td.ex-st-rejected { color: #f59e0b; }
+td.ex-st-blocked { color: #f87171; }
+td.ex-st-failed { color: #ef4444; }
+td.ex-st-unknown, td.ex-st-expired { color: #9ca3af; }
+td.ex-st-would_bet, td.ex-st-pending, td.ex-st-submitting,
+td.ex-st-submitted { color: #3b82f6; }
+/* line_minus_final: + green = total finished under the line (UNDER won) */
+#exTable td.ex-pos { color: #22c55e; font-weight: 700; }
+#exTable td.ex-neg { color: #ef4444; font-weight: 700; }
+
+.ab-exec.st-accepted { border-left-color: #22c55e; }
+.ab-exec.st-accepted .ab-status { color: #22c55e; }
+.ab-exec.st-rejected { border-left-color: #f59e0b; }
+.ab-exec.st-rejected .ab-status { color: #f59e0b; }
+.ab-exec.st-failed { border-left-color: #ef4444; }
+.ab-exec.st-failed .ab-status { color: #ef4444; }
+.ab-exec.st-unknown { border-left-color: #9ca3af; }
+.ab-exec.st-unknown .ab-status { color: #9ca3af; }
+.ab-exec.st-pending, .ab-exec.st-submitted { border-left-color: #3b82f6; }
+.ab-exec.st-pending .ab-status, .ab-exec.st-submitted .ab-status { color: #3b82f6; }
+.ab-exec.st-cancelled { border-left-color: #6b7280; }
+.ab-exec.st-cancelled .ab-status { color: #6b7280; }
+/* --- MISSING execution state colours (BLM-specific states) --- */
+/* IDLE — betting worker is up but this game is not armed */
+.ab-exec.st-idle { border-left-color: #374151; }
+.ab-exec.st-idle .ab-status { color: #6b7280; }
+/* ARMED — auto betting enabled and game qualifies: bet will fire on trigger */
+.ab-exec.st-armed { border-left-color: #a78bfa; }
+.ab-exec.st-armed .ab-status { color: #a78bfa; font-weight: 800; }
+/* WOULD_BET — dry-run: a real bet would have been placed */
+.ab-exec.st-would_bet { border-left-color: #818cf8; }
+.ab-exec.st-would_bet .ab-status { color: #818cf8; font-weight: 800; }
+/* SUBMITTING — bet is being submitted to the provider RIGHT NOW */
+.ab-exec.st-submitting { border-left-color: #fbbf24; }
+.ab-exec.st-submitting .ab-status { color: #fbbf24; font-weight: 800; }
+/* BLOCKED — worker blocked this execution (limit hit / safety gate) */
+.ab-exec.st-blocked { border-left-color: #f87171; }
+.ab-exec.st-blocked .ab-status { color: #f87171; font-weight: 800; }
+
+/* inline execution-state badges on game cards */
+.exec-idle        { color: #6b7280; }
+.exec-armed       { color: #a78bfa; font-weight: 800; }
+.exec-would_bet   { color: #818cf8; font-weight: 800; }
+.exec-submitting  { color: #fbbf24; font-weight: 800; }
+.exec-blocked     { color: #f87171; font-weight: 800; }
+.exec-accepted    { color: #22c55e; font-weight: 800; }
+.exec-rejected    { color: #f59e0b; font-weight: 800; }
+.exec-failed      { color: #ef4444; font-weight: 800; }
+.exec-unknown     { color: #9ca3af; }
+.exec-pending,
+.exec-submitted   { color: #3b82f6; font-weight: 700; }
+.exec-cancelled   { color: #6b7280; }
+
+/* ═══════════════════════════════════════════════════════════════
+   GLOBAL CONTROLS — kill-switch state bar + betting status
+   ═══════════════════════════════════════════════════════════════ */
+.ab-global-bar {
+  display: flex; flex-wrap: wrap; gap: 12px 24px;
+  padding: 8px 4px 12px; border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.ab-state-item {
+  display: flex; flex-direction: column; gap: 2px; min-width: 80px;
+}
+.ab-state-label {
+  font-size: 9px; letter-spacing: 1.5px; color: var(--muted);
+  text-transform: uppercase;
+}
+.ab-state-val {
+  font-family: var(--mono); font-size: 13px; font-weight: 800;
+  color: var(--text);
+}
+.ab-state-val.ab-val-on  { color: var(--green); }
+.ab-state-val.ab-val-off { color: var(--red); }
+.ab-state-val.ab-val-dry { color: var(--amber); }
+.ab-state-val.ab-val-live { color: var(--green); }
+
+/* kill-switch pill in header */
+.ab-mode-pill { font-family: var(--mono); font-size: 11px; letter-spacing: 1px; }
+.ab-mode-pill.dry  { color: var(--amber); border-color: #7c5a12; background: #261a04; }
+.ab-mode-pill.live { color: var(--green);  border-color: #14532d; background: #052e1c; }
+.ab-mode-pill.off  { color: var(--red);    border-color: #7f1d1d; background: #2d0a0a; }
+
+/* exec legend in exec head row */
+.ab-exec-legend { margin-left: 12px; font-size: 10px; opacity: .6; }
+
+/* ═══════════════════════════════════════════════════════════════
+   ALERT → BET TRACEABILITY PANEL
+   Visible directly on game cards when an execution exists for that game.
+   Dense, styled as a data row, not a prose block.
+   ═══════════════════════════════════════════════════════════════ */
+.exec-trace {
+  display: flex; flex-wrap: wrap; gap: 4px 12px;
+  padding: 6px 10px; font-family: var(--mono); font-size: 10px;
+  color: var(--muted); border-top: 1px dashed var(--border);
+  background: rgba(10,14,20,.5);
+}
+.exec-trace .et-label {
+  font-size: 9px; letter-spacing: 1px; color: var(--dim);
+  text-transform: uppercase; white-space: nowrap;
+}
+.exec-trace .et-val { color: var(--text); font-weight: 700; }
+.exec-trace .et-ref { color: var(--cyan); }
+.exec-trace .et-alert { color: var(--amber); }
+.exec-trace .et-reason { color: var(--red); }
+.exec-trace .et-accepted { color: var(--green); font-weight: 800; }
+.exec-trace .et-rejected { color: var(--amber); font-weight: 800; }
+.exec-trace .et-blocked  { color: var(--red); font-weight: 800; }
+.exec-trace .et-pending  { color: #3b82f6; }
+
+/* ═══════════════════════════════════════════════════════════════
+   BLM SIGNAL / DIRECTION ROW on game cards
+   Makes UNDER/OVER direction and checkpoint explicit at a glance.
+   ═══════════════════════════════════════════════════════════════ */
+.blm-signal-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 5px 12px; font-family: var(--mono); font-size: 11px;
+  border-top: 1px solid var(--border); background: #0c1520;
+}
+.blm-sig-label {
+  font-size: 9px; letter-spacing: 1.5px; color: var(--muted);
+  text-transform: uppercase;
+}
+.blm-sig-active {
+  color: var(--amber); font-weight: 800; letter-spacing: .5px;
+}
+.blm-sig-inactive { color: var(--dim); }
+.blm-sig-direction-under { color: var(--green); font-weight: 800; }
+.blm-sig-direction-over  { color: var(--red);   font-weight: 800; }
+.blm-sig-direction-none  { color: var(--dim); }
+.blm-sig-checkpoint { color: var(--cyan); font-weight: 700; }
+.blm-sig-line { color: #eaf2ff; font-weight: 800; }
+.blm-sig-trap {
+  font-size: 9px; letter-spacing: 1px; padding: 2px 6px;
+  border-radius: 4px; border: 1px solid;
+}
+.blm-sig-trap.trap-under {
+  color: var(--green); border-color: #14532d; background: rgba(34,197,94,.08);
+}
+.blm-sig-trap.trap-over {
+  color: var(--red); border-color: #7f1d1d; background: rgba(239,68,68,.08);
+}
+.blm-sig-trap.trap-none { color: var(--dim); border-color: var(--border); }
+/* BETTABLE vs NON-ACTIONABLE — mirrors the Auto-Bet executor's gate EXACTLY
+   (under_alert.active AND under_alert_eligibility.eligible).  A visible alert
+   that is not actionable says so, with the reason on hover. */
+.blm-sig-bettable {
+  font-size: 9px; letter-spacing: 1px; padding: 2px 6px;
+  border-radius: 4px; border: 1px solid; font-weight: 800; cursor: help;
+}
+.blm-sig-bettable.blm-bt-yes {
+  color: #052e16; background: var(--green); border-color: var(--green);
+}
+.blm-sig-bettable.blm-bt-no {
+  color: var(--dim); border-color: var(--border); background: transparent;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   VIEW TABS + STATS TAB
+   The live board and the stats board are separate VIEWS, not stacked
+   sections: the stats tables are wide and dense, and mixing them with
+   the live grid made both harder to scan.
+   ═══════════════════════════════════════════════════════════════ */
+
+.tabs {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 18px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  letter-spacing: 1.2px;
+  padding: 8px 18px; cursor: pointer;
+  background: transparent; color: var(--muted);
+  border: 1px solid transparent; border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+}
+.tab:hover { color: var(--text); background: var(--panel2); }
+.tab.active {
+  color: var(--cyan); background: var(--panel);
+  border-color: var(--border2); border-bottom-color: var(--cyan);
+}
+.tab-note { margin-left: auto; font-size: 11px; padding-bottom: 6px; }
+
+.view[hidden] { display: none; }
+
+/* ── stats cards ─────────────────────────────────────────── */
+.st-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 12px 18px;
+  padding: 12px 14px;
+}
+.st-head {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding-bottom: 8px; margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.st-title {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  letter-spacing: 1.1px; color: var(--cyan);
+}
+.st-head .muted { font-size: 11px; }
+.st-head .pill { font-size: 10px; }
+.st-note {
+  font-size: 11px; line-height: 1.6; margin-top: 8px;
+  padding-top: 8px; border-top: 1px dashed var(--border);
+}
+.st-note ul { margin: 4px 0 0 16px; }
+.st-note li { margin: 2px 0; }
+.st-scroll { overflow-x: auto; }
+
+/* ── stats tables ────────────────────────────────────────── */
+.st-table {
+  width: 100%; border-collapse: collapse;
+  font-family: var(--mono); font-size: 12px;
+}
+.st-table th {
+  text-align: right; padding: 5px 8px;
+  color: var(--muted); font-weight: 600; font-size: 10px;
+  letter-spacing: .6px; text-transform: uppercase;
+  border-bottom: 1px solid var(--border2);
+  white-space: nowrap;
+}
+.st-table th:first-child, .st-table td:first-child { text-align: left; }
+.st-table td {
+  text-align: right; padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.st-table tbody tr:hover { background: var(--panel2); }
+.st-table td.lbl { color: var(--text); font-weight: 600; }
+.st-table .muted { color: var(--muted); }
+
+/* ── KPI strip ───────────────────────────────────────────── */
+.st-kpis {
+  display: flex; gap: 26px; flex-wrap: wrap; align-items: flex-end;
+}
+.st-kpi { min-width: 108px; }
+.st-kpi-label {
+  font-size: 10px; letter-spacing: .8px; color: var(--muted);
+  text-transform: uppercase;
+}
+.st-kpi-value {
+  font-family: var(--mono); font-size: 24px; font-weight: 700;
+  line-height: 1.25;
+}
+.st-kpi-sub { font-size: 10px; color: var(--muted); }
+.st-kpi-value.good { color: var(--green); }
+.st-kpi-value.bad { color: var(--red); }
+.st-kpi-value.warn { color: var(--amber); }
+.st-kpi-value.plain { color: var(--text); }
+
+/* verdict colouring for the standings */
+.v-profitable { color: var(--green); font-weight: 700; }
+.v-losing { color: var(--red); font-weight: 700; }
+.v-coin { color: var(--amber); font-weight: 700; }
+.v-none { color: var(--dim); }
+
+/* inline proportion bar — makes a table of percentages readable at a glance */
+.st-bar {
+  display: inline-block; vertical-align: middle;
+  width: 54px; height: 7px; margin-left: 7px;
+  background: #16202e; border-radius: 3px; overflow: hidden;
+}
+.st-bar > i {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--red), var(--amber) 50%, var(--green));
+}
+.st-split { display: flex; gap: 0; flex-wrap: wrap; }
+.st-split > .st-card { flex: 1 1 380px; }
+
+/* text columns in the stats tables stay LEFT-aligned; the table default is
+   right-aligned because almost every column is numeric */
+.st-table td.txt { text-align: left; white-space: normal; color: var(--text); }
+
+/* ── ACTIVE ALERT CARD STATE (directive 2026-09-28) ─────────────
+   Yellow border = an ACTIVE BLM alert on this canonical game — never a
+   placed bet.  Only ACTIVE_ALERT gets it; RESULTED removes it. */
+.card.card-alert-active {
+  border: 2px solid #ffd400;
+  box-shadow: 0 0 8px rgba(255, 212, 0, 0.35);
+}
+.card.card-alert-resulted { border-color: var(--border2); }
+.card-alert-slot:empty { display: none; }
+.card-alert-banner {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 8px; margin: 2px 0;
+  border: 1px solid #ffd400; border-radius: 4px;
+  background: rgba(255, 212, 0, 0.08);
+}
+.card-alert-badge {
+  font-weight: 700; color: #ffd400; white-space: nowrap;
+}
+.card-alert-info { font-size: 12px; color: var(--text); }
+.card-place-bet {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  background: #ffd400; color: #1a1a00;
+  border: 1px solid #ffd400; border-radius: 3px;
+  padding: 3px 10px; cursor: pointer;
+  transition: filter 0.15s;
+}
+.card-place-bet:hover { filter: brightness(1.1); }
+.card-place-bet:disabled { opacity: 0.55; cursor: wait; }
+
+/* ── RESULTED ALERTS section ──────────────────────────────────── */
+/* Collapsing is presentation-only: the section always renders and the
+   data keeps updating while hidden.  When EXPANDED the body is
+   independently scrollable so a 50+-row history never pushes the rest
+   of the dashboard down (directive 2026-09-28). */
+.resulted-details { }
+.resulted-details .alerts-body {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.resulted-details summary.alerts-head {
+  cursor: default;
+  display: flex; align-items: center; gap: 12px;
+}
+.resulted-details summary.alerts-head .alerts-title { margin-right: auto; }
+.resulted-expand-btn {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border2); border-radius: 3px;
+  padding: 2px 7px; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.resulted-expand-btn:hover { background: var(--border2); border-color: var(--cyan); }
+.resulted-expand-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.resulted-toggle { display: inline-flex; align-items: center; }
+
+/* ═══════════════════════════════════════════════════════════════
+   FRONTEND REDESIGN — LIVE ALERTS / RESULTS / CARD HIERARCHY
+   (directive 2026-09-28).  Presentation only: no data, no contract.
+   The existing .al-row / .al-under / .al-over rules above ARE the
+   settled-result colour contract and are deliberately UNTOUCHED —
+   every rule here is either a NEW class or scoped under the live
+   alerts panel's own ul.al-list wrapper.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── LIVE ALERTS — one compact, clickable row per active alert ─── */
+/* each alert row is a STACKED card (headline → ident → game state → fact
+   rail → result → disclosure).  The legacy `.al-row` rule above sets
+   display:flex for the key/value summary rows; scoped here to the alert
+   panel bodies so an alert row is never laid out as side-by-side columns. */
+.alerts-body .al-row { display: block; }
+.alerts ul.al-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.alerts ul.al-list li.al-row { cursor: pointer; transition: border-color .15s, transform .15s; }
+.alerts ul.al-list li.al-row:hover { border-color: var(--cyan); transform: translateY(-1px); }
+.alerts ul.al-list li.al-row:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.alerts ul.al-list li.al-row .alc-more { cursor: auto; }
+
+/* the game's CURRENT state — score / period / clock, from the payload */
+.alc-meta {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin: 2px 0 3px; font-family: var(--mono); font-size: 12.5px;
+  color: var(--muted);
+}
+.alc-meta .alc-score { color: #eaf2ff; font-weight: 800; letter-spacing: .04em; }
+.alc-meta .alc-clock { color: var(--cyan); }
+
+/* the compact fact rail: the alert's own sealed numbers on one line */
+.alc-facts {
+  display: flex; flex-wrap: wrap; gap: 4px 16px;
+  margin: 3px 0; font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+}
+.alc-fact .al-num, .alc-fact .al-trigger-line, .alc-fact .al-neg { font-weight: 800; margin-left: 3px; }
+.alc-fact .al-num { color: var(--text); }
+.alc-fact .al-neg { color: var(--red); }
+.alc-facts .al-trigger-line { color: var(--amber); }
+
+/* DETAILS ▸ — the row's own disclosure; the deeper alert detail stays here */
+.alc-more { margin-top: 5px; border-top: 1px dashed var(--border); padding-top: 4px; }
+.alc-more > summary {
+  cursor: pointer; font-family: var(--mono); font-size: 10px; letter-spacing: 1px;
+  color: var(--dim); user-select: none;
+}
+.alc-more > summary:hover, .alc-more[open] > summary { color: var(--cyan); }
+.alc-more .al-line { margin-top: 4px; }
+
+/* ── RESULTS — verdict first: colour + glyph + word, then the line ─ */
+.alc-result-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+.alc-verdict {
+  font-family: var(--mono); font-size: 12px; font-weight: 800;
+  letter-spacing: .08em; color: var(--muted);
+}
+.al-row.al-under .alc-verdict { color: #22c55e; }
+.al-row.al-over .alc-verdict { color: #ef4444; }
+.al-row.al-push .alc-verdict { color: var(--muted, #94a3b8); }
+.al-row.al-unknown .alc-verdict { color: #f59e0b; }
+.alc-result-head .al-teams { font-size: 12px; color: var(--muted); }
+
+/* ── ALERT → GAME REVEAL — the clicked card is emphasised, briefly ─ */
+.card.card-focus { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+/* ── CARD HIERARCHY — the betting controls read as the operable row.
+      Visual emphasis on ALREADY-RENDERED elements only; the manual
+      wager form and the BLM signal row keep their exact structure. */
+.card .manual-bet {
+  border-top: 1px solid var(--border2);
+  background: rgba(34, 211, 238, .04);
+  padding: 8px 10px;
+}
+.card .manual-bet button { padding: 6px 12px; }
+.card .blm-signal-row { border-left: 2px solid var(--border2); padding-left: 6px; }
+
+/* ── RESPONSIVE — alert rows and betting controls stay usable on
+      tablet and phone; nothing overflows horizontally. */
+/* the header filter rail wraps instead of forcing page-wide horizontal
+   scroll — its content is wider than any viewport (pre-existing defect,
+   fixed here so the responsive layout is actually sound) */
+.filters { flex-wrap: wrap; }
+@media (max-width: 760px) {
+  .alerts { margin: 14px 10px 0; }
+  .alerts-head { flex-wrap: wrap; }
+  .alerts-body { padding: 10px; }
+  .alc-facts { gap: 3px 12px; }
+  .manual-bet { flex-wrap: wrap; }
+  .grid { padding: 4px 10px 40px; }
+}
+@media (max-width: 520px) {
+  .alerts-sub { display: none; }
+  .alc-meta { gap: 8px; font-size: 12px; }
+  .manual-bet input { width: 68px; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   AUTO-BET PRIMARY CONTROLS (top bar) — frontend-only relocation.
+   The ON/OFF switch, unit price and Save moved out of the collapsed
+   GLOBAL CONTROLS section so they are visible without scrolling.  The
+   element ids (#abSwitch / #abUnitPrice / #abSaveUnit) are unchanged, so
+   the existing status poll, authorization gating and settings API calls
+   all continue to work untouched.  Deliberately RED: this is the one
+   control area that can risk money, so it must never read as decorative.
+   ══════════════════════════════════════════════════════════════════════ */
+.ab-top {
+  display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 5px 12px; border-radius: 8px;
+  border: 1px solid var(--red);
+  background: linear-gradient(180deg, rgba(248, 113, 113, .18) 0%, rgba(248, 113, 113, .07) 100%);
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, .18), 0 0 14px rgba(248, 113, 113, .10) inset;
+}
+.ab-top-switch {
+  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; font-weight: 800;
+  letter-spacing: 1px; color: var(--red); white-space: nowrap;
+}
+.ab-top-switch input[type="checkbox"] {
+  width: 22px; height: 22px; margin: 0; accent-color: var(--red); cursor: pointer;
+}
+.ab-top-switch input[type="checkbox"]:disabled { cursor: not-allowed; }
+.ab-top-switch input[type="checkbox"]:disabled + span { opacity: .65; }
+.ab-top-switch input[type="checkbox"]:not(:disabled):checked + span {
+  color: #fecaca; text-shadow: 0 0 8px rgba(248, 113, 113, .7);
+}
+.ab-top-sep { color: rgba(248, 113, 113, .45); font-family: var(--mono); font-weight: 700; }
+.ab-top-unit {
+  font-family: var(--mono); font-size: 12px; font-weight: 800;
+  letter-spacing: 1px; color: #fecaca; white-space: nowrap;
+}
+.ab-top-input { display: inline-flex; align-items: center; gap: 5px; }
+/* keep "UNIT:" glued to its field + SAVE when the header wraps on narrow screens */
+.ab-top-unit-wrap { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.ab-top-cur { font-family: var(--mono); font-size: 12px; font-weight: 800; color: #fecaca; }
+.ab-top-input input[type="number"] {
+  width: 78px; padding: 3px 7px; border-radius: 6px;
+  border: 1px solid var(--red); background: #1b0c0c; color: #fef2f2;
+  font-family: var(--mono); font-size: 12px; font-weight: 800;
+}
+.ab-top-input input[type="number"]:disabled {
+  /* A DISABLED field must LOOK disabled.  The previous opacity:1 made the
+     stale-bundle state indistinguishable from an editable field and hid the
+     fault (2026-10-05).  Dimmed + dashed + not-allowed instead. */
+  opacity: .55; color: rgba(254, 202, 202, .6);
+  border-style: dashed; border-color: rgba(248, 113, 113, .4);
+  cursor: not-allowed;
+}
+.ab-top-input button {
+  padding: 3px 11px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--red); background: var(--red); color: #1b0606;
+  font-family: var(--mono); font-size: 11px; font-weight: 800; letter-spacing: 1px;
+}
+.ab-top-input button:hover:not(:disabled) { background: #fca5a5; }
+.ab-top-input button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Narrow screens: give the control block its own full-width row instead of
+   squeezing the header; never let it force horizontal scrolling. */
+@media (max-width: 900px) {
+  .ab-top { width: 100%; justify-content: flex-start; }
+}
+@media (max-width: 520px) {
+  .ab-top { gap: 6px; padding: 5px 8px; }
+  .ab-top-switch { font-size: 11px; }
+  .ab-top-switch input[type="checkbox"] { width: 19px; height: 19px; }
+  .ab-top-sep { display: none; }
+  .ab-top-input input[type="number"] { width: 64px; }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+  OPERATOR BOARD BACKGROUND  (operator directive 2026-10-10)
+
+  The post-login board carries the operator's own backdrop image.
+
+  APPENDED AT EOF, scoped to `body`, so it overrides only the background
+  IMAGE of the `html, body` rule above (later wins at equal specificity) and
+  edits no existing rule — the static contract's lowest-risk tier.
+
+  Scoped to the BODY on purpose: `login.html` loads `login.css`, not this
+  file, so the login page is untouched and still shows the arena image.
+
+  The gradient layer is a legibility veil over the image — a photo behind a
+  dense board of cards costs contrast. TUNE ONLY ITS ALPHA:
+   0.72 = image clearly visible (current)
+   0.85 = image faint
+   1.00 = image hidden (a plain near-black board)
+  ═══════════════════════════════════════════════════════════════════════════ */
+  body {
+  background-image:
+  linear-gradient(rgba(4, 6, 10, 0.72), rgba(4, 6, 10, 0.72)),
+  url("/static/blmbackground.png");
+  background-size: cover, cover;
+  background-position: center center, center center;
+  background-attachment: fixed, fixed;
+  background-repeat: no-repeat, no-repeat;
+  }
+
+
+/* ── Read-only historical execution analytics ─────────────────────── */
+.ex-data-warning { margin: 10px 12px; padding: 9px 11px; border-left: 3px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 8%, transparent); }
+.ex-analytics-filters { justify-content: flex-start; }
+.ex-analytics-filters input[type="date"] { width: 132px; }
+.ex-analytics-kpis { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.ex-analytics-kpis .st-kpi:first-child { min-width: 160px; }
+.ex-analytics-kpis .st-kpi:first-child .st-kpi-value { font-size: 34px; }
+.ex-subhead { padding: 12px 12px 6px; align-items: baseline; }
+.ex-subhead .st-title { font-size: 11px; }
+.ex-config-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr));
+  gap: 8px; padding: 8px 12px 12px; }
+.ex-config-item { min-width: 0; padding: 8px; background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 5px; }
+.ex-config-item .k { color: var(--muted); font: 9px var(--mono); letter-spacing: .7px;
+  text-transform: uppercase; }
+.ex-config-item .v { margin-top: 4px; color: var(--text); font: 11px var(--mono);
+  overflow-wrap: anywhere; }
+.ex-breakdowns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px;
+  padding: 8px 12px 14px; }
+.ex-breakdowns section { min-width: 0; }
+.ex-breakdowns h3 { margin: 0 0 6px; color: var(--muted); font: 10px var(--mono);
+  letter-spacing: .7px; text-transform: uppercase; }
+.ex-break-table { width: 100%; border-collapse: collapse; font: 10px var(--mono); }
+.ex-break-table td { padding: 4px 5px; border-bottom: 1px solid var(--border); }
+.ex-break-table td:nth-child(n+2) { text-align: right; }
+.ex-league-tag { display: inline-flex; align-items: center; gap: 6px; }
+.ex-league-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.ex-pagination { display: flex; justify-content: center; gap: 12px; align-items: center;
+  padding: 10px; color: var(--muted); font: 10px var(--mono); }
+.ex-pagination button { background: var(--panel2); border: 1px solid var(--border);
+  color: var(--text); padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+.ex-pagination button:disabled { opacity: .4; cursor: default; }
+@media (max-width: 760px) { .ex-breakdowns { grid-template-columns: 1fr; } }
+
+
+/* ── QUALIFYING BETS: settled result vs the row's own line ────────────────
+   Appended at EOF (later-wins at equal specificity); no existing rule edited.
+   A dash (no provable final) stays muted so it never reads as a verdict. */
+.ab-result { min-width: 3.6em; font-variant-numeric: tabular-nums; }
+.ab-res-under { color: #22c55e; }
+.ab-res-over  { color: #ef4444; }
+.ab-res-push  { color: #94a3b8; }
+.ab-res-none  { color: #64748b; }

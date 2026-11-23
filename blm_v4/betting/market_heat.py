@@ -56,6 +56,17 @@ _cache: dict = {}
 _history_cache: dict = {}
 _cache_lock = threading.Lock()
 
+#: The OPERATOR SWITCH — ``betting_config.market_heat_enabled``.  ``None``
+#: means "no switch set" and the deployment env decides; True/False is an
+#: explicit operator choice that outranks the env default.  It is loaded ONCE
+#: at startup (``load_persisted_override``) and then mutated only by
+#: ``apply_override``, so ``enabled()`` never does I/O on the 3 s lane path.
+_override: Optional[bool] = None
+_override_lock = threading.Lock()
+
+#: the config key the dashboard toggle writes (POST /api/v4/betting/settings)
+SWITCH_KEY = "market_heat_enabled"
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
@@ -79,7 +90,53 @@ def _env_int(name: str, default: int) -> int:
 
 
 def enabled() -> bool:
+    """Operator switch wins; otherwise the deployment env (default ON)."""
+    over = override()
+    if over is not None:
+        return over
     return _env_bool("TRADE_MARKET_HEAT_ENABLED", True)
+
+
+def override() -> Optional[bool]:
+    with _override_lock:
+        return _override
+
+
+def apply_override(flag: Optional[bool]) -> None:
+    """Publish an operator switch immediately (the API just wrote the row).
+
+    ``None`` clears the switch so the env default governs again.
+    """
+    global _override
+    with _override_lock:
+        _override = None if flag is None else bool(flag)
+
+
+def load_persisted_override(db_path=None) -> Optional[bool]:
+    """Read ``betting_config.market_heat_enabled`` ONCE, at server startup.
+
+    Fail-open in both directions: an unreadable store or a missing row leaves
+    the switch unset, so the deployment env decides.  A database that cannot
+    be read must never be able to decide a betting policy.
+    """
+    global _override
+    path = Path(db_path) if db_path else _data_root() / "blm_betting.db"
+    value: Optional[bool] = None
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        try:
+            row = con.execute(
+                "SELECT value FROM betting_config WHERE key=?",
+                (SWITCH_KEY,)).fetchone()
+        finally:
+            con.close()
+        if row is not None and row[0] is not None:
+            value = str(row[0]).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        value = None
+    with _override_lock:
+        _override = value
+    return value
 
 
 def window_s() -> float:
@@ -280,11 +337,14 @@ def state(prod_db=None, clean_db=None, now: Optional[float] = None,
     now = now or time.time()
 
     if not enabled():
+        why = ("operator switch OFF (betting_config.%s=false)" % SWITCH_KEY
+               if override() is False
+               else "TRADE_MARKET_HEAT_ENABLED=0")
         return {"enabled": False, "tripped": False, "reason": None,
                 "overshare": None, "over": 0, "n": 0,
                 "threshold": max_over(), "min_games": min_games(),
                 "window_s": window_s(), "error": None,
-                "text": "guardrail disabled (TRADE_MARKET_HEAT_ENABLED=0)"}
+                "text": f"guardrail disabled ({why})"}
 
     with _cache_lock:
         hit = _cache.get(key)

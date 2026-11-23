@@ -395,6 +395,9 @@ def main() -> None:
             rung = _settle.current_rung(betting_store.db_path, depth,
                                         unit_price=unit) if depth else 1
             units = _ladder.stake_units(rung, 1.0)
+            pending = _settle.pending_bets(betting_store.db_path,
+                                           unit_price=unit) if depth else []
+            in_flight = [p for p in pending if p["reason"] == "no_result_row"]
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
         last = None
@@ -428,6 +431,11 @@ def main() -> None:
             "rung": rung,
             "stake_units": units,
             "next_stake": round(units * unit, 2) if (units and unit) else None,
+            "ladder_pending": bool(in_flight),
+            "ladder_pending_bets": len(in_flight),
+            "ladder_pending_oldest_at_utc":
+                in_flight[0]["submitted_at_utc"] if in_flight else None,
+            "ladder_unprovable_bets": len(pending) - len(in_flight),
             "max_stake_per_bet": betting_cfg.max_stake_per_bet,
             "today": today,
             "last": last,

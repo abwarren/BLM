@@ -11,6 +11,14 @@ the render's final total against the line the bet was taken at, and only when
 NEEDS_RECONCILIATION, missing) is NOT settled and yields no outcome, so the
 ladder holds its rung rather than inventing a win.
 
+Operator directive 2026-11-19 (rung 3 taken twice in seven minutes): an
+UNCONFIRMED result must not hold the rung — it RESETS the next stake to rung 1.
+If a bet has not resulted before the next eligible game is due, that game is
+staked at rung 1 and the increased stake is deferred until the outstanding
+result lands; the progression test then applies to the game after it.  A final
+stamped before the bet's own submission (an earlier replay instance of the same
+game id) counts as unconfirmed for the same reason.
+
 Chronology is by `submitted_at_utc`, which is the order the stakes were placed.
 Only bets that actually reached the provider count: a FAILED row has no
 position, so it cannot move the ladder either way.
@@ -19,12 +27,17 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from . import ladder as _ladder
 
 #: statuses that represent a real position at the bookmaker
 PLACED_STATUSES = ("SUBMITTED", "ACCEPTED", "SETTLED", "PUSHED")
+
+#: A final stamped more than this BEFORE the bet was submitted belongs to an
+#: earlier replay instance of the same game id, not to this bet.
+_STALE_SLACK = timedelta(seconds=60)
 
 PROD_DB_DEFAULT = "/home/ubuntu/BLM/blm_pokerbet.db"
 
@@ -50,6 +63,59 @@ def settled_outcomes(betting_db: str, prod_db: Optional[str] = None,
     R46.40 were being counted as rungs 1-3 of a R115 ladder.  A unit change
     therefore restarts the progression at rung 1, which is the safe direction.
     """
+    return [o for o in outcome_sequence(betting_db, prod_db, limit=limit,
+                                        unit_price=unit_price) if o is not None]
+
+
+def outcome_sequence(betting_db: str, prod_db: Optional[str] = None,
+                     limit: int = 200,
+                     unit_price: Optional[float] = None) -> List[Optional[str]]:
+    """One entry per placed bet, oldest first — ``None`` = result not confirmed.
+
+    The ``None`` entries are the point: a placed bet whose final has not
+    landed (no row, not OK, or a final recorded BEFORE the bet itself) is a
+    bet still in flight, and the ladder must see it rather than have it
+    silently vanish from the replay.
+    """
+    return [_settled_result(r) for r in _placed_rows(betting_db, prod_db,
+                                                    unit_price=unit_price)[-limit:]]
+
+
+def pending_bets(betting_db: str, prod_db: Optional[str] = None,
+                 limit: int = 200,
+                 unit_price: Optional[float] = None) -> List[dict]:
+    """The placed bets whose own result is still UNCONFIRMED, oldest first.
+
+    Exactly the entries that make ``current_rung`` reset to rung 1, surfaced so
+    the status can say WHY the next stake is one unit instead of a rung
+    (operator directive 2026-11-19).  Same unit scope as the rung itself, so a
+    bet staked at an older unit can never hold the ladder down for ever.
+    """
+    out: List[dict] = []
+    for r in _placed_rows(betting_db, prod_db, unit_price=unit_price)[-limit:]:
+        if _settled_result(r) is not None:
+            continue
+        out.append({
+            "execution_id": r["execution_id"],
+            "game_id": str(r["game_id"]),
+            "submitted_at_utc": r["submitted_at_utc"] or r["requested_at_utc"],
+            "reason": _unconfirmed_reason(r),
+        })
+    return out
+
+
+def _unconfirmed_reason(row) -> str:
+    status = row["final_result_status"]
+    if status is None:
+        return "no_result_row"
+    if status != "OK":
+        return f"final_{str(status).lower()}"
+    return "final_before_bet"
+
+
+def _placed_rows(betting_db: str, prod_db: Optional[str] = None,
+                 unit_price: Optional[float] = None) -> list:
+    """Placed bets, oldest first, joined to their recorded final (read-only)."""
     prod = _prod_path(prod_db)
     try:
         conn = sqlite3.connect(f"file:{betting_db}?mode=ro", uri=True)
@@ -61,50 +127,85 @@ def settled_outcomes(betting_db: str, prod_db: Optional[str] = None,
             conn.execute(f"ATTACH DATABASE 'file:{prod}?mode=ro' AS p")
         except sqlite3.Error:
             return []
-        rows = conn.execute(
-            """
-            SELECT e.id, e.market, e.selection, e.triggered_line, e.submitted_at_utc,
-                   r.final_total, r.final_result_status
-              FROM bet_executions e
-              LEFT JOIN p.game_results r ON r.source_game_id = e.game_id
-             WHERE e.status IN ({ph})
-               AND e.triggered_line IS NOT NULL
-               {unit_clause}
-             ORDER BY COALESCE(e.submitted_at_utc, e.requested_at_utc) ASC, e.id ASC
-            """.format(ph=",".join("?" * len(PLACED_STATUSES)),
-                       unit_clause=("AND ROUND(e.unit_price, 2) = ROUND(?, 2)"
-                                    if unit_price is not None else "")),
-            (*PLACED_STATUSES, *((unit_price,) if unit_price is not None else ())),
-        ).fetchall()
+        select = (
+            "SELECT e.id, {exec_id}, e.game_id, e.market, e.selection,"
+            "       e.triggered_line, e.submitted_at_utc, e.requested_at_utc,"
+            "       r.final_total, r.final_result_status, {result_at}"
+            "  FROM bet_executions e"
+            "  LEFT JOIN p.game_results r ON r.source_game_id = e.game_id"
+            " WHERE e.status IN ({ph})"
+            "   AND e.triggered_line IS NOT NULL"
+            "   {unit_clause}"
+            " ORDER BY COALESCE(e.submitted_at_utc, e.requested_at_utc) ASC, e.id ASC"
+        )
+        args = (*PLACED_STATUSES, *((unit_price,) if unit_price is not None else ()))
+        unit_clause = ("AND ROUND(e.unit_price, 2) = ROUND(?, 2)"
+                       if unit_price is not None else "")
+        # fixtures / older prod schemas may lack execution_id or result_at; the
+        # ordering guard simply cannot fire without result_at
+        for exec_id, result_at in (("e.execution_id", "r.result_at"),
+                                   ("NULL AS execution_id", "r.result_at"),
+                                   ("NULL AS execution_id", "NULL AS result_at")):
+            try:
+                return conn.execute(
+                    select.format(ph=",".join("?" * len(PLACED_STATUSES)),
+                                  unit_clause=unit_clause, exec_id=exec_id,
+                                  result_at=result_at),
+                    args).fetchall()
+            except sqlite3.Error:
+                continue
+        return []
     except sqlite3.Error:
         return []
     finally:
         conn.close()
 
-    out: List[str] = []
-    for r in rows:
-        if (r["final_result_status"] or "") != "OK":
-            continue
-        outcome = _ladder.settle_outcome(
-            r["market"], r["selection"], r["triggered_line"], r["final_total"])
-        if outcome is not None:
-            out.append(outcome)
-    return out[-limit:]
+
+def _parse_ts(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _settled_result(row) -> Optional[str]:
+    """WON/LOST/PUSH when this bet's OWN result is confirmed, else None.
+
+    ``result_at`` earlier than the bet's own submission is an earlier replay
+    instance of the same game id, not evidence about this bet — the same guard
+    ``api._attach_fixture_context`` applies to the displayed margin.
+    """
+    if (row["final_result_status"] or "") != "OK":
+        return None
+    outcome = _ladder.settle_outcome(
+        row["market"], row["selection"], row["triggered_line"], row["final_total"])
+    if outcome is None:
+        return None
+    placed_at = _parse_ts(row["submitted_at_utc"] or row["requested_at_utc"])
+    result_at = _parse_ts(row["result_at"])
+    if placed_at is not None and result_at is not None \
+            and result_at < placed_at - _STALE_SLACK:
+        return None
+    return outcome
 
 
 def current_rung(betting_db: str, depth_value, prod_db: Optional[str] = None,
                  unit_price: Optional[float] = None) -> int:
     """The rung the NEXT bet should be staked at.
 
-    1 when the ladder is off, when no history is readable, or when the newest
-    settled bet won (a win at the selected depth banks to rung 1).
+    1 when the ladder is off, when no history is readable, when the newest
+    settled bet won at the selected depth (a win there banks to rung 1), and —
+    operator directive 2026-11-19 — when ANY placed bet still has no confirmed
+    result: an unconfirmed result must never carry a stake to the next rung.
     """
     d = _ladder.depth(depth_value)
     if d == 0:
         return 1
     try:
-        return _ladder.rung_from_history(
-            settled_outcomes(betting_db, prod_db, unit_price=unit_price), d)
+        return _ladder.rung_from_replay(
+            outcome_sequence(betting_db, prod_db, unit_price=unit_price), d)
     except Exception:
         # never stake a ladder rung we cannot justify: rung 1 is the minimum
         return 1

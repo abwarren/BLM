@@ -1136,7 +1136,7 @@ function q3HistoryRowHTML(rec) {
   const ocClass = alertOutcomeClass(rec.outcome);
   return `
     <li class="al-row${running ? "" : " al-resolved"}${ocClass ? " " + ocClass : ""}">
-      <div class="al-ident">[Q3 BREAK] ${esc(rec.league)} | Game ${esc(rec.game_id)}${rec.triggered_at ? ` <span class="alc-ts">${fmtTime(rec.triggered_at)}</span>` : ""}</div>
+      <div class="al-ident">[Q3 BREAK] ${esc(rec.league)} | Game ${gameIdLinkHTML(rec.game_id, gameSourceUrl(rec.game_id))}${rec.triggered_at ? ` <span class="alc-ts">${fmtTime(rec.triggered_at)}</span>` : ""}</div>
       ${(rec.home_team || rec.away_team)
         ? `<div class="al-ident al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</div>` : ""}
       ${rec.alert_rule !== Q3B_ALERT_RULE_ID
@@ -1522,7 +1522,36 @@ function closeUnderAlert(id, act, game, now) {
   saveAlertHistory();
 }
 
-const alertIdent = (r) => `${esc(r.league)} | Game ${esc(r.game_id)}`;
+// ---- clickable game id -------------------------------------------------------
+// The id is rendered as a LINK to that fixture's PokerBet event view.  Prefer the
+// canonical per-game `source_url` the live payload already carries (api._v4_live ->
+// games.source_url); fall back to the id-path form PokerBet's SPA resolves by the
+// trailing event id (same shape the explorer page ships).  An instance id like
+// "31624569#i1" links to its BASE event id.
+const POKERBET_EVENT_URL = "https://www.pokerbet.co.za/en/sports/live/event-view/"
+  + "Basketball/Virtual%20Matches/18296900-betual-tbsl/";
+function gameUrlFor(gameId, sourceUrl) {
+  const u = String(sourceUrl || "").trim();
+  if (/^https?:\/\//i.test(u)) return u;
+  const eventId = String(gameId == null ? "" : gameId).split("#")[0].trim();
+  if (!/^\d+$/.test(eventId)) return "";
+  return POKERBET_EVENT_URL + encodeURIComponent(eventId);
+}
+function gameIdLinkHTML(gameId, sourceUrl, label) {
+  const text = label == null ? String(gameId == null ? "" : gameId) : String(label);
+  const url = gameUrlFor(gameId, sourceUrl);
+  if (!url) return esc(text);
+  return `<a class="gid-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer"`
+    + ` title="open game ${esc(String(gameId == null ? "" : gameId))} on PokerBet">${esc(text)}</a>`;
+}
+// the live game object for an alert/ledger record (source_url lives there)
+function gameSourceUrl(gameId) {
+  try {
+    const g = typeof alertGameLookup === "function" ? alertGameLookup({ game_id: gameId }) : null;
+    return g && g.source_url ? g.source_url : "";
+  } catch (e) { return ""; }
+}
+const alertIdent = (r) => `${esc(r.league)} | Game ${gameIdLinkHTML(r.game_id, gameSourceUrl(r.game_id))}`;
 
 /* ── LIVE ALERTS — compact rows ─────────────────────────────────────────
    The panel answers "what is firing NOW" and sits directly above the game
@@ -1661,7 +1690,7 @@ function historyRowHTML(rec) {
           ? `<span class="al-teams">${esc(rec.home_team)} vs ${esc(rec.away_team)}</span>` : ""}
         ${rec.triggered_at ? `<span class="alc-ts">${fmtTime(rec.triggered_at)}</span>` : ""}
       </div>
-      <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${esc(rec.game_id)}</div>
+      <div class="al-ident">[${rec.checkpoint}%] ${esc(rec.league)} | Game ${gameIdLinkHTML(rec.game_id, gameSourceUrl(rec.game_id))}</div>
       ${rec.alert_rule !== ALERT_RULE_ID
         ? `<div class="al-audit">AUDIT · triggered under the superseded condition — not a validated alert under the current rule</div>` : ""}
       ${(rec.refire_count)
@@ -4063,9 +4092,9 @@ function execStateWord(raw) {
 function traceHTML(g, exec, bstate) {
   const st = execStateWord((exec && (exec.execution_state || exec.status))
     || (bstate && bstate.state) || "UNKNOWN");
-  const chain = (label, value, cls) =>
+  const chain = (label, value, cls, raw) =>
     `<span class="tr-step ${cls || ""}" title="${label}">`
-      + `<span class="tr-k">${label}</span><span class="tr-v">${esc(value)}</span></span>`;
+      + `<span class="tr-k">${label}</span><span class="tr-v">${raw ? value : esc(value)}</span></span>`;
   const timing = [];
   if (exec) {
     if (exec.requested_at_utc) timing.push(`req ${(exec.requested_at_utc || "").replace("T", " ").slice(11, 19)}`);
@@ -4078,7 +4107,7 @@ function traceHTML(g, exec, bstate) {
     || (bstate && bstate.blocked_reason) || "";
   return `<div class="tr-chain">
     ${chain("ALERT", exec && exec.alert_id ? exec.alert_id : "–", "tr-alert")}
-    ${chain("GAME", `${g.game_id}${(g.home_team || g.away_team) ? ` · ${g.home_team || "–"} vs ${g.away_team || "–"}` : ""}`)}
+    ${chain("GAME", `${gameIdLinkHTML(g.game_id, g.source_url)}${(g.home_team || g.away_team) ? ` · ${esc(g.home_team || "–")} vs ${esc(g.away_team || "–")}` : ""}`, "", true)}
     ${chain("SIGNAL", exec ? `${exec.market || "TOTAL"} ${exec.selection || "–"}` : "–")}
     ${chain("LINE", exec ? (exec.line != null || exec.price != null ? num1(exec.line != null ? exec.line : exec.price) : "–") : "–")}
     ${chain("EXECUTION", exec && exec.execution_id ? exec.execution_id : "–", "tr-exec")}
@@ -4228,6 +4257,23 @@ function abStatusHTML(st) {
     // the button is a persistent OFF; show it as inert when betting is already off
     stopBtn.classList.toggle("is-off", st.enabled !== true);
     stopBtn.textContent = st.enabled === true ? "\u25A0 STOP" : "\u25A0 STOPPED";
+  }
+  // ── HEAT (market-heat guardrail switch) ────────────────────
+  // Server-owned policy switch: painted from this same status read, enabled
+  // under the same gate as the other money controls.  It never places a bet.
+  const heatBtn = $("abHeat");
+  const heat = st.market_heat || {};
+  if (heatBtn) {
+    heatBtn.disabled = false;
+    const heatOn = heat.enabled !== false;
+    heatBtn.classList.toggle("is-off", !heatOn);
+    heatBtn.textContent = !heatOn ? "HEAT: OFF"
+      : (heat.tripped === true ? "HEAT: PAUSED" : "HEAT: ON");
+    heatBtn.title = !heatOn
+      ? "MARKET-HEAT guardrail OFF — arming is not paused by market heat. Click to turn it back on."
+      : (heat.tripped === true
+          ? `MARKET-HEAT guardrail PAUSED arming — ${heat.text || "unders are being beaten"}. Click to turn it off.`
+          : `MARKET-HEAT guardrail ON — ${heat.text || "market is within the 45% band"}. Click to turn it off.`);
   }
   $("abSwitchLabel").textContent =
     `AUTO BETTING: ${st.enabled ? "ON" : "OFF"}${st.dry_run ? " (DRY RUN)" : ""}`;
@@ -4758,6 +4804,32 @@ if (_stopBtn) _stopBtn.addEventListener("click", async () => {
       body: JSON.stringify({ auto_betting: "OFF" }),
     });
     if (!resp.ok) console.warn("STOP refused", resp.status);
+  } catch (_) {}
+  refreshBettingStatus();
+  setTimeout(refreshBettingStatus, 1200);   // re-read after the write lands
+});
+
+/* HEAT — the market-heat guardrail switch.  Same audited endpoint as the kill
+   switch: POST /settings {market_heat:"ON"|"OFF"} -> betting_config row +
+   a `market_heat_switch` bet_audit row, so it survives a restart.  It changes
+   only the global pause policy — every per-game gate still applies. */
+const _heatBtn = $("abHeat");
+if (_heatBtn) _heatBtn.addEventListener("click", async () => {
+  const st = (state.betting && state.betting.market_heat) || {};
+  const on = st.enabled !== false;
+  const next = on ? "OFF" : "ON";
+  const msg = next === "OFF"
+    ? "Turn the MARKET-HEAT guardrail OFF?\n\nArming will no longer be paused when the market runs hot. The kill switch, limits, price floor, line age and the fingerprint gate all still apply."
+    : "Turn the MARKET-HEAT guardrail back ON?\n\nArming pauses again while ≥45% of recent settled games finish OVER the line.";
+  if (!window.confirm(msg)) return;
+  _heatBtn.disabled = true;
+  try {
+    const resp = await fetch(`${BETTING_API}/settings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ market_heat: next }),
+    });
+    if (!resp.ok) console.warn("market-heat switch refused", resp.status);
   } catch (_) {}
   refreshBettingStatus();
   setTimeout(refreshBettingStatus, 1200);   // re-read after the write lands

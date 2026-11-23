@@ -67,14 +67,17 @@ def test_tier_b_qualifies_when_r2_fires():
     assert (ok, tier) == (True, "B")
 
 
-def test_tier_b_does_not_qualify_when_q3_is_available_and_no_fingerprint_fires():
-    ok, reason = call(req=4.6, q3=4.2)          # q3_ratio 1.05 → nothing fires
-    assert (ok, reason) == (False, qualify.NO_FINGERPRINT)
+def test_tier_b_qualifies_without_a_fingerprint_route_a():
+    """POLICY 2026-11-17 (route A): fingerprints are recorded context, not an
+    admission gate — a Tier-B game with Q3 present and nothing firing trades."""
+    ok, tier = call(req=4.6, q3=4.2)            # q3_ratio 1.05 → nothing fires
+    assert (ok, tier) == (True, "B")
 
 
-def test_tier_c_with_q3_unavailable_does_not_qualify():
-    ok, reason = call(req=4.3, q3=None, avg_q3=None, total=None, minutes=None)
-    assert (ok, reason) == (False, qualify.TIER_C_Q3_UNAVAILABLE)
+def test_tier_c_qualifies_even_when_q3_is_unavailable_route_a():
+    """POLICY 2026-11-17 (route A): Tier C no longer needs confirmation."""
+    ok, tier = call(req=4.3, q3=None, avg_q3=None, total=None, minutes=None)
+    assert (ok, tier) == (True, "C")
 
 
 def test_tier_c_qualifies_when_a_fingerprint_fires():
@@ -145,10 +148,11 @@ def test_shortfall_toggle_default_is_the_live_configuration(monkeypatch):
     assert call(req=4.8, act=4.8) == (False, qualify.SHORTFALL_ABSENT)
 
 
-def test_c1_and_c2_cannot_qualify_a_tier():
-    """Directive §3.5 names C3/C5/R2 only — C1/C2 are recorded context."""
-    ok, reason = call(req=4.6, q3=4.3)   # q3_ratio 1.075, req in C1's band
-    assert (ok, reason) == (False, qualify.NO_FINGERPRINT)
+def test_c1_and_c2_are_recorded_context_not_gates():
+    """Route A (2026-11-17): no fingerprint gates admission any more; C1/C2
+    stay recorded context exactly as C3/C5/R2 do."""
+    ok, tier = call(req=4.6, q3=4.3)     # q3_ratio 1.075, req in C1's band
+    assert (ok, tier) == (True, "B")
 
 
 # ── §5.4 — the audit record ───────────────────────────────────────────
@@ -172,13 +176,12 @@ def test_audit_block_carries_every_deciding_value():
 
 def test_audit_block_of_a_refusal_names_the_reason():
     game = {"game_id": "1", "competition_slug": SLUG,
-            "projector": {"progress_pct": 82.5, "required_pts_per_min": 4.3,
+            "projector": {"progress_pct": 60.0, "required_pts_per_min": 4.3,
                           "actual_pts_per_min": 4.1},
             "competition_pace": {"avg_pace": AVG}}
     block = qualify.check_game(game)
     assert block["qualified"] is False
-    assert block["reason"] == qualify.TIER_C_Q3_UNAVAILABLE
-    assert block["q3_ratio"] is None and block["tier"] == "C"
+    assert block["reason"] == qualify.PROGRESS_OUT_OF_BAND
 
 
 # ── the wiring: the fast lane's candidates pass through the gate ──────
@@ -235,16 +238,14 @@ def _worker(tmp_path, rows, monkeypatch):
     return w
 
 
-def test_lane_refuses_tier_c_when_q3_is_unavailable(tmp_path, monkeypatch):
-    """4.3/4.0 = 1.075 → Tier C; the lane carries no Q3 evidence, so the
-    directive's rule refuses it rather than guessing a fingerprint."""
+def test_lane_places_tier_c_without_q3_evidence_route_a(tmp_path, monkeypatch):
+    """POLICY 2026-11-17 (route A): 4.3/4.0 = 1.075 → Tier C, the lane carries
+    no Q3 evidence, and it still trades — the fingerprint leg is gone."""
     from blm_v4 import trade_window as TW
     monkeypatch.setattr(TW, "TRADE_MIN_PACE_RATIO", 1.0, raising=False)
     w = _worker(tmp_path, [_row(4.3, 4.1)], monkeypatch)
     out = w.pass_once()
-    assert out["armed"] == 1
-    assert out["would_bet"] == 0 and out["executed"] == 0
-    assert out["refused"].get("autobet_gate:TIER_C_Q3_UNAVAILABLE") == 1
+    assert out["armed"] == 1 and out["would_bet"] == 1
 
 
 def test_lane_still_places_a_tier_b_candidate(tmp_path, monkeypatch):

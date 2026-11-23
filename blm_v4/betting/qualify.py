@@ -145,7 +145,7 @@ def qualifies_for_autobet(
         return False, MISSING_INPUT
 
     # ── §3.2 progress band (the alert's own execution window) ─────────
-    progress_min = float(getattr(TW, "EXEC_MIN_PROGRESS_PCT", PROGRESS_MIN))
+    progress_min = float(getattr(TW, "TRADE_MIN_PROGRESS_PCT", PROGRESS_MIN))
     progress_max = float(getattr(TW, "TRADE_MAX_PROGRESS_PCT", PROGRESS_MAX))
     if pct < progress_min or pct > progress_max:
         return False, PROGRESS_OUT_OF_BAND
@@ -178,15 +178,16 @@ def qualifies_for_autobet(
     # pass), so this list is exactly the qualifying fingerprints that fired.
     fired = [k for k in QUALIFYING_FINGERPRINTS
              if block.get(f"fingerprint_{k.lower()}_triggered") is True]
-    if fired:
-        return True, tier
-    if block.get("q3_ratio") is None:
-        # Q3 unprovable: a Tier-B base rate (77.6 %) is still acceptable, a
-        # Tier-C edge (71.4 %) is not — it only exists with confirmation.
-        if tier == "B":
-            return True, "B"
-        return False, TIER_C_Q3_UNAVAILABLE
-    return False, NO_FINGERPRINT
+    # ── §3.5 fingerprints — RECORDED CONTEXT ONLY (operator decision
+    # 2026-11-17, route A).  The fingerprint leg is REMOVED from admission:
+    # every tier that clears the pace floor trades, and C3/C5/R2 keep firing
+    # and stay in the audit block.  Why: measured on the last 7 days, the
+    # fingerprint requirement cut ~45 leg-clearing bets/day down to ~4 while
+    # the unconfirmed cohort still returned 65.3 % / +8.84 units a day.
+    # Revert = restore the `if fired / q3 is None / TIER_C_Q3_UNAVAILABLE`
+    # branches this replaces.
+    _ = fired                      # recorded above; gates nothing
+    return True, tier
 
 
 def inputs_from_game(game: dict) -> dict:

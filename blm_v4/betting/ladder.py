@@ -145,9 +145,25 @@ def rung_from_history(results: Iterable[str], depth_value) -> int:
     engine would have had, which is the property a persisted counter loses
     when a settle is missed.
     """
+    return rung_from_replay(results, depth_value)
+
+
+def rung_from_replay(results: Iterable[Optional[str]], depth_value) -> int:
+    """Replay results where ``None`` = a placed bet whose result is NOT yet confirmed.
+
+    Operator directive 2026-11-19: an unconfirmed result must never pass its
+    stake on.  When a bet's result has not landed before the next eligible
+    game, that next stake starts again at rung 1 — the increased stake is
+    deferred until the outstanding result is confirmed, and the progression
+    test only resumes for the game after it.  Skipping the pending bet
+    (the old behaviour) silently HELD the previous rung, which re-staked a
+    rung whose basis was unproven — measured 2026-11-19: rung 3 staked twice
+    in seven minutes, the second one a loss taken on a win that had not
+    been recorded yet.
+    """
     r = 1
     for res in results:
-        r = advance(r, res, depth_value)
+        r = 1 if res is None else advance(r, res, depth_value)
     return r
 
 
