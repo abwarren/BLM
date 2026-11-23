@@ -20,6 +20,7 @@ authority (``BETTING_DRY_RUN``, risk limits) lives above it.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import threading
 import time
@@ -456,6 +457,48 @@ class BettingStore:
             return False
 
     # ── idempotent claim ───────────────────────────────────────────────
+    #: BLOCK reasons that are TRANSIENT and provably money-free: the claim was
+    #: refused before any submission, so a later pass may safely try again.  A
+    #: kill switch, a daily cap, an exposure cap or an ambiguity hold is NOT
+    #: here on purpose — those are operator or money decisions, not faults.
+    RECLAIMABLE_BLOCK_CODES = ("ACCOUNT_MISMATCH", "PROVIDER_UNAVAILABLE")
+    #: How many times ONE checkpoint may be re-claimed after transient blocks.
+    MAX_RECLAIMS = 2
+
+    def _insert_claim(self, c, rec: dict, ik: str) -> int:
+        """INSERT OR IGNORE one claim row; returns the affected row count."""
+        return c.execute(
+            """INSERT OR IGNORE INTO bet_executions
+               (execution_id, idempotency_key, game_id, alert_id,
+                checkpoint, market, selection, triggered_line, price,
+                unit_price, stake_units, stake_amount, status,
+                execution_state,
+                requested_at_utc, day_utc, requested_amount,
+                accepted_amount, simulated_amount, unit_limit,
+                rejection_reason)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (rec["execution_id"], ik, rec["game_id"], rec["alert_id"],
+             rec["checkpoint"], rec.get("market") or
+             "MONEYLINE_TOTAL_UNDER", rec.get("selection") or "UNDER",
+             rec.get("triggered_line"), rec.get("price"),
+             rec.get("unit_price"), rec.get("stake_units"),
+             rec.get("stake_amount"), rec.get("status") or "PENDING",
+             rec.get("execution_state") or rec.get("status") or "PENDING",
+             _now(), _day(), rec.get("requested_amount"),
+             rec.get("accepted_amount"), rec.get("simulated_amount"),
+             rec.get("unit_limit"), rec.get("rejection_reason"))).rowcount
+
+    def _reclaimable(self, row) -> bool:
+        """True when an existing claim can be re-attempted without money risk."""
+        if row is None:
+            return False
+        if (row["status"] or "").upper() != "BLOCKED":
+            return False
+        if (row["error_code"] or "") not in self.RECLAIMABLE_BLOCK_CODES:
+            return False
+        # provably pre-submission: nothing was sent and no receipt exists
+        return not row["submitted_at_utc"] and not row["provider_ref"]
+
     def claim(self, rec: dict) -> tuple[bool, Optional[dict]]:
         """Atomically claim an execution slot for ``rec``'s idempotency
         key.
@@ -465,34 +508,39 @@ class BettingStore:
         must not bet again.  The INSERT OR IGNORE + SELECT pair runs
         inside one transaction so two concurrent workers can never both
         win (§4 / concurrency test).
+
+        EXCEPTION — a TRANSIENTLY BLOCKED claim is re-claimable.  A blocked
+        claim (identity guard, provider unavailable) is provably money-free and
+        used to burn that checkpoint for the rest of the day: the armed
+        candidate then failed with ``duplicate_execution`` forever.  Such a row
+        is re-claimed under its own ``<key>#rc<N>`` identity, bounded by
+        :data:`MAX_RECLAIMS`, so nothing is overwritten: the blocked row keeps
+        its status, error and audit trail, and the new attempt is a new row.
         """
         ik = rec["idempotency_key"]
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
-            cur = c.execute(
-                """INSERT OR IGNORE INTO bet_executions
-                   (execution_id, idempotency_key, game_id, alert_id,
-                    checkpoint, market, selection, triggered_line, price,
-                    unit_price, stake_units, stake_amount, status,
-                    execution_state,
-                    requested_at_utc, day_utc, requested_amount,
-                    accepted_amount, simulated_amount, unit_limit,
-                    rejection_reason)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (rec["execution_id"], ik, rec["game_id"], rec["alert_id"],
-                 rec["checkpoint"], rec.get("market") or
-                 "MONEYLINE_TOTAL_UNDER", rec.get("selection") or "UNDER",
-                 rec.get("triggered_line"), rec.get("price"),
-                 rec.get("unit_price"), rec.get("stake_units"),
-                 rec.get("stake_amount"), rec.get("status") or "PENDING",
-                 rec.get("execution_state") or rec.get("status") or "PENDING",
-                 _now(), _day(), rec.get("requested_amount"),
-                 rec.get("accepted_amount"), rec.get("simulated_amount"),
-                 rec.get("unit_limit"), rec.get("rejection_reason")))
-            if cur.rowcount == 0:
+            if self._insert_claim(c, rec, ik) == 0:
                 row = c.execute(
                     "SELECT * FROM bet_executions WHERE idempotency_key=?",
                     (ik,)).fetchone()
+                if self._reclaimable(row):
+                    used = c.execute(
+                        "SELECT COUNT(*) AS n FROM bet_executions "
+                        "WHERE idempotency_key LIKE ?", (f"{ik}#rc%",)
+                    ).fetchone()["n"]
+                    if used < self.MAX_RECLAIMS:
+                        new_ik = f"{ik}#rc{used + 1}"
+                        retry = dict(rec)
+                        retry["idempotency_key"] = new_ik
+                        retry["execution_id"] = "bet-" + hashlib.sha256(
+                            new_ik.encode("utf-8")).hexdigest()[:20]
+                        if self._insert_claim(c, retry, new_ik):
+                            new_row = c.execute(
+                                "SELECT * FROM bet_executions "
+                                "WHERE idempotency_key=?", (new_ik,)).fetchone()
+                            c.commit()
+                            return True, (dict(new_row) if new_row else None)
                 c.commit()
                 return False, (dict(row) if row else None)
             row = c.execute(
