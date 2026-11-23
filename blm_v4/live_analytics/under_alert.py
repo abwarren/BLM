@@ -36,6 +36,14 @@ same ``trigger_observation`` authority settlement reads.  It is what the
 frontend shows and what the eventual verdict is measured against; it never
 moves when the market does.
 
+STRATEGY PROFILES (2026-11-11) — the production rule above is FROZEN and
+stays the default.  A profile named by ``BLM_ALERT_PROFILE`` narrows the
+SAME rule with its own pace margin, progress band, UNDER-price floor and
+market-line age bound (see :data:`PROFILES`).  It never adds a condition to
+the settlement, the frozen trigger line or the checkpoint identity, and
+with no profile selected the decision is byte-identical to the production
+trigger.
+
 Q3 BREAK (directive 2026-09-18) — an ADDITIONAL checkpoint, additive to and
 never replacing the 75% production trigger above.  The Q3/Q4 break sits at
 exactly 75.0% progress (3 of 4 regulation quarters); the boundary is the
@@ -47,6 +55,8 @@ See :func:`q3_break_snapshot` below.
 from __future__ import annotations
 
 import math
+import os
+from dataclasses import dataclass
 from typing import Any, Optional
 
 # Progress checkpoints (%).  Each is its OWN identity downstream, so a 25%
@@ -70,6 +80,66 @@ Q3_BREAK_PROGRESS = 75.0
 #: The Q3_BREAK checkpoint identity — a STRING, deliberately NOT part of
 #: the numeric ``CHECKPOINTS`` tuple (25/50/75 keep their own semantics).
 Q3_BREAK_CHECKPOINT = "Q3_BREAK"
+
+# ── STRATEGY PROFILES (2026-11-11) ─────────────────────────────────────
+# The production trigger above is FROZEN by directive and remains the
+# DEFAULT.  A profile is an explicit, NAMED deviation selected by the
+# environment (``BLM_ALERT_PROFILE``): it edits only the boundary values of
+# the SAME rule (pace margin, progress band, minimum UNDER price, maximum
+# market-line age).  It never changes the checkpoint identity, the frozen
+# trigger line, settlement or the Q3_BREAK block.
+#
+# ``pace_vol_2026_11_11`` is the volume/edge profile from the 7-day gate
+# sweep (2026-11-04 → 2026-11-10): required pace > 1.12× the game's own
+# competition average, progress 75–95%, UNDER price >= 1.50, market line
+# quoted at most 30s before the observation.  It produced ~36 candidates/day
+# at 81% win vs a 59.7% breakeven on fresh lines in that window.  The
+# progress FLOOR stays at 75 because 75 is the execution checkpoint
+# identity — a 70% entry would carry the 50% checkpoint's frozen line and
+# could never pass rung validation.
+PROFILE_ENV = "BLM_ALERT_PROFILE"
+PROFILE_PRODUCTION = "production_2026_09_14"
+PROFILE_PACE_VOL = "pace_vol_2026_11_11"
+
+
+@dataclass(frozen=True)
+class AlertProfile:
+    """Boundary values for the ONE UNDER rule.  ``None`` means "not part
+    of this profile" (the production defaults)."""
+
+    name: str
+    required_margin: float
+    progress_min: float
+    progress_max: float
+    min_under_price: Optional[float] = None
+    max_market_age_s: Optional[float] = None
+
+
+PROFILES = {
+    PROFILE_PRODUCTION: AlertProfile(
+        name=PROFILE_PRODUCTION,
+        required_margin=REQUIRED_MARGIN,
+        progress_min=ALERT_PROGRESS_PCT,
+        progress_max=100.0,
+    ),
+    PROFILE_PACE_VOL: AlertProfile(
+        name=PROFILE_PACE_VOL,
+        required_margin=1.12,
+        progress_min=ALERT_PROGRESS_PCT,
+        progress_max=95.0,
+        min_under_price=1.50,
+        max_market_age_s=30.0,
+    ),
+}
+
+
+def active_profile(name: Any = None) -> AlertProfile:
+    """The profile in force: the explicit argument, else ``BLM_ALERT_PROFILE``,
+    else production.  An unrecognised name is IGNORED (production applies) —
+    a typo degrades to the frozen directive rule, never to an invented one."""
+    raw = name if name is not None else os.environ.get(PROFILE_ENV, "")
+    key = str(raw or "").strip().lower()
+    return PROFILES.get(key, PROFILES[PROFILE_PRODUCTION])
 
 # ── Eligibility vocabulary (LIVE MARKETS ONLY directive, 2026-09-12) ──
 ELIGIBLE_MARKET_LIVE = "market_live"
@@ -146,7 +216,10 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
                       eligible: Any = True,
                       trigger_line: Any = None,
                       trigger_progress: Any = None,
-                      trigger_captured_at: Any = None) -> dict:
+                      trigger_captured_at: Any = None,
+                      under_price: Any = None,
+                      market_age_s: Any = None,
+                      profile: Any = None) -> dict:
     """The actionable UNDER state for one game (progress-tiered).
 
     ``active`` is TRUE only when ALL of the following hold:
@@ -173,6 +246,11 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
     available, so nothing is claimed and no other competition's rate is
     borrowed.
 
+    ``under_price`` / ``market_age_s`` are the UNDER decimal price and the
+    age (seconds) of the quoted market total at the evaluated observation.
+    The production profile requires neither; a named profile that requires
+    one treats a missing value as NOT satisfied (fail closed).
+
     ``trigger_line`` / ``trigger_progress`` / ``trigger_captured_at`` are the
     FROZEN trigger provenance and are NOT part of the condition: the caller
     supplies them from :func:`blm_v4.live_analytics.under_outcome.trigger_observation`
@@ -185,22 +263,36 @@ def under_alert_state(actual_pace: Any, required_pace: Any,
     league = _finite(league_average_pace)
     games = _finite(reference_games)
     prog = _finite(progress_pct)
-    # THE production trigger, and nothing else: progress >= 75 AND
-    # required > league * 1.04, on a genuinely-live game with a LIVE market.
-    # actual_pace is reported but takes no part in the decision, and no
-    # minimum-remaining rule applies here.
+    prof = active_profile(profile)
+    price = _finite(under_price)
+    age = _finite(market_age_s)
+    # The production profile adds no price/age leg, so its decision is
+    # EXACTLY the frozen trigger: progress >= 75 AND required > league*1.04.
+    # A named profile narrows the same rule with its own boundaries; a
+    # missing price/age under a profile that requires one is NOT a pass
+    # (fail closed — no invented price, no assumed freshness).
+    price_ok = (prof.min_under_price is None
+                or (price is not None and price >= prof.min_under_price))
+    age_ok = (prof.max_market_age_s is None
+              or (age is not None and age <= prof.max_market_age_s))
     active = bool(
         eligible is True
         and required is not None and league is not None and prog is not None
-        and prog >= ALERT_PROGRESS_PCT
-        and required > league * REQUIRED_MARGIN
+        and prog >= prof.progress_min
+        and prog <= prof.progress_max
+        and required > league * prof.required_margin
+        and price_ok
+        and age_ok
     )
     return {
         "active": active,
+        "profile": prof.name,
         "checkpoint": checkpoint_for(prog),
         "actual_pace": actual,
         "required_pace": required,
         "league_average_pace": league,
+        "under_price": price,
+        "market_age_s": age,
         "league_reference_games": (int(games) if games is not None else None),
         # Derived here, by the same authority that decides `active`, so the
         # displayed gap and the displayed verdict can never disagree.

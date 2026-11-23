@@ -2281,10 +2281,17 @@ def _v4_live_uncached(classification: Optional[str] = Query(None)) -> dict:
                 eligibility = {"eligible": False,
                                "reason": "stale_state"}
             g["under_alert_eligibility"] = eligibility
+            # A named strategy profile (BLM_ALERT_PROFILE) narrows the rule
+            # with an UNDER-price floor and a market-line age bound.  Both
+            # inputs come from this same payload, so the alert and the
+            # auto-bet decide on identical numbers; under the production
+            # profile they are reported but take no part in `active`.
             g["under_alert"] = under_alert_state(
                 proj.get("actual_pts_per_min"), proj.get("required_pts_per_min"),
                 entry.get("avg_pace"), proj.get("progress_pct"),
                 entry.get("games"), eligible=eligibility["eligible"],
+                under_price=(g.get("market") or {}).get("under_odds"),
+                market_age_s=proj.get("market_age_seconds"),
                 **trigger)
             # ── HISTORICAL UNDER FINGERPRINT LAYER (authorization
             # 2026-09-21; C2 restored 2026-10-04) — the set C1, C2, C3, C5 + R2
