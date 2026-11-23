@@ -260,6 +260,24 @@ class BettingStore:
                 (str(game_id),)).fetchone()
         return row is not None
 
+    def account_mismatch_today(self) -> int:
+        """Claims refused TODAY by the identity guard (``ACCOUNT_MISMATCH``).
+
+        A transient empty identity read blocks a perfectly good bet and burns
+        that checkpoint's claim, so this count is an operational fault signal,
+        not a betting statistic — the dashboard alarms on it.
+        """
+        try:
+            with self._conn() as c:
+                row = c.execute(
+                    "SELECT COUNT(*) AS n FROM bet_executions "
+                    "WHERE day_utc=? AND status='BLOCKED' "
+                    "AND COALESCE(error_code,'')='ACCOUNT_MISMATCH'",
+                    (_day(),)).fetchone()
+            return int(row["n"]) if row else 0
+        except Exception:
+            return 0
+
     def attempts_today(self, game_id: str) -> int:
         """How many execution attempts this game already has TODAY.
 

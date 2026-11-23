@@ -141,6 +141,10 @@ def betting_status() -> dict:
         "today": today_block,
         "credentials": credentials_present(),   # booleans ONLY
         "recent": [_public_execution(r) for r in store.recent(25)],
+        # Identity-guard health.  A non-zero count means the browser went blind
+        # inside a bet window and the claim was refused — an operational fault
+        # the dashboard must surface, never a number to hide in the ledger.
+        "identity_blocks_today": store.account_mismatch_today(),
     }
 
 

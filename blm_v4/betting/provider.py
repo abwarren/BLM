@@ -416,6 +416,16 @@ class PokerBetBrowserProvider(BetProvider):
     #: id (PokerBet renders it as the profile's account number).
     ACCOUNT_ENV = "BLM_EXPECTED_ACCOUNT_ID"
 
+    #: A BLIND identity read is retried before it is believed.  The SPA
+    #: re-renders on navigation, so a single DOM read taken moments after a
+    #: claim can see no identity while the account is perfectly signed in
+    #: (observed live 2026-11-23: 13 ACCOUNT_MISMATCH blocks in one morning,
+    #: each from one read taken ~86 ms after its claim).  Empty reads are
+    #: retried; a readable-but-WRONG id is not, because retrying that would
+    #: turn a real account swap into a placed bet on the wrong account.
+    ACCOUNT_READ_ATTEMPTS = 3
+    ACCOUNT_READ_SETTLE_S = 0.5
+
     @property
     def _auto_live_account(self) -> bool:
         """True when the operator authorized "the account already signed in".
@@ -468,20 +478,8 @@ class PokerBetBrowserProvider(BetProvider):
         # pinned; otherwise an unreadable page would exempt itself from GATE 8.
         return self._auto_live_account or bool(self.configured_account_id)
 
-    @property
-    def authenticated_account_id(self) -> Optional[str]:
-        """The account the BROWSER is signed into, read live (never cached).
-
-        The adapter reads the numeric PokerBet user id when the session
-        exposes it, and otherwise the signed-in account's email from the
-        bookmaker's own ``LaUserDetails`` cookie (a session that was restored
-        from cookies has no localStorage auth blob).  None means unprovable,
-        which the guard treats as a refusal, never as a match.
-
-        With ``BLM_EXPECTED_ACCOUNT_ID=auto`` the first readable identity is
-        pinned as the authorized account; later reads are compared against
-        that pin, so signing into a different account blocks the bet.
-        """
+    def _read_account_once(self) -> Optional[str]:
+        """ONE live read of the signed-in account; None means unreadable."""
         try:
             self._wire()
         except Exception:
@@ -493,13 +491,40 @@ class PokerBetBrowserProvider(BetProvider):
             account = rd()
         except Exception:
             return None
-        account = str(account or "").strip()
-        if not account:
-            return None
-        if self._auto_live_account and not getattr(
-                self, "_pinned_live_account", None):
-            self._pinned_live_account = account
-        return account
+        return str(account or "").strip() or None
+
+    @property
+    def authenticated_account_id(self) -> Optional[str]:
+        """The account the BROWSER is signed into, read live (never cached).
+
+        The adapter reads the numeric PokerBet user id when the session
+        exposes it, and otherwise the signed-in account's email from the
+        bookmaker's own ``LaUserDetails`` cookie (a session that was restored
+        from cookies has no localStorage auth blob).  None means unprovable,
+        which the guard treats as a refusal, never as a match.
+
+        An EMPTY read is retried (``ACCOUNT_READ_ATTEMPTS`` over roughly
+        ``ACCOUNT_READ_SETTLE_S`` each) so a mid-render page is not mistaken
+        for a missing session; the settle lets the SPA finish re-rendering,
+        and every attempt performs a fresh DOM read.  A read that returns a
+        DIFFERENT id is returned immediately: that is a real identity, and
+        the guard must be free to refuse it.
+
+        With ``BLM_EXPECTED_ACCOUNT_ID=auto`` the first readable identity is
+        pinned as the authorized account; later reads are compared against
+        that pin, so signing into a different account blocks the bet.
+        """
+        attempts = max(1, int(self.ACCOUNT_READ_ATTEMPTS))
+        for attempt in range(attempts):
+            account = self._read_account_once()
+            if account:
+                if self._auto_live_account and not getattr(
+                        self, "_pinned_live_account", None):
+                    self._pinned_live_account = account
+                return account
+            if attempt + 1 < attempts:
+                time.sleep(max(0.0, float(self.ACCOUNT_READ_SETTLE_S)))
+        return None
 
     def _gate(self, command: dict, stake_amount: float) -> dict:
         """Resolve → select → verify the betslip → PRICE/STAKE gate, then STOP.
