@@ -454,6 +454,15 @@ def evaluate(inp: Inputs, th: Thresholds | None = None) -> dict:
     enq, per = int(w.get("enqueued") or 0), int(w.get("persisted") or 0)
     lag = max(0, enq - per)
     failed, dropped = int(w.get("failed") or 0), int(w.get("dropped") or 0)
+    # Drops were judged on the LIFETIME counter, so one minute-long stall read
+    # DEGRADED for ever and the only cure was a restart — which erased the
+    # evidence.  Judge the window the collector reports; an older collector
+    # that cannot report one keeps the old, conservative behaviour.
+    window_raw = w.get("dropped_recent_15m")
+    window_s = int(w.get("drop_window_s") or 900)
+    recent = int(window_raw) if window_raw is not None else dropped
+    drop_note = (f"dropped={dropped} lifetime, {recent} in {window_s // 60}m"
+                 if window_raw is not None else f"dropped={dropped}")
     if not w:
         comps.append(_component("persistence", "Persistence Worker", "FAILED", RED,
                                 "no worker telemetry in the collector state"))
@@ -465,14 +474,20 @@ def evaluate(inp: Inputs, th: Thresholds | None = None) -> dict:
         comps.append(_component("persistence", "Persistence Worker", "FAILED", RED,
                                 f"queue={q} lag={lag} — persistence is not keeping up",
                                 queue_depth=q, lag=lag, failed=failed, dropped=dropped))
-    elif q > th.queue_degraded or lag > th.persist_lag_degraded or failed or dropped:
+    elif q > th.queue_degraded or lag > th.persist_lag_degraded or failed or recent:
         comps.append(_component("persistence", "Persistence Worker", "DEGRADED", YELLOW,
-                                f"queue={q} lag={lag} failed={failed} dropped={dropped}",
-                                queue_depth=q, lag=lag, failed=failed, dropped=dropped))
+                                f"queue={q} lag={lag} failed={failed} {drop_note}",
+                                queue_depth=q, lag=lag, failed=failed, dropped=dropped,
+                                dropped_recent=recent))
     else:
+        # Nothing lost inside the window: the worker is healthy even when an
+        # older stall left a lifetime total behind.  Say both numbers so the
+        # history is visible without raising an alarm that cannot clear.
         comps.append(_component("persistence", "Persistence Worker", "HEALTHY", GREEN,
-                                f"queue={q} lag={lag} persisted={per:,}",
-                                queue_depth=q, lag=lag, failed=failed, dropped=dropped))
+                                f"queue={q} lag={lag} persisted={per:,}"
+                                + (f" · {drop_note}" if dropped else ""),
+                                queue_depth=q, lag=lag, failed=failed, dropped=dropped,
+                                dropped_recent=recent))
 
     # ── database ───────────────────────────────────────────────────────
     d = inp.db or {}
