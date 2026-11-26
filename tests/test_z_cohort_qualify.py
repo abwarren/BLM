@@ -278,3 +278,20 @@ def test_on_demand_benchmark_is_windowed(on_demand_db, monkeypatch):
     # priors cycle -2,-1,0,1,2 ; the last four are -1,0,1,2
     assert r["z"] == _expected_z(3.0, [-1, 0, 1, 2])
     assert r["benchmark_n"] == 4
+
+
+def test_on_demand_bucket_comes_from_live_z(on_demand_db):
+    """ONE bucket definition: a 74 % 4th-quarter row must key on the LABEL.
+
+    Progress alone would put it in Q3; the projection's own period_label is the
+    batch's source of truth.  live_z owns that rule, so z_cohort must ask it.
+    """
+    live_z = pytest.importorskip("blm_v4.betting.live_z")
+    con = sqlite3.connect(on_demand_db)
+    con.execute("UPDATE clean_projections SET progress_pct=74.0")
+    con.commit(); con.close()
+    r = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    expected = live_z.bucket_key("BETUAL_NBA", 74.0, "4th Quarter")
+    assert expected == "BETUAL_NBA|Q4"
+    assert r["benchmark_key"] == expected
+    assert r["reason"] is None

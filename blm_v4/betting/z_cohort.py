@@ -35,6 +35,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
+try:  # ONE bucket definition: the live_z module owns it (present on prod)
+    from blm_v4.betting import live_z as _live_z
+except Exception:      # a tree without live_z keeps the label-only fallback
+    _live_z = None
+
 ENABLE_ENV = "AUTOBET_Z_COHORT_ENABLED"
 FLOOR_ENV = "AUTOBET_Z_COHORT_MIN_Z"
 MAX_AGE_ENV = "AUTOBET_Z_COHORT_MAX_AGE_S"
@@ -279,7 +284,12 @@ def _computed_z(conn: sqlite3.Connection, base: str, as_of_ts: Optional[float],
     if age < -1.0 or age > age_limit:
         base_result["reason"] = STALE_Z
         return base_result
-    key = _benchmark_key(cls, _normalize_period(period_label))
+    key = (_live_z.bucket_key(cls, progress, period_label)
+           if _live_z is not None
+           else _benchmark_key(cls, _normalize_period(period_label)))
+    if key is None:
+        base_result["reason"] = MISSING_Z
+        return base_result
     try:
         n, s, ss = conn.execute(
             f"SELECT COUNT(*), COALESCE(SUM(r), 0), "
