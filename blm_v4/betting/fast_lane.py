@@ -542,7 +542,7 @@ class FastLaneWorker:
             # 3rd-Quarter rows yet, no league reference) still reads
             # UNAVAILABLE and keeps the directive's base-rate branch.
             # Refused candidates never claim a slot.
-            qualification = _qualify.check_game(game)
+            qualification = _qualify.check_game(game, store=self.store)
             if not qualification["qualified"]:
                 key = f"autobet_gate:{qualification['reason']}"
                 summary["refused"][key] = summary["refused"].get(key, 0) + 1

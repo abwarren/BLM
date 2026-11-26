@@ -10,8 +10,9 @@ Design invariants
   when false the layer is a no-op and performs NO database I/O at all.
 * ADDITIVE.  It can only REMOVE a game the incumbent gate would have passed.
   It never widens the gate, never changes stake, ladder, rung or safety.
-* FAIL CLOSED.  Missing / non-finite z, an unreadable DB, a stale observation,
-  or z <= floor all refuse.  UNAVAILABLE is never a pass.
+* FAIL CLOSED.  Missing / non-finite z, an unreadable DB, a stale or
+  unprovable observation time, or z <= floor all refuse.  UNAVAILABLE is
+  never a pass.
 * READ ONLY.  Every connection is ``file:...?mode=ro`` with ``query_only=1``.
   No table is written; the z value is read from the already-persisted
   ``blm_metrics_clean.db.deviation_residuals`` rows.
@@ -154,11 +155,17 @@ def latest_z(source_game_id: Any, clean_db_path: Optional[Path] = None,
     age_limit = max_age_s() if max_age is None else max(0.0, float(max_age))
     as_of_ts = _parse_iso(as_of)
     row_ts = _parse_iso(row[1])
-    if as_of_ts is not None and row_ts is not None:
-        age = as_of_ts - row_ts
-        if age < -1.0 or age > age_limit:
-            result["z"] = None
-            result["reason"] = STALE_Z
+    # FAIL CLOSED: freshness must be PROVABLE.  Without both timestamps the
+    # layer cannot show the z belongs to this observation, so it refuses
+    # instead of assuming the row is current.
+    if as_of_ts is None or row_ts is None:
+        result["z"] = None
+        result["reason"] = STALE_Z
+        return result
+    age = as_of_ts - row_ts
+    if age < -1.0 or age > age_limit:
+        result["z"] = None
+        result["reason"] = STALE_Z
     return result
 
 

@@ -257,7 +257,7 @@ def audit_block(game: dict, result: Optional[tuple[bool, str]] = None,
     return record
 
 
-def check_game(game: dict) -> dict:
+def check_game(game: dict, store=None) -> dict:
     """Evaluate ONE game dict, LOG the audit record, return the block.
 
     This is the wiring entry point for the two autonomous producers —
@@ -266,42 +266,84 @@ def check_game(game: dict) -> dict:
     qualification decision and its evidence are recorded for every candidate
     whether it then passes or not.  The executor's own contract is untouched,
     so the manual/read-only paths are not re-decided by this gate.
+
+    ``store`` is the producer's BettingStore.  Supplying it makes the
+    persisted per-layer toggles (dashboard switches) authoritative on the
+    decision path; without it the env defaults apply, which is what the
+    read-only and unit-test paths want.
     """
     inputs = inputs_from_game(game)
     result = qualifies_for_autobet(**inputs)
     block = audit_block(game, result, inputs)
-    # COHORT OVERLAYS (independent toggles, persisted, all OFF by default).
-    # STRENGTH remains the ALWAYS-ON incumbent gate: a game it refuses is
-    # never rescued by an overlay.  Overlays only add a LABEL + UNIT SIZE to
-    # a game that already passed STRENGTH, strongest match wins.  No overlay
-    # widens admission, changes a limit, or touches DRY_RUN.  Fail closed.
+    strength_ok = bool(result[0])
+    # COHORT OVERLAYS + SELECTOR (2026-11-11, modes wired 2026-11-26).
+    # STRENGTH is the incumbent gate and the default policy.  The selector
+    # is a persisted, audited policy choice:
+    #   STRENGTH — the incumbent gate alone decides (z is informational)
+    #   BOTH     — STRENGTH must pass AND the armed z layer must qualify
+    #   Z_ONLY   — the armed z layer alone decides; this is the ONE mode that
+    #              can admit a game STRENGTH refused, so it is an explicit
+    #              operator choice, and while z is disarmed it refuses
+    #              everything (fail closed).
+    # Overlays only LABEL and PRICE a game that will actually run.
     try:
         from blm_v4.betting import cohort_select as _sel
         from blm_v4.betting import z_cohort
-        block["cohort_mode"] = _sel.get()
+        mode = _sel.get()
+        block["cohort_mode"] = mode
         z_block = z_cohort.evaluate(game)       # no-op while z layer disarmed
         block["z_cohort"] = z_block
-        z = z_block.get("z")
-        inputs = inputs_from_game(game)
-        req = inputs.get("required_pts_per_min")
-        avg = inputs.get("competition_avg_pace")
-        ratio = (req / avg) if (req is not None and avg) else None
-        tcx = ratio is not None and ratio > 1.16  # TC-X elite pace rung
-        match = {
-            _sel.LAYER_Z2: z is not None and z > 2.0,
-            _sel.LAYER_Z1: z is not None and z > 1.0,
-            _sel.LAYER_TCX: tcx,
-        }
-        resolved = _sel.resolve_layers(match)
-        block["cohort_layer"] = resolved["label"]
-        block["cohort_layer_key"] = resolved["layer"]
-        block["cohort_units"] = resolved["units"]
-        block["cohort_matched"] = resolved["matched"]
+        z_ok = (bool(z_block.get("applicable"))
+                and bool(z_block.get("qualified")))
+        z_reason = "Z_COHORT_" + str(z_block.get("reason") or "REFUSED")
+        if mode == _sel.Z_ONLY:
+            admitted = z_ok
+            if not admitted:
+                block["qualified"] = False
+                block["reason"] = z_reason
+                block["mode_reason"] = z_reason
+            elif not strength_ok:
+                # Audited: the selector, not the incumbent gate, is why this
+                # game runs.  The strength verdict stays in the tier block.
+                block["qualified"] = True
+                block["reason"] = "MODE_Z_ONLY_ADMITTED"
+                block["mode_reason"] = "MODE_Z_ONLY_ADMITTED"
+        elif mode == _sel.BOTH:
+            admitted = strength_ok and z_ok
+            if strength_ok and not z_ok:
+                block["qualified"] = False
+                block["reason"] = z_reason
+                block["mode_reason"] = z_reason
+        else:
+            admitted = strength_ok
+        if admitted:
+            inputs = inputs_from_game(game)
+            req = inputs.get("required_pts_per_min")
+            avg = inputs.get("competition_avg_pace")
+            ratio = (req / avg) if (req is not None and avg) else None
+            tcx = ratio is not None and ratio > 1.16  # TC-X elite pace rung
+            z = z_block.get("z")
+            match = {
+                _sel.LAYER_Z2: z is not None and z > 2.0,
+                _sel.LAYER_Z1: z is not None and z > 1.0,
+                _sel.LAYER_TCX: tcx,
+            }
+            resolved = _sel.resolve_layers(match, store=store)
+            block["cohort_layer"] = resolved["label"]
+            block["cohort_layer_key"] = resolved["layer"]
+            block["cohort_units"] = resolved["units"]
+            block["cohort_matched"] = resolved["matched"]
+        else:
+            block["cohort_layer"] = None
+            block["cohort_layer_key"] = None
+            block["cohort_units"] = None
+            block["cohort_matched"] = []
     except Exception:            # an overlay failure NEVER changes admission
         block["cohort_layer"] = None
         block["cohort_layer_key"] = None
         block["cohort_units"] = None
         block["cohort_matched"] = []
+        block["mode_reason"] = "COHORT_LAYER_UNAVAILABLE"
     try:
         logger.info("autobet_qualification", **block)
     except Exception:            # logging must never decide a bet

@@ -43,14 +43,27 @@ def client_for(tmp_path, g=None):
     return TestClient(app), store, current
 
 
-def test_one_unit_max_is_enforced_by_auto_executor(tmp_path):
+def test_multi_unit_stake_is_allowed_within_the_money_cap(tmp_path):
+    """Operator ruling 2026-11-26: "1 unit" is the variable amount, not a cap.
+    Two units at a R10 unit is a R20 stake, well inside the R2 000 bound."""
     g = game()
-    config = cfg(tmp_path, stake_units=1.01)
+    config = cfg(tmp_path, stake_units=2.0, max_stake_per_bet=2000.0,
+                 max_daily_exposure=5000.0)
     store = BettingStore(config.db_path)
     out = evaluate(g, cfg=config, store=store, enabled=True,
                    unit_price=10, stats=store.today_stats())
-    assert out["decision"] == "NO_BET"
-    assert out["reason"] == "ONE_UNIT_MAXIMUM"
+    assert out["decision"] in ("WOULD_BET", "EXECUTE")
+    assert out["candidate"]["stake_units"] == 2.0
+    assert out["candidate"]["stake_amount"] == 20.0
+
+
+def test_multi_unit_stake_over_the_money_cap_is_refused(tmp_path):
+    g = game()
+    config = cfg(tmp_path, stake_units=3.0, max_stake_per_bet=25.0)
+    store = BettingStore(config.db_path)
+    out = evaluate(g, cfg=config, store=store, enabled=True,
+                   unit_price=10, stats=store.today_stats())
+    assert (out["decision"], out["reason"]) == ("NO_BET", "max_stake_exceeded")
 
 
 def test_game_state_is_authoritative_and_read_only(tmp_path):
@@ -101,7 +114,10 @@ def test_manual_wager_rejects_unapproved_market_direction_stake_and_line(tmp_pat
             "direction": "UNDER", "line": 193.5, "stake": 5,
             "idempotency_key": "manual-run-0002"}
     for change in ({"market": "MONEYLINE"}, {"direction": "HOME"},
-                   {"stake": 10.01}, {"line": 190.5}):
+                   {"stake": 60}, {"line": 190.5}):
+        # 60 is over the R50 per-bet maximum (operator ruling 2026-11-26:
+        # "1 unit" is the variable amount, so 2+ units are legal up to the
+        # money cap; the cap is what must reject).
         response = c.post("/api/v4/betting/manual", json={**base, **change})
         assert response.status_code in (400, 409)
     assert store.recent() == []

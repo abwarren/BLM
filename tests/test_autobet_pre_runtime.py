@@ -437,15 +437,28 @@ def test_unconfigured_limits_are_refused(store, enabled_store):
                                                 "limits_not_configured")
 
 
-def test_multi_unit_stake_is_refused(store, enabled_store, live_cfg):
-    cfg = BettingConfig(dry_run=True, max_stake_per_bet=10.0,
-                        max_bets_per_day=50, max_daily_exposure=100.0,
+def test_multi_unit_stake_is_allowed_within_the_money_cap(store, enabled_store,
+                                                          live_cfg):
+    """Operator ruling 2026-11-26: no fixed unit ceiling; R2 000 binds."""
+    cfg = BettingConfig(dry_run=True, max_stake_per_bet=1000.0,
+                        max_bets_per_day=50, max_daily_exposure=1000.0,
                         stake_units=2.0)
     res = evaluate(_qualifying_game(), cfg=cfg, store=enabled_store,
                    enabled=True, unit_price=2.0,
                    stats=enabled_store.today_stats())
-    assert (res["decision"], res["reason"]) == ("NO_BET",
-                                                "ONE_UNIT_MAXIMUM")
+    assert res["decision"] in ("WOULD_BET", "EXECUTE")
+    assert res["candidate"]["stake_amount"] == 4.0
+
+
+def test_multi_unit_stake_over_the_money_cap_is_refused(store, enabled_store,
+                                                        live_cfg):
+    cfg = BettingConfig(dry_run=True, max_stake_per_bet=5.0,
+                        max_bets_per_day=50, max_daily_exposure=100.0,
+                        stake_units=3.0)
+    res = evaluate(_qualifying_game(), cfg=cfg, store=enabled_store,
+                   enabled=True, unit_price=2.0,
+                   stats=enabled_store.today_stats())
+    assert (res["decision"], res["reason"]) == ("NO_BET", "max_stake_exceeded")
 
 
 def test_per_game_switch_off_is_refused(store, enabled_store, live_cfg):

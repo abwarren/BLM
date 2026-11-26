@@ -165,7 +165,7 @@ class BettingWorker:
         _ua = g.get("under_alert") or {}
         qualification = None
         if g.get("under_alert_exec_armed") is True or _ua.get("active") is True:
-            qualification = _qualify.check_game(g)
+            qualification = _qualify.check_game(g, store=self.store)
             if not qualification["qualified"]:
                 summary["no_bet"] += 1
                 self._no_bet_reasons[

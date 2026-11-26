@@ -91,6 +91,10 @@ def wants_z(mode: str | None = None) -> bool:
 # OFF, so an unconfigured deployment behaves exactly as before.
 # Layer strength order (STRONGEST first) decides the label and unit when
 # several layers match: Z2+TC-X > Z2+ > Z1+ > TC-X.
+#
+# UNIT SIZES are multiples of the VARIABLE unit price, not a fixed ceiling
+# (operator ruling 2026-11-26): the executor's per-bet money cap
+# (BETTING_MAX_STAKE_PER_BET, R2 000) and the balance are the binding bounds.
 LAYER_Z1 = "Z1"
 LAYER_Z2 = "Z2"
 LAYER_Z2TCX = "Z2TCX"

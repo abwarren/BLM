@@ -212,7 +212,12 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
     # returns to rung 1, and at the chosen depth a win banks the cycle.
     # The rung is DERIVED from settlements (blm_v4.betting.settlement), never
     # stored, so a restart cannot resume on a stale rung.
-    # OFF (depth 0) keeps the original contract exactly: one unit maximum.
+    #
+    # NO FIXED UNIT CEILING (operator ruling 2026-11-26): "1 unit" is the
+    # variable amount (unit_price), not a maximum.  Ladder rungs and cohort
+    # overlays may both carry more than one unit; the binding bounds are the
+    # money limits below — cfg.max_stake_per_bet (R2 000), the daily count,
+    # the optional daily exposure and the account balance.
     ladder_depth = 0
     try:
         ladder_depth = _ladder.depth(store.get_config("ladder_wins", "0"))
@@ -227,8 +232,6 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
         units = _ladder.stake_units(rung, units)
         if units != units or units <= 0:      # NaN / non-positive
             return _no("ladder_stake_invalid", ik)
-    elif units > 1.0:
-        return _no("ONE_UNIT_MAXIMUM", ik)
     stake_amount = round(unit_price * units, 2)
     # ── R5 (operator directive 2026-10-06): if the account BALANCE is below
     #    one unit, stake the WHOLE balance instead of the unit.

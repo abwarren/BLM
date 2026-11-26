@@ -32,6 +32,7 @@ from blm_v4.betting import command as _command
 from blm_v4.betting import market_heat
 from blm_v4.betting import identity_watch
 from blm_v4.betting import cohort_select as _cohort
+from blm_v4.betting import z_cohort as _z_cohort
 from blm_v4.betting.cohort_units import _sel_config_for
 from blm_v4.betting import stake as _stake
 
@@ -161,7 +162,11 @@ def betting_status() -> dict:
         "ladder_step": _ladder.step_units(),
         "ladder_factor": _ladder.factor(),
         **_ladder_live_state(store, cfg),
-        "max_stake_units": 1.0,
+        # The per-bet money cap expressed in units at the CURRENT unit price
+        # (operator ruling 2026-11-26: "1 unit" is the variable amount, not a
+        # ceiling; cfg.max_stake_per_bet — R2 000 — is the binding bound).
+        "max_stake_units": (round(cfg.max_stake_per_bet / unit_price, 4)
+                            if (cfg.max_stake_per_bet and unit_price) else None),
         "max_stake_per_bet": cfg.max_stake_per_bet,
         "max_bets_per_day": cfg.max_bets_per_day,
         "max_daily_exposure": limit,
@@ -180,13 +185,8 @@ def betting_status() -> dict:
         # Cohort selector: the PERSISTED mode and z-layer arming state the
         # three buttons render.  Never guess a value from the UI.
         "cohort_mode": _cohort.get(),
-        "z_cohort_enabled": os.environ.get(
-            "AUTOBET_Z_COHORT_ENABLED", "").strip().lower() in (
-                "1", "true", "yes", "on"),
-        "z_cohort_floor": (float(os.environ["AUTOBET_Z_COHORT_MIN_Z"])
-                           if str(os.environ.get(
-                               "AUTOBET_Z_COHORT_MIN_Z", "")).strip()
-                           else 1.0),
+        "z_cohort_enabled": _z_cohort.enabled(),
+        "z_cohort_floor": _z_cohort.z_floor(),
         "cohort_layers": _cohort_status(_require()[0]),
         # Identity-guard health.  A non-zero count means the browser went blind
         # inside a bet window and the claim was refused — an operational fault
@@ -618,11 +618,16 @@ def manual_bet(payload: dict) -> dict:
         raise HTTPException(status_code=409, detail="configured unit is unavailable")
     if unit < cfg.min_unit_price or unit > cfg.max_unit_price:
         raise HTTPException(status_code=409, detail="configured unit is outside the server limit")
-    if stake > unit:
-        raise HTTPException(status_code=400, detail="stake exceeds one configured unit")
+    # "1 unit" is the variable amount (unit_price), not a ceiling (operator
+    # ruling 2026-11-26).  The manual stake may be several units; the money
+    # bound is the same per-bet maximum the executor enforces.
+    if cfg.max_stake_per_bet is None:
+        raise HTTPException(status_code=409,
+                            detail="per-bet maximum is not configured")
+    if stake > cfg.max_stake_per_bet:
+        raise HTTPException(status_code=400,
+                            detail="stake exceeds the per-bet maximum")
     units = stake / unit
-    if units > 1.0:
-        raise HTTPException(status_code=400, detail="ONE_UNIT_MAXIMUM")
 
     # Resolve a prior logical request before checking current market
     # freshness: a lost HTTP response must return its ledger outcome, never

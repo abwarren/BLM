@@ -109,7 +109,7 @@ def test_check_game_disarmed_is_noop(monkeypatch):
 
 
 def test_check_game_overlay_never_refuses(monkeypatch, zdb):
-    """Overlays label + price a game; STRENGTH alone still decides admission."""
+    """STRENGTH still decides in the default mode; overlays only label."""
     monkeypatch.setenv(z_cohort.ENABLE_ENV, "true")
     monkeypatch.setenv(z_cohort.FLOOR_ENV, "10")   # z too low for any layer
     monkeypatch.delenv("AUTOBET_Z1_ENABLED", raising=False)
@@ -122,3 +122,31 @@ def test_check_game_overlay_never_refuses(monkeypatch, zdb):
     assert block["qualified"] is True         # incumbent gate decided
     assert block["cohort_layer"] is None      # no enabled overlay matched
     assert block["z_cohort"]["qualified"] is False
+
+
+def test_unprovable_observation_time_refuses(monkeypatch, zdb):
+    monkeypatch.setenv(z_cohort.ENABLE_ENV, "true")
+    game = dict(GAME)
+    game["projector"] = {k: v for k, v in GAME["projector"].items()
+                         if k != "captured_at"}
+    r = z_cohort.evaluate(game, clean_db_path=zdb)
+    assert (r["qualified"], r["reason"]) == (False, z_cohort.STALE_Z)
+
+
+def test_junk_floor_env_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv(z_cohort.FLOOR_ENV, "not-a-number")
+    assert z_cohort.z_floor() == z_cohort.DEFAULT_FLOOR
+
+
+def test_z_only_can_admit_a_strength_refusal(monkeypatch, zdb):
+    """Z_ONLY is the ONE mode that widens: the armed z layer decides."""
+    from blm_v4.betting import cohort_select as sel
+    monkeypatch.setenv(z_cohort.ENABLE_ENV, "true")
+    monkeypatch.setenv(z_cohort.DB_ENV, str(zdb))
+    monkeypatch.setattr(sel, "_mode", sel.Z_ONLY)
+    game = dict(GAME)
+    game["projector"] = dict(GAME["projector"], progress_pct=50.0)
+    block = qualify.check_game(game)
+    assert block["cohort_mode"] == "Z_ONLY"
+    assert block["qualified"] is True          # z 2.0247 > floor 1.0
+    assert block["reason"] == "MODE_Z_ONLY_ADMITTED"

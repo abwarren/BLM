@@ -84,3 +84,41 @@ def test_unit_override_ignores_bad_value():
     cfg = Cfg(stake_units=1.0)
     assert _sel_config_for(cfg, {"cohort_units": "NaN"}) is cfg
     assert _sel_config_for(cfg, {}) is cfg
+
+
+# ── operator ruling 2026-11-26: the persisted toggles and the selector are
+#    the DECISION path's authority, not dashboard decoration.
+GAME = {
+    "game_id": "31684333",
+    "competition_slug": "betual-nba",
+    "competition_pace": {"avg_pace": 4.0},
+    "projector": {"progress_pct": 75.0, "required_pts_per_min": 6.0,
+                  "actual_pts_per_min": 5.5,
+                  "captured_at": "2026-11-25T00:38:23Z"},
+}
+
+
+def test_store_toggle_reaches_check_game(monkeypatch):
+    from blm_v4.betting import qualify
+    monkeypatch.delenv("AUTOBET_TCX_ENABLED", raising=False)
+    store = FakeStore({sel.layer_enabled_key(sel.LAYER_TCX): "true",
+                       sel.layer_units_key(sel.LAYER_TCX): "1.5"})
+    block = qualify.check_game(GAME, store=store)
+    assert block["qualified"] is True
+    assert block["cohort_layer"] == "TC-X"
+    assert block["cohort_units"] == 1.5
+
+
+def test_env_defaults_apply_when_no_store_is_supplied(monkeypatch):
+    from blm_v4.betting import qualify
+    monkeypatch.delenv("AUTOBET_TCX_ENABLED", raising=False)
+    assert qualify.check_game(GAME)["cohort_layer"] is None
+
+
+def test_mode_both_refuses_while_z_is_disarmed(monkeypatch):
+    from blm_v4.betting import qualify
+    monkeypatch.delenv("AUTOBET_Z_COHORT_ENABLED", raising=False)
+    monkeypatch.setattr(sel, "_mode", sel.BOTH)
+    block = qualify.check_game(GAME, store=FakeStore({}))
+    assert block["qualified"] is False
+    assert block["reason"] == "Z_COHORT_DISARMED"
