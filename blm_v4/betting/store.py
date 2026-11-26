@@ -20,11 +20,29 @@ authority (``BETTING_DRY_RUN``, risk limits) lives above it.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """A connection that is RELEASED when used as a context manager.
+
+    ``with sqlite3.connect(...) as c`` commits (or rolls back) but never
+    closes, so every ``with self._conn() as c`` leaked one file descriptor
+    per call (observed live 2026-11-26: 852 fds against LimitNOFILE=1024).
+    Transaction semantics are unchanged; the connection is now also closed.
+    """
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS betting_config (
@@ -196,7 +214,8 @@ class BettingStore:
                 c.execute(f"ALTER TABLE bet_executions ADD COLUMN {name} {decl}")
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = sqlite3.connect(self.db_path, timeout=30,
+                               factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
@@ -259,6 +278,55 @@ class BettingStore:
                 "('SUBMITTED','ACCEPTED') LIMIT 1",
                 (str(game_id),)).fetchone()
         return row is not None
+
+    def account_mismatch_today(self) -> int:
+        """Claims refused TODAY by the identity guard (``ACCOUNT_MISMATCH``).
+
+        A transient empty identity read blocks a perfectly good bet and burns
+        that checkpoint's claim, so this count is an operational fault signal,
+        not a betting statistic — the dashboard alarms on it.
+        """
+        try:
+            with self._conn() as c:
+                row = c.execute(
+                    "SELECT COUNT(*) AS n FROM bet_executions "
+                    "WHERE day_utc=? AND status='BLOCKED' "
+                    "AND COALESCE(error_code,'')='ACCOUNT_MISMATCH'",
+                    (_day(),)).fetchone()
+            return int(row["n"]) if row else 0
+        except Exception:
+            return 0
+
+    def burned_checkpoints_today(self) -> dict:
+        """Checkpoints whose claim can NEVER be re-tried, and why.
+
+        ``claim()`` refuses an existing idempotency key forever.  A FAILED row
+        whose code is not in the reclaimable sets is therefore a permanent dead
+        end for that game+checkpoint: every later pass reports
+        ``duplicate_execution`` and the armed candidate can never be placed.
+        Measured 2026-11-26: ``armed: 1`` with ``duplicate_execution`` on 118 of
+        123 fast-lane passes.  This is the number that makes that visible
+        instead of leaving it to be inferred from a refusal list.
+        """
+        codes = ("ACCOUNT_MISMATCH", "PROVIDER_UNAVAILABLE",
+                 *self.RECLAIMABLE_FAILED_CODES)
+        ph = ",".join("?" * len(codes))
+        where = ("WHERE day_utc=? AND status='FAILED' "
+                 f"AND COALESCE(error_code,'') NOT IN ({ph}) "
+                 "AND submitted_at_utc IS NULL AND provider_ref IS NULL")
+        try:
+            with self._conn() as c:
+                row = c.execute(
+                    "SELECT COUNT(DISTINCT idempotency_key) AS n "
+                    f"FROM bet_executions {where}", (_day(), *codes)).fetchone()
+                by_code = c.execute(
+                    "SELECT COALESCE(error_code,'NONE') AS code, COUNT(*) AS n "
+                    f"FROM bet_executions {where} GROUP BY 1 ORDER BY 2 DESC",
+                    (_day(), *codes)).fetchall()
+            return {"count": int(row["n"]) if row else 0,
+                    "by_code": {r["code"]: int(r["n"]) for r in by_code}}
+        except Exception:
+            return {"count": None, "by_code": {}}
 
     def attempts_today(self, game_id: str) -> int:
         """How many execution attempts this game already has TODAY.
@@ -438,6 +506,76 @@ class BettingStore:
             return False
 
     # ── idempotent claim ───────────────────────────────────────────────
+    #: BLOCK reasons that are TRANSIENT and provably money-free: the claim was
+    #: refused before any submission, so a later pass may safely try again.  A
+    #: kill switch, a daily cap, an exposure cap or an ambiguity hold is NOT
+    #: here on purpose — those are operator or money decisions, not faults.
+    RECLAIMABLE_BLOCK_CODES = ("ACCOUNT_MISMATCH", "PROVIDER_UNAVAILABLE")
+    #: FAILED rows that are still provably PRE-SUBMISSION and may therefore be
+    #: re-claimed.  ``dom.submit`` returns at the submit CONTROL gate BEFORE the
+    #: BET NOW click — no ticket exists, ``submitted_at_utc`` is never stamped
+    #: and no provider ref is ever issued — so the bookmaker holds no position.
+    #: Without this the armed checkpoint was burned for the rest of the day:
+    #: measured 2026-11-25/26, 201 such failures in the ledger and every later
+    #: pass on the same checkpoint refused with ``duplicate_execution``, then
+    #: ``alert_stale`` once the observation aged out (live: 118 of 123 passes in
+    #: a 20-minute window).  Only these codes — a FAILED row with any other code
+    #: (STAKE_MISMATCH, SUBMIT_FAILED, GAME_ID_MISMATCH) may have reached the
+    #: bookmaker and stays un-reclaimable.
+    #:
+    #: ``REVALIDATION_*`` refusals are produced by ``revalidate.revalidate`` at
+    #: the submission boundary, i.e. BEFORE ``provider.submit`` is ever called,
+    #: so they are pre-submission for the same reason.  Only the pace refusal is
+    #: listed here: the other revalidation codes (stale capture, unreadable
+    #: capture, price drift, market heat) mean the opportunity itself is gone,
+    #: so re-trying them buys nothing and would only churn claims.
+    RECLAIMABLE_FAILED_CODES = (
+        "SUBMIT_CONTROL_UNAVAILABLE",
+        "REVALIDATION_PACE_BELOW_EXECUTION_THRESHOLD",
+    )
+    #: How many times ONE checkpoint may be re-claimed after transient blocks.
+    MAX_RECLAIMS = 2
+
+    def _insert_claim(self, c, rec: dict, ik: str) -> int:
+        """INSERT OR IGNORE one claim row; returns the affected row count."""
+        return c.execute(
+            """INSERT OR IGNORE INTO bet_executions
+               (execution_id, idempotency_key, game_id, alert_id,
+                checkpoint, market, selection, triggered_line, price,
+                unit_price, stake_units, stake_amount, status,
+                execution_state,
+                requested_at_utc, day_utc, requested_amount,
+                accepted_amount, simulated_amount, unit_limit,
+                rejection_reason)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (rec["execution_id"], ik, rec["game_id"], rec["alert_id"],
+             rec["checkpoint"], rec.get("market") or
+             "MONEYLINE_TOTAL_UNDER", rec.get("selection") or "UNDER",
+             rec.get("triggered_line"), rec.get("price"),
+             rec.get("unit_price"), rec.get("stake_units"),
+             rec.get("stake_amount"), rec.get("status") or "PENDING",
+             rec.get("execution_state") or rec.get("status") or "PENDING",
+             _now(), _day(), rec.get("requested_amount"),
+             rec.get("accepted_amount"), rec.get("simulated_amount"),
+             rec.get("unit_limit"), rec.get("rejection_reason"))).rowcount
+
+    def _reclaimable(self, row) -> bool:
+        """True when an existing claim can be re-attempted without money risk."""
+        if row is None:
+            return False
+        status = (row["status"] or "").upper()
+        code = row["error_code"] or ""
+        if status == "BLOCKED":
+            if code not in self.RECLAIMABLE_BLOCK_CODES:
+                return False
+        elif status == "FAILED":
+            if code not in self.RECLAIMABLE_FAILED_CODES:
+                return False
+        else:
+            return False
+        # provably pre-submission: nothing was sent and no receipt exists
+        return not row["submitted_at_utc"] and not row["provider_ref"]
+
     def claim(self, rec: dict) -> tuple[bool, Optional[dict]]:
         """Atomically claim an execution slot for ``rec``'s idempotency
         key.
@@ -447,34 +585,40 @@ class BettingStore:
         must not bet again.  The INSERT OR IGNORE + SELECT pair runs
         inside one transaction so two concurrent workers can never both
         win (§4 / concurrency test).
+
+        EXCEPTION — a TRANSIENTLY BLOCKED claim, and a FAILED claim whose
+        failure is provably pre-submission (the submit-control gate refuses
+        before the click), is re-claimable.  Such a claim is money-free and
+        used to burn that checkpoint for the rest of the day: the armed
+        candidate then failed with ``duplicate_execution`` forever.  Such a row
+        is re-claimed under its own ``<key>#rc<N>`` identity, bounded by
+        :data:`MAX_RECLAIMS`, so nothing is overwritten: the blocked row keeps
+        its status, error and audit trail, and the new attempt is a new row.
         """
         ik = rec["idempotency_key"]
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
-            cur = c.execute(
-                """INSERT OR IGNORE INTO bet_executions
-                   (execution_id, idempotency_key, game_id, alert_id,
-                    checkpoint, market, selection, triggered_line, price,
-                    unit_price, stake_units, stake_amount, status,
-                    execution_state,
-                    requested_at_utc, day_utc, requested_amount,
-                    accepted_amount, simulated_amount, unit_limit,
-                    rejection_reason)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (rec["execution_id"], ik, rec["game_id"], rec["alert_id"],
-                 rec["checkpoint"], rec.get("market") or
-                 "MONEYLINE_TOTAL_UNDER", rec.get("selection") or "UNDER",
-                 rec.get("triggered_line"), rec.get("price"),
-                 rec.get("unit_price"), rec.get("stake_units"),
-                 rec.get("stake_amount"), rec.get("status") or "PENDING",
-                 rec.get("execution_state") or rec.get("status") or "PENDING",
-                 _now(), _day(), rec.get("requested_amount"),
-                 rec.get("accepted_amount"), rec.get("simulated_amount"),
-                 rec.get("unit_limit"), rec.get("rejection_reason")))
-            if cur.rowcount == 0:
+            if self._insert_claim(c, rec, ik) == 0:
                 row = c.execute(
                     "SELECT * FROM bet_executions WHERE idempotency_key=?",
                     (ik,)).fetchone()
+                if self._reclaimable(row):
+                    used = c.execute(
+                        "SELECT COUNT(*) AS n FROM bet_executions "
+                        "WHERE idempotency_key LIKE ?", (f"{ik}#rc%",)
+                    ).fetchone()["n"]
+                    if used < self.MAX_RECLAIMS:
+                        new_ik = f"{ik}#rc{used + 1}"
+                        retry = dict(rec)
+                        retry["idempotency_key"] = new_ik
+                        retry["execution_id"] = "bet-" + hashlib.sha256(
+                            new_ik.encode("utf-8")).hexdigest()[:20]
+                        if self._insert_claim(c, retry, new_ik):
+                            new_row = c.execute(
+                                "SELECT * FROM bet_executions "
+                                "WHERE idempotency_key=?", (new_ik,)).fetchone()
+                            c.commit()
+                            return True, (dict(new_row) if new_row else None)
                 c.commit()
                 return False, (dict(row) if row else None)
             row = c.execute(
@@ -557,26 +701,55 @@ class BettingStore:
                         updated_at_utc)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(dedupe_key) DO UPDATE SET
-                        at_utc=excluded.at_utc,
-                        checkpoint=excluded.checkpoint,
-                        line=excluded.line,
-                        price=excluded.price,
-                        progress_pct=excluded.progress_pct,
-                        total_points=excluded.total_points,
-                        required_pace=excluded.required_pace,
-                        actual_pace=excluded.actual_pace,
-                        pace_ratio=excluded.pace_ratio,
-                        shortfall=excluded.shortfall,
-                        outcome=excluded.outcome,
-                        reason=excluded.reason,
-                        execution_id=COALESCE(excluded.execution_id,
-                                              bet_candidates.execution_id),
-                        execution_state=COALESCE(excluded.execution_state,
-                                                 bet_candidates.execution_state),
-                        stake_units=COALESCE(excluded.stake_units,
-                                             bet_candidates.stake_units),
-                        stake_amount=COALESCE(excluded.stake_amount,
-                                              bet_candidates.stake_amount),
+                        at_utc=CASE WHEN bet_candidates.outcome='PLACED'
+                                     THEN bet_candidates.at_utc
+                                     ELSE excluded.at_utc END,
+                        checkpoint=CASE WHEN bet_candidates.outcome='PLACED'
+                                        THEN bet_candidates.checkpoint
+                                        ELSE excluded.checkpoint END,
+                        line=CASE WHEN bet_candidates.outcome='PLACED'
+                                  THEN bet_candidates.line ELSE excluded.line END,
+                        price=CASE WHEN bet_candidates.outcome='PLACED'
+                                   THEN bet_candidates.price ELSE excluded.price END,
+                        progress_pct=CASE WHEN bet_candidates.outcome='PLACED'
+                                          THEN bet_candidates.progress_pct
+                                          ELSE excluded.progress_pct END,
+                        total_points=CASE WHEN bet_candidates.outcome='PLACED'
+                                          THEN bet_candidates.total_points
+                                          ELSE excluded.total_points END,
+                        required_pace=CASE WHEN bet_candidates.outcome='PLACED'
+                                           THEN bet_candidates.required_pace
+                                           ELSE excluded.required_pace END,
+                        actual_pace=CASE WHEN bet_candidates.outcome='PLACED'
+                                         THEN bet_candidates.actual_pace
+                                         ELSE excluded.actual_pace END,
+                        pace_ratio=CASE WHEN bet_candidates.outcome='PLACED'
+                                        THEN bet_candidates.pace_ratio
+                                        ELSE excluded.pace_ratio END,
+                        shortfall=CASE WHEN bet_candidates.outcome='PLACED'
+                                       THEN bet_candidates.shortfall
+                                       ELSE excluded.shortfall END,
+                        outcome=CASE WHEN bet_candidates.outcome='PLACED'
+                                     THEN 'PLACED' ELSE excluded.outcome END,
+                        reason=CASE WHEN bet_candidates.outcome='PLACED'
+                                    THEN bet_candidates.reason
+                                    ELSE excluded.reason END,
+                        execution_id=CASE WHEN bet_candidates.outcome='PLACED'
+                                          THEN bet_candidates.execution_id
+                                          ELSE COALESCE(excluded.execution_id,
+                                               bet_candidates.execution_id) END,
+                        execution_state=CASE WHEN bet_candidates.outcome='PLACED'
+                                             THEN bet_candidates.execution_state
+                                             ELSE COALESCE(excluded.execution_state,
+                                                  bet_candidates.execution_state) END,
+                        stake_units=CASE WHEN bet_candidates.outcome='PLACED'
+                                         THEN bet_candidates.stake_units
+                                         ELSE COALESCE(excluded.stake_units,
+                                              bet_candidates.stake_units) END,
+                        stake_amount=CASE WHEN bet_candidates.outcome='PLACED'
+                                          THEN bet_candidates.stake_amount
+                                          ELSE COALESCE(excluded.stake_amount,
+                                               bet_candidates.stake_amount) END,
                         updated_at_utc=excluded.updated_at_utc""",
                     (key, rec.get("at_utc") or now, rec.get("day_utc") or _day(),
                      str(rec.get("game_id")), rec.get("checkpoint"),
@@ -608,6 +781,46 @@ class BettingStore:
             return [dict(r) for r in rows]
         except sqlite3.Error:
             return []
+
+    def placed_executions_for(self, game_ids) -> dict:
+        """game_id -> the NEWEST placed execution for it.
+
+        The execution ledger is the authority on whether a bet exists — a
+        placement made by any executor (poll worker, fast lane, manual) lands
+        in ``bet_executions``, and only some of those paths also write a
+        ``bet_candidates`` row.  The qualifying-bets panel therefore reads
+        placement from HERE and never infers it from a decision row.
+        READ-ONLY; unknown / unplaced ids are simply absent from the map.
+        """
+        ids = [str(g) for g in dict.fromkeys(game_ids or []) if str(g)]
+        if not ids:
+            return {}
+        out: dict = {}
+        try:
+            with self._conn() as c:
+                for i in range(0, len(ids), 400):
+                    chunk = ids[i:i + 400]
+                    rows = c.execute(
+                        "SELECT execution_id, game_id, status, triggered_line, "
+                        "       price, stake_amount, requested_at_utc, "
+                        "       submitted_at_utc, day_utc "
+                        "  FROM bet_executions "
+                        " WHERE status IN ('SUBMITTED','ACCEPTED','SETTLED','PUSHED') "
+                        f"   AND game_id IN ({','.join('?' * len(chunk))}) "
+                        " ORDER BY id", chunk).fetchall()
+                    for r in rows:      # last row per game = newest
+                        out[str(r["game_id"])] = {
+                            "execution_id": r["execution_id"],
+                            "status": r["status"],
+                            "line": r["triggered_line"],
+                            "price": r["price"],
+                            "stake_amount": r["stake_amount"],
+                            "at_utc": r["submitted_at_utc"] or r["requested_at_utc"],
+                            "day_utc": r["day_utc"],
+                        }
+        except sqlite3.Error:
+            return {}
+        return out
 
     def get_execution(self, execution_id: str) -> Optional[dict]:
         with self._conn() as c:

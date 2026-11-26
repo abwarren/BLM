@@ -31,6 +31,7 @@ from blm_v4.betting.provider import (
     ProviderUnavailable,
 )
 from blm_v4.betting.account_guard import verify_account
+from blm_v4.betting import identity_watch
 from blm_v4.betting import revalidate as _reval
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
@@ -297,6 +298,16 @@ def evaluate(game: dict, *, cfg: BettingConfig, store: BettingStore,
             return {"decision": "NO_BET", "reason": "duplicate_execution",
                     "idempotency_key": ik, "existing": existing,
                     "candidate": None}
+        # ADOPT THE ROW THE STORE ACTUALLY CLAIMED.  A transiently-BLOCKED
+        # claim is re-claimed under its OWN identity (``<key>#rc<N>`` with a
+        # fresh execution_id) and that row is what the store returns; keeping
+        # the pre-claim id here made every write below land on the original
+        # BLOCKED row while the row that carried the attempt sat PENDING
+        # forever (observed 2026-11-24: 76 orphaned PENDING rows, and the
+        # blocked row's resolved_at kept advancing as if it had been retried).
+        if isinstance(existing, dict):
+            execution_id = existing.get("execution_id") or execution_id
+            ik = existing.get("idempotency_key") or ik
         store.audit(
         "claimed", idempotency_key=ik, execution_id=execution_id,
         reason="all ten conditions satisfied",
@@ -392,6 +403,23 @@ def execute(candidate: dict, *, cfg: BettingConfig, store: BettingStore,
     # without account identity (DryRunProvider) are exempt by design —
     # there is no real submission to mis-bind.
     mismatch = verify_account(provider)
+    # A fail-closed guard that refuses silently is indistinguishable from a
+    # switch nobody turned on (2026-11-25: 53 refusals, nine hours, no bet, no
+    # log line).  Watch the guard so an unprovable account is LOUD and audited
+    # once per episode — the refusal itself is unchanged.
+    if identity_watch.observe(
+            required=bool(getattr(provider, "requires_account_identity",
+                                  False)),
+            reason=mismatch):
+        store.audit("identity_stall", idempotency_key=ik,
+                    execution_id=execution_id,
+                    reason=(mismatch or "")[:300],
+                    details={"guard": "account_identity",
+                             "result": "BLOCKED",
+                             "kind": identity_watch.snapshot()["state"],
+                             "note": "autobet is armed but cannot prove the "
+                                     "signed-in account; every candidate "
+                                     "is refused until the read recovers"})
     if mismatch:
         store.update_status(execution_id, "BLOCKED",
                             error_code="ACCOUNT_MISMATCH",

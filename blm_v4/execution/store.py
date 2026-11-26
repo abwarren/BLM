@@ -17,6 +17,23 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+
+class _ClosingConnection(sqlite3.Connection):
+    """A connection that is RELEASED when used as a context manager.
+
+    ``with sqlite3.connect(...) as c`` commits (or rolls back) but never
+    closes, so every ``with self._conn() as c`` leaked one file descriptor
+    per call (observed live 2026-11-26: 852 fds against LimitNOFILE=1024).
+    Transaction semantics are unchanged; the connection is now also closed.
+    """
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS execution_jobs (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,7 +157,8 @@ class ExecutionStore:
         conn.commit()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = sqlite3.connect(self.db_path, timeout=30,
+                               factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")

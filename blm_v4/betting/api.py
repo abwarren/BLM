@@ -29,6 +29,8 @@ from blm_v4.betting.provider import (
 )
 from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
+from blm_v4.betting import market_heat
+from blm_v4.betting import identity_watch
 from blm_v4.betting import stake as _stake
 
 router = APIRouter(prefix="/api/v4/betting", tags=["blm-v4-betting"])
@@ -50,6 +52,12 @@ def configure_betting(store: BettingStore, cfg: BettingConfig,
     global _store, _cfg, _live_payload_fn, _balance_fn
     _store = store
     _cfg = cfg
+    # the market-heat OPERATOR SWITCH lives in betting_config and outranks the
+    # deployment env; read it once here so enabled() stays I/O-free per pass.
+    try:
+        market_heat.load_persisted_override(cfg.db_path)
+    except Exception:            # a broken store must not stop the API wiring
+        pass
     if live_payload_fn is not None:
         _live_payload_fn = live_payload_fn
     if balance_fn is not None:
@@ -64,21 +72,38 @@ def _require() -> tuple[BettingStore, BettingConfig]:
 
 
 def _ladder_live_state(store, cfg) -> dict:
-    """Rung + the stake the NEXT bet will carry.  Never breaks the status call."""
+    """Rung + the stake the NEXT bet will carry.  Never breaks the status call.
+
+    ``ladder_pending`` = a placed bet is still awaiting its result, so — operator
+    directive 2026-11-19 — the next stake is rung 1 and the increase is deferred
+    until that result lands.  Bets whose final can NEVER prove a result (an
+    INVALID verdict, or a final stamped before the bet itself) are counted
+    separately: they reset the rung at their point in history but must not make
+    the flag read pending for ever.
+    """
+    off = {"ladder_rung": 0, "ladder_next_units": None,
+           "ladder_next_stake": None, "ladder_pending": False,
+           "ladder_pending_bets": 0, "ladder_pending_oldest_at_utc": None,
+           "ladder_unprovable_bets": 0}
     try:
         d = _ladder.depth(store.get_config("ladder_wins", "0"))
         if d == 0:
-            return {"ladder_rung": 0, "ladder_next_units": None,
-                    "ladder_next_stake": None}
+            return off
         from blm_v4.betting import settlement as _settlement
         unit_price = store.get_unit_price() or 0.0
         rung = _settlement.current_rung(store.db_path, d, unit_price=unit_price)
         units = _ladder.stake_units(rung, cfg.stake_units)
+        unconfirmed = _settlement.pending_bets(store.db_path, unit_price=unit_price)
+        in_flight = [p for p in unconfirmed if p["reason"] == "no_result_row"]
         return {"ladder_rung": rung, "ladder_next_units": units,
-                "ladder_next_stake": round(units * unit_price, 2)}
+                "ladder_next_stake": round(units * unit_price, 2),
+                "ladder_pending": bool(in_flight),
+                "ladder_pending_bets": len(in_flight),
+                "ladder_pending_oldest_at_utc":
+                    in_flight[0]["submitted_at_utc"] if in_flight else None,
+                "ladder_unprovable_bets": len(unconfirmed) - len(in_flight)}
     except Exception:
-        return {"ladder_rung": 0, "ladder_next_units": None,
-                "ladder_next_stake": None}
+        return off
 
 
 @router.get("/status")
@@ -141,7 +166,34 @@ def betting_status() -> dict:
         "today": today_block,
         "credentials": credentials_present(),   # booleans ONLY
         "recent": [_public_execution(r) for r in store.recent(25)],
+        # The MARKET-HEAT operator switch + the live verdict behind it — the
+        # SAME module the arming lane calls (120 s cache, fail-open).  A status
+        # read must never fail on it.
+        "market_heat_enabled": market_heat.enabled(),
+        "market_heat": _market_heat_payload(),
+        # Identity-guard health.  A non-zero count means the browser went blind
+        # inside a bet window and the claim was refused — an operational fault
+        # the dashboard must surface, never a number to hide in the ledger.
+        "identity_blocks_today": store.account_mismatch_today(),
+        # Live identity-guard health: whether the browser can PROVE the signed-in
+        # account right now, how many refusals in a row, and since when.  A
+        # stalled read refuses every candidate while the lane still looks armed,
+        # so the dashboard must be able to say so out loud.
+        "identity_health": identity_watch.snapshot(),
+        # Checkpoints killed by a FAILED claim that policy does not allow to be
+        # retried.  Non-zero while the lane is armed means it is finding
+        # candidates it can never execute (2026-11-26: 118 of 123 passes).
+        "burned_checkpoints_today": store.burned_checkpoints_today(),
     }
+
+
+def _market_heat_payload() -> dict:
+    """The guardrail verdict for the dashboard button.  Never raises."""
+    try:
+        return market_heat.state()
+    except Exception:
+        return {"enabled": market_heat.enabled(), "tripped": None,
+                "error": "unavailable"}
 
 
 def _public_execution(r: dict) -> dict:
@@ -341,14 +393,24 @@ def betting_candidates(limit: int = 50) -> dict:
     every trade leg appears here even when the slip was refused, the limit
     blocked it, or the game had already been bet.  Execution rows stay in
     ``/history``; this endpoint never mixes the two.
+
+    ADDITIVE (integrity fix 2026-11-19): ``placed`` carries, per game id, the
+    newest PLACED execution from ``bet_executions``.  Placement is an
+    execution fact — some executors (poll worker, manual path) never write a
+    ``bet_candidates`` row, so the panel must not infer "no bet" from the
+    absence of a PLACED decision row.  The map is read-only and empty when
+    nothing was placed.
     """
     store, _cfg = _require()
     rows = store.candidates_recent(limit=max(1, min(int(limit), 500)))
+    today = store.candidates_recent(limit=500, day=_utc_day())
+    gids = sorted({str(r["game_id"]) for r in rows}
+                  | {str(r["game_id"]) for r in today})
     return {
         "candidates": rows,
         "limit": max(1, min(int(limit), 500)),
-        "today": store.candidates_recent(limit=500,
-                                         day=_utc_day()),
+        "today": today,
+        "placed": store.placed_executions_for(gids),
     }
 
 
@@ -680,6 +742,21 @@ def betting_settings(payload: dict) -> dict:
                          else "false")
         store.audit("kill_switch", reason="frontend",
                     details={"enabled": enable, "dry_run": cfg.dry_run})
+
+    if "market_heat" in payload:
+        # The MARKET-HEAT operator switch (2026-11-16).  This is a POLICY
+        # control, not a bet: it never places or resizes anything, and every
+        # other gate (limits, kill switch, price floor, line age) is untouched.
+        wanted = payload["market_heat"]
+        if wanted not in ("ON", "OFF", True, False):
+            raise HTTPException(status_code=400,
+                                detail="market_heat must be ON or OFF")
+        heat_on = wanted in ("ON", True)
+        store.set_config(market_heat.SWITCH_KEY,
+                         "true" if heat_on else "false")
+        market_heat.apply_override(heat_on)
+        store.audit("market_heat_switch", reason="frontend",
+                    details={"enabled": heat_on, "dry_run": cfg.dry_run})
 
     if "ladder_wins" in payload:
         raw = payload["ladder_wins"]
