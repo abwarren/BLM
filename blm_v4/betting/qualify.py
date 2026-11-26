@@ -270,6 +270,38 @@ def check_game(game: dict) -> dict:
     inputs = inputs_from_game(game)
     result = qualifies_for_autobet(**inputs)
     block = audit_block(game, result, inputs)
+    # COHORT OVERLAYS (independent toggles, persisted, all OFF by default).
+    # STRENGTH remains the ALWAYS-ON incumbent gate: a game it refuses is
+    # never rescued by an overlay.  Overlays only add a LABEL + UNIT SIZE to
+    # a game that already passed STRENGTH, strongest match wins.  No overlay
+    # widens admission, changes a limit, or touches DRY_RUN.  Fail closed.
+    try:
+        from blm_v4.betting import cohort_select as _sel
+        from blm_v4.betting import z_cohort
+        block["cohort_mode"] = _sel.get()
+        z_block = z_cohort.evaluate(game)       # no-op while z layer disarmed
+        block["z_cohort"] = z_block
+        z = z_block.get("z")
+        inputs = inputs_from_game(game)
+        req = inputs.get("required_pts_per_min")
+        avg = inputs.get("competition_avg_pace")
+        ratio = (req / avg) if (req is not None and avg) else None
+        tcx = ratio is not None and ratio > 1.16  # TC-X elite pace rung
+        match = {
+            _sel.LAYER_Z2: z is not None and z > 2.0,
+            _sel.LAYER_Z1: z is not None and z > 1.0,
+            _sel.LAYER_TCX: tcx,
+        }
+        resolved = _sel.resolve_layers(match)
+        block["cohort_layer"] = resolved["label"]
+        block["cohort_layer_key"] = resolved["layer"]
+        block["cohort_units"] = resolved["units"]
+        block["cohort_matched"] = resolved["matched"]
+    except Exception:            # an overlay failure NEVER changes admission
+        block["cohort_layer"] = None
+        block["cohort_layer_key"] = None
+        block["cohort_units"] = None
+        block["cohort_matched"] = []
     try:
         logger.info("autobet_qualification", **block)
     except Exception:            # logging must never decide a bet

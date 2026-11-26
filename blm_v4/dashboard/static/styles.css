@@ -102,6 +102,17 @@ html, body { background: var(--bg); color: var(--text); font-family: var(--sans)
 .ab-stop:hover:not(:disabled) { background: #ff8f8f; }
 .ab-stop:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
 .ab-stop.is-off { background: #2d0a0a; color: var(--red); border-color: #7f1d1d; box-shadow: none; }
+/* ── Cohort overlay toggles (top bar) ─────────────────────────────── */
+.cohort-layers { display:flex; align-items:center; gap:6px; }
+.cohort-layer { display:inline-flex; align-items:center; gap:3px; padding:3px 5px;
+  border:1px solid var(--border2); border-radius:5px; font:10px var(--mono);
+  color:var(--muted); white-space:nowrap; cursor:pointer; }
+.cohort-layer:has(input:checked) { color:var(--green); border-color:var(--green); }
+.cohort-layer input[type=checkbox] { margin:0; cursor:pointer; }
+.cohort-layer input[type=number] { width:42px; margin-left:2px; padding:2px 3px;
+  background:var(--panel2); color:var(--text); border:1px solid var(--border2);
+  border-radius:3px; font:10px var(--mono); }
+.cohort-layer input:disabled { opacity:.5; cursor:not-allowed; }
 .filter-select { display:flex; align-items:center; gap:5px; color:var(--muted); font:10px var(--mono); letter-spacing:.6px; white-space:nowrap; }
 .filter-select select { background:var(--panel2); color:var(--text); border:1px solid var(--border2); border-radius:4px; padding:4px 6px; font:11px var(--mono); }
 

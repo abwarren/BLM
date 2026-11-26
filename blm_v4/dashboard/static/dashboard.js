@@ -4229,6 +4229,27 @@ function abStatusHTML(st) {
     stopBtn.classList.toggle("is-off", st.enabled !== true);
     stopBtn.textContent = st.enabled === true ? "\u25A0 STOP" : "\u25A0 STOPPED";
   }
+  // ── COHORT overlays: independent toggles + per-layer unit sizes ───
+  const layers = st.cohort_layers || [];
+  document.querySelectorAll(".cohort-toggle").forEach(t => {
+    const cfg = layers.find(c => c.layer === t.dataset.layer);
+    t.disabled = false;
+    t.checked = cfg ? cfg.enabled === true : false;
+  });
+  document.querySelectorAll(".cohort-units").forEach(u => {
+    const cfg = layers.find(c => c.layer === u.dataset.layer);
+    u.disabled = false;
+    if (document.activeElement !== u && cfg) u.value = cfg.units;
+  });
+  const cstate = $("abCohortState");
+  if (cstate) {
+    const zOn = st.z_cohort_enabled === true;
+    cstate.textContent = zOn ? "z ON" : "z BLOCKED";
+    cstate.title = zOn
+      ? `z master layer armed; floor > ${st.z_cohort_floor ?? 1}`
+      : "z layer DISARMED — set AUTOBET_Z_COHORT_ENABLED=true and restart to arm";
+    cstate.style.color = zOn ? "var(--muted)" : "var(--amber)";
+  }
   $("abSwitchLabel").textContent =
     `AUTO BETTING: ${st.enabled ? "ON" : "OFF"}${st.dry_run ? " (DRY RUN)" : ""}`;
   const up = $("abUnitPrice");
@@ -4583,6 +4604,37 @@ $("grid").addEventListener("click", async (ev) => {
   } catch (err) {
     button.title = err.message;
   } finally { button.disabled = false; }
+});
+
+/* COHORT overlays: four independent ON/OFF toggles, each with its own unit
+   size.  Persistence + audit happen server-side; no bet is placed here. */
+async function sendCohortLayer(payload, el) {
+  el.disabled = true;
+  try {
+    const resp = await fetch(`${BETTING_API}/settings`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      console.warn("cohort layer refused", resp.status, body.detail || "");
+    }
+  } catch (_) {}
+  refreshBettingStatus();
+  setTimeout(refreshBettingStatus, 1200);
+}
+document.querySelectorAll(".cohort-toggle").forEach(t => {
+  t.addEventListener("change", () => {
+    sendCohortLayer({ cohort_layer: { layer: t.dataset.layer,
+                    enabled: t.checked ? "ON" : "OFF" } }, t);
+  });
+});
+document.querySelectorAll(".cohort-units").forEach(u => {
+  u.addEventListener("change", () => {
+    const v = parseFloat(u.value);
+    if (!isFinite(v) || v <= 0) { refreshBettingStatus(); return; }
+    sendCohortLayer({ cohort_layer: { layer: u.dataset.layer, units: v } }, u);
+  });
 });
 
 $("abSwitch").addEventListener("change", async (ev) => {

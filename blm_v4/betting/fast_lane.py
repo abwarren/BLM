@@ -61,6 +61,7 @@ from blm_v4.trade_window import (
 )
 from blm_v4.betting import market_heat
 from blm_v4.betting import qualify as _qualify
+from blm_v4.betting.cohort_units import _sel_config_for
 from blm_v4.live_analytics.under_fingerprints import evaluate_fingerprints
 from blm_v2.telemetry.logging import get_logger
 
@@ -549,8 +550,12 @@ class FastLaneWorker:
                                        outcome="NOT_PLACED", reason=key)
                 continue
             bal = balance if isinstance(balance, (int, float)) else None
+            # PER-COHORT UNIT SIZE: a strongest-match overlay may raise the
+            # stake for THIS game only, via a copied config — never mutating
+            # the process-wide cfg and never touching risk limits.
+            eff_cfg = _sel_config_for(self.cfg, qualification)
             res = evaluate(
-                game, cfg=self.cfg, store=self.store, enabled=True,
+                game, cfg=eff_cfg, store=self.store, enabled=True,
                 unit_price=unit_price, stats=stats, balance=bal,
                 game_enabled=self.store.is_game_enabled(base))
             if res["decision"] == "NO_BET":

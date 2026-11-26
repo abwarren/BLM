@@ -31,6 +31,8 @@ from blm_v4.betting.store import BettingStore
 from blm_v4.betting import command as _command
 from blm_v4.betting import market_heat
 from blm_v4.betting import identity_watch
+from blm_v4.betting import cohort_select as _cohort
+from blm_v4.betting.cohort_units import _sel_config_for
 from blm_v4.betting import stake as _stake
 
 router = APIRouter(prefix="/api/v4/betting", tags=["blm-v4-betting"])
@@ -57,6 +59,10 @@ def configure_betting(store: BettingStore, cfg: BettingConfig,
     try:
         market_heat.load_persisted_override(cfg.db_path)
     except Exception:            # a broken store must not stop the API wiring
+        pass
+    try:
+        _cohort.load_persisted_override(cfg.db_path)
+    except Exception:            # default mode on a broken store
         pass
     if live_payload_fn is not None:
         _live_payload_fn = live_payload_fn
@@ -171,6 +177,17 @@ def betting_status() -> dict:
         # read must never fail on it.
         "market_heat_enabled": market_heat.enabled(),
         "market_heat": _market_heat_payload(),
+        # Cohort selector: the PERSISTED mode and z-layer arming state the
+        # three buttons render.  Never guess a value from the UI.
+        "cohort_mode": _cohort.get(),
+        "z_cohort_enabled": os.environ.get(
+            "AUTOBET_Z_COHORT_ENABLED", "").strip().lower() in (
+                "1", "true", "yes", "on"),
+        "z_cohort_floor": (float(os.environ["AUTOBET_Z_COHORT_MIN_Z"])
+                           if str(os.environ.get(
+                               "AUTOBET_Z_COHORT_MIN_Z", "")).strip()
+                           else 1.0),
+        "cohort_layers": _cohort_status(_require()[0]),
         # Identity-guard health.  A non-zero count means the browser went blind
         # inside a bet window and the claim was refused — an operational fault
         # the dashboard must surface, never a number to hide in the ledger.
@@ -185,6 +202,26 @@ def betting_status() -> dict:
         # candidates it can never execute (2026-11-26: 118 of 123 passes).
         "burned_checkpoints_today": store.burned_checkpoints_today(),
     }
+
+
+def _cohort_status(store) -> list[dict]:
+    """Persisted ON/OFF + unit size for each overlay layer.  Never raises."""
+    out = []
+    for layer in _cohort.LAYERS:
+        cfg = _cohort.layer_config(layer)
+        try:
+            e = store.get_config(_cohort.layer_enabled_key(layer), None)
+            u = store.get_config(_cohort.layer_units_key(layer), None)
+            if e is not None:
+                cfg["enabled"] = str(e).strip().lower() in ("1", "true", "yes", "on")
+            if u is not None:
+                parsed = float(u)
+                if parsed > 0:
+                    cfg["units"] = parsed
+        except Exception:
+            pass
+        out.append(cfg)
+    return out
 
 
 def _market_heat_payload() -> dict:
@@ -757,6 +794,60 @@ def betting_settings(payload: dict) -> dict:
         market_heat.apply_override(heat_on)
         store.audit("market_heat_switch", reason="frontend",
                     details={"enabled": heat_on, "dry_run": cfg.dry_run})
+
+    if "cohort_mode" in payload:
+        # COHORT SELECTOR: STRENGTH / Z_ONLY / BOTH.  A policy flip only;
+        # it never places a bet or changes any limit.  Strict validation —
+        # junk is a 400 and the persisted row is untouched.  Audited.
+        wanted = _cohort.normalize(payload["cohort_mode"])
+        if wanted is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"cohort_mode must be one of {list(_cohort.VALID)}")
+        store.set_config(_cohort.MODE_KEY, wanted)
+        _cohort.apply_override(wanted)
+        store.audit("cohort_mode_switch", reason="frontend",
+                    details={"mode": wanted, "dry_run": cfg.dry_run})
+
+    if "cohort_layer" in payload:
+        # INDEPENDENT OVERLAY: {layer, enabled?, units?}.  Policy only —
+        # never places/resizes a bet here; the unit takes effect on the next
+        # pass through the qualification block.  Strict validation + audit.
+        raw = payload["cohort_layer"]
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400,
+                                detail="cohort_layer must be an object")
+        layer = raw.get("layer")
+        if layer not in _cohort.LAYERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"cohort_layer.layer must be one of {list(_cohort.LAYERS)}")
+        details = {"layer": layer, "dry_run": cfg.dry_run}
+        if "enabled" in raw:
+            val = raw["enabled"]
+            if val not in ("ON", "OFF", True, False):
+                raise HTTPException(status_code=400,
+                                    detail="enabled must be ON or OFF")
+            on = val in ("ON", True)
+            store.set_config(_cohort.layer_enabled_key(layer),
+                             "true" if on else "false")
+            details["enabled"] = on
+        if "units" in raw:
+            val = raw["units"]
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise HTTPException(status_code=400,
+                                    detail="units must be a number")
+            try:
+                number = float(val)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400,
+                                    detail="units must be a number")
+            if not math.isfinite(number) or number <= 0:
+                raise HTTPException(status_code=400,
+                                    detail="units must be positive")
+            store.set_config(_cohort.layer_units_key(layer), str(number))
+            details["units"] = number
+        store.audit("cohort_layer_switch", reason="frontend", details=details)
 
     if "ladder_wins" in payload:
         raw = payload["ladder_wins"]

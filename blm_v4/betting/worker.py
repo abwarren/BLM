@@ -28,6 +28,7 @@ from typing import Optional
 from blm_v4.betting.config import BettingConfig
 from blm_v4.betting.executor import evaluate, execute
 from blm_v4.betting import qualify as _qualify
+from blm_v4.betting.cohort_units import _sel_config_for
 from blm_v4.betting.provider import provider_from_config
 from blm_v4.betting.store import BettingStore
 from blm_v2.telemetry.logging import get_logger
@@ -169,7 +170,8 @@ class BettingWorker:
                 self._no_bet_reasons[
                     f"autobet_gate:{qualification['reason']}"] += 1
                 return stats
-        res = evaluate(g, cfg=self.cfg, store=self.store,
+        eff_cfg = _sel_config_for(self.cfg, qualification)
+        res = evaluate(g, cfg=eff_cfg, store=self.store,
                        enabled=True, unit_price=unit_price,
                        stats=stats, balance=balance,
                        game_enabled=self.store.is_game_enabled(

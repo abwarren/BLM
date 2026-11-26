@@ -37,6 +37,22 @@
            It does NOT stop the collector — capture keeps running. -->
       <button class="ab-stop" id="abStop" type="button" disabled
               title="STOP auto-betting — persists the kill switch (survives a restart). Capture keeps running.">&#9632; STOP</button>
+      <!-- COHORT OVERLAYS: four independent toggles, each with its own unit
+           size. STRENGTH (incumbent gate) is ALWAYS ON; these only tag a
+           game that already passed it with a stronger label + stake.
+           Strongest match wins: Z2+TC-X > Z2+ > Z1+ > TC-X.
+           Persisted in betting_config + audited; a flip never places a bet. -->
+      <span class="ab-top-sep" aria-hidden="true">|</span>
+      <span class="ab-top-unit-wrap" id="abCohortWrap">
+        <label class="ab-top-unit" title="Optional cohort overlays — each toggle and unit size is independent">COHORT:</label>
+        <span class="ab-top-input cohort-layers">
+          <label class="cohort-layer" title="Z &gt; 1, 1 unit"><input type="checkbox" class="cohort-toggle" data-layer="Z1" disabled><span>Z1+</span><input type="number" class="cohort-units" data-layer="Z1" min="0.1" step="0.5" value="1" disabled aria-label="Z1+ units"></label>
+          <label class="cohort-layer" title="Z &gt; 2, 2 units"><input type="checkbox" class="cohort-toggle" data-layer="Z2" disabled><span>Z2+</span><input type="number" class="cohort-units" data-layer="Z2" min="0.1" step="0.5" value="2" disabled aria-label="Z2+ units"></label>
+          <label class="cohort-layer" title="Z &gt; 2 AND pace &gt; 1.16, 3 units"><input type="checkbox" class="cohort-toggle" data-layer="Z2TCX" disabled><span>Z2+TC-X</span><input type="number" class="cohort-units" data-layer="Z2TCX" min="0.1" step="0.5" value="3" disabled aria-label="Z2+TC-X units"></label>
+          <label class="cohort-layer" title="Pace &gt; 1.16, 1 unit"><input type="checkbox" class="cohort-toggle" data-layer="TCX" disabled><span>TC-X</span><input type="number" class="cohort-units" data-layer="TCX" min="0.1" step="0.5" value="1" disabled aria-label="TC-X units"></label>
+        </span>
+        <span class="ab-top-cur" id="abCohortState" title="z master layer state">--</span>
+      </span>
       <span class="ab-top-sep" aria-hidden="true">|</span>
       <span class="ab-top-unit-wrap">
         <label class="ab-top-unit" for="abUnitPrice">UNIT:</label>
