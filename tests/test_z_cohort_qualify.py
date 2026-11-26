@@ -150,3 +150,131 @@ def test_z_only_can_admit_a_strength_refusal(monkeypatch, zdb):
     assert block["cohort_mode"] == "Z_ONLY"
     assert block["qualified"] is True          # z 2.0247 > floor 1.0
     assert block["reason"] == "MODE_Z_ONLY_ADMITTED"
+
+
+# ── ON-DEMAND z (2026-11-26): the stored writer cannot keep up with a live
+#    decision, so the current clean projection is standardised in place.
+
+AS_OF = "2026-11-25T00:38:23Z"
+
+
+def _seed_benchmark(con, n=100, key="BETUAL_NBA|Q4"):
+    """n prior residuals cycling -2,-1,0,1,2 → mean 0, sample std 1.4213."""
+    from datetime import datetime, timedelta, timezone
+    start = datetime(2026, 11, 25, 0, 0, 0, tzinfo=timezone.utc)
+    for i in range(n):
+        ts = (start + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        con.execute(
+            "INSERT INTO deviation_residuals (observation_id, model_version,"
+            " source_game_id, classification, period, benchmark_key,"
+            " captured_at, market_trajectory_residual, z_score)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (i + 1, "v", "oldgame", "BETUAL_NBA", 4, key, ts,
+             float(-2 + (i % 5)), 0.0))
+
+
+@pytest.fixture
+def on_demand_db(tmp_path, monkeypatch):
+    path = tmp_path / "metrics_od.db"
+    con = sqlite3.connect(path)
+    con.execute("""CREATE TABLE deviation_residuals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, observation_id INTEGER,
+        model_version TEXT, source_game_id TEXT, classification TEXT,
+        period INTEGER, benchmark_key TEXT, captured_at TEXT,
+        market_trajectory_residual REAL, z_score REAL)""")
+    con.execute("""CREATE TABLE clean_projections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, observation_id INTEGER,
+        source_game_id TEXT, classification TEXT, captured_at TEXT,
+        period_label TEXT, progress_pct REAL, live_total_line REAL,
+        projected_final_total REAL, terminal INTEGER)""")
+    _seed_benchmark(con)
+    con.execute("INSERT INTO clean_projections (observation_id, source_game_id,"
+                " classification, captured_at, period_label, progress_pct,"
+                " live_total_line, projected_final_total, terminal)"
+                " VALUES (9999,'31684333','BETUAL_NBA',?,'4th Quarter',85.0,"
+                " 150.0,147.0,0)", (AS_OF,))
+    con.commit()
+    con.close()
+    monkeypatch.setenv(z_cohort.ENABLE_ENV, "true")
+    return path
+
+
+def _expected_z(residual, values):
+    mean = sum(values) / len(values)
+    var = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return round((residual - mean) / math.sqrt(var), 4)
+
+
+def test_on_demand_computes_the_stored_maths(on_demand_db):
+    r = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    assert r["reason"] is None and r["source"] == "computed"
+    assert r["z"] == _expected_z(3.0, [-2, -1, 0, 1, 2] * 20)
+
+
+def test_on_demand_prefers_a_fresh_stored_row(on_demand_db):
+    con = sqlite3.connect(on_demand_db)
+    con.execute("INSERT INTO deviation_residuals (observation_id, model_version,"
+                " source_game_id, classification, period, benchmark_key,"
+                " captured_at, market_trajectory_residual, z_score)"
+                " VALUES (9999,'v','31684333','BETUAL_NBA',4,'BETUAL_NBA|Q4',"
+                " ?, 3.0, 9.9)", (AS_OF,))
+    con.commit(); con.close()
+    r = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    assert (r["z"], r["source"]) == (9.9, "stored")
+
+
+def test_on_demand_excludes_later_residuals(on_demand_db):
+    before = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    con = sqlite3.connect(on_demand_db)
+    con.execute("INSERT INTO deviation_residuals (observation_id, model_version,"
+                " source_game_id, classification, period, benchmark_key,"
+                " captured_at, market_trajectory_residual, z_score)"
+                " VALUES (10001,'v','other','BETUAL_NBA',4,'BETUAL_NBA|Q4',"
+                " '2026-11-25T00:39:00Z', 500.0, 0.0)")
+    con.commit(); con.close()
+    after = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    assert after["z"] == before["z"]
+
+
+def test_on_demand_refuses_without_a_usable_benchmark(on_demand_db):
+    con = sqlite3.connect(on_demand_db)
+    con.execute("DELETE FROM deviation_residuals")
+    con.execute("INSERT INTO deviation_residuals (observation_id, model_version,"
+                " source_game_id, classification, period, benchmark_key,"
+                " captured_at, market_trajectory_residual, z_score)"
+                " VALUES (1,'v','old','BETUAL_NBA',4,'BETUAL_NBA|Q4',"
+                " '2026-11-25T00:00:00Z', 1.0, 0.0)")
+    con.commit(); con.close()
+    r = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    assert (r["z"], r["reason"]) == (None, z_cohort.MISSING_Z)
+
+
+def test_on_demand_refuses_a_terminal_projection(on_demand_db):
+    con = sqlite3.connect(on_demand_db)
+    con.execute("UPDATE clean_projections SET terminal=1")
+    con.commit(); con.close()
+    r = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    assert (r["z"], r["reason"]) == (None, z_cohort.MISSING_Z)
+
+
+def test_on_demand_can_be_disabled(on_demand_db, monkeypatch):
+    monkeypatch.setenv(z_cohort.ONDEMAND_ENV, "false")
+    r = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    assert (r["z"], r["reason"]) == (None, z_cohort.MISSING_Z)
+
+
+def test_on_demand_evaluate_reports_its_source(on_demand_db):
+    r = z_cohort.evaluate(GAME, clean_db_path=on_demand_db)
+    assert r["qualified"] is True
+    assert r["z_source"] == "computed"
+    assert r["z_benchmark"]["status"] in ("EXPLORATORY", "PROVISIONAL",
+                                          "ESTABLISHED")
+
+
+def test_on_demand_benchmark_is_windowed(on_demand_db, monkeypatch):
+    """The computed z uses the most recent N priors, not all history."""
+    monkeypatch.setenv(z_cohort.WINDOW_ENV, "4")
+    r = z_cohort.latest_z("31684333", clean_db_path=on_demand_db, as_of=AS_OF)
+    # priors cycle -2,-1,0,1,2 ; the last four are -1,0,1,2
+    assert r["z"] == _expected_z(3.0, [-1, 0, 1, 2])
+    assert r["benchmark_n"] == 4
