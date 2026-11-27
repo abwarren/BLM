@@ -1,0 +1,20 @@
+{
+  "cohort": {
+    "n": 3901,
+    "under_pct": 62.91,
+    "settled": null,
+    "under_raw": [
+      null,
+      null,
+      3901
+    ]
+  },
+  "_meta": {
+    "scan_s": 119.39445994199923,
+    "sqlite_version": "3.45.1",
+    "python_version": "3.12.3",
+    "COHORT_SINCE_UTC": "2026-10-09T00:43:02",
+    "prod_ok_count": 63464,
+    "run_at_utc": "2026-11-27T12:30:08.932791+00:00"
+  }
+}
