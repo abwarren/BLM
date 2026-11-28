@@ -2131,6 +2131,37 @@ function audioWindowUpdate(win, level, now, rank) {
   if (win && now < win.until && r <= win.best) return { play: null, win };
   return { play: level, win: { until: now + AUDIO_COALESCE_MS, best: r } };
 }
+// Spoken description of the condition that ROSE.  Built only from served
+// facts; no class verdict and no new gate.  PACE Z is descriptive — it is
+// spoken as the measured value, never as a recommendation.
+const ALERT_LEVEL_WORDS = {
+  base: "pace gap alert",
+  strong: "late game pace gap alert",
+  high: "late game pace and Z alert",
+  "pace-state": "pace state alert",
+};
+// pure: (level, facts) -> sentence. facts = { teams, checkpoint,
+// triggerLine, z }; every field may be absent (spoken as unavailable).
+function alertSpokenText(level, facts) {
+  const f = facts || {};
+  const what = ALERT_LEVEL_WORDS[level] || "alert";
+  let s = "Alert. " + what + " triggered";
+  if (f.teams) s += " for " + String(f.teams);
+  s += ".";
+  if (f.checkpoint != null) s += " Checkpoint " + String(f.checkpoint) + ".";
+  if (f.triggerLine != null) {
+    s += " Trigger line " + String(f.triggerLine) + ".";
+  }
+  const z = Number(f.z);
+  if (f.z == null || !Number.isFinite(z)) {
+    s += " Z unavailable.";
+  } else if (z > 2) {
+    s += " Z greater than two.";
+  } else {
+    s += " Z " + (z < 0 ? "negative " : "") + Math.abs(z).toFixed(2) + ".";
+  }
+  return s;
+}
 /* __PURE_AUDIO_END__ */
 
 let audioCtx = null;
@@ -2179,13 +2210,32 @@ function playAlertCue(level) {
     t += 0.2;
   }
 }
+// last spoken alert id — one voiceover per distinct alert identity, so the
+// modal re-render cannot repeat a description the card path already spoke.
+let spokenAlertId = null;
 // the SINGLE entry point, called wherever alertEscalation() returns a
-// level (card badge and modal panel) — the transition source of truth
-function alertAudio(level) {
+// level (card badge and modal panel) — the transition source of truth.
+// The WebAudio alarm fires first; the spoken description follows it from
+// the SAME served facts, never from a re-derived condition.
+function alertAudio(level, facts) {
   if (!level || !audioEnabled()) return;
   const upd = audioWindowUpdate(audioWindow, level, Date.now(), ALERT_RANK);
   audioWindow = upd.win;
-  if (upd.play) playAlertCue(upd.play);
+  if (!upd.play) return;
+  playAlertCue(upd.play);
+  if (typeof speechSynthesis === "undefined") return;   // unsupported → tones only
+  const f = facts || {};
+  const id = f.game_id != null && f.checkpoint != null
+    ? String(f.game_id) + "|" + String(f.checkpoint) : null;
+  if (id && id === spokenAlertId) return;               // same alert once
+  spokenAlertId = id;
+  try {
+    speechSynthesis.cancel();                            // no overlapping speech
+    const utterance = new SpeechSynthesisUtterance(
+      alertSpokenText(level, f));
+    utterance.rate = 1.05;
+    speechSynthesis.speak(utterance);
+  } catch (_) { /* speech is optional; the alarm already sounded */ }
 }
 function syncAudioButton() {
   const btn = $("audioToggle");
@@ -2783,7 +2833,18 @@ function renderCards(payload) {
     // the cue obeys the re-fire cooling-off: a suppressed re-fire is silent.
     // The badge and its pulse are untouched — they report the live condition,
     // which is exactly what stays true during a cooldown.
-    if (entered && !underAlertRefireCooling(g)) alertAudio(entered);
+    // spoken facts = the alert's OWN frozen trigger snapshot, consumed
+    // verbatim; the modal z is authoritative /pace-z, descriptive only.
+    if (entered && !underAlertRefireCooling(g)) {
+      alertAudio(entered, {
+        game_id: g.game_id,
+        checkpoint: ((g.under_alert || {}).checkpoint),
+        teams: [g.home_team, g.away_team].filter(Boolean).join(" vs ") || null,
+        triggerLine: (g.under_alert || {}).trigger_line,
+        z: state.modalZMeta && state.modalZMeta.z != null
+          ? state.modalZMeta.z : null,
+      });
+    }
     // re-render while preserving each card's CHARTS / DETAILS state
     card.el.innerHTML = cardHTML(g, { detOpen: card.detOpen, chartsOpen: card.chartsOpen }, entered);
     bindCardSections(card.el, card);
@@ -3137,8 +3198,14 @@ function refreshHistAlert(g) {
     panel.classList.add("al-in");
   }
   if (rose && !underAlertRefireCooling(g)) {
-    alertAudio(rose);                     // same transition → same cue,
-  }                                       // silenced while cooling off
+    alertAudio(rose, {               // same transition → same cue + voice,
+      game_id: g.game_id,            // silenced while cooling off
+      checkpoint: ((g.under_alert || {}).checkpoint),
+      teams: [g.home_team, g.away_team].filter(Boolean).join(" vs ") || null,
+      triggerLine: (g.under_alert || {}).trigger_line,
+      z: zm.z != null ? zm.z : null,
+    });
+  }
 }
 
 // explicit no-context panel — shown when the live state is eligible but
@@ -3915,6 +3982,7 @@ $("audioToggle").addEventListener("click", () => {
   const on = !audioEnabled();
   try { localStorage.setItem(PREF.ALERT_AUDIO, on ? "1" : "0"); } catch (_) {}
   audioWindow = null;                     // fresh coalescing window per switch
+  spokenAlertId = null;                   // re-announce current set on switch ON
   if (on) unlockAudio();
   syncAudioButton();
 });

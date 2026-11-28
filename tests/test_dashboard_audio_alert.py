@@ -200,8 +200,10 @@ def test_sound_only_from_alert_escalation(client):
     # trigger, and the gate never suppresses a first activation or a standing
     # alert — only a reopen inside the 300 s window.
     assert "const entered = alertEscalation(card.prevAlert, alLvl);" in js
-    assert ("if (entered && !underAlertRefireCooling(g))"
-            " alertAudio(entered);") in js
+    # The FIRST of the two audio call sites now passes served facts as a
+    # second argument; the transition gate and cooling-off are untouched.
+    assert ("if (entered && !underAlertRefireCooling(g)) {\n"
+            "      alertAudio(entered, {") in js
     assert "const rose = alertEscalation(priorLevel, lvl);" in js
     assert "if (rose && !underAlertRefireCooling(g)) {" in js
     # SINGLE audio entry point: its definition + exactly those two call sites
